@@ -63,10 +63,7 @@ type command struct {
 // New creates an immediately usable in-memory World. It executes runners in
 // goroutines when root runs and durable operations are scheduled.
 func New(runners ...workflowops.Runner) *World {
-	set, err := workflow.Runners(runners...)
-	if err != nil {
-		panic(err)
-	}
+	set := workflow.Runners(runners...)
 	ctx, cancel := context.WithCancel(context.Background())
 	world := &World{
 		ctx:      ctx,

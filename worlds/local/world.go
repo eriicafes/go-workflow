@@ -504,9 +504,6 @@ func (world *World) EnsureOperation(
 	if err := writeJSON(world.root, commandName(request.RunID, request.Sequence), command); err != nil {
 		return workflowops.Operation{}, err
 	}
-	if request.Kind != workflowops.KindSleep || !due.After(time.Now()) {
-		world.launch(request.RunID, request.Sequence)
-	}
 	world.signal()
 	return commandOperation(request.RunID, command), nil
 }
@@ -723,6 +720,11 @@ func (world *World) dispatchReady() (time.Time, error) {
 	for _, run := range runs {
 		if run.Status == workflowops.StatusQueued {
 			world.launch(run.ID, workflowops.RootSequence)
+		}
+		// A workflow records its full batch of commands before suspending. Do
+		// not run a command while its parent is still constructing that batch.
+		if run.Status != workflowops.StatusWaiting {
+			continue
 		}
 		commands, err := world.commands(run.ID)
 		if err != nil {

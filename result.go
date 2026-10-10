@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -37,31 +38,90 @@ type resultState[T any] struct {
 	done  chan struct{}
 	value T
 	err   error
-	wait  func(context.Context) (T, error)
-	task  *workflowops.Task
+	world World
+	task  workflowops.Task
 	await bool
 }
 
-func operationResult[T any](
-	runID string,
-	sequence int,
-	wait func(context.Context) (T, error),
-) Result[T] {
+func suspendingOperationResult[T any](world World, runID string, sequence int) Result[T] {
 	return Result[T]{state: &resultState[T]{
 		done:  make(chan struct{}),
-		wait:  wait,
-		task:  &workflowops.Task{RunID: runID, Sequence: sequence},
+		task:  workflowops.Task{RunID: runID, Sequence: sequence},
+		world: world,
 		await: true,
 	}}
 }
 
-func resolvedResult[T any](value T, err error) Result[T] {
+func waitingOperationResult[T any](world World, runID string, sequence int) Result[T] {
 	return Result[T]{state: &resultState[T]{
-		done: make(chan struct{}),
-		wait: func(ctx context.Context) (T, error) {
-			return value, err
-		},
+		done:  make(chan struct{}),
+		task:  workflowops.Task{RunID: runID, Sequence: sequence},
+		world: world,
 	}}
+}
+
+func errorResult[T any](err error) Result[T] {
+	result := Result[T]{state: &resultState[T]{
+		done: make(chan struct{}),
+		err:  err,
+	}}
+	result.state.once.Do(func() { close(result.state.done) })
+	return result
+}
+
+func (state *resultState[T]) wait(ctx context.Context) (T, error) {
+	state.once.Do(func() {
+		defer close(state.done)
+		if execution, active := executionFromContext(ctx); active && state.await {
+			if err := awaitTask(ctx, execution, &state.task); err != nil {
+				state.err = err
+				return
+			}
+		}
+		raw, err := state.world.WaitOperation(ctx, state.task)
+		if err != nil {
+			state.err = err
+			return
+		}
+		if err := json.Unmarshal(raw, &state.value); err != nil {
+			state.err = fmt.Errorf("workflow: decode operation output: %w", err)
+			return
+		}
+	})
+	select {
+	case <-state.done:
+		return state.value, state.err
+	case <-ctx.Done():
+		return state.value, ctx.Err()
+	}
+}
+
+func (result Result[T]) Wait(ctx context.Context) error {
+	_, err := result.Value(ctx)
+	return err
+}
+
+func (result Result[T]) Value(ctx context.Context) (T, error) {
+	if result.state == nil {
+		var zero T
+		return zero, fmt.Errorf("workflow: zero Result")
+	}
+	return result.state.wait(ctx)
+}
+
+func (result Result[T]) Unwrap(ctx context.Context) T {
+	value, err := result.Value(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func (result Result[T]) task() *workflowops.Task {
+	if result.state == nil {
+		return nil
+	}
+	return &result.state.task
 }
 
 func awaitTask(ctx context.Context, execution *workflowops.Execution, task *workflowops.Task) error {
@@ -86,52 +146,4 @@ func awaitTask(ctx context.Context, execution *workflowops.Execution, task *work
 		return err
 	}
 	panic(internal.ErrReplaySuspended)
-}
-
-func (result Result[T]) resolve(ctx context.Context) (T, error) {
-	var zero T
-	if result.state == nil {
-		return zero, fmt.Errorf("workflow: zero Result")
-	}
-	result.state.once.Do(func() {
-		if execution, active := executionFromContext(ctx); active && result.state.await {
-			if err := awaitTask(ctx, execution, result.state.task); err != nil {
-				result.state.err = err
-				close(result.state.done)
-				return
-			}
-		}
-		result.state.value, result.state.err = result.state.wait(ctx)
-		close(result.state.done)
-	})
-	select {
-	case <-result.state.done:
-		return result.state.value, result.state.err
-	case <-ctx.Done():
-		return zero, ctx.Err()
-	}
-}
-
-func (result Result[T]) Wait(ctx context.Context) error {
-	_, err := result.resolve(ctx)
-	return err
-}
-
-func (result Result[T]) Value(ctx context.Context) (T, error) {
-	return result.resolve(ctx)
-}
-
-func (result Result[T]) Unwrap(ctx context.Context) T {
-	value, err := result.resolve(ctx)
-	if err != nil {
-		panic(err)
-	}
-	return value
-}
-
-func (result Result[T]) task() *workflowops.Task {
-	if result.state == nil {
-		return nil
-	}
-	return result.state.task
 }

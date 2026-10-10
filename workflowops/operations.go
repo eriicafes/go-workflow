@@ -321,12 +321,6 @@ func (command CommandMetadata) MatchesRun(request RunRequest) bool {
 	return command.Kind == KindRun && command.Identity == request.Identity && command.Fingerprint == request.Fingerprint && bytes.Equal(command.Input, request.Input)
 }
 
-func (command CommandMetadata) MatchesWait(
-	request WaitRequest,
-	input json.RawMessage,
-) bool {
-	return command.Kind == request.Kind &&
-		command.Identity == string(request.Kind) &&
-		command.Fingerprint == request.Fingerprint &&
-		bytes.Equal(command.Input, input)
+func (command CommandMetadata) MatchesWait(request WaitRequest, input json.RawMessage) bool {
+	return command.Kind == request.Kind && command.Identity == string(request.Kind) && command.Fingerprint == request.Fingerprint && bytes.Equal(command.Input, input)
 }

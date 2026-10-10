@@ -53,13 +53,10 @@ func workflowClient() (workflow.Client, func() error, error) {
 		return client, func() error { return nil }, nil
 	}
 
-	runners, err := workflow.Runners(
+	runners := workflow.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	world, err := localworld.Open(".workflows", runners)
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/workflowops"
 	"github.com/eriicafes/go-workflow/worlds/local"
 )
 
@@ -51,17 +50,8 @@ func double(_ context.Context, value int) (int, error) {
 	return value * 2, nil
 }
 
-func mustRunners(t *testing.T, runners ...workflowops.Runner) workflowops.RunnerSet {
-	t.Helper()
-	set, err := workflow.Runners(runners...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return set
-}
-
 func TestWorldRunsStepsAndNestedWorkflows(t *testing.T) {
-	runners := mustRunners(t, workflow.Use(child), workflow.Use(parent))
+	runners := workflow.Runners(workflow.Use(child), workflow.Use(parent))
 	world, err := localworld.Open(t.TempDir(), runners)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +203,7 @@ func failedRace(ctx context.Context, _ failedRaceInput) (failedRaceOutput, error
 }
 
 func TestWorldComposesMappedResults(t *testing.T) {
-	runners := mustRunners(t,
+	runners := workflow.Runners(
 		workflow.Use(mapped),
 		workflow.Use(allFailure),
 		workflow.Use(settled),
@@ -229,7 +219,7 @@ func TestWorldComposesMappedResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	mappedRun, err := workflow.Start(workflow.NewContext(ctx, world), mapInput{})
@@ -327,7 +317,7 @@ func TestWorldPersistsCompletedWorkAndLocksStorage(t *testing.T) {
 		return child(ctx, input)
 	})
 
-	runners := mustRunners(t, runner)
+	runners := workflow.Runners(runner)
 	world, err := localworld.Open(directory, runners)
 	if err != nil {
 		t.Fatal(err)

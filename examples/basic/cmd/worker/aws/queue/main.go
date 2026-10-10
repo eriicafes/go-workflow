@@ -41,13 +41,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runners, err := workflow.Runners(
+	runners := workflow.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	lambda.Start(awsworld.Queue(world, runners))
 }

@@ -23,8 +23,7 @@ world, err := vercelworld.New(vercelworld.Config{
 })
 if err != nil { return err }
 
-runners, err := workflow.Runners(workflow.Use(flows.GenerateReport))
-if err != nil { return err }
+runners := workflow.Runners(workflow.Use(flows.GenerateReport))
 http.ListenAndServe(":8081", vercelworld.Queue(world, runners))
 ```
 

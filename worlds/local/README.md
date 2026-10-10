@@ -14,10 +14,7 @@ or `rm -rf .workflow-data`. Development UIs should use the normal workflow
 client/server API and must not read these records directly.
 
 ```go
-runners, err := workflow.Runners(workflow.Use(flows.GenerateReport))
-if err != nil {
-	return err
-}
+runners := workflow.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(".workflow-data", runners)
 if err != nil {

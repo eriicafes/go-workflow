@@ -27,8 +27,7 @@ world, err := awsworld.New(awsworld.Config{
 }, dynamoClient, sqsClient)
 if err != nil { return err }
 
-runners, err := workflow.Runners(workflow.Use(flows.GenerateReport))
-if err != nil { return err }
+runners := workflow.Runners(workflow.Use(flows.GenerateReport))
 
 // Lambda SQS event-source handler.
 lambda.Start(awsworld.Queue(world, runners))

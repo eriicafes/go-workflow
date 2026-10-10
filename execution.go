@@ -87,7 +87,7 @@ func join(ctx context.Context, waiters []Waiter, settled bool, fingerprint strin
 		return err
 	}
 	if op.Status == workflowops.StatusCompleted || op.Status == workflowops.StatusFailed {
-		return decodeWaitOperation[struct{}](ctx, execution.World(), execution.RunID(), sequence).Wait(ctx)
+		return waitingOperationResult[struct{}](execution.World(), execution.RunID(), sequence).Wait(ctx)
 	}
 	if err := execution.World().SuspendRun(ctx, execution.Lease()); err != nil {
 		return err
@@ -127,7 +127,7 @@ func Race(ctx context.Context, waiters ...Waiter) (Waiter, error) {
 		}
 		panic(internal.ErrReplaySuspended)
 	}
-	outcome, err := decodeWaitOperation[workflowops.RaceOutcome](ctx, execution.World(), execution.RunID(), sequence).Value(ctx)
+	outcome, err := waitingOperationResult[workflowops.RaceOutcome](execution.World(), execution.RunID(), sequence).Value(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -151,10 +151,10 @@ func timeout(execution *workflowops.Execution, ctx context.Context, duration tim
 		DueAt:       &due,
 	})
 	if err != nil {
-		return resolvedResult(struct{}{}, err)
+		return errorResult[struct{}](err)
 	}
 	if op.Status == workflowops.StatusCompleted {
-		return decodeAwaitOperation[struct{}](ctx, execution.World(), execution.RunID(), sequence)
+		return suspendingOperationResult[struct{}](execution.World(), execution.RunID(), sequence)
 	}
 	if sequence == execution.Target() {
 		if remain := time.Until(op.DueAt); remain > 0 {
@@ -166,7 +166,7 @@ func timeout(execution *workflowops.Execution, ctx context.Context, duration tim
 		}
 		panic(internal.ErrReplayComplete)
 	}
-	return decodeAwaitOperation[struct{}](ctx, execution.World(), execution.RunID(), sequence)
+	return suspendingOperationResult[struct{}](execution.World(), execution.RunID(), sequence)
 }
 
 func background[In, Out any](
@@ -179,8 +179,7 @@ func background[In, Out any](
 	sequence := execution.Sequence()
 	raw, err := json.Marshal(input)
 	if err != nil {
-		var zero Out
-		return resolvedResult(zero, err)
+		return errorResult[Out](err)
 	}
 	if execution.Target() >= 0 && sequence > execution.Target() {
 		panic(fmt.Errorf("workflow: history mismatch: replay passed command %d", execution.Target()))
@@ -194,14 +193,13 @@ func background[In, Out any](
 		Input:       raw,
 	})
 	if err != nil {
-		var zero Out
-		return resolvedResult(zero, err)
+		return errorResult[Out](err)
 	}
 	if op.Status == workflowops.StatusCompleted {
-		return decodeAwaitOperation[Out](ctx, execution.World(), execution.RunID(), sequence)
+		return suspendingOperationResult[Out](execution.World(), execution.RunID(), sequence)
 	}
 	if op.Status == workflowops.StatusFailed {
-		return decodeAwaitOperation[Out](ctx, execution.World(), execution.RunID(), sequence)
+		return suspendingOperationResult[Out](execution.World(), execution.RunID(), sequence)
 	}
 	if sequence == execution.Target() {
 		stepCtx := context.WithValue(ctx, stepContextKey{}, true)
@@ -219,7 +217,7 @@ func background[In, Out any](
 		}
 		panic(internal.ErrReplayComplete)
 	}
-	return decodeAwaitOperation[Out](ctx, execution.World(), execution.RunID(), sequence)
+	return suspendingOperationResult[Out](execution.World(), execution.RunID(), sequence)
 }
 
 // Writer returns replay-safe workflow output. It returns a writer that fails
@@ -268,26 +266,6 @@ func (writer eventWriter) Write(data []byte) (int, error) {
 		panic(internal.ErrReplayComplete)
 	}
 	return len(data), nil
-}
-
-func decodeAwaitOperation[Out any](ctx context.Context, world World, runID string, sequence int) Result[Out] {
-	return operationResult(runID, sequence, func(ctx context.Context) (Out, error) {
-		var zero Out
-		raw, err := world.WaitOperation(ctx, workflowops.Task{RunID: runID, Sequence: sequence})
-		if err != nil {
-			return zero, err
-		}
-		if err := json.Unmarshal(raw, &zero); err != nil {
-			return zero, fmt.Errorf("workflow: decode operation output: %w", err)
-		}
-		return zero, nil
-	})
-}
-
-func decodeWaitOperation[Out any](ctx context.Context, world World, runID string, sequence int) Result[Out] {
-	result := decodeAwaitOperation[Out](ctx, world, runID, sequence)
-	result.state.await = false
-	return result
 }
 
 func dependenciesFor(waiters []Waiter) ([]workflowops.Task, error) {

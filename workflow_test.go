@@ -24,6 +24,21 @@ func TestStartRequiresClientContext(t *testing.T) {
 	}
 }
 
+func TestRunnersDeduplicatesIdentities(t *testing.T) {
+	var unnamed workflow.Runner
+	runners := workflow.Runners(
+		unnamed,
+		workflow.Use(func(context.Context, input) (output, error) { return output{}, nil }),
+		workflow.Use(func(context.Context, input) (output, error) { return output{}, nil }),
+	)
+	if len(runners) != 1 {
+		t.Fatalf("runner count = %d, want 1", len(runners))
+	}
+	if _, exists := runners[""]; exists {
+		t.Fatal("unnamed runner was not skipped")
+	}
+}
+
 func TestStartUsesWorkerHTTPClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {

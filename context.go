@@ -14,22 +14,20 @@ func NewContext(ctx context.Context, client Client) context.Context {
 	return context.WithValue(ctx, clientContextKey{}, client)
 }
 
-func clientFromContext(ctx context.Context) (Client, error) {
-	client, ok := ctx.Value(clientContextKey{}).(Client)
-	if !ok || client == nil {
-		return nil, ErrNoClient
+func clientFromContext(ctx context.Context) (Client, *workflowops.Execution, error) {
+	if execution, active := workflowops.ExecutionFromContext(ctx); active {
+		return execution.World(), execution, nil
 	}
-	return client, nil
+	if client, ok := ctx.Value(clientContextKey{}).(Client); ok {
+		return client, nil, nil
+	}
+	return nil, nil, ErrNoClient
 }
 
 func executionFromContext(ctx context.Context) (*workflowops.Execution, bool) {
 	if inStep, _ := ctx.Value(stepContextKey{}).(bool); inStep {
 		return nil, false
 	}
-	return workflowops.ExecutionFromContext(ctx)
-}
-
-func parentExecutionFromContext(ctx context.Context) (*workflowops.Execution, bool) {
 	return workflowops.ExecutionFromContext(ctx)
 }
 

@@ -34,8 +34,7 @@ or database. Its state is lost when the process exits.
 
 ```go
 // import localworld "github.com/eriicafes/go-workflow/worlds/local"
-runners, err := workflow.Runners(workflow.Use(flows.GenerateReport))
-if err != nil { log.Fatal(err) }
+runners := workflow.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(".workflow-data", runners)
 if err != nil { log.Fatal(err) }
@@ -108,10 +107,9 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{URL: os.Getenv("DATAB
 if err != nil { log.Fatal(err) }
 defer world.Close()
 
- runners, err := workflow.Runners(
+ runners := workflow.Runners(
     workflow.Use(flows.GenerateReport),
 )
-if err != nil { log.Fatal(err) }
 
 go postgresworld.Run(ctx, world, runners)
 http.ListenAndServe(":8081", postgresworld.HTTP(world))

@@ -23,13 +23,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runners, err := workflow.Runners(
+	runners := workflow.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	address := cmp.Or(os.Getenv("PORT"), ":8081")
 	log.Printf("workflow queue worker listening on %s", address)
