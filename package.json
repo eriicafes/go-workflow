@@ -1,0 +1,13 @@
+{
+  "name": "@eriicafes/go-workflow",
+  "version": "0.3.0",
+  "private": true,
+  "description": "",
+  "scripts": {},
+  "keywords": [],
+  "author": "Eric Afes <eriicafes@gmail.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@changesets/cli": "^3.0.3"
+  }
+}
