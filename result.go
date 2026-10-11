@@ -10,24 +10,19 @@ import (
 	"github.com/eriicafes/go-workflow/workflowops"
 )
 
-// Waiter is implemented by both Run and Result, enabling Join and Race.
-type Waiter interface {
+// Task is a durable workflow or operation handle.
+type Task interface {
 	Wait(context.Context) error
+	Task() *workflowops.Task
 }
 
-// Waiters converts a homogeneous slice into heterogeneous waiters for Join,
-// JoinSettled, or Race.
-func Waiters[T Waiter](values []T) []Waiter {
-	result := make([]Waiter, len(values))
+// Tasks converts a homogeneous slice into durable task handles.
+func Tasks[T Task](values []T) []Task {
+	result := make([]Task, len(values))
 	for index := range values {
 		result[index] = values[index]
 	}
 	return result
-}
-
-type durableWaiter interface {
-	Waiter
-	task() *workflowops.Task
 }
 
 // Result is a comparable, pointer-backed handle to a durable operation.
@@ -73,7 +68,7 @@ func (state *resultState[T]) wait(ctx context.Context) (T, error) {
 	state.once.Do(func() {
 		defer close(state.done)
 		if execution, active := executionFromContext(ctx); active && state.await {
-			if err := awaitTask(ctx, execution, &state.task); err != nil {
+			if err := awaitSuspendingTask(ctx, execution, &state.task); err != nil {
 				state.err = err
 				return
 			}
@@ -117,16 +112,16 @@ func (result Result[T]) Unwrap(ctx context.Context) T {
 	return value
 }
 
-func (result Result[T]) task() *workflowops.Task {
+func (result Result[T]) Task() *workflowops.Task {
 	if result.state == nil {
 		return nil
 	}
 	return &result.state.task
 }
 
-func awaitTask(ctx context.Context, execution *workflowops.Execution, task *workflowops.Task) error {
+func awaitSuspendingTask(ctx context.Context, execution *workflowops.Execution, task *workflowops.Task) error {
 	if task == nil {
-		return fmt.Errorf("workflow: waiter is not durable")
+		return fmt.Errorf("workflow: task is not durable")
 	}
 	sequence := execution.Sequence()
 	op, err := execution.World().EnsureWait(ctx, execution.Lease(), workflowops.WaitRequest{

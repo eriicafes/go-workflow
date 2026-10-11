@@ -138,7 +138,7 @@ lambda.Start(lambdaurl.Wrap(awsworld.HTTP(awsWorld)))
 
 // Vercel: deploy separate Queue-consumer and app-facing API functions.
 http.ListenAndServe(":8081", vercelworld.Queue(vercelWorld, runners))
-http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld))
+http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld, runners))
 ```
 
 The examples are split accordingly:
@@ -146,7 +146,8 @@ The examples are split accordingly:
 - `cmd/worker/aws/queue` and `cmd/worker/aws/api`
 - `cmd/worker/vercel/queue` and `cmd/worker/vercel/api`
 
-Only the queue entrypoints register workflow implementations.
+The Vercel HTTP entrypoint also receives the runners so it can serve an
+optional signed QStash timer route.
 
 The AWS and Vercel queues publish a `workflow.Task` after each root-run or
 command task is persisted. Claiming is lease-fenced, so a duplicate queue

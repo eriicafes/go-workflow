@@ -10,7 +10,7 @@ type executionContextKey struct{}
 // Execution is replay-local state.
 type Execution struct {
 	world World
-	lease *LeasedRun
+	lease *Lease
 	mu    sync.Mutex
 	next  int
 }
@@ -40,4 +40,4 @@ func (execution *Execution) RunID() string { return execution.lease.ID }
 func (execution *Execution) Target() int { return execution.lease.Sequence }
 
 // Lease returns the task lease being executed.
-func (execution *Execution) Lease() *LeasedRun { return execution.lease }
+func (execution *Execution) Lease() *Lease { return execution.lease }

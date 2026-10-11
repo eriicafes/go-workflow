@@ -42,7 +42,7 @@ func TestRunnersDeduplicatesIdentities(t *testing.T) {
 func TestStartUsesWorkerHTTPClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
-		case "/v1/runs":
+		case "/.well-known/workflow/v1/runs":
 			if request.Method != http.MethodPost {
 				http.Error(writer, "expected POST", http.StatusMethodNotAllowed)
 				return
@@ -62,7 +62,7 @@ func TestStartUsesWorkerHTTPClient(t *testing.T) {
 				return
 			}
 			_, _ = writer.Write([]byte(`{"id":"run_1"}`))
-		case "/v1/runs/run_1":
+		case "/.well-known/workflow/v1/runs/run_1":
 			_, _ = writer.Write([]byte(`{"output":{"Value":"done"}}`))
 		default:
 			http.NotFound(writer, request)

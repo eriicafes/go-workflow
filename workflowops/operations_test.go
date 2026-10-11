@@ -25,8 +25,17 @@ func TestResolveWait(t *testing.T) {
 	if result := ResolveWait(KindAwait, []Dependency{{}}); !errors.Is(result.Err, ErrRunNotFound) {
 		t.Fatalf("await missing = %#v", result)
 	}
-	if result := ResolveWait(KindRace, []Dependency{completed(2, `1`), completed(1, `2`)}); string(result.Output) != `{"index":1}` {
-		t.Fatalf("race = %#v", result)
+	if result := ResolveWait(KindSelect, []Dependency{completed(2, `1`), completed(1, `2`)}); string(result.Output) != `{"index":1}` {
+		t.Fatalf("select = %#v", result)
+	}
+	if result := ResolveWait(KindSelectOk, []Dependency{failed(1, "first"), completed(2, `2`)}); result.Err != nil || string(result.Output) != `{"index":1}` {
+		t.Fatalf("select-ok success = %#v", result)
+	}
+	if result := ResolveWait(KindSelectOk, []Dependency{failed(2, "late"), failed(1, "first")}); result.Err == nil || result.Err.Error() != "first" {
+		t.Fatalf("select-ok failures = %#v", result)
+	}
+	if result := ResolveWait(KindSelectOk, []Dependency{pending, failed(1, "ignored")}); !result.Pending {
+		t.Fatalf("select-ok pending = %#v", result)
 	}
 	if result := ResolveWait(KindJoin, []Dependency{pending, failed(2, "late"), failed(1, "first")}); result.Err == nil || result.Err.Error() != "first" {
 		t.Fatalf("join = %#v", result)
@@ -41,27 +50,16 @@ func TestResolveWait(t *testing.T) {
 
 func TestCommandMatchingAndRunIDs(t *testing.T) {
 	request := OperationRequest{Kind: KindStep, Identity: "step", Fingerprint: "fingerprint", Input: json.RawMessage(`{"input":1}`)}
-	command := CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-	}
-	if !command.MatchesOperation(request) {
+	kind, identity, fingerprint, input := request.Kind, request.Identity, request.Fingerprint, request.Input
+	if !MatchesOperation(kind, identity, fingerprint, input, request) {
 		t.Fatal("operation metadata did not match its request")
 	}
 	request.Identity = "changed"
-	if command.MatchesOperation(request) {
+	if MatchesOperation(kind, identity, fingerprint, input, request) {
 		t.Fatal("operation metadata matched changed request")
 	}
 	run := RunRequest{RunID: "parent", Sequence: 1, Kind: KindRun, Identity: "child", Fingerprint: "caller", Input: json.RawMessage(`{"input":2}`)}
-	if !(CommandMetadata{
-		Kind:        KindRun,
-		Identity:    run.Identity,
-		Fingerprint: run.Fingerprint,
-		Input:       run.Input,
-		ChildRunID:  "run_child",
-	}).MatchesRun(run) {
+	if !MatchesRun(KindRun, run.Identity, run.Fingerprint, run.Input, run) {
 		t.Fatal("run metadata did not match its request")
 	}
 	wait := WaitRequest{Kind: KindJoin, Fingerprint: "join", Dependencies: []Task{{RunID: "run_1", Sequence: 1}}}
@@ -69,13 +67,7 @@ func TestCommandMatchingAndRunIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command = CommandMetadata{
-		Kind:        wait.Kind,
-		Identity:    string(wait.Kind),
-		Fingerprint: wait.Fingerprint,
-		Input:       input,
-	}
-	if !command.MatchesWait(wait, input) {
+	if !MatchesWait(wait.Kind, string(wait.Kind), wait.Fingerprint, input, wait, input) {
 		t.Fatal("wait metadata did not match")
 	}
 	first, err := NewRunID()

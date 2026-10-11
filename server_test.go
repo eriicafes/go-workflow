@@ -18,7 +18,7 @@ type recordingClient struct {
 
 func (client *recordingClient) CreateRun(
 	_ context.Context,
-	_ *workflowops.LeasedRun,
+	_ *workflowops.Lease,
 	request workflowops.RunRequest,
 ) (string, error) {
 	client.calls++
@@ -34,11 +34,15 @@ func (*recordingClient) Events(context.Context, string, int64) ([]Event, error) 
 	return nil, nil
 }
 
+func (*recordingClient) CancelOperations(context.Context, ...workflowops.Task) error {
+	return nil
+}
+
 func TestHTTPHandlerCreatesRootRequest(t *testing.T) {
 	client := &recordingClient{}
 	request := httptest.NewRequest(
 		http.MethodPost,
-		apiPrefix,
+		APIPrefix+"/runs",
 		strings.NewReader(`{"identity":"example","input":{"value":1}}`),
 	)
 	response := httptest.NewRecorder()
@@ -63,7 +67,7 @@ func TestHTTPHandlerRejectsInternalRunFields(t *testing.T) {
 	client := &recordingClient{}
 	request := httptest.NewRequest(
 		http.MethodPost,
-		apiPrefix,
+		APIPrefix+"/runs",
 		strings.NewReader(`{"identity":"example","input":{},"sequence":-1}`),
 	)
 	response := httptest.NewRecorder()

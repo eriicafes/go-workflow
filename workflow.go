@@ -31,9 +31,8 @@ type workflow[Out any] interface {
 
 // Workflow names a root workflow execution.
 type Workflow[Out any] struct {
-	id        string
-	client    Client
-	execution bool
+	id     string
+	client Client
 }
 
 func (w *Workflow[Out]) ID() string {
@@ -69,22 +68,19 @@ func (w *Workflow[Out]) Unwrap(ctx context.Context) Out {
 
 func (w *Workflow[Out]) rawValue(ctx context.Context) (json.RawMessage, error) {
 	if execution, active := executionFromContext(ctx); active {
-		task := w.task()
+		task := w.Task()
 		if task == nil {
 			return nil, fmt.Errorf("workflow: run is not durable")
 		}
-		if err := awaitTask(ctx, execution, task); err != nil {
+		if err := awaitSuspendingTask(ctx, execution, task); err != nil {
 			return nil, err
 		}
 	}
 	return w.client.WaitRun(ctx, w.id)
 }
 
-func (w *Workflow[Out]) task() *workflowops.Task {
-	if w.execution {
-		return &workflowops.Task{RunID: w.id, Sequence: workflowops.RootSequence}
-	}
-	return nil
+func (w *Workflow[Out]) Task() *workflowops.Task {
+	return &workflowops.Task{RunID: w.id, Sequence: workflowops.RootSequence}
 }
 
 // Events returns events emitted by this workflow after the supplied offset.
@@ -100,9 +96,18 @@ func (w *Workflow[Out]) Read(data []byte) (int, error) {
 	return 0, errors.New("workflow: event streaming is not implemented")
 }
 
-// Start enqueues a named workflow input. The input type must declare
-// Workflow(Out). A worker must register the corresponding Runner with its
-// World.
+// Get returns a handle for an existing workflow.
+// The handle is bound to the client in ctx. Use NewContext or Middleware before calling Get.
+func Get[Out any](ctx context.Context, id string) (*Workflow[Out], error) {
+	client, _, err := clientFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Workflow[Out]{id: id, client: client}, nil
+}
+
+// Start enqueues a new workflow. A worker must register the corresponding Runner with its World.
+// The handle is bound to the client in ctx. Use NewContext or Middleware before calling Start.
 func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Workflow[Out], error) {
 	client, execution, err := clientFromContext(ctx)
 	if err != nil {
@@ -127,7 +132,7 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Workflow[
 		if err != nil {
 			return nil, err
 		}
-		return &Workflow[Out]{id: id, client: client, execution: true}, nil
+		return &Workflow[Out]{id: id, client: client}, nil
 	}
 	id, err := client.CreateRun(ctx, nil, workflowops.RunRequest{
 		Identity:    identity,
@@ -199,16 +204,17 @@ func Sleep(ctx context.Context, duration time.Duration) error {
 	if !active {
 		return ErrNoWorkflow
 	}
-	return timeout(execution, ctx, duration, 3).Wait(ctx)
+	return timer(execution, ctx, duration, workflowops.KindSleep, 3).Wait(ctx)
 }
 
-// Timeout completes after duration as a durable timer operation.
+// Timeout starts a durable timer that cancels its containing workflow when it
+// fires. Cancel the returned task before it fires to disarm the timeout.
 func Timeout(ctx context.Context, duration time.Duration) Result[struct{}] {
 	execution, active := executionFromContext(ctx)
 	if !active {
 		return errorResult[struct{}](ErrNoWorkflow)
 	}
-	return timeout(execution, ctx, duration, 3)
+	return timer(execution, ctx, duration, workflowops.KindTimeout, 3)
 }
 
 func typeIdentity[In any]() string {

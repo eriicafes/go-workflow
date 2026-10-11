@@ -2,6 +2,7 @@ package workflowtest_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -25,6 +26,29 @@ func sleepWorkflow(ctx context.Context, input sleepInput) (sleepOutput, error) {
 		return sleepOutput{}, err
 	}
 	return sleepOutput{Completed: true}, nil
+}
+
+func timeoutWorkflow(ctx context.Context, input sleepInput) (sleepOutput, error) {
+	if err := workflow.Timeout(ctx, input.Delay).Wait(ctx); err != nil {
+		return sleepOutput{}, err
+	}
+	return sleepOutput{Completed: true}, nil
+}
+
+func delayedWorkflowStep(ctx context.Context, input sleepInput) (sleepOutput, error) {
+	select {
+	case <-time.After(input.Delay):
+		return sleepOutput{Completed: true}, nil
+	case <-ctx.Done():
+		return sleepOutput{}, ctx.Err()
+	}
+}
+
+func selectWithCancelWorkflow(ctx context.Context, _ sleepInput) (sleepOutput, error) {
+	fast := workflow.Background(ctx, delayedWorkflowStep, sleepInput{Delay: time.Millisecond})
+	slow := workflow.Background(ctx, delayedWorkflowStep, sleepInput{Delay: time.Second})
+	_, err := workflow.SelectWithCancel(ctx, fast, slow)
+	return sleepOutput{Completed: err == nil}, err
 }
 
 type stepInput struct {
@@ -90,4 +114,60 @@ func TestWorldSchedulesTimersWithWallClockTime(t *testing.T) {
 			t.Fatalf("timer completed after %s, want at least %s", elapsed, delay)
 		}
 	})
+}
+
+func TestCancelRunIsIdempotent(t *testing.T) {
+	world := workflowtest.New(workflow.Use(sleepWorkflow))
+	defer world.Close()
+
+	ctx := workflow.NewContext(context.Background(), world)
+	run, err := workflow.Start(ctx, sleepInput{Delay: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workflow.Cancel(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := workflow.Cancel(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(context.Background()); !errors.Is(err, workflow.ErrCancelled) {
+		t.Fatalf("Wait error = %v, want ErrCancelled", err)
+	}
+}
+
+func TestTimeoutCancelsItsRun(t *testing.T) {
+	world := workflowtest.New(workflow.Use(timeoutWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(
+		workflow.NewContext(context.Background(), world),
+		sleepInput{Delay: 10 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(context.Background()); !errors.Is(err, workflow.ErrCancelled) {
+		t.Fatalf("Wait error = %v, want ErrCancelled", err)
+	}
+}
+
+func TestSelectWithCancelCompletesAfterCancellingLosers(t *testing.T) {
+	world := workflowtest.New(workflow.Use(selectWithCancelWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(
+		workflow.NewContext(context.Background(), world),
+		sleepInput{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !output.Completed {
+		t.Fatal("select workflow did not complete")
+	}
 }

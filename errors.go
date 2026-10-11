@@ -14,12 +14,9 @@ var (
 	// ErrNoWorkflow means a durable primitive was called outside a workflow body.
 	ErrNoWorkflow = errors.New("workflow: context has no active workflow")
 
-	// ErrUnknownWorkflow means the application has not installed that workflow.
-	ErrUnknownWorkflow = workflowops.ErrUnknownWorkflow
-
 	// ErrRunNotFound means the requested durable run does not exist.
 	ErrRunNotFound = workflowops.ErrRunNotFound
 
-	// ErrLeaseLost means another worker obtained a newer fencing token.
-	ErrLeaseLost = workflowops.ErrLeaseLost
+	// ErrCancelled means the durable task was cancelled.
+	ErrCancelled = workflowops.ErrCancelled
 )

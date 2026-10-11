@@ -27,6 +27,19 @@ func taskKey(runID string, sequence int) map[string]ddb.AttributeValue {
 	return key(runPartitionKey(runID), fmt.Sprintf("TASK#%010d", sequence+1))
 }
 
+// dependentWaitKey stores the reverse edge used to find waits affected by a
+// dependency task without scanning the workflow table.
+func dependentWaitKey(dependency, wait workflowops.Task) map[string]ddb.AttributeValue {
+	return key(
+		fmt.Sprintf("DEPENDENCY#%s#%010d", dependency.RunID, dependency.Sequence+1),
+		fmt.Sprintf("WAIT#%s#%010d", wait.RunID, wait.Sequence+1),
+	)
+}
+
+func dependencyPartitionKey(task workflowops.Task) string {
+	return fmt.Sprintf("DEPENDENCY#%s#%010d", task.RunID, task.Sequence+1)
+}
+
 func eventKey(runID string, sequence int) map[string]ddb.AttributeValue {
 	return key(runPartitionKey(runID), fmt.Sprintf("EVENT#%010d", sequence))
 }

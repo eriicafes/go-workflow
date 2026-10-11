@@ -8,7 +8,8 @@ import (
 	"github.com/eriicafes/go-workflow/workflowops"
 )
 
-const apiPrefix = "/v1/runs"
+// APIPrefix is the versioned base path for workflow HTTP endpoints.
+const APIPrefix = "/.well-known/workflow/v1"
 
 type (
 	startRequest struct {
@@ -27,12 +28,15 @@ type (
 	errorResponse struct {
 		Error string `json:"error"`
 	}
+	cancelRequest struct {
+		Tasks []workflowops.Task `json:"tasks"`
+	}
 )
 
 // NewHTTPHandler exposes a Client through the API consumed by NewHTTPClient.
 func NewHTTPHandler(client Client) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST "+apiPrefix, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+APIPrefix+"/runs", func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var start startRequest
 		decoder := json.NewDecoder(r.Body)
@@ -54,7 +58,22 @@ func NewHTTPHandler(client Client) http.Handler {
 		}
 		writeJSON(w, http.StatusAccepted, startResponse{ID: id})
 	})
-	mux.HandleFunc("GET "+apiPrefix+"/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+APIPrefix+"/runs/cancel", func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var cancel cancelRequest
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&cancel); err != nil || len(cancel.Tasks) == 0 {
+			writeError(w, http.StatusBadRequest, "workflow: tasks are required")
+			return
+		}
+		if err := client.CancelOperations(r.Context(), cancel.Tasks...); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET "+APIPrefix+"/runs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		output, err := client.WaitRun(r.Context(), r.PathValue("id"))
 		if err != nil {
 			writeRunError(w, err)
@@ -62,7 +81,7 @@ func NewHTTPHandler(client Client) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, runResponse{Output: output})
 	})
-	mux.HandleFunc("GET "+apiPrefix+"/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+APIPrefix+"/runs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		var after int64
 		if _, err := fmt.Sscan(r.URL.Query().Get("after"), &after); err != nil {
 			writeError(w, http.StatusBadRequest, "workflow: invalid event offset")

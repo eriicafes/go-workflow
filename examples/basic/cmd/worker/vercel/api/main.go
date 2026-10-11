@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/eriicafes/go-workflow"
+	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/worlds/vercel"
 )
 
@@ -23,5 +25,9 @@ func main() {
 
 	address := cmp.Or(os.Getenv("PORT"), ":8081")
 	log.Printf("workflow API listening on %s", address)
-	log.Fatal(http.ListenAndServe(address, vercelworld.HTTP(world)))
+	runners := workflow.Runners(
+		workflow.Use(flows.GenerateReport),
+		workflow.Use(flows.PublishReport),
+	)
+	log.Fatal(http.ListenAndServe(address, vercelworld.HTTP(world, runners)))
 }

@@ -11,4 +11,7 @@ var (
 
 	// ErrLeaseLost means another worker owns a newer task lease.
 	ErrLeaseLost = errors.New("workflow: lease lost")
+
+	// ErrCancelled identifies a durably cancelled workflow task.
+	ErrCancelled = errors.New("workflow: cancelled")
 )

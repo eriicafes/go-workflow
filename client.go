@@ -33,7 +33,7 @@ func NewHTTPClient(endpoint string) Client {
 
 func (client *httpClient) CreateRun(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	input workflowops.RunRequest,
 ) (string, error) {
 	if lease != nil {
@@ -48,7 +48,7 @@ func (client *httpClient) CreateRun(
 	err := client.request(
 		ctx,
 		http.MethodPost,
-		apiPrefix,
+		APIPrefix+"/runs",
 		startRequest{
 			Identity: input.Identity,
 			Input:    input.Input,
@@ -63,7 +63,7 @@ func (client *httpClient) WaitRun(ctx context.Context, id string) (json.RawMessa
 	err := client.request(
 		ctx,
 		http.MethodGet,
-		apiPrefix+"/"+url.PathEscape(id),
+		APIPrefix+"/runs/"+url.PathEscape(id),
 		nil,
 		&response,
 	)
@@ -74,12 +74,25 @@ func (client *httpClient) Events(ctx context.Context, id string, after int64) ([
 	var response eventsResponse
 	path := fmt.Sprintf(
 		"%s/%s/events?after=%d",
-		apiPrefix,
+		APIPrefix+"/runs",
 		url.PathEscape(id),
 		after,
 	)
 	err := client.request(ctx, http.MethodGet, path, nil, &response)
 	return response.Events, err
+}
+
+func (client *httpClient) CancelOperations(ctx context.Context, tasks ...workflowops.Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	return client.request(
+		ctx,
+		http.MethodPost,
+		APIPrefix+"/runs/cancel",
+		cancelRequest{Tasks: tasks},
+		nil,
+	)
 }
 
 func (client *httpClient) request(ctx context.Context, method, path string, input, output any) error {
@@ -109,6 +122,9 @@ func (client *httpClient) request(ctx context.Context, method, path string, inpu
 			return errors.New(failure.Error)
 		}
 		return fmt.Errorf("workflow: HTTP request failed with %s", response.Status)
+	}
+	if output == nil {
+		return nil
 	}
 	return json.NewDecoder(response.Body).Decode(output)
 }

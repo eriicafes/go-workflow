@@ -1,11 +1,10 @@
-// Package vercelworld provides an Upstash Redis and Vercel Queues workflow
-// world.
+// Package vercelworld provides an Upstash Redis, Vercel Queues, and QStash
+// workflow world.
 package vercelworld
 
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,29 +18,27 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/workflowops"
-	"github.com/redis/go-redis/v9"
 )
 
-// Config identifies the Upstash Redis TCP connection and Vercel Queue topic.
-// RedisURL accepts a rediss:// URL. QueueURL is the regional Vercel Queues API
-// root, including /api/v3.
+// Config identifies the Redis connection and Vercel Queue topic. QueueURL is
+// the regional Vercel Queues API root, including /api/v3.
 type Config struct {
-	// RedisURL is an Upstash rediss:// TCP URL. It is used when Redis is nil.
+	// RedisURL is the optional Upstash rediss:// TCP URL. When set, the world
+	// uses TCP; otherwise it uses RedisRESTURL and RedisRESTToken.
 	RedisURL string
-	// RedisAddr is the TLS Redis host:port used when both Redis and RedisURL are
-	// empty. RedisPassword is then required.
-	RedisAddr string
-	// RedisPassword authenticates RedisAddr when RedisURL and Redis are empty.
-	RedisPassword string
-	// Redis is an existing client. It takes precedence over RedisURL, RedisAddr,
-	// and RedisPassword. The caller retains ownership of it.
-	Redis *redis.Client
+	// RedisRESTURL is the Upstash Redis HTTPS endpoint used when RedisURL is empty.
+	RedisRESTURL string
+	// RedisRESTToken authorizes requests to RedisRESTURL.
+	RedisRESTToken string
 	// QueueURL is the required regional Vercel Queues API root, including /api/v3.
 	QueueURL string
 	// OIDCToken is the required bearer token used to publish queue messages.
 	OIDCToken string
 	// Topic is the required Vercel Queue topic that receives workflow tasks.
 	Topic string
+	// QStash optionally delivers timers longer than Vercel Queue's seven-day
+	// delay limit. Vercel Queue remains the transport for all other tasks.
+	QStash *QStashConfig
 	// Prefix namespaces all Redis keys. Zero defaults to go-workflow.
 	Prefix string
 	// PollInterval controls how often WaitRun and WaitOperation read Redis. Zero
@@ -50,8 +47,25 @@ type Config struct {
 	// LeaseDuration is the duration of a task claim before another worker may
 	// reclaim it. Zero defaults to 5 minutes.
 	LeaseDuration time.Duration
-	// HTTPClient publishes messages to Vercel Queues. Nil uses http.DefaultClient.
+	// HTTPClient sends Redis REST, Vercel Queue, and QStash requests. Nil uses
+	// http.DefaultClient.
 	HTTPClient *http.Client
+}
+
+// QStashConfig configures QStash delivery for long timers. WebhookEndpoint is
+// the public application base URL; the fixed QStash webhook path is appended
+// when publishing and verifying deliveries.
+type QStashConfig struct {
+	// BaseURL is the QStash API root. An empty value uses the global endpoint.
+	BaseURL string
+	// Token authorizes publishing and cancelling QStash messages.
+	Token string
+	// WebhookEndpoint is the HTTPS base URL that serves the workflow HTTP handler.
+	WebhookEndpoint string
+	// CurrentSigningKey verifies current QStash request signatures.
+	CurrentSigningKey string
+	// NextSigningKey verifies requests during QStash signing-key rotation.
+	NextSigningKey string
 }
 
 // World keeps all durable state in Redis and publishes compact task pointers
@@ -59,16 +73,12 @@ type Config struct {
 type World struct {
 	config Config
 	http   *http.Client
-	redis  *redis.Client
+	redis  redisStore
 }
 
 func New(config Config) (*World, error) {
 	if config.QueueURL == "" || config.OIDCToken == "" || config.Topic == "" {
 		return nil, errors.New("workflow/vercel: Queue and OIDC configuration is required")
-	}
-	client, err := redisClient(config)
-	if err != nil {
-		return nil, err
 	}
 	if config.LeaseDuration <= 0 {
 		config.LeaseDuration = 5 * time.Minute
@@ -82,7 +92,33 @@ func New(config Config) (*World, error) {
 	if config.HTTPClient == nil {
 		config.HTTPClient = http.DefaultClient
 	}
+	client, err := newRedisStore(
+		config.RedisURL,
+		config.RedisRESTURL,
+		config.RedisRESTToken,
+		config.HTTPClient,
+	)
+	if err != nil {
+		return nil, err
+	}
 	config.QueueURL = strings.TrimRight(config.QueueURL, "/")
+	if config.QStash != nil {
+		qstash := *config.QStash
+		if qstash.Token == "" || qstash.WebhookEndpoint == "" ||
+			qstash.CurrentSigningKey == "" || qstash.NextSigningKey == "" {
+			return nil, errors.New("workflow/vercel: QStash token, webhook endpoint, and signing keys are required")
+		}
+		if qstash.BaseURL == "" {
+			qstash.BaseURL = "https://qstash.upstash.io"
+		}
+		qstash.BaseURL = strings.TrimRight(qstash.BaseURL, "/")
+		webhookEndpoint, err := qstashWebhookEndpoint(qstash.WebhookEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		qstash.WebhookEndpoint = webhookEndpoint
+		config.QStash = &qstash
+	}
 	return &World{
 		config: config,
 		http:   config.HTTPClient,
@@ -90,29 +126,29 @@ func New(config Config) (*World, error) {
 	}, nil
 }
 
-func redisClient(config Config) (*redis.Client, error) {
-	if config.Redis != nil {
-		return config.Redis, nil
-	}
-	if config.RedisURL != "" {
-		options, err := redis.ParseURL(config.RedisURL)
-		if err != nil {
-			return nil, fmt.Errorf("workflow/vercel: parse Redis URL: %w", err)
-		}
-		return redis.NewClient(options), nil
-	}
-	if config.RedisAddr == "" || config.RedisPassword == "" {
-		return nil, errors.New("workflow/vercel: Redis URL or address and password are required")
-	}
-	return redis.NewClient(&redis.Options{
-		Addr:      config.RedisAddr,
-		Password:  config.RedisPassword,
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	}), nil
-}
-
 func (world *World) LeaseDuration() time.Duration {
 	return world.config.LeaseDuration
+}
+
+// CleanupTimer removes the QStash message recorded for a cancelled long timer.
+// Vercel Queue deliveries have no handle and are safely ignored after
+// cancellation.
+func (world *World) CleanupTimer(ctx context.Context, task workflowops.Task) error {
+	record, err := world.hash(ctx, world.taskKey(task.RunID, task.Sequence))
+	if err != nil {
+		return err
+	}
+	handle := record["timer"]
+	if handle == "" {
+		return nil
+	}
+	if world.config.QStash == nil {
+		return errors.New("workflow/vercel: QStash configuration is required to clean a timer")
+	}
+	if err = world.cancelQStash(ctx, handle); err != nil {
+		return err
+	}
+	return world.redis.HDel(ctx, world.taskKey(task.RunID, task.Sequence), "timer")
 }
 
 func (world *World) createRoot(ctx context.Context, request workflowops.RunRequest) (string, error) {
@@ -130,12 +166,6 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 		return "", err
 	}
 	now := stamp(time.Now())
-	root := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	_, err = world.eval(
 		ctx,
 		createRunScript,
@@ -144,13 +174,13 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 			world.commandKey(runID, workflowops.RootSequence),
 			world.taskKey(runID, workflowops.RootSequence),
 		},
-		root.Identity,
-		string(root.Input),
+		request.Identity,
+		string(request.Input),
 		now,
 		runID,
 		strconv.Itoa(workflowops.RootSequence),
 		runID+":"+strconv.Itoa(workflowops.RootSequence),
-		string(root.Kind),
+		string(workflowops.KindRun),
 		string(workflowops.StatusQueued),
 	)
 	if err != nil {
@@ -168,7 +198,7 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 
 func (world *World) CreateRun(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.RunRequest,
 ) (string, error) {
 	if lease == nil {
@@ -179,7 +209,7 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	if len(command) != 0 {
-		if !commandMetadata(command).MatchesRun(request) || command["child"] == "" {
+		if !matchesRun(command, request) || command["child"] == "" {
 			return "", workflowops.HistoryMismatchError("nested run", request.Sequence)
 		}
 		return command["child"], nil
@@ -192,19 +222,6 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	now := stamp(time.Now())
-	childCommand := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-		ChildRunID:  child,
-	}
-	childRoot := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	created, err := world.eval(
 		ctx,
 		createChildScript,
@@ -214,14 +231,14 @@ func (world *World) CreateRun(
 			world.commandKey(child, workflowops.RootSequence),
 			world.taskKey(child, workflowops.RootSequence),
 		},
-		string(childCommand.Kind),
-		childCommand.Identity,
-		childCommand.Fingerprint,
-		string(childCommand.Input),
-		childCommand.ChildRunID,
+		string(workflowops.KindRun),
+		request.Identity,
+		request.Fingerprint,
+		string(request.Input),
+		child,
 		now,
 		child+":"+strconv.Itoa(workflowops.RootSequence),
-		string(childRoot.Kind),
+		string(workflowops.KindRun),
 		string(workflowops.StatusQueued),
 	)
 	if err != nil {
@@ -240,7 +257,7 @@ func (world *World) CreateRun(
 	return child, nil
 }
 
-func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.LeasedRun, error) {
+func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.Lease, error) {
 	run, err := world.hash(ctx, world.runKey(task.RunID))
 	if err != nil {
 		return nil, err
@@ -269,7 +286,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	if claimed != "1" {
 		return nil, nil
 	}
-	return &workflowops.LeasedRun{
+	return &workflowops.Lease{
 		ID:       task.RunID,
 		Identity: run["identity"],
 		Input:    json.RawMessage(run["input"]),
@@ -278,7 +295,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	}, nil
 }
 
-func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun) error {
+func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.Lease) error {
 	ok, err := world.eval(
 		ctx,
 		heartbeatScript,
@@ -293,15 +310,15 @@ func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun
 	if ok != "1" {
 		return workflowops.ErrLeaseLost
 	}
-	return nil
+	return world.resumeLatestWait(ctx, run.ID)
 }
 
-func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun, output json.RawMessage) error {
+func (world *World) CompleteRun(ctx context.Context, run *workflowops.Lease, output json.RawMessage) error {
 	if err := world.finishTask(ctx, run, workflowops.StatusCompleted, output, ""); err != nil {
 		return err
 	}
 	if run.Sequence != workflowops.RootSequence {
-		return world.resolveWaits(ctx)
+		return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 	}
 	if err := world.redis.HSet(
 		ctx,
@@ -309,18 +326,18 @@ func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun,
 		"status", string(workflowops.StatusCompleted),
 		"output", string(output),
 		"updated", stamp(time.Now()),
-	).Err(); err != nil {
+	); err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 }
 
-func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cause error) error {
+func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause error) error {
 	if err := world.finishTask(ctx, run, workflowops.StatusFailed, nil, cause.Error()); err != nil {
 		return err
 	}
 	if run.Sequence != workflowops.RootSequence {
-		return world.resolveWaits(ctx)
+		return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 	}
 	if err := world.redis.HSet(
 		ctx,
@@ -328,15 +345,113 @@ func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cau
 		"status", string(workflowops.StatusFailed),
 		"error", cause.Error(),
 		"updated", stamp(time.Now()),
-	).Err(); err != nil {
+	); err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
+}
+
+func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.Task) error {
+	pending := append([]workflowops.Task(nil), tasks...)
+	changed := make([]workflowops.Task, 0, len(tasks))
+	visitedRoots := make(map[string]bool)
+	for len(pending) > 0 {
+		task := pending[0]
+		pending = pending[1:]
+		if task.Sequence == workflowops.RootSequence {
+			if visitedRoots[task.RunID] {
+				continue
+			}
+			visitedRoots[task.RunID] = true
+			children, err := world.childRuns(ctx, task.RunID)
+			if err != nil {
+				return err
+			}
+			for _, childID := range children {
+				pending = append(pending, workflowops.Task{
+					RunID:    childID,
+					Sequence: workflowops.RootSequence,
+				})
+			}
+		}
+		record, err := world.hash(ctx, world.taskKey(task.RunID, task.Sequence))
+		if err != nil {
+			return err
+		}
+		if len(record) == 0 {
+			return workflowops.ErrRunNotFound
+		}
+		status := workflowops.Status(record["status"])
+		if status == workflowops.StatusCompleted || status == workflowops.StatusFailed {
+			continue
+		}
+		if status == workflowops.StatusCancelled {
+			if err := world.CleanupTimer(ctx, task); err != nil {
+				return err
+			}
+			continue
+		}
+		completion, err := world.redis.Incr(ctx, world.completionKey())
+		if err != nil {
+			return err
+		}
+		if err = world.redis.HSet(
+			ctx,
+			world.taskKey(task.RunID, task.Sequence),
+			"status", string(workflowops.StatusCancelled),
+			"error", workflowops.ErrCancelled.Error(),
+			"completed", strconv.FormatInt(completion, 10),
+			"updated", stamp(time.Now()),
+		); err != nil {
+			return err
+		}
+		changed = append(changed, task)
+		if task.Sequence == workflowops.RootSequence {
+			if err = world.redis.HSet(
+				ctx,
+				world.runKey(task.RunID),
+				"status", string(workflowops.StatusCancelled),
+				"error", workflowops.ErrCancelled.Error(),
+				"updated", stamp(time.Now()),
+			); err != nil {
+				return err
+			}
+		}
+		if err := world.CleanupTimer(ctx, task); err != nil {
+			return err
+		}
+	}
+	return world.resolveDependents(ctx, changed...)
+}
+
+func (world *World) childRuns(ctx context.Context, runID string) ([]string, error) {
+	var cursor uint64
+	var children []string
+	pattern := world.config.Prefix + ":run:" + runID + ":command:*"
+	for {
+		keys, next, err := world.redis.Scan(ctx, cursor, pattern, 100)
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			command, err := world.hash(ctx, key)
+			if err != nil {
+				return nil, err
+			}
+			if childID := command["child"]; childID != "" {
+				children = append(children, childID)
+			}
+		}
+		if next == 0 {
+			return children, nil
+		}
+		cursor = next
+	}
 }
 
 func (world *World) EnsureOperation(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.OperationRequest,
 ) (workflowops.Operation, error) {
 	command, err := world.hash(ctx, world.commandKey(request.RunID, request.Sequence))
@@ -344,7 +459,7 @@ func (world *World) EnsureOperation(
 		return workflowops.Operation{}, err
 	}
 	if len(command) != 0 {
-		if !commandMetadata(command).MatchesOperation(request) {
+		if !matchesOperation(command, request) {
 			return workflowops.Operation{}, workflowops.HistoryMismatchError("operation", request.Sequence)
 		}
 		return world.operation(ctx, request.RunID, request.Sequence)
@@ -357,12 +472,6 @@ func (world *World) EnsureOperation(
 		due = *request.DueAt
 	}
 	key := request.RunID + ":" + strconv.Itoa(request.Sequence)
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-	}
 	created, err := world.eval(
 		ctx,
 		createOperationScript,
@@ -370,10 +479,10 @@ func (world *World) EnsureOperation(
 			world.commandKey(request.RunID, request.Sequence),
 			world.taskKey(request.RunID, request.Sequence),
 		},
-		string(metadata.Kind),
-		metadata.Identity,
-		metadata.Fingerprint,
-		string(metadata.Input),
+		string(request.Kind),
+		request.Identity,
+		request.Fingerprint,
+		string(request.Input),
 		request.RunID,
 		strconv.Itoa(request.Sequence),
 		key,
@@ -401,25 +510,19 @@ func (world *World) EnsureOperation(
 
 func (world *World) EnsureWait(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.WaitRequest,
 ) (workflowops.Operation, error) {
 	input, err := json.Marshal(request.Dependencies)
 	if err != nil {
 		return workflowops.Operation{}, err
 	}
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    string(request.Kind),
-		Fingerprint: request.Fingerprint,
-		Input:       input,
-	}
 	command, err := world.hash(ctx, world.commandKey(request.RunID, request.Sequence))
 	if err != nil {
 		return workflowops.Operation{}, err
 	}
 	if len(command) != 0 {
-		if !commandMetadata(command).MatchesWait(request, input) {
+		if !matchesWait(command, request, input) {
 			return workflowops.Operation{}, workflowops.HistoryMismatchError("wait", request.Sequence)
 		}
 		return world.operation(ctx, request.RunID, request.Sequence)
@@ -427,18 +530,23 @@ func (world *World) EnsureWait(
 	if !allowsCreate(lease, request.RunID) {
 		return workflowops.Operation{}, workflowops.HistoryMissingError("wait command", request.Sequence)
 	}
+	keys := []string{world.commandKey(request.RunID, request.Sequence), world.taskKey(request.RunID, request.Sequence)}
+	for _, dependency := range request.Dependencies {
+		keys = append(keys, world.dependentsKey(dependency))
+	}
 	created, err := world.eval(
 		ctx,
 		createWaitScript,
-		[]string{world.commandKey(request.RunID, request.Sequence), world.taskKey(request.RunID, request.Sequence)},
-		string(metadata.Kind),
-		metadata.Fingerprint,
-		string(metadata.Input),
+		keys,
+		string(request.Kind),
+		request.Fingerprint,
+		string(input),
 		request.RunID,
 		strconv.Itoa(request.Sequence),
 		request.RunID+":"+strconv.Itoa(request.Sequence),
 		stamp(time.Now()),
 		string(workflowops.StatusWaiting),
+		request.RunID+":"+strconv.Itoa(request.Sequence),
 	)
 	if err != nil {
 		return workflowops.Operation{}, err
@@ -446,13 +554,17 @@ func (world *World) EnsureWait(
 	if created == "0" {
 		return world.EnsureWait(ctx, lease, request)
 	}
-	if err := world.resolveWaits(ctx); err != nil {
+	if resolved, err := world.resolveWait(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}); err != nil {
 		return workflowops.Operation{}, err
+	} else if resolved {
+		if err = world.resolveDependents(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}); err != nil {
+			return workflowops.Operation{}, err
+		}
 	}
 	return world.operation(ctx, request.RunID, request.Sequence)
 }
 
-func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) error {
+func (world *World) SuspendRun(ctx context.Context, run *workflowops.Lease) error {
 	if run.Sequence != workflowops.RootSequence {
 		return workflowops.ErrLeaseLost
 	}
@@ -471,7 +583,7 @@ func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) 
 	if ok != "1" {
 		return workflowops.ErrLeaseLost
 	}
-	return world.resolveWaits(ctx)
+	return nil
 }
 
 func (world *World) FinishOperation(
@@ -484,7 +596,7 @@ func (world *World) FinishOperation(
 	if cause != nil {
 		status, message, output = workflowops.StatusFailed, cause.Error(), nil
 	}
-	run := &workflowops.LeasedRun{
+	run := &workflowops.Lease{
 		ID:       operation.RunID,
 		Sequence: operation.Sequence,
 		Token:    operation.Token,
@@ -492,7 +604,7 @@ func (world *World) FinishOperation(
 	if err := world.finishTask(ctx, run, status, output, message); err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
 }
 
 func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage, error) {
@@ -511,6 +623,9 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 		}
 		if workflowops.Status(run["status"]) == workflowops.StatusFailed {
 			return nil, errors.New(run["error"])
+		}
+		if workflowops.Status(run["status"]) == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
 		}
 		select {
 		case <-ctx.Done():
@@ -538,6 +653,9 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		if operation.Status == workflowops.StatusFailed {
 			return nil, errors.New(operation.Error)
 		}
+		if operation.Status == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -557,11 +675,7 @@ func (world *World) AppendEvent(ctx context.Context, task workflowops.Task, data
 	return err
 }
 func (world *World) Events(ctx context.Context, runID string, after int64) ([]workflow.Event, error) {
-	sequences, err := world.redis.ZRangeByScore(
-		ctx,
-		world.eventsKey(runID),
-		&redis.ZRangeBy{Min: "-inf", Max: "+inf"},
-	).Result()
+	sequences, err := world.redis.ZRangeByScore(ctx, world.eventsKey(runID), "-inf", "+inf")
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +730,7 @@ func (world *World) operation(ctx context.Context, runID string, sequence int) (
 
 func (world *World) finishTask(
 	ctx context.Context,
-	run *workflowops.LeasedRun,
+	run *workflowops.Lease,
 	status workflowops.Status,
 	output json.RawMessage,
 	message string,
@@ -641,10 +755,12 @@ func (world *World) finishTask(
 	return nil
 }
 
-func (world *World) resolveWaits(ctx context.Context) error {
+// reconcileWaits is reserved for recovery or operator-initiated repair. Normal
+// task transitions use resolveDependents and never scan every task key.
+func (world *World) reconcileWaits(ctx context.Context) error {
 	var cursor uint64
 	for {
-		keys, next, err := world.redis.Scan(ctx, cursor, world.config.Prefix+":run:*:task:*", 100).Result()
+		keys, next, err := world.redis.Scan(ctx, cursor, world.config.Prefix+":run:*:task:*", 100)
 		if err != nil {
 			return err
 		}
@@ -714,6 +830,127 @@ func (world *World) resolveWaits(ctx context.Context) error {
 	}
 }
 
+func (world *World) resolveDependents(ctx context.Context, changed ...workflowops.Task) error {
+	for len(changed) > 0 {
+		task := changed[0]
+		changed = changed[1:]
+		waits, err := world.redis.SMembers(ctx, world.dependentsKey(task))
+		if err != nil {
+			return err
+		}
+		for _, value := range waits {
+			index := strings.LastIndex(value, ":")
+			if index < 1 {
+				continue
+			}
+			sequence, err := strconv.Atoi(value[index+1:])
+			if err != nil {
+				return err
+			}
+			wait := workflowops.Task{RunID: value[:index], Sequence: sequence}
+			resolved, err := world.resolveWait(ctx, wait)
+			if err != nil {
+				return err
+			}
+			if resolved {
+				changed = append(changed, wait)
+			}
+		}
+	}
+	return nil
+}
+
+func (world *World) resolveWait(ctx context.Context, wait workflowops.Task) (bool, error) {
+	command, err := world.hash(ctx, world.commandKey(wait.RunID, wait.Sequence))
+	if err != nil {
+		return false, err
+	}
+	var dependencies []workflowops.Task
+	if err = json.Unmarshal([]byte(command["input"]), &dependencies); err != nil {
+		return false, err
+	}
+	states, err := world.waitStates(ctx, dependencies)
+	if err != nil {
+		return false, err
+	}
+	resolution := workflowops.ResolveWait(workflowops.Kind(command["kind"]), states)
+	if resolution.Pending {
+		return false, nil
+	}
+	status, message := workflowops.StatusCompleted, ""
+	if resolution.Err != nil {
+		status, message = workflowops.StatusFailed, resolution.Err.Error()
+	}
+	resolved, err := world.eval(ctx, resolveWaitScript, []string{world.taskKey(wait.RunID, wait.Sequence), world.taskKey(wait.RunID, workflowops.RootSequence), world.runKey(wait.RunID), world.completionKey()}, string(status), string(resolution.Output), message, stamp(time.Now()), string(workflowops.StatusWaiting), string(workflowops.StatusQueued))
+	if err != nil || resolved != "1" {
+		return false, err
+	}
+	if err = world.enqueueTask(ctx, workflowops.Task{RunID: wait.RunID, Sequence: workflowops.RootSequence}, time.Time{}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// resumeLatestWait closes the race between checking a barrier and releasing
+// the root lease. It reads only this run's command keys, not every wait.
+func (world *World) resumeLatestWait(ctx context.Context, runID string) error {
+	var cursor uint64
+	latest := workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence}
+	found := false
+	pattern := world.config.Prefix + ":run:" + runID + ":command:*"
+	for {
+		keys, next, err := world.redis.Scan(ctx, cursor, pattern, 100)
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			sequenceText := key[strings.LastIndex(key, ":")+1:]
+			sequence, err := strconv.Atoi(sequenceText)
+			if err != nil {
+				return err
+			}
+			command, err := world.hash(ctx, key)
+			if err != nil {
+				return err
+			}
+			if workflowops.IsWaitKind(workflowops.Kind(command["kind"])) && (!found || sequence > latest.Sequence) {
+				latest.Sequence, found = sequence, true
+			}
+		}
+		if next == 0 {
+			break
+		}
+		cursor = next
+	}
+	if !found {
+		return nil
+	}
+	task, err := world.hash(ctx, world.taskKey(runID, latest.Sequence))
+	if err != nil {
+		return err
+	}
+	status := workflowops.Status(task["status"])
+	if status == workflowops.StatusWaiting {
+		_, err = world.resolveWait(ctx, latest)
+		return err
+	}
+	if status != workflowops.StatusCompleted && status != workflowops.StatusFailed {
+		return nil
+	}
+	resumed, err := world.eval(
+		ctx,
+		resumeRunScript,
+		[]string{world.taskKey(runID, workflowops.RootSequence), world.runKey(runID)},
+		stamp(time.Now()),
+		string(workflowops.StatusWaiting),
+		string(workflowops.StatusQueued),
+	)
+	if err != nil || resumed != "1" {
+		return err
+	}
+	return world.enqueueTask(ctx, workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence}, time.Time{})
+}
+
 func (world *World) waitStates(ctx context.Context, dependencies []workflowops.Task) ([]workflowops.Dependency, error) {
 	states := make([]workflowops.Dependency, len(dependencies))
 	for index, dependency := range dependencies {
@@ -734,15 +971,17 @@ func (world *World) waitStates(ctx context.Context, dependencies []workflowops.T
 }
 
 func (world *World) enqueueTask(ctx context.Context, task workflowops.Task, due time.Time) error {
+	const maxVercelQueueDelay = 7 * 24 * time.Hour
+
 	delay := time.Duration(0)
 	if !due.IsZero() {
-		delay = time.Until(due)
-		if delay < 0 {
-			delay = 0
-		}
+		delay = max(time.Until(due), 0)
 	}
-	if delay > 24*time.Hour {
-		return errors.New("workflow/vercel: Vercel Queue supports timer delivery up to 24 hours")
+	if delay > maxVercelQueueDelay {
+		if world.config.QStash == nil {
+			return errors.New("workflow/vercel: timer over seven days requires QStash configuration")
+		}
+		return world.enqueueQStash(ctx, task, due)
 	}
 	body, err := json.Marshal(task)
 	if err != nil {
@@ -763,6 +1002,9 @@ func (world *World) enqueueTask(ctx context.Context, task workflowops.Task, due 
 	request.Header.Set("Vqs-Idempotency-Key", task.RunID+":"+strconv.Itoa(task.Sequence))
 	if delay > 0 {
 		request.Header.Set("Vqs-Delay-Seconds", strconv.Itoa(int(delay.Round(time.Second).Seconds())))
+		// Vercel Queue's default retention is one day. A delayed message must
+		// remain retained until it becomes visible.
+		request.Header.Set("Vqs-Retention-Seconds", strconv.Itoa(int(maxVercelQueueDelay.Seconds())))
 	}
 	response, err := world.http.Do(request)
 	if err != nil {
@@ -776,12 +1018,101 @@ func (world *World) enqueueTask(ctx context.Context, task workflowops.Task, due 
 	return nil
 }
 
+func (world *World) enqueueQStash(ctx context.Context, task workflowops.Task, due time.Time) error {
+	body, err := json.Marshal(task)
+	if err != nil {
+		return err
+	}
+	config := world.config.QStash
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		config.BaseURL+"/v2/publish/"+url.PathEscape(config.WebhookEndpoint+workflow.APIPrefix+"/webhook/qstash"),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+config.Token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Upstash-Not-Before", strconv.FormatInt(due.Unix(), 10))
+	response, err := world.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("workflow/vercel: publish QStash timer: %s: %s", response.Status, strings.TrimSpace(string(data)))
+	}
+	var published struct {
+		MessageID string `json:"messageId"`
+	}
+	if err = json.NewDecoder(response.Body).Decode(&published); err != nil {
+		return fmt.Errorf("workflow/vercel: decode QStash timer: %w", err)
+	}
+	if published.MessageID == "" {
+		return errors.New("workflow/vercel: QStash timer response has no message ID")
+	}
+	recorded, err := world.recordTimer(ctx, task, published.MessageID)
+	if err != nil {
+		cleanupErr := world.cancelQStash(ctx, published.MessageID)
+		if cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
+		return err
+	}
+	if recorded {
+		return nil
+	}
+	return world.cancelQStash(ctx, published.MessageID)
+}
+
+func (world *World) recordTimer(ctx context.Context, task workflowops.Task, handle string) (bool, error) {
+	recorded, err := world.eval(
+		ctx,
+		recordTimerScript,
+		[]string{world.taskKey(task.RunID, task.Sequence)},
+		string(workflowops.StatusQueued),
+		handle,
+	)
+	return recorded == "1", err
+}
+
+func (world *World) cancelQStash(ctx context.Context, messageID string) error {
+	config := world.config.QStash
+	values := url.Values{"messageIds": []string{messageID}}
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodDelete,
+		config.BaseURL+"/v2/messages?"+values.Encode(),
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+config.Token)
+	response, err := world.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("workflow/vercel: cancel QStash timer: %s: %s", response.Status, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
 func (world *World) eval(ctx context.Context, script string, keys []string, args ...string) (string, error) {
 	values := make([]any, len(args))
 	for index, argument := range args {
 		values[index] = argument
 	}
-	result, err := world.redis.Eval(ctx, script, keys, values...).Result()
+	result, err := world.redis.Eval(ctx, script, keys, values...)
 	if err != nil {
 		return "", err
 	}
@@ -795,7 +1126,7 @@ func (world *World) eval(ctx context.Context, script string, keys []string, args
 	}
 }
 func (world *World) hash(ctx context.Context, key string) (map[string]string, error) {
-	return world.redis.HGetAll(ctx, key).Result()
+	return world.redis.HGetAll(ctx, key)
 }
 func (world *World) runKey(runID string) string { return world.config.Prefix + ":run:" + runID }
 func (world *World) commandKey(runID string, sequence int) string {
@@ -803,6 +1134,9 @@ func (world *World) commandKey(runID string, sequence int) string {
 }
 func (world *World) taskKey(runID string, sequence int) string {
 	return world.config.Prefix + ":run:" + runID + ":task:" + strconv.Itoa(sequence)
+}
+func (world *World) dependentsKey(task workflowops.Task) string {
+	return world.config.Prefix + ":dependents:" + task.RunID + ":" + strconv.Itoa(task.Sequence)
 }
 func (world *World) eventKey(runID string, sequence int) string {
 	return world.config.Prefix + ":run:" + runID + ":event:" + strconv.Itoa(sequence)
@@ -826,18 +1160,39 @@ func completion(value string) uint64 {
 	return result
 }
 
-func allowsCreate(lease *workflowops.LeasedRun, runID string) bool {
+func allowsCreate(lease *workflowops.Lease, runID string) bool {
 	return lease != nil && lease.ID == runID && lease.Sequence == workflowops.RootSequence
 }
 
-func commandMetadata(command map[string]string) workflowops.CommandMetadata {
-	return workflowops.CommandMetadata{
-		Kind:        workflowops.Kind(command["kind"]),
-		Identity:    command["identity"],
-		Fingerprint: command["fingerprint"],
-		Input:       json.RawMessage(command["input"]),
-		ChildRunID:  command["child"],
-	}
+func matchesOperation(command map[string]string, request workflowops.OperationRequest) bool {
+	return workflowops.MatchesOperation(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+	)
+}
+
+func matchesRun(command map[string]string, request workflowops.RunRequest) bool {
+	return workflowops.MatchesRun(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+	)
+}
+
+func matchesWait(command map[string]string, request workflowops.WaitRequest, input json.RawMessage) bool {
+	return workflowops.MatchesWait(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+		input,
+	)
 }
 
 func readSequence(value string) int {
@@ -903,6 +1258,18 @@ redis.call('HSET', KEYS[2],
   'run', ARGV[4], 'sequence', ARGV[5], 'status', ARGV[8],
   'idempotency', ARGV[6], 'attempt', '0',
   'created', ARGV[7], 'updated', ARGV[7])
+for index = 3, #KEYS do
+  redis.call('SADD', KEYS[index], ARGV[9])
+end
+return 1
+`
+
+const resumeRunScript = `
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[2] then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'status', ARGV[3], 'updated', ARGV[1])
+redis.call('HSET', KEYS[2], 'status', ARGV[3], 'updated', ARGV[1])
 return 1
 `
 
@@ -982,5 +1349,13 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
 end
 redis.call('HSET', KEYS[1], 'data', ARGV[1], 'created', ARGV[3])
 redis.call('ZADD', KEYS[2], ARGV[2], ARGV[2])
+return 1
+`
+
+const recordTimerScript = `
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[1] then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'timer', ARGV[2])
 return 1
 `

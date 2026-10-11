@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/worlds/local"
+	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
 type childInput struct {
@@ -107,7 +107,7 @@ func mapped(ctx context.Context, _ mapInput) (mapOutput, error) {
 		{Value: 1, Delay: 20 * time.Millisecond},
 		{Value: 2, Delay: 10 * time.Millisecond},
 	})
-	if err := workflow.Join(ctx, workflow.Waiters(results)...); err != nil {
+	if err := workflow.Join(ctx, workflow.Tasks(results)...); err != nil {
 		return mapOutput{}, err
 	}
 	values := make([]int, len(results))
@@ -153,52 +153,52 @@ func settled(ctx context.Context, _ settledInput) (settledOutput, error) {
 		{Value: 1, Delay: 30 * time.Millisecond},
 		{Delay: 10 * time.Millisecond, Fail: true},
 	})
-	if err := workflow.JoinSettled(ctx, workflow.Waiters(results)...); err != nil {
+	if err := workflow.JoinSettled(ctx, workflow.Tasks(results)...); err != nil {
 		return settledOutput{}, err
 	}
 	return settledOutput{Completed: true}, nil
 }
 
-type raceInput struct{}
-type raceOutput struct{ Winner int }
+type selectInput struct{}
+type selectOutput struct{ Winner int }
 
-func (raceInput) Workflow(raceOutput) {}
+func (selectInput) Workflow(selectOutput) {}
 
-func raced(ctx context.Context, _ raceInput) (raceOutput, error) {
+func selectd(ctx context.Context, _ selectInput) (selectOutput, error) {
 	results := workflow.Map(ctx, delayed, []delayedInput{
 		{Value: 1, Delay: 30 * time.Millisecond},
 		{Value: 2, Delay: 10 * time.Millisecond},
 	})
-	winner, err := workflow.Race(ctx, workflow.Waiters(results)...)
+	winner, err := workflow.Select(ctx, workflow.Tasks(results)...)
 	if err != nil {
-		return raceOutput{}, err
+		return selectOutput{}, err
 	}
 	result, ok := winner.(workflow.Result[int])
 	if !ok {
-		return raceOutput{}, errors.New("workflow: unexpected race winner")
+		return selectOutput{}, errors.New("workflow: unexpected select winner")
 	}
 	value, err := result.Value(ctx)
-	return raceOutput{Winner: value}, err
+	return selectOutput{Winner: value}, err
 }
 
-type failedRaceInput struct{}
-type failedRaceOutput struct {
-	RaceError string
-	WaitError string
+type failedSelectInput struct{}
+type failedSelectOutput struct {
+	SelectError string
+	WaitError   string
 }
 
-func (failedRaceInput) Workflow(failedRaceOutput) {}
+func (failedSelectInput) Workflow(failedSelectOutput) {}
 
-func failedRace(ctx context.Context, _ failedRaceInput) (failedRaceOutput, error) {
+func failedSelect(ctx context.Context, _ failedSelectInput) (failedSelectOutput, error) {
 	results := workflow.Map(ctx, delayed, []delayedInput{
 		{Value: 1, Delay: 30 * time.Millisecond},
-		{Delay: 10 * time.Millisecond, Fail: true, Failure: "race failure"},
+		{Delay: 10 * time.Millisecond, Fail: true, Failure: "select failure"},
 	})
-	winner, raceErr := workflow.Race(ctx, workflow.Waiters(results)...)
+	winner, selectErr := workflow.Select(ctx, workflow.Tasks(results)...)
 	waitErr := winner.Wait(ctx)
-	return failedRaceOutput{
-		RaceError: errorMessage(raceErr),
-		WaitError: errorMessage(waitErr),
+	return failedSelectOutput{
+		SelectError: errorMessage(selectErr),
+		WaitError:   errorMessage(waitErr),
 	}, nil
 }
 
@@ -207,8 +207,8 @@ func TestWorldComposesMappedResults(t *testing.T) {
 		workflow.Use(mapped),
 		workflow.Use(allFailure),
 		workflow.Use(settled),
-		workflow.Use(raced),
-		workflow.Use(failedRace),
+		workflow.Use(selectd),
+		workflow.Use(failedSelect),
 	)
 	world, err := localworld.Open(t.TempDir(), runners)
 	if err != nil {
@@ -265,28 +265,28 @@ func TestWorldComposesMappedResults(t *testing.T) {
 		t.Fatalf("JoinSettled output = %#v", settledOutput)
 	}
 
-	raceRun, err := workflow.Start(workflow.NewContext(ctx, world), raceInput{})
+	selectRun, err := workflow.Start(workflow.NewContext(ctx, world), selectInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raceOutput, err := raceRun.Value(ctx)
+	selectOutput, err := selectRun.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raceOutput.Winner != 2 {
-		t.Fatalf("Race winner = %d, want 2", raceOutput.Winner)
+	if selectOutput.Winner != 2 {
+		t.Fatalf("Select winner = %d, want 2", selectOutput.Winner)
 	}
 
-	failedRaceRun, err := workflow.Start(workflow.NewContext(ctx, world), failedRaceInput{})
+	failedSelectRun, err := workflow.Start(workflow.NewContext(ctx, world), failedSelectInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	failedRaceOutput, err := failedRaceRun.Value(ctx)
+	failedSelectOutput, err := failedSelectRun.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failedRaceOutput.RaceError != "race failure" || failedRaceOutput.WaitError != "race failure" {
-		t.Fatalf("failed Race output = %#v", failedRaceOutput)
+	if failedSelectOutput.SelectError != "select failure" || failedSelectOutput.WaitError != "select failure" {
+		t.Fatalf("failed Select output = %#v", failedSelectOutput)
 	}
 }
 

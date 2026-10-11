@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	replay "github.com/eriicafes/go-workflow/internal"
+	"github.com/eriicafes/go-workflow/internal"
 )
 
 // Engine replays workflow code for a leased root run or operation task.
@@ -27,22 +27,24 @@ func NewEngine(world World, runners RunnerSet) *Engine {
 }
 
 // Execute processes one World-issued lease.
-func (engine *Engine) Execute(ctx context.Context, leased *LeasedRun) error {
+func (engine *Engine) Execute(ctx context.Context, leased *Lease) error {
 	engine.mu.RLock()
 	runner, ok := engine.runners[leased.Identity]
 	engine.mu.RUnlock()
 	if !ok {
 		return engine.world.FailRun(ctx, leased, fmt.Errorf("%w: %s", ErrUnknownWorkflow, leased.Identity))
 	}
-	stop := engine.heartbeat(ctx, leased)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stop := engine.heartbeat(ctx, leased, cancel)
 	defer stop()
 	execution := &Execution{world: engine.world, lease: leased}
-	workflowCtx := context.WithValue(ctx, executionContextKey{}, execution)
-	output, err := engine.replay(runner, workflowCtx, execution, leased.Input)
+	ctx = context.WithValue(ctx, executionContextKey{}, execution)
+	output, err := engine.replay(runner, ctx, execution, leased.Input)
 	switch {
-	case errors.Is(err, replay.ErrReplayComplete):
+	case errors.Is(err, internal.ErrReplayComplete), errors.Is(err, internal.ErrReplaySuspended):
 		return nil
-	case errors.Is(err, replay.ErrReplaySuspended):
+	case errors.Is(context.Cause(ctx), ErrCancelled), errors.Is(context.Cause(ctx), ErrLeaseLost):
 		return nil
 	case err != nil:
 		return engine.world.FailRun(ctx, leased, err)
@@ -70,7 +72,7 @@ func (engine *Engine) replay(runner Runner, ctx context.Context, execution *Exec
 	return runner.execute(ctx, input)
 }
 
-func (engine *Engine) heartbeat(ctx context.Context, leased *LeasedRun) func() {
+func (engine *Engine) heartbeat(ctx context.Context, leased *Lease, cancel context.CancelCauseFunc) func() {
 	done := make(chan struct{})
 	every := max(engine.world.LeaseDuration()/3, time.Second)
 	go func() {
@@ -81,7 +83,11 @@ func (engine *Engine) heartbeat(ctx context.Context, leased *LeasedRun) func() {
 			case <-done:
 				return
 			case <-ticker.C:
-				_ = engine.world.HeartbeatRun(ctx, leased)
+				err := engine.world.HeartbeatRun(ctx, leased)
+				if errors.Is(err, ErrCancelled) || errors.Is(err, ErrLeaseLost) {
+					cancel(err)
+					return
+				}
 			}
 		}
 	}()

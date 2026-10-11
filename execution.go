@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -11,6 +10,65 @@ import (
 	"github.com/eriicafes/go-workflow/internal"
 	"github.com/eriicafes/go-workflow/workflowops"
 )
+
+// Cancel durably cancels unfinished tasks. Cancelling an already cancelled
+// task is a successful no-op.
+func Cancel(ctx context.Context, tasks ...Task) error {
+	dependencies, err := dependenciesFor(tasks)
+	if err != nil {
+		return err
+	}
+	if execution, active := executionFromContext(ctx); active {
+		return cancel(execution, ctx, dependencies)
+	}
+	client, _, err := clientFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	return client.CancelOperations(ctx, dependencies...)
+}
+
+func cancel(
+	execution *workflowops.Execution,
+	ctx context.Context,
+	dependencies []workflowops.Task,
+) error {
+	sequence := execution.Sequence()
+	input, err := json.Marshal(dependencies)
+	if err != nil {
+		return err
+	}
+	op, err := execution.World().EnsureOperation(ctx, execution.Lease(), workflowops.OperationRequest{
+		RunID:       execution.RunID(),
+		Sequence:    sequence,
+		Kind:        workflowops.KindCancel,
+		Identity:    string(workflowops.KindCancel),
+		Fingerprint: fingerprint(string(workflowops.KindCancel), 3),
+		Input:       input,
+	})
+	if err != nil {
+		return err
+	}
+	if op.Status == workflowops.StatusCompleted || op.Status == workflowops.StatusFailed {
+		return waitingOperationResult[struct{}](execution.World(), execution.RunID(), sequence).Wait(ctx)
+	}
+	if sequence != execution.Target() {
+		return suspendingOperationResult[struct{}](execution.World(), execution.RunID(), sequence).Wait(ctx)
+	}
+	if err := execution.World().CancelOperations(ctx, dependencies...); err != nil {
+		return err
+	}
+	for _, dependency := range dependencies {
+		if dependency.RunID == execution.RunID() && dependency.Sequence == workflowops.RootSequence {
+			panic(internal.ErrReplayComplete)
+		}
+	}
+	output, _ := json.Marshal(struct{}{})
+	if err := execution.World().FinishOperation(ctx, op, output, nil); err != nil {
+		panic(err)
+	}
+	panic(internal.ErrReplayComplete)
+}
 
 // Map starts one durable background step for each input without waiting for
 // any result.
@@ -36,7 +94,7 @@ func All[In, Out any](
 	inputs []In,
 ) ([]Out, error) {
 	results := Map(ctx, step, inputs)
-	if err := join(ctx, Waiters(results), false, fingerprint(string(workflowops.KindJoin), 2)); err != nil {
+	if err := join(ctx, Tasks(results), false, fingerprint(string(workflowops.KindJoin), 2)); err != nil {
 		return nil, err
 	}
 	values := make([]Out, len(results))
@@ -50,24 +108,24 @@ func All[In, Out any](
 	return values, nil
 }
 
-// Join waits for every supplied durable waiter. It returns the first terminal
-// failure in completion order, without waiting for unfinished waiters.
-func Join(ctx context.Context, waiters ...Waiter) error {
-	return join(ctx, waiters, false, fingerprint(string(workflowops.KindJoin), 2))
+// Join waits for every supplied durable task. It returns the first terminal
+// failure in completion order, without waiting for unfinished tasks.
+func Join(ctx context.Context, tasks ...Task) error {
+	return join(ctx, tasks, false, fingerprint(string(workflowops.KindJoin), 2))
 }
 
-// JoinSettled waits until every supplied durable waiter has completed. Unlike
-// Join, failures in the supplied waiters do not cause the join to fail.
-func JoinSettled(ctx context.Context, waiters ...Waiter) error {
-	return join(ctx, waiters, true, fingerprint(string(workflowops.KindJoinSettled), 2))
+// JoinSettled waits until every supplied durable task has completed. Unlike
+// Join, failures in the supplied tasks do not cause the join to fail.
+func JoinSettled(ctx context.Context, tasks ...Task) error {
+	return join(ctx, tasks, true, fingerprint(string(workflowops.KindJoinSettled), 2))
 }
 
-func join(ctx context.Context, waiters []Waiter, settled bool, fingerprint string) error {
+func join(ctx context.Context, tasks []Task, settled bool, fingerprint string) error {
 	execution, active := executionFromContext(ctx)
 	if !active {
 		return ErrNoWorkflow
 	}
-	dependencies, err := dependenciesFor(waiters)
+	dependencies, err := dependenciesFor(tasks)
 	if err != nil {
 		return err
 	}
@@ -95,18 +153,28 @@ func join(ctx context.Context, waiters []Waiter, settled bool, fingerprint strin
 	panic(internal.ErrReplaySuspended)
 }
 
-// Race waits for the first durable waiter to complete and returns that exact
-// waiter with its terminal error. It does not synthesize a replacement waiter
-// when the winner failed.
-func Race(ctx context.Context, waiters ...Waiter) (Waiter, error) {
+// Select waits for the first durable task to complete and returns that exact
+// task with its terminal error.
+func Select(ctx context.Context, tasks ...Task) (Task, error) {
+	return selectTask(ctx, workflowops.KindSelect, tasks...)
+}
+
+// SelectOk waits for the first successfully completed durable task. It ignores
+// failures while another task can still succeed, and returns the earliest
+// durable failure only when every task has failed.
+func SelectOk(ctx context.Context, tasks ...Task) (Task, error) {
+	return selectTask(ctx, workflowops.KindSelectOk, tasks...)
+}
+
+func selectTask(ctx context.Context, kind workflowops.Kind, tasks ...Task) (Task, error) {
 	execution, active := executionFromContext(ctx)
 	if !active {
 		return nil, ErrNoWorkflow
 	}
-	if len(waiters) == 0 {
-		return nil, errors.New("workflow: Race requires a waiter")
+	if len(tasks) == 0 {
+		return nil, fmt.Errorf("workflow: %s requires a task", kind)
 	}
-	dependencies, err := dependenciesFor(waiters)
+	dependencies, err := dependenciesFor(tasks)
 	if err != nil {
 		return nil, err
 	}
@@ -114,39 +182,84 @@ func Race(ctx context.Context, waiters ...Waiter) (Waiter, error) {
 	op, err := execution.World().EnsureWait(ctx, execution.Lease(), workflowops.WaitRequest{
 		RunID:        execution.RunID(),
 		Sequence:     sequence,
-		Kind:         workflowops.KindRace,
-		Fingerprint:  fingerprint(string(workflowops.KindRace), 2),
+		Kind:         kind,
+		Fingerprint:  fingerprint(string(kind), 3),
 		Dependencies: dependencies,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if op.Status != workflowops.StatusCompleted && op.Status != workflowops.StatusFailed {
-		if err := execution.World().SuspendRun(ctx, execution.Lease()); err != nil {
+	if op.Status == workflowops.StatusCompleted || op.Status == workflowops.StatusFailed {
+		outcome, err := waitingOperationResult[workflowops.SelectOutcome](execution.World(), execution.RunID(), sequence).Value(ctx)
+		if err != nil {
 			return nil, err
 		}
-		panic(internal.ErrReplaySuspended)
+		if outcome.Index < 0 || outcome.Index >= len(dependencies) {
+			return nil, fmt.Errorf("workflow: %s recorded invalid winner %d", kind, outcome.Index)
+		}
+		dependency := dependencies[outcome.Index]
+		if dependency.Sequence == workflowops.RootSequence {
+			_, err = execution.World().WaitRun(ctx, dependency.RunID)
+		} else {
+			_, err = execution.World().WaitOperation(ctx, dependency)
+		}
+		return tasks[outcome.Index], err
 	}
-	outcome, err := waitingOperationResult[workflowops.RaceOutcome](execution.World(), execution.RunID(), sequence).Value(ctx)
-	if err != nil {
+	if err := execution.World().SuspendRun(ctx, execution.Lease()); err != nil {
 		return nil, err
 	}
-	if outcome.Index < 0 || outcome.Index >= len(waiters) {
-		return nil, fmt.Errorf("workflow: Race recorded invalid winner %d", outcome.Index)
-	}
-	return waiters[outcome.Index], dependencyError(ctx, execution.World(), waiters[outcome.Index])
+	panic(internal.ErrReplaySuspended)
 }
 
-func timeout(execution *workflowops.Execution, ctx context.Context, duration time.Duration, callerSkip int) Result[struct{}] {
+// SelectWithCancel returns the task resolved by Select and cancels every
+// other supplied durable task. It also cancels the losers when the winner
+// failed.
+func SelectWithCancel(ctx context.Context, tasks ...Task) (Task, error) {
+	return selectWithCancel(ctx, workflowops.KindSelect, tasks...)
+}
+
+// SelectOkWithCancel returns the task resolved by SelectOk and cancels every
+// other supplied durable task.
+func SelectOkWithCancel(ctx context.Context, tasks ...Task) (Task, error) {
+	return selectWithCancel(ctx, workflowops.KindSelectOk, tasks...)
+}
+
+func selectWithCancel(ctx context.Context, kind workflowops.Kind, tasks ...Task) (Task, error) {
+	winner, selectErr := selectTask(ctx, kind, tasks...)
+	if winner == nil {
+		return nil, selectErr
+	}
+	winnerTask := winner.Task()
+	losers := make([]Task, 0, len(tasks)-1)
+	for _, task := range tasks {
+		value := task.Task()
+		if value == nil || (value.RunID == winnerTask.RunID && value.Sequence == winnerTask.Sequence) {
+			continue
+		}
+		losers = append(losers, task)
+	}
+	if err := Cancel(ctx, losers...); err != nil {
+		return winner, err
+	}
+	return winner, selectErr
+}
+
+func timer(
+	execution *workflowops.Execution,
+	ctx context.Context,
+	duration time.Duration,
+	kind workflowops.Kind,
+	callerSkip int,
+) Result[struct{}] {
 	sequence := execution.Sequence()
 	raw, _ := json.Marshal(duration.String())
 	due := time.Now().Add(duration)
 	op, err := execution.World().EnsureOperation(ctx, execution.Lease(), workflowops.OperationRequest{
 		RunID:       execution.RunID(),
 		Sequence:    sequence,
-		Kind:        workflowops.KindSleep,
-		Identity:    string(workflowops.KindSleep),
-		Fingerprint: fingerprint(string(workflowops.KindSleep), callerSkip),
+		Kind:        kind,
+		Identity:    string(kind),
+		Fingerprint: fingerprint(string(kind), callerSkip),
 		Input:       raw,
 		DueAt:       &due,
 	})
@@ -158,10 +271,23 @@ func timeout(execution *workflowops.Execution, ctx context.Context, duration tim
 	}
 	if sequence == execution.Target() {
 		if remain := time.Until(op.DueAt); remain > 0 {
-			time.Sleep(remain)
+			timer := time.NewTimer(remain)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return errorResult[struct{}](ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if kind == workflowops.KindTimeout {
+			task := workflowops.Task{RunID: execution.RunID(), Sequence: workflowops.RootSequence}
+			if err := execution.World().CancelOperations(ctx, task); err != nil {
+				panic(err)
+			}
+			panic(internal.ErrReplayComplete)
 		}
 		output, _ := json.Marshal(struct{}{})
-		if err := execution.World().FinishOperation(context.Background(), op, output, nil); err != nil {
+		if err := execution.World().FinishOperation(ctx, op, output, nil); err != nil {
 			panic(err)
 		}
 		panic(internal.ErrReplayComplete)
@@ -206,13 +332,13 @@ func background[In, Out any](
 		stepCtx = context.WithValue(stepCtx, idempotencyContextKey{}, op.IdempotencyKey)
 		value, callErr := fn(stepCtx, input)
 		if callErr != nil {
-			if err := execution.World().FinishOperation(context.Background(), op, nil, callErr); err != nil {
+			if err := execution.World().FinishOperation(ctx, op, nil, callErr); err != nil {
 				panic(err)
 			}
 			panic(internal.ErrReplayComplete)
 		}
 		output, encodeErr := json.Marshal(value)
-		if err := execution.World().FinishOperation(context.Background(), op, output, encodeErr); err != nil {
+		if err := execution.World().FinishOperation(ctx, op, output, encodeErr); err != nil {
 			panic(err)
 		}
 		panic(internal.ErrReplayComplete)
@@ -257,7 +383,8 @@ func (writer eventWriter) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	if sequence == writer.execution.Target() {
-		if err := writer.execution.World().AppendEvent(writer.ctx, workflowops.Task{RunID: writer.execution.RunID(), Sequence: sequence}, data); err != nil {
+		task := workflowops.Task{RunID: writer.execution.RunID(), Sequence: sequence}
+		if err := writer.execution.World().AppendEvent(writer.ctx, task, data); err != nil {
 			return 0, err
 		}
 		if err := writer.execution.World().FinishOperation(writer.ctx, op, raw, nil); err != nil {
@@ -268,35 +395,14 @@ func (writer eventWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-func dependenciesFor(waiters []Waiter) ([]workflowops.Task, error) {
-	dependencies := make([]workflowops.Task, len(waiters))
-	for index, waiter := range waiters {
-		durable, ok := waiter.(durableWaiter)
-		if !ok {
-			return nil, fmt.Errorf("workflow: waiter %d is not durable", index)
-		}
-		task := durable.task()
+func dependenciesFor(tasks []Task) ([]workflowops.Task, error) {
+	dependencies := make([]workflowops.Task, len(tasks))
+	for index, value := range tasks {
+		task := value.Task()
 		if task == nil {
-			return nil, fmt.Errorf("workflow: waiter %d is not durable", index)
+			return nil, fmt.Errorf("workflow: task %d is not durable", index)
 		}
 		dependencies[index] = *task
 	}
 	return dependencies, nil
-}
-
-func dependencyError(ctx context.Context, world World, waiter Waiter) error {
-	durable, ok := waiter.(durableWaiter)
-	if !ok {
-		return fmt.Errorf("workflow: race winner is not durable")
-	}
-	task := durable.task()
-	if task == nil {
-		return fmt.Errorf("workflow: race winner is not durable")
-	}
-	if task.Sequence == workflowops.RootSequence {
-		_, err := world.WaitRun(ctx, task.RunID)
-		return err
-	}
-	_, err := world.WaitOperation(ctx, *task)
-	return err
 }

@@ -43,7 +43,10 @@ type Event struct {
 type Client interface {
 	// CreateRun creates a root run when lease is nil, or creates/verifies a
 	// child run at the leased replay position otherwise.
-	CreateRun(context.Context, *LeasedRun, RunRequest) (string, error)
+	CreateRun(context.Context, *Lease, RunRequest) (string, error)
+	// CancelOperations durably cancels unfinished tasks. Cancelling an already
+	// cancelled task is a successful no-op.
+	CancelOperations(context.Context, ...Task) error
 	// WaitRun waits until the root run completes, then returns its encoded output
 	// or its terminal failure.
 	WaitRun(context.Context, string) (json.RawMessage, error)
@@ -55,23 +58,26 @@ type Client interface {
 type World interface {
 	Client
 
+	// CleanupTimer removes a provider-managed timer after its durable task has
+	// been cancelled. Worlds without a removable timer resource return nil.
+	CleanupTimer(context.Context, Task) error
+	// EnsureOperation creates or verifies one deterministic replay command.
+	EnsureOperation(context.Context, *Lease, OperationRequest) (Operation, error)
 	// EnsureWait creates or verifies a durable dependency barrier. Worlds resolve
 	// the barrier when its referenced tasks become terminal. The barrier itself
 	// is not executable worker work.
-	EnsureWait(context.Context, *LeasedRun, WaitRequest) (Operation, error)
+	EnsureWait(context.Context, *Lease, WaitRequest) (Operation, error)
 	// SuspendRun releases a root-run lease after its replay records unresolved
 	// work. The world must requeue the root when its wait becomes terminal.
-	SuspendRun(context.Context, *LeasedRun) error
-	// HeartbeatRun extends a running lease. A world must fence stale tokens.
-	HeartbeatRun(context.Context, *LeasedRun) error
-	// CompleteRun records successful output for the leased root run or task.
-	CompleteRun(context.Context, *LeasedRun, json.RawMessage) error
-	// FailRun records terminal failure for the leased root run or task.
-	FailRun(context.Context, *LeasedRun, error) error
+	SuspendRun(context.Context, *Lease) error
 	// LeaseDuration returns the maximum interval between worker heartbeats.
 	LeaseDuration() time.Duration
-	// EnsureOperation creates or verifies one deterministic replay command.
-	EnsureOperation(context.Context, *LeasedRun, OperationRequest) (Operation, error)
+	// HeartbeatRun extends a running lease. A world must fence stale tokens.
+	HeartbeatRun(context.Context, *Lease) error
+	// CompleteRun records successful output for the leased root run or task.
+	CompleteRun(context.Context, *Lease, json.RawMessage) error
+	// FailRun records terminal failure for the leased root run or task.
+	FailRun(context.Context, *Lease, error) error
 	// FinishOperation records output or failure for a leased operation. The
 	// implementation must reject a stale lease token.
 	FinishOperation(context.Context, Operation, json.RawMessage, error) error
@@ -106,18 +112,21 @@ const (
 	KindRun         Kind = "run"
 	KindStep        Kind = "step"
 	KindSleep       Kind = "sleep"
+	KindTimeout     Kind = "timeout"
+	KindCancel      Kind = "cancel"
 	KindLog         Kind = "log"
 	KindAwait       Kind = "await"
 	KindJoin        Kind = "join"
 	KindJoinSettled Kind = "join-settled"
-	KindRace        Kind = "race"
+	KindSelect      Kind = "select"
+	KindSelectOk    Kind = "select-ok"
 )
 
 // IsWaitKind reports whether kind is a dependency-barrier kind that a world can
 // resolve without executing it as worker work.
 func IsWaitKind(kind Kind) bool {
 	switch kind {
-	case KindAwait, KindJoin, KindJoinSettled, KindRace:
+	case KindAwait, KindJoin, KindJoinSettled, KindSelect, KindSelectOk:
 		return true
 	default:
 		return false
@@ -137,8 +146,8 @@ const (
 	StatusCancelled Status = "cancelled"
 )
 
-// LeasedRun is a World-issued work lease protected by Token.
-type LeasedRun struct {
+// Lease is a World-issued work lease protected by Token.
+type Lease struct {
 	ID       string
 	Identity string
 	Token    string
@@ -180,8 +189,8 @@ type Dependency struct {
 	Found      bool
 }
 
-// RaceOutcome identifies the dependency selected by a race barrier.
-type RaceOutcome struct {
+// SelectOutcome identifies the dependency selected by a select barrier.
+type SelectOutcome struct {
 	Index int `json:"index"`
 }
 
@@ -202,15 +211,20 @@ type WaitResolution struct {
 	Err     error
 }
 
-// ResolveWait applies await, race, join, and join-settled semantics to durable
+// ResolveWait applies await, select, join, and join-settled semantics to durable
 // dependency states without depending on a storage implementation.
 func ResolveWait(kind Kind, dependencies []Dependency) WaitResolution {
 	terminal := func(value Dependency) bool {
-		return value.Found && (value.Status == StatusCompleted || value.Status == StatusFailed)
+		return value.Found && (value.Status == StatusCompleted ||
+			value.Status == StatusFailed ||
+			value.Status == StatusCancelled)
 	}
 	failure := func(value Dependency) error {
 		if !value.Found {
 			return ErrRunNotFound
+		}
+		if value.Status == StatusCancelled {
+			return ErrCancelled
 		}
 		if value.Error == "" {
 			return errors.New("workflow: dependency failed")
@@ -228,12 +242,12 @@ func ResolveWait(kind Kind, dependencies []Dependency) WaitResolution {
 		if !terminal(dependency) {
 			return WaitResolution{Pending: true}
 		}
-		if dependency.Status == StatusFailed {
+		if dependency.Status != StatusCompleted {
 			return WaitResolution{Err: failure(dependency)}
 		}
 		return WaitResolution{Output: append(json.RawMessage(nil), dependency.Output...)}
 	}
-	if kind == KindRace {
+	if kind == KindSelect {
 		winner := -1
 		for index, dependency := range dependencies {
 			if !dependency.Found {
@@ -247,12 +261,45 @@ func ResolveWait(kind Kind, dependencies []Dependency) WaitResolution {
 		if winner < 0 {
 			return WaitResolution{Pending: true}
 		}
-		output, _ := json.Marshal(RaceOutcome{Index: winner})
+		output, _ := json.Marshal(SelectOutcome{Index: winner})
 		return WaitResolution{Output: output}
+	}
+	if kind == KindSelectOk {
+		if len(dependencies) == 0 {
+			return WaitResolution{Err: errors.New("workflow: select-ok requires a dependency")}
+		}
+		winner, firstFailure := -1, -1
+		for index, dependency := range dependencies {
+			if !dependency.Found {
+				return WaitResolution{Err: ErrRunNotFound}
+			}
+			if dependency.Status == StatusCompleted &&
+				(winner < 0 || dependency.Completion < dependencies[winner].Completion) {
+				winner = index
+				continue
+			}
+			if !terminal(dependency) {
+				continue
+			}
+			if firstFailure < 0 || dependency.Completion < dependencies[firstFailure].Completion {
+				firstFailure = index
+			}
+		}
+		if winner >= 0 {
+			output, _ := json.Marshal(SelectOutcome{Index: winner})
+			return WaitResolution{Output: output}
+		}
+		for _, dependency := range dependencies {
+			if !terminal(dependency) {
+				return WaitResolution{Pending: true}
+			}
+		}
+		return WaitResolution{Err: failure(dependencies[firstFailure])}
 	}
 
 	settled := kind == KindJoinSettled
 	firstFailure := -1
+	pending := false
 	for index, dependency := range dependencies {
 		if !dependency.Found {
 			if settled {
@@ -267,21 +314,18 @@ func ResolveWait(kind Kind, dependencies []Dependency) WaitResolution {
 			if settled {
 				return WaitResolution{Pending: true}
 			}
+			pending = true
 			continue
 		}
-		if !settled && dependency.Status == StatusFailed && (firstFailure < 0 || dependency.Completion < dependencies[firstFailure].Completion) {
+		if !settled && dependency.Status != StatusCompleted && (firstFailure < 0 || dependency.Completion < dependencies[firstFailure].Completion) {
 			firstFailure = index
 		}
 	}
 	if firstFailure >= 0 {
 		return WaitResolution{Err: failure(dependencies[firstFailure])}
 	}
-	if !settled {
-		for _, dependency := range dependencies {
-			if !terminal(dependency) {
-				return WaitResolution{Pending: true}
-			}
-		}
+	if pending {
+		return WaitResolution{Pending: true}
 	}
 	output, _ := json.Marshal(struct{}{})
 	return WaitResolution{Output: output}
@@ -297,30 +341,36 @@ func NewRunID() (string, error) {
 }
 
 func HistoryMismatchError(kind string, sequence int) error {
-	return fmt.Errorf("workflow: replay at %s %d no longer matches recorded history", kind, sequence)
+	return fmt.Errorf("workflow: history mismatch: replay at %s %d no longer matches recorded history", kind, sequence)
 }
 
 func HistoryMissingError(kind string, sequence int) error {
 	return fmt.Errorf("workflow: history mismatch: %s %d is absent", kind, sequence)
 }
 
-// CommandMetadata is the storage-neutral, deterministic portion of a command.
-type CommandMetadata struct {
-	Kind        Kind
-	Identity    string
-	Fingerprint string
-	Input       json.RawMessage
-	ChildRunID  string
+// MatchesOperation reports whether persisted command fields match an operation
+// replay request.
+func MatchesOperation(kind Kind, identity, fingerprint string, input json.RawMessage, request OperationRequest) bool {
+	return kind == request.Kind &&
+		identity == request.Identity &&
+		fingerprint == request.Fingerprint &&
+		bytes.Equal(input, request.Input)
 }
 
-func (command CommandMetadata) MatchesOperation(request OperationRequest) bool {
-	return command.Kind == request.Kind && command.Identity == request.Identity && command.Fingerprint == request.Fingerprint && bytes.Equal(command.Input, request.Input)
+// MatchesRun reports whether persisted command fields match a child-run replay
+// request. childRunID is deliberately not part of the request comparison.
+func MatchesRun(kind Kind, identity, fingerprint string, input json.RawMessage, request RunRequest) bool {
+	return kind == KindRun &&
+		identity == request.Identity &&
+		fingerprint == request.Fingerprint &&
+		bytes.Equal(input, request.Input)
 }
 
-func (command CommandMetadata) MatchesRun(request RunRequest) bool {
-	return command.Kind == KindRun && command.Identity == request.Identity && command.Fingerprint == request.Fingerprint && bytes.Equal(command.Input, request.Input)
-}
-
-func (command CommandMetadata) MatchesWait(request WaitRequest, input json.RawMessage) bool {
-	return command.Kind == request.Kind && command.Identity == string(request.Kind) && command.Fingerprint == request.Fingerprint && bytes.Equal(command.Input, input)
+// MatchesWait reports whether persisted command fields match a durable wait
+// request. encodedDependencies is the storage encoding of request.Dependencies.
+func MatchesWait(kind Kind, identity, fingerprint string, input json.RawMessage, request WaitRequest, encodedDependencies json.RawMessage) bool {
+	return kind == request.Kind &&
+		identity == string(request.Kind) &&
+		fingerprint == request.Fingerprint &&
+		bytes.Equal(input, encodedDependencies)
 }

@@ -10,9 +10,16 @@ import (
 	"github.com/eriicafes/go-workflow/workflowops"
 )
 
-// HTTP returns the worker HTTP API consumed by workflow.Client.
-func HTTP(world *World) http.Handler {
-	return workflow.NewHTTPHandler(world)
+// HTTP returns the worker HTTP API consumed by workflow.Client. When QStash is
+// configured, it also mounts the signed timer-delivery endpoint at the fixed
+// QStash webhook path.
+func HTTP(world *World, runners workflowops.RunnerSet) http.Handler {
+	api := workflow.NewHTTPHandler(world).(*http.ServeMux)
+	if world.config.QStash == nil {
+		return api
+	}
+	api.Handle(workflow.APIPrefix+"/webhook/qstash", qstashHandler(world, runners))
+	return api
 }
 
 // Queue returns an HTTP consumer for a Vercel Queue message containing a

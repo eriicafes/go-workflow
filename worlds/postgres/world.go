@@ -88,13 +88,19 @@ func (world *World) LeaseDuration() time.Duration {
 	return world.lease
 }
 
+// CleanupTimer is a no-op because Postgres stores timer due times in its task
+// rows; cancelling the row makes it ineligible for leasing.
+func (*World) CleanupTimer(context.Context, workflowops.Task) error {
+	return nil
+}
+
 var schema = fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS go_workflow_runs (
   id text PRIMARY KEY,
   workflow_identity text NOT NULL,
   input jsonb NOT NULL,
   output jsonb,
-  status text NOT NULL CHECK (status IN (%s, %s, %s, %s, %s)),
+  status text NOT NULL CHECK (status IN (%s, %s, %s, %s, %s, %s)),
   error text,
   lease_until timestamptz,
   lease_token text,
@@ -103,6 +109,12 @@ CREATE TABLE IF NOT EXISTS go_workflow_runs (
 );
 
 CREATE INDEX IF NOT EXISTS go_workflow_runs_queue_idx ON go_workflow_runs (created_at) WHERE status = %s;
+
+ALTER TABLE go_workflow_runs
+  DROP CONSTRAINT IF EXISTS go_workflow_runs_status_check;
+ALTER TABLE go_workflow_runs
+  ADD CONSTRAINT go_workflow_runs_status_check
+  CHECK (status IN (%s, %s, %s, %s, %s, %s));
 
 CREATE TABLE IF NOT EXISTS workflow_commands (
   run_id text NOT NULL REFERENCES go_workflow_runs(id) ON DELETE CASCADE,
@@ -177,7 +189,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS go_workflow_events_operation_idx
 	statusLiteral(workflowops.StatusWaiting),
 	statusLiteral(workflowops.StatusCompleted),
 	statusLiteral(workflowops.StatusFailed),
+	statusLiteral(workflowops.StatusCancelled),
 	statusLiteral(workflowops.StatusQueued),
+	statusLiteral(workflowops.StatusQueued),
+	statusLiteral(workflowops.StatusRunning),
+	statusLiteral(workflowops.StatusWaiting),
+	statusLiteral(workflowops.StatusCompleted),
+	statusLiteral(workflowops.StatusFailed),
+	statusLiteral(workflowops.StatusCancelled),
 	statusLiteral(workflowops.StatusQueued),
 	statusLiteral(workflowops.StatusRunning),
 	statusLiteral(workflowops.StatusWaiting),
@@ -211,12 +230,6 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	root := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	if _, err = tx.Exec(
 		ctx,
 		`INSERT INTO go_workflow_runs (id, workflow_identity, input, status)
@@ -235,9 +248,9 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 			 VALUES ($1, $2, $3, $4, $4, $5, md5($5::text))`,
 		id,
 		workflowops.RootSequence,
-		string(root.Kind),
-		root.Identity,
-		root.Input,
+		string(workflowops.KindRun),
+		request.Identity,
+		request.Input,
 	); err != nil {
 		return "", err
 	}
@@ -259,7 +272,7 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 
 func (world *World) CreateRun(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.RunRequest,
 ) (string, error) {
 	if lease == nil {
@@ -281,7 +294,7 @@ func (world *World) CreateRun(
 		request.Sequence,
 	).Scan(&kind, &identity, &fingerprint, &input, &childID)
 	if err == nil {
-		if !commandMetadata(kind, identity, fingerprint, input, childID).MatchesRun(request) || childID == "" {
+		if !workflowops.MatchesRun(workflowops.Kind(kind), identity, fingerprint, input, request) || childID == "" {
 			return "", workflowops.HistoryMismatchError("nested run", request.Sequence)
 		}
 		return childID, tx.Commit(ctx)
@@ -296,19 +309,6 @@ func (world *World) CreateRun(
 	if err != nil {
 		return "", err
 	}
-	childCommand := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-		ChildRunID:  childID,
-	}
-	childRoot := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	if _, err = tx.Exec(
 		ctx,
 		`INSERT INTO workflow_commands
@@ -316,11 +316,11 @@ func (world *World) CreateRun(
 		 VALUES ($1, $2, $3, $4, $5, $6, md5($6::text), $7)`,
 		request.RunID,
 		request.Sequence,
-		string(childCommand.Kind),
-		childCommand.Identity,
-		childCommand.Fingerprint,
-		childCommand.Input,
-		childCommand.ChildRunID,
+		string(workflowops.KindRun),
+		request.Identity,
+		request.Fingerprint,
+		request.Input,
+		childID,
 	); err != nil {
 		return "", err
 	}
@@ -342,9 +342,9 @@ func (world *World) CreateRun(
 			 VALUES ($1, $2, $3, $4, $4, $5, md5($5::text))`,
 		childID,
 		workflowops.RootSequence,
-		string(childRoot.Kind),
-		childRoot.Identity,
-		childRoot.Input,
+		string(workflowops.KindRun),
+		request.Identity,
+		request.Input,
 	); err != nil {
 		return "", err
 	}
@@ -364,7 +364,7 @@ func (world *World) CreateRun(
 	return childID, tx.Commit(ctx)
 }
 
-func (world *World) ClaimRun(ctx context.Context) (*workflowops.LeasedRun, error) {
+func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 	token, err := workflowops.NewRunID()
 	if err != nil {
 		return nil, err
@@ -397,7 +397,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.LeasedRun, error
 		string(workflowops.StatusQueued),
 		string(workflowops.StatusRunning),
 	)
-	var run workflowops.LeasedRun
+	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
@@ -408,7 +408,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.LeasedRun, error
 
 // ClaimTask claims one known queue-delivered task. A completed or currently
 // leased task returns nil so duplicate queue delivery is safe to acknowledge.
-func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.LeasedRun, error) {
+func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.Lease, error) {
 	token, err := workflowops.NewRunID()
 	if err != nil {
 		return nil, err
@@ -438,7 +438,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		string(workflowops.StatusRunning),
 		string(workflowops.StatusQueued),
 	)
-	var run workflowops.LeasedRun
+	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
@@ -447,8 +447,8 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	return &run, nil
 }
 
-func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun) error {
-	_, err := world.pool.Exec(
+func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.Lease) error {
+	command, err := world.pool.Exec(
 		ctx,
 		`UPDATE workflow_tasks
 		 SET lease_until = now() + make_interval(secs => $4), updated_at = now()
@@ -459,10 +459,16 @@ func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun
 		world.lease.Seconds(),
 		string(workflowops.StatusRunning),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return workflowops.ErrLeaseLost
+	}
+	return nil
 }
 
-func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun, output json.RawMessage) error {
+func (world *World) CompleteRun(ctx context.Context, run *workflowops.Lease, output json.RawMessage) error {
 	tx, err := world.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -509,13 +515,13 @@ func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun,
 			return err
 		}
 	}
-	if _, err = world.resolveWaits(ctx, tx); err != nil {
+	if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cause error) error {
+func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause error) error {
 	tx, err := world.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -562,11 +568,127 @@ func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cau
 	); err != nil {
 		return err
 	}
-	if _, err = world.resolveWaits(ctx, tx); err != nil {
+	if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
+func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.Task) error {
+	tx, err := world.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	pending := append([]workflowops.Task(nil), tasks...)
+	cleanup := make([]workflowops.Task, 0, len(tasks))
+	visitedRoots := make(map[string]bool)
+	for len(pending) > 0 {
+		task := pending[0]
+		pending = pending[1:]
+
+		if task.Sequence == workflowops.RootSequence {
+			if visitedRoots[task.RunID] {
+				continue
+			}
+			visitedRoots[task.RunID] = true
+			children, err := childRuns(ctx, tx, task.RunID)
+			if err != nil {
+				return err
+			}
+			for _, childID := range children {
+				pending = append(pending, workflowops.Task{
+					RunID:    childID,
+					Sequence: workflowops.RootSequence,
+				})
+			}
+		}
+
+		var exists bool
+		if err := tx.QueryRow(
+			ctx,
+			"SELECT EXISTS(SELECT 1 FROM workflow_tasks WHERE run_id = $1 AND sequence = $2)",
+			task.RunID,
+			task.Sequence,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return workflowops.ErrRunNotFound
+		}
+		updated, err := tx.Exec(
+			ctx,
+			"UPDATE workflow_tasks SET status = $3, error = $4, output = NULL, lease_token = NULL, lease_until = NULL, updated_at = now() WHERE run_id = $1 AND sequence = $2 AND status NOT IN ($5, $6, $7)",
+			task.RunID,
+			task.Sequence,
+			string(workflowops.StatusCancelled),
+			workflowops.ErrCancelled.Error(),
+			string(workflowops.StatusCompleted),
+			string(workflowops.StatusFailed),
+			string(workflowops.StatusCancelled),
+		)
+		if err != nil {
+			return err
+		}
+		if updated.RowsAffected() == 0 {
+			continue
+		}
+		if task.Sequence == workflowops.RootSequence {
+			if _, err = tx.Exec(
+				ctx,
+				"UPDATE go_workflow_runs SET status = $2, error = $3, lease_token = NULL, lease_until = NULL, updated_at = now() WHERE id = $1",
+				task.RunID,
+				string(workflowops.StatusCancelled),
+				workflowops.ErrCancelled.Error(),
+			); err != nil {
+				return err
+			}
+		}
+		if _, err = tx.Exec(
+			ctx,
+			"INSERT INTO workflow_completion_events (run_id, sequence) VALUES ($1, $2) ON CONFLICT (run_id, sequence) DO NOTHING",
+			task.RunID,
+			task.Sequence,
+		); err != nil {
+			return err
+		}
+		cleanup = append(cleanup, task)
+	}
+	if _, err = world.resolveDependents(ctx, tx, cleanup...); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	for _, task := range cleanup {
+		if err = world.CleanupTimer(ctx, task); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func childRuns(ctx context.Context, tx pgx.Tx, runID string) ([]string, error) {
+	rows, err := tx.Query(
+		ctx,
+		"SELECT child_run_id FROM workflow_commands WHERE run_id = $1 AND child_run_id IS NOT NULL",
+		runID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var children []string
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			return nil, err
+		}
+		children = append(children, childID)
+	}
+	return children, rows.Err()
+}
+
 func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage, error) {
 	ticker := time.NewTicker(world.interval)
 	defer ticker.Stop()
@@ -596,6 +718,9 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 			}
 			return nil, errors.New(*message)
 		}
+		if workflowops.Status(status) == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -606,7 +731,7 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 
 func (world *World) EnsureOperation(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.OperationRequest,
 ) (workflowops.Operation, error) {
 	var op workflowops.Operation
@@ -636,7 +761,7 @@ func (world *World) EnsureOperation(
 		&op.IdempotencyKey,
 	)
 	if err == nil {
-		if !commandMetadata(kind, identity, fingerprint, input, "").MatchesOperation(request) {
+		if !workflowops.MatchesOperation(workflowops.Kind(kind), identity, fingerprint, input, request) {
 			return op, workflowops.HistoryMismatchError("operation", request.Sequence)
 		}
 		return op, nil
@@ -657,12 +782,6 @@ func (world *World) EnsureOperation(
 		return op, e
 	}
 	defer tx.Rollback(ctx)
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-	}
 	command, e := tx.Exec(
 		ctx,
 		`INSERT INTO workflow_commands
@@ -671,10 +790,10 @@ func (world *World) EnsureOperation(
 		 ON CONFLICT (run_id, sequence) DO NOTHING`,
 		request.RunID,
 		request.Sequence,
-		string(metadata.Kind),
-		metadata.Identity,
-		metadata.Fingerprint,
-		metadata.Input,
+		string(request.Kind),
+		request.Identity,
+		request.Fingerprint,
+		request.Input,
 		due,
 	)
 	if e != nil {
@@ -713,18 +832,12 @@ func (world *World) EnsureOperation(
 
 func (world *World) EnsureWait(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.WaitRequest,
 ) (workflowops.Operation, error) {
 	waitInput, err := json.Marshal(request.Dependencies)
 	if err != nil {
 		return workflowops.Operation{}, err
-	}
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    string(request.Kind),
-		Fingerprint: request.Fingerprint,
-		Input:       waitInput,
 	}
 	var op workflowops.Operation
 	var kind, fingerprint string
@@ -741,13 +854,14 @@ func (world *World) EnsureWait(
 		request.Sequence,
 	).Scan(&kind, &fingerprint, &input, &op.Status, &op.Token, &op.Error, &op.LeaseUntil, &op.IdempotencyKey)
 	if err == nil {
-		matches := commandMetadata(
-			kind,
+		matches := workflowops.MatchesWait(
+			workflowops.Kind(kind),
 			string(workflowops.Kind(kind)),
 			fingerprint,
 			input,
-			"",
-		).MatchesWait(request, waitInput)
+			request,
+			waitInput,
+		)
 		if !matches {
 			return op, workflowops.HistoryMismatchError("wait", request.Sequence)
 		}
@@ -775,9 +889,9 @@ func (world *World) EnsureWait(
 		 ON CONFLICT (run_id, sequence) DO NOTHING`,
 		request.RunID,
 		request.Sequence,
-		string(metadata.Kind),
-		metadata.Fingerprint,
-		metadata.Input,
+		string(request.Kind),
+		request.Fingerprint,
+		waitInput,
 	)
 	if err != nil {
 		return op, err
@@ -814,8 +928,14 @@ func (world *World) EnsureWait(
 			return op, err
 		}
 	}
-	if _, err = world.resolveWaits(ctx, tx); err != nil {
+	resolved, err := world.resolveWait(ctx, tx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}, request.Kind)
+	if err != nil {
 		return op, err
+	}
+	if resolved {
+		if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}); err != nil {
+			return op, err
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return op, err
@@ -823,7 +943,7 @@ func (world *World) EnsureWait(
 	return world.waitOperation(ctx, request.RunID, request.Sequence)
 }
 
-func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) error {
+func (world *World) SuspendRun(ctx context.Context, run *workflowops.Lease) error {
 	if run.Sequence != workflowops.RootSequence {
 		return workflowops.ErrLeaseLost
 	}
@@ -856,7 +976,7 @@ func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) 
 	); err != nil {
 		return err
 	}
-	if _, err = world.resolveWaits(ctx, tx); err != nil {
+	if err = world.resumeLatestWait(ctx, tx, run.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -871,32 +991,26 @@ type waitDependency struct {
 	ordinal  int64
 }
 
-func (world *World) resolveWaits(ctx context.Context, tx pgx.Tx) (int, error) {
+func (world *World) resolveDependents(ctx context.Context, tx pgx.Tx, changed ...workflowops.Task) (int, error) {
 	resolved := 0
-	for changed := true; changed; {
-		changed = false
-		rows, err := tx.Query(
-			ctx,
-			`SELECT tasks.run_id, tasks.sequence, commands.kind
-			 FROM workflow_tasks tasks
-			 JOIN workflow_commands commands USING (run_id, sequence)
-			 WHERE tasks.status = $1
-			 ORDER BY tasks.run_id, tasks.sequence`,
-			string(workflowops.StatusWaiting),
-		)
+	for len(changed) > 0 {
+		task := changed[0]
+		changed = changed[1:]
+		rows, err := tx.Query(ctx, `SELECT dependencies.wait_run_id, dependencies.wait_sequence, commands.kind
+ FROM workflow_wait_dependencies dependencies JOIN workflow_tasks waits ON waits.run_id=dependencies.wait_run_id AND waits.sequence=dependencies.wait_sequence
+ JOIN workflow_commands commands ON commands.run_id=waits.run_id AND commands.sequence=waits.sequence
+ WHERE dependencies.dependency_run_id=$1 AND dependencies.dependency_sequence=$2 AND waits.status=$3`, task.RunID, task.Sequence, string(workflowops.StatusWaiting))
 		if err != nil {
 			return resolved, err
 		}
 		var waits []struct {
-			runID    string
-			sequence int
-			kind     string
+			runID, kind string
+			sequence    int
 		}
 		for rows.Next() {
 			var wait struct {
-				runID    string
-				sequence int
-				kind     string
+				runID, kind string
+				sequence    int
 			}
 			if err = rows.Scan(&wait.runID, &wait.sequence, &wait.kind); err != nil {
 				rows.Close()
@@ -909,82 +1023,110 @@ func (world *World) resolveWaits(ctx context.Context, tx pgx.Tx) (int, error) {
 			return resolved, err
 		}
 		rows.Close()
-
 		for _, wait := range waits {
-			kind := workflowops.Kind(wait.kind)
-			if !workflowops.IsWaitKind(kind) {
-				continue
-			}
-			dependencies, err := world.waitDependencies(ctx, tx, wait.runID, wait.sequence)
+			ok, err := world.resolveWait(ctx, tx, workflowops.Task{RunID: wait.runID, Sequence: wait.sequence}, workflowops.Kind(wait.kind))
 			if err != nil {
 				return resolved, err
 			}
-			resolution := workflowops.ResolveWait(kind, dependencies)
-			if resolution.Pending {
-				continue
+			if ok {
+				resolved++
+				changed = append(changed, workflowops.Task{RunID: wait.runID, Sequence: wait.sequence})
 			}
-			status := workflowops.StatusCompleted
-			var message any
-			if resolution.Err != nil {
-				status = workflowops.StatusFailed
-				message = resolution.Err.Error()
-			}
-			command, err := tx.Exec(
-				ctx,
-				`UPDATE workflow_tasks
-				 SET status = $3, output = $4, error = $5, updated_at = now()
-				 WHERE run_id = $1 AND sequence = $2 AND status = $6`,
-				wait.runID,
-				wait.sequence,
-				string(status),
-				resolution.Output,
-				message,
-				string(workflowops.StatusWaiting),
-			)
-			if err != nil {
-				return resolved, err
-			}
-			if command.RowsAffected() != 1 {
-				continue
-			}
-			if _, err = tx.Exec(
-				ctx,
-				`INSERT INTO workflow_completion_events (run_id, sequence)
-				 VALUES ($1, $2) ON CONFLICT (run_id, sequence) DO NOTHING`,
-				wait.runID,
-				wait.sequence,
-			); err != nil {
-				return resolved, err
-			}
-			if _, err = tx.Exec(
-				ctx,
-				`UPDATE workflow_tasks
-				 SET status = $2, updated_at = now()
-				 WHERE run_id = $1 AND sequence = -1 AND status = $3`,
-				wait.runID,
-				string(workflowops.StatusQueued),
-				string(workflowops.StatusWaiting),
-			); err != nil {
-				return resolved, err
-			}
-			if _, err = tx.Exec(
-				ctx,
-				`UPDATE go_workflow_runs SET status = $2, updated_at = now()
-				 WHERE id = $1 AND status = $3`,
-				wait.runID,
-				string(workflowops.StatusQueued),
-				string(workflowops.StatusWaiting),
-			); err != nil {
-				return resolved, err
-			}
-			if _, err = tx.Exec(ctx, `SELECT pg_notify('go_workflow_jobs', $1)`, wait.runID); err != nil {
-				return resolved, err
-			}
-			resolved++
-			changed = true
 		}
 	}
 	return resolved, nil
+}
+
+func (world *World) resolveWait(ctx context.Context, tx pgx.Tx, wait workflowops.Task, kind workflowops.Kind) (bool, error) {
+	if !workflowops.IsWaitKind(kind) {
+		return false, nil
+	}
+	dependencies, err := world.waitDependencies(ctx, tx, wait.RunID, wait.Sequence)
+	if err != nil {
+		return false, err
+	}
+	resolution := workflowops.ResolveWait(kind, dependencies)
+	if resolution.Pending {
+		return false, nil
+	}
+	status, message := workflowops.StatusCompleted, any(nil)
+	if resolution.Err != nil {
+		status, message = workflowops.StatusFailed, resolution.Err.Error()
+	}
+	command, err := tx.Exec(ctx, `UPDATE workflow_tasks SET status=$3, output=$4, error=$5, updated_at=now() WHERE run_id=$1 AND sequence=$2 AND status=$6`, wait.RunID, wait.Sequence, string(status), resolution.Output, message, string(workflowops.StatusWaiting))
+	if err != nil || command.RowsAffected() != 1 {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO workflow_completion_events (run_id,sequence) VALUES ($1,$2) ON CONFLICT (run_id,sequence) DO NOTHING`, wait.RunID, wait.Sequence); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE workflow_tasks SET status=$2,updated_at=now() WHERE run_id=$1 AND sequence=-1 AND status=$3`, wait.RunID, string(workflowops.StatusQueued), string(workflowops.StatusWaiting)); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE go_workflow_runs SET status=$2,updated_at=now() WHERE id=$1 AND status=$3`, wait.RunID, string(workflowops.StatusQueued), string(workflowops.StatusWaiting)); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `SELECT pg_notify('go_workflow_jobs', $1)`, wait.RunID)
+	return err == nil, err
+}
+
+// resumeLatestWait closes the small race where a dependency completes after a
+// barrier is evaluated but before the root releases its lease. It inspects only
+// this run's latest barrier; normal completion remains dependency-driven.
+func (world *World) resumeLatestWait(ctx context.Context, tx pgx.Tx, runID string) error {
+	var kind workflowops.Kind
+	var status workflowops.Status
+	var sequence int
+	err := tx.QueryRow(
+		ctx,
+		`SELECT commands.sequence, commands.kind, tasks.status
+		 FROM workflow_commands commands
+		 JOIN workflow_tasks tasks ON tasks.run_id = commands.run_id AND tasks.sequence = commands.sequence
+		 WHERE commands.run_id = $1
+		   AND commands.kind IN ($2, $3, $4, $5, $6)
+		 ORDER BY commands.sequence DESC
+		 LIMIT 1`,
+		runID,
+		string(workflowops.KindAwait),
+		string(workflowops.KindJoin),
+		string(workflowops.KindJoinSettled),
+		string(workflowops.KindSelect),
+		string(workflowops.KindSelectOk),
+	).Scan(&sequence, &kind, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status == workflowops.StatusWaiting {
+		_, err = world.resolveWait(ctx, tx, workflowops.Task{RunID: runID, Sequence: sequence}, kind)
+		return err
+	}
+	if status != workflowops.StatusCompleted && status != workflowops.StatusFailed {
+		return nil
+	}
+	if _, err = tx.Exec(
+		ctx,
+		`UPDATE workflow_tasks SET status=$2, updated_at=now()
+		 WHERE run_id=$1 AND sequence=-1 AND status=$3`,
+		runID,
+		string(workflowops.StatusQueued),
+		string(workflowops.StatusWaiting),
+	); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(
+		ctx,
+		`UPDATE go_workflow_runs SET status=$2, updated_at=now() WHERE id=$1 AND status=$3`,
+		runID,
+		string(workflowops.StatusQueued),
+		string(workflowops.StatusWaiting),
+	); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `SELECT pg_notify('go_workflow_jobs', $1)`, runID)
+	return err
 }
 
 func (world *World) waitDependencies(
@@ -1105,7 +1247,7 @@ func (world *World) FinishOperation(
 	); err != nil {
 		return err
 	}
-	if _, err = world.resolveWaits(ctx, tx); err != nil {
+	if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: op.RunID, Sequence: op.Sequence}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1137,6 +1279,9 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 				return nil, errors.New("workflow: operation failed")
 			}
 			return nil, errors.New(*message)
+		}
+		if workflowops.Status(status) == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
 		}
 		select {
 		case <-ctx.Done():
@@ -1185,24 +1330,8 @@ func (world *World) Events(ctx context.Context, runID string, after int64) ([]wo
 	return events, rows.Err()
 }
 
-func allowsCreate(lease *workflowops.LeasedRun, runID string) bool {
+func allowsCreate(lease *workflowops.Lease, runID string) bool {
 	return lease != nil && lease.ID == runID && lease.Sequence == workflowops.RootSequence
-}
-
-func commandMetadata(
-	kind string,
-	identity string,
-	fingerprint string,
-	input json.RawMessage,
-	childRunID string,
-) workflowops.CommandMetadata {
-	return workflowops.CommandMetadata{
-		Kind:        workflowops.Kind(kind),
-		Identity:    identity,
-		Fingerprint: fingerprint,
-		Input:       input,
-		ChildRunID:  childRunID,
-	}
 }
 
 func statusLiteral(status workflowops.Status) string {

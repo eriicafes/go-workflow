@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
@@ -90,6 +91,52 @@ func (world *World) LeaseDuration() time.Duration {
 	return world.config.LeaseDuration
 }
 
+// CleanupTimer removes the provider timer recorded for a cancelled task. SQS
+// delay messages have no timer handle, so cancellation does not call a
+// scheduler for short timers.
+func (world *World) CleanupTimer(ctx context.Context, task workflowops.Task) error {
+	record, found, err := world.item(ctx, taskKey(task.RunID, task.Sequence))
+	if err != nil || !found {
+		return err
+	}
+	handle := record["timer"]
+	if handle == "" {
+		return nil
+	}
+	if err := world.deleteTimer(ctx, handle); err != nil {
+		return err
+	}
+	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:        awsv2.String(world.config.TableName),
+		Key:              taskKey(task.RunID, task.Sequence),
+		UpdateExpression: awsv2.String("REMOVE #timer"),
+		ExpressionAttributeNames: map[string]string{
+			"#timer": "timer",
+		},
+	})
+	return err
+}
+
+func (world *World) deleteTimer(ctx context.Context, handle string) error {
+	schedulerConfig := world.config.Scheduler
+	if schedulerConfig == nil || schedulerConfig.Client == nil {
+		return errors.New("workflow/aws: EventBridge Scheduler is required to clean a timer")
+	}
+	group := schedulerConfig.Group
+	if group == "" {
+		group = "default"
+	}
+	_, err := schedulerConfig.Client.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
+		Name:      awsv2.String(handle),
+		GroupName: awsv2.String(group),
+	})
+	var notFound *sch.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return nil
+	}
+	return err
+}
+
 func (world *World) createRoot(ctx context.Context, request workflowops.RunRequest) (string, error) {
 	if request.Sequence != workflowops.RootSequence {
 		return "", fmt.Errorf("workflow/aws: invalid root sequence %d", request.Sequence)
@@ -105,12 +152,6 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 		return "", err
 	}
 	now := time.Now()
-	root := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	_, err = world.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []ddb.TransactWriteItem{
 			put(world.config.TableName, runKey(runID), map[string]string{
@@ -121,10 +162,10 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 				"updated":  stamp(now),
 			}),
 			put(world.config.TableName, commandKey(runID, workflowops.RootSequence), map[string]string{
-				"kind":        string(root.Kind),
-				"identity":    root.Identity,
-				"fingerprint": root.Fingerprint,
-				"input":       string(root.Input),
+				"kind":        string(workflowops.KindRun),
+				"identity":    request.Identity,
+				"fingerprint": request.Identity,
+				"input":       string(request.Input),
 			}),
 			put(
 				world.config.TableName,
@@ -148,7 +189,7 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 
 func (world *World) CreateRun(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.RunRequest,
 ) (string, error) {
 	if lease == nil {
@@ -159,7 +200,7 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	if found {
-		if !commandMetadata(command).MatchesRun(request) || command["child"] == "" {
+		if !matchesRun(command, request) || command["child"] == "" {
 			return "", workflowops.HistoryMismatchError("nested run", request.Sequence)
 		}
 		return command["child"], nil
@@ -172,27 +213,14 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	now := time.Now()
-	childCommand := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-		ChildRunID:  childID,
-	}
-	childRoot := workflowops.CommandMetadata{
-		Kind:        workflowops.KindRun,
-		Identity:    request.Identity,
-		Fingerprint: request.Identity,
-		Input:       request.Input,
-	}
 	_, err = world.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []ddb.TransactWriteItem{
 			put(world.config.TableName, commandKey(request.RunID, request.Sequence), map[string]string{
-				"kind":        string(childCommand.Kind),
-				"identity":    childCommand.Identity,
-				"fingerprint": childCommand.Fingerprint,
-				"input":       string(childCommand.Input),
-				"child":       childCommand.ChildRunID,
+				"kind":        string(workflowops.KindRun),
+				"identity":    request.Identity,
+				"fingerprint": request.Fingerprint,
+				"input":       string(request.Input),
+				"child":       childID,
 			}),
 			put(world.config.TableName, runKey(childID), map[string]string{
 				"identity": request.Identity,
@@ -202,10 +230,10 @@ func (world *World) CreateRun(
 				"updated":  stamp(now),
 			}),
 			put(world.config.TableName, commandKey(childID, workflowops.RootSequence), map[string]string{
-				"kind":        string(childRoot.Kind),
-				"identity":    childRoot.Identity,
-				"fingerprint": childRoot.Fingerprint,
-				"input":       string(childRoot.Input),
+				"kind":        string(workflowops.KindRun),
+				"identity":    request.Identity,
+				"fingerprint": request.Identity,
+				"input":       string(request.Input),
 			}),
 			put(
 				world.config.TableName,
@@ -230,7 +258,7 @@ func (world *World) CreateRun(
 	return childID, nil
 }
 
-func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.LeasedRun, error) {
+func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.Lease, error) {
 	run, found, err := world.item(ctx, runKey(task.RunID))
 	if err != nil {
 		return nil, err
@@ -276,7 +304,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		}
 		return nil, err
 	}
-	return &workflowops.LeasedRun{
+	return &workflowops.Lease{
 		ID:       task.RunID,
 		Identity: run["identity"],
 		Input:    json.RawMessage(run["input"]),
@@ -285,7 +313,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	}, nil
 }
 
-func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun) error {
+func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.Lease) error {
 	_, err := world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           awsv2.String(world.config.TableName),
 		Key:                 taskKey(run.ID, run.Sequence),
@@ -307,12 +335,12 @@ func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.LeasedRun
 	}
 	return err
 }
-func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun, output json.RawMessage) error {
+func (world *World) CompleteRun(ctx context.Context, run *workflowops.Lease, output json.RawMessage) error {
 	if err := world.finishTask(ctx, run, workflowops.StatusCompleted, output, ""); err != nil {
 		return err
 	}
 	if run.Sequence != workflowops.RootSequence {
-		return world.resolveWaits(ctx)
+		return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 	}
 	_, err := world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:        awsv2.String(world.config.TableName),
@@ -332,15 +360,15 @@ func (world *World) CompleteRun(ctx context.Context, run *workflowops.LeasedRun,
 	if err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 }
 
-func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cause error) error {
+func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause error) error {
 	if err := world.finishTask(ctx, run, workflowops.StatusFailed, nil, cause.Error()); err != nil {
 		return err
 	}
 	if run.Sequence != workflowops.RootSequence {
-		return world.resolveWaits(ctx)
+		return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 	}
 	_, err := world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:        awsv2.String(world.config.TableName),
@@ -360,12 +388,143 @@ func (world *World) FailRun(ctx context.Context, run *workflowops.LeasedRun, cau
 	if err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
+}
+
+func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.Task) error {
+	pending := append([]workflowops.Task(nil), tasks...)
+	changed := make([]workflowops.Task, 0, len(tasks))
+	visitedRoots := make(map[string]bool)
+	for len(pending) > 0 {
+		task := pending[0]
+		pending = pending[1:]
+		if task.Sequence == workflowops.RootSequence {
+			if visitedRoots[task.RunID] {
+				continue
+			}
+			visitedRoots[task.RunID] = true
+			children, err := world.childRuns(ctx, task.RunID)
+			if err != nil {
+				return err
+			}
+			for _, childID := range children {
+				pending = append(pending, workflowops.Task{
+					RunID:    childID,
+					Sequence: workflowops.RootSequence,
+				})
+			}
+		}
+		record, found, err := world.item(ctx, taskKey(task.RunID, task.Sequence))
+		if err != nil {
+			return err
+		}
+		if !found {
+			return workflowops.ErrRunNotFound
+		}
+		status := workflowops.Status(record["status"])
+		if status == workflowops.StatusCompleted || status == workflowops.StatusFailed {
+			continue
+		}
+		if status == workflowops.StatusCancelled {
+			if err := world.CleanupTimer(ctx, task); err != nil {
+				return err
+			}
+			continue
+		}
+		completion, err := world.nextCompletion(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName: awsv2.String(world.config.TableName),
+			Key:       taskKey(task.RunID, task.Sequence),
+			UpdateExpression: awsv2.String(
+				"SET #status=:cancelled, #error=:error, #completed=:completed, #updated=:updated REMOVE #token, #lease",
+			),
+			ConditionExpression: awsv2.String("#status=:status"),
+			ExpressionAttributeNames: map[string]string{
+				"#status":    "status",
+				"#error":     "error",
+				"#completed": "completed",
+				"#updated":   "updated",
+				"#token":     "token",
+				"#lease":     "lease",
+			},
+			ExpressionAttributeValues: map[string]ddb.AttributeValue{
+				":status":    avs(string(status)),
+				":cancelled": avs(string(workflowops.StatusCancelled)),
+				":error":     avs(workflowops.ErrCancelled.Error()),
+				":completed": avs(strconv.FormatUint(completion, 10)),
+				":updated":   avs(stamp(time.Now())),
+			},
+		})
+		if conditional(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		changed = append(changed, task)
+		if task.Sequence == workflowops.RootSequence {
+			_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+				TableName: awsv2.String(world.config.TableName),
+				Key:       runKey(task.RunID),
+				UpdateExpression: awsv2.String(
+					"SET #status=:cancelled, #error=:error, #updated=:updated",
+				),
+				ExpressionAttributeNames: map[string]string{
+					"#status":  "status",
+					"#error":   "error",
+					"#updated": "updated",
+				},
+				ExpressionAttributeValues: map[string]ddb.AttributeValue{
+					":cancelled": avs(string(workflowops.StatusCancelled)),
+					":error":     avs(workflowops.ErrCancelled.Error()),
+					":updated":   avs(stamp(time.Now())),
+				},
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if err := world.CleanupTimer(ctx, task); err != nil {
+			return err
+		}
+	}
+	return world.resolveDependents(ctx, changed...)
+}
+
+func (world *World) childRuns(ctx context.Context, runID string) ([]string, error) {
+	children := make([]string, 0)
+	var start map[string]ddb.AttributeValue
+	for {
+		result, err := world.dynamo.Query(ctx, &dynamodb.QueryInput{
+			TableName:              awsv2.String(world.config.TableName),
+			ExclusiveStartKey:      start,
+			KeyConditionExpression: awsv2.String("pk=:pk AND begins_with(sk,:command)"),
+			ExpressionAttributeValues: map[string]ddb.AttributeValue{
+				":pk":      avs(runPartitionKey(runID)),
+				":command": avs("COMMAND#"),
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range result.Items {
+			if childID := read(item, "child"); childID != "" {
+				children = append(children, childID)
+			}
+		}
+		if len(result.LastEvaluatedKey) == 0 {
+			return children, nil
+		}
+		start = result.LastEvaluatedKey
+	}
 }
 
 func (world *World) EnsureOperation(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.OperationRequest,
 ) (workflowops.Operation, error) {
 	command, found, err := world.item(ctx, commandKey(request.RunID, request.Sequence))
@@ -373,7 +532,7 @@ func (world *World) EnsureOperation(
 		return workflowops.Operation{}, err
 	}
 	if found {
-		if !commandMetadata(command).MatchesOperation(request) {
+		if !matchesOperation(command, request) {
 			return workflowops.Operation{}, workflowops.HistoryMismatchError("operation", request.Sequence)
 		}
 		return world.operation(ctx, request.RunID, request.Sequence)
@@ -389,19 +548,13 @@ func (world *World) EnsureOperation(
 	if !due.IsZero() {
 		task["due"] = stamp(due)
 	}
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    request.Identity,
-		Fingerprint: request.Fingerprint,
-		Input:       request.Input,
-	}
 	_, err = world.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
 		TransactItems: []ddb.TransactWriteItem{
 			put(world.config.TableName, commandKey(request.RunID, request.Sequence), map[string]string{
-				"kind":        string(metadata.Kind),
-				"identity":    metadata.Identity,
-				"fingerprint": metadata.Fingerprint,
-				"input":       string(metadata.Input),
+				"kind":        string(request.Kind),
+				"identity":    request.Identity,
+				"fingerprint": request.Fingerprint,
+				"input":       string(request.Input),
 			}),
 			put(world.config.TableName, taskKey(request.RunID, request.Sequence), task),
 		},
@@ -426,25 +579,19 @@ func (world *World) EnsureOperation(
 
 func (world *World) EnsureWait(
 	ctx context.Context,
-	lease *workflowops.LeasedRun,
+	lease *workflowops.Lease,
 	request workflowops.WaitRequest,
 ) (workflowops.Operation, error) {
 	input, err := json.Marshal(request.Dependencies)
 	if err != nil {
 		return workflowops.Operation{}, err
 	}
-	metadata := workflowops.CommandMetadata{
-		Kind:        request.Kind,
-		Identity:    string(request.Kind),
-		Fingerprint: request.Fingerprint,
-		Input:       input,
-	}
 	command, found, err := world.item(ctx, commandKey(request.RunID, request.Sequence))
 	if err != nil {
 		return workflowops.Operation{}, err
 	}
 	if found {
-		if !commandMetadata(command).MatchesWait(request, input) {
+		if !matchesWait(command, request, input) {
 			return workflowops.Operation{}, workflowops.HistoryMismatchError("wait", request.Sequence)
 		}
 		return world.operation(ctx, request.RunID, request.Sequence)
@@ -452,19 +599,34 @@ func (world *World) EnsureWait(
 	if !allowsCreate(lease, request.RunID) {
 		return workflowops.Operation{}, workflowops.HistoryMissingError("wait command", request.Sequence)
 	}
+	if len(request.Dependencies) > 98 {
+		return workflowops.Operation{}, errors.New("workflow/aws: a wait may depend on at most 98 tasks")
+	}
 	now := time.Now()
 	task := taskFields(request.RunID, request.Sequence, now)
 	task["status"] = string(workflowops.StatusWaiting)
+	wait := workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}
+	items := []ddb.TransactWriteItem{
+		put(world.config.TableName, commandKey(request.RunID, request.Sequence), map[string]string{
+			"kind":        string(request.Kind),
+			"identity":    string(request.Kind),
+			"fingerprint": request.Fingerprint,
+			"input":       string(input),
+		}),
+		put(world.config.TableName, taskKey(request.RunID, request.Sequence), task),
+	}
+	for _, dependency := range request.Dependencies {
+		items = append(items, put(
+			world.config.TableName,
+			dependentWaitKey(dependency, wait),
+			map[string]string{
+				"waitRun":      wait.RunID,
+				"waitSequence": strconv.Itoa(wait.Sequence),
+			},
+		))
+	}
 	_, err = world.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []ddb.TransactWriteItem{
-			put(world.config.TableName, commandKey(request.RunID, request.Sequence), map[string]string{
-				"kind":        string(metadata.Kind),
-				"identity":    metadata.Identity,
-				"fingerprint": metadata.Fingerprint,
-				"input":       string(metadata.Input),
-			}),
-			put(world.config.TableName, taskKey(request.RunID, request.Sequence), task),
-		},
+		TransactItems: items,
 	})
 	if err != nil {
 		if conditional(err) {
@@ -472,13 +634,19 @@ func (world *World) EnsureWait(
 		}
 		return workflowops.Operation{}, err
 	}
-	if err = world.resolveWaits(ctx); err != nil {
+	resolved, err := world.resolveWait(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence})
+	if err != nil {
 		return workflowops.Operation{}, err
+	}
+	if resolved {
+		if err = world.resolveDependents(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}); err != nil {
+			return workflowops.Operation{}, err
+		}
 	}
 	return world.operation(ctx, request.RunID, request.Sequence)
 }
 
-func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) error {
+func (world *World) SuspendRun(ctx context.Context, run *workflowops.Lease) error {
 	if run.Sequence != workflowops.RootSequence {
 		return workflowops.ErrLeaseLost
 	}
@@ -519,7 +687,7 @@ func (world *World) SuspendRun(ctx context.Context, run *workflowops.LeasedRun) 
 	if err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resumeLatestWait(ctx, run.ID)
 }
 
 func (world *World) FinishOperation(
@@ -532,7 +700,7 @@ func (world *World) FinishOperation(
 	if cause != nil {
 		status, message, output = workflowops.StatusFailed, cause.Error(), nil
 	}
-	run := &workflowops.LeasedRun{
+	run := &workflowops.Lease{
 		ID:       operation.RunID,
 		Sequence: operation.Sequence,
 		Token:    operation.Token,
@@ -540,7 +708,7 @@ func (world *World) FinishOperation(
 	if err := world.finishTask(ctx, run, status, output, message); err != nil {
 		return err
 	}
-	return world.resolveWaits(ctx)
+	return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
 }
 
 func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage, error) {
@@ -559,6 +727,9 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 		}
 		if workflowops.Status(run["status"]) == workflowops.StatusFailed {
 			return nil, errors.New(run["error"])
+		}
+		if workflowops.Status(run["status"]) == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
 		}
 		select {
 		case <-ctx.Done():
@@ -585,6 +756,9 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		}
 		if operation.Status == workflowops.StatusFailed {
 			return nil, errors.New(operation.Error)
+		}
+		if operation.Status == workflowops.StatusCancelled {
+			return nil, workflowops.ErrCancelled
 		}
 		select {
 		case <-ctx.Done():
@@ -665,7 +839,7 @@ func (world *World) operation(ctx context.Context, runID string, sequence int) (
 
 func (world *World) finishTask(
 	ctx context.Context,
-	run *workflowops.LeasedRun,
+	run *workflowops.Lease,
 	status workflowops.Status,
 	output json.RawMessage,
 	message string,
@@ -713,7 +887,9 @@ func (world *World) finishTask(
 	return err
 }
 
-func (world *World) resolveWaits(ctx context.Context) error {
+// reconcileWaits is reserved for recovery or operator-initiated repair. Normal
+// task transitions use resolveDependents and never scan the workflow table.
+func (world *World) reconcileWaits(ctx context.Context) error {
 	var start map[string]ddb.AttributeValue
 	for {
 		page, err := world.dynamo.Scan(ctx, &dynamodb.ScanInput{
@@ -762,7 +938,13 @@ func (world *World) resolveWaits(ctx context.Context) error {
 				status = workflowops.StatusFailed
 				message = resolution.Err.Error()
 			}
-			if err = world.resolveWait(ctx, runID, sequence, string(status), resolution.Output, message); err != nil {
+			if _, err = world.transitionWait(
+				ctx,
+				workflowops.Task{RunID: runID, Sequence: sequence},
+				status,
+				resolution.Output,
+				message,
+			); err != nil {
 				return err
 			}
 		}
@@ -773,13 +955,177 @@ func (world *World) resolveWaits(ctx context.Context) error {
 	}
 }
 
+func (world *World) resolveDependents(ctx context.Context, changed ...workflowops.Task) error {
+	for len(changed) > 0 {
+		dependency := changed[0]
+		changed = changed[1:]
+		var start map[string]ddb.AttributeValue
+		for {
+			page, err := world.dynamo.Query(ctx, &dynamodb.QueryInput{
+				TableName:              awsv2.String(world.config.TableName),
+				ExclusiveStartKey:      start,
+				KeyConditionExpression: awsv2.String("pk=:pk AND begins_with(sk,:wait)"),
+				ExpressionAttributeValues: map[string]ddb.AttributeValue{
+					":pk":   avs(dependencyPartitionKey(dependency)),
+					":wait": avs("WAIT#"),
+				},
+			})
+			if err != nil {
+				return err
+			}
+			for _, edge := range page.Items {
+				wait := workflowops.Task{
+					RunID:    read(edge, "waitRun"),
+					Sequence: readInt(edge, "waitSequence"),
+				}
+				if wait.RunID == "" {
+					continue
+				}
+				resolved, err := world.resolveWait(ctx, wait)
+				if err != nil {
+					return err
+				}
+				if resolved {
+					changed = append(changed, wait)
+				}
+			}
+			if len(page.LastEvaluatedKey) == 0 {
+				break
+			}
+			start = page.LastEvaluatedKey
+		}
+	}
+	return nil
+}
+
+func (world *World) resolveWait(ctx context.Context, wait workflowops.Task) (bool, error) {
+	command, found, err := world.item(ctx, commandKey(wait.RunID, wait.Sequence))
+	if err != nil || !found {
+		return false, err
+	}
+	kind := workflowops.Kind(command["kind"])
+	if !workflowops.IsWaitKind(kind) {
+		return false, nil
+	}
+	var dependencies []workflowops.Task
+	if err := json.Unmarshal([]byte(command["input"]), &dependencies); err != nil {
+		return false, err
+	}
+	states, err := world.waitStates(ctx, dependencies)
+	if err != nil {
+		return false, err
+	}
+	resolution := workflowops.ResolveWait(kind, states)
+	if resolution.Pending {
+		return false, nil
+	}
+	status, message := workflowops.StatusCompleted, ""
+	if resolution.Err != nil {
+		status, message = workflowops.StatusFailed, resolution.Err.Error()
+	}
+	return world.transitionWait(ctx, wait, status, resolution.Output, message)
+}
+
+// resumeLatestWait closes the race between evaluating a wait and releasing the
+// root lease. It reads just this run's command partition, never all waits.
+func (world *World) resumeLatestWait(ctx context.Context, runID string) error {
+	latest := workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence}
+	found := false
+	var start map[string]ddb.AttributeValue
+	for {
+		result, err := world.dynamo.Query(ctx, &dynamodb.QueryInput{
+			TableName:              awsv2.String(world.config.TableName),
+			ExclusiveStartKey:      start,
+			KeyConditionExpression: awsv2.String("pk=:pk AND begins_with(sk,:command)"),
+			ExpressionAttributeValues: map[string]ddb.AttributeValue{
+				":pk":      avs(runPartitionKey(runID)),
+				":command": avs("COMMAND#"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+		for _, command := range result.Items {
+			kind := workflowops.Kind(read(command, "kind"))
+			sequence, err := strconv.Atoi(strings.TrimPrefix(read(command, "sk"), "COMMAND#"))
+			if err != nil {
+				return err
+			}
+			sequence--
+			if workflowops.IsWaitKind(kind) && (!found || sequence > latest.Sequence) {
+				latest.Sequence, found = sequence, true
+			}
+		}
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+		start = result.LastEvaluatedKey
+	}
+	if !found {
+		return nil
+	}
+	task, found, err := world.item(ctx, taskKey(runID, latest.Sequence))
+	if err != nil || !found {
+		return err
+	}
+	status := workflowops.Status(task["status"])
+	if status == workflowops.StatusWaiting {
+		_, err = world.resolveWait(ctx, latest)
+		return err
+	}
+	if status != workflowops.StatusCompleted && status != workflowops.StatusFailed {
+		return nil
+	}
+	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           awsv2.String(world.config.TableName),
+		Key:                 taskKey(runID, workflowops.RootSequence),
+		UpdateExpression:    awsv2.String("SET #status=:queued, #updated=:updated"),
+		ConditionExpression: awsv2.String("#status=:waiting"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status", "#updated": "updated",
+		},
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{
+			":waiting": avs(string(workflowops.StatusWaiting)),
+			":queued":  avs(string(workflowops.StatusQueued)),
+			":updated": avs(stamp(time.Now())),
+		},
+	})
+	if conditional(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:        awsv2.String(world.config.TableName),
+		Key:              runKey(runID),
+		UpdateExpression: awsv2.String("SET #status=:queued, #updated=:updated"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status", "#updated": "updated",
+		},
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{
+			":queued":  avs(string(workflowops.StatusQueued)),
+			":updated": avs(stamp(time.Now())),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return world.enqueueTask(ctx, workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence}, time.Time{})
+}
+
 func (world *World) waitStates(ctx context.Context, dependencies []workflowops.Task) ([]workflowops.Dependency, error) {
+	keys := make([]map[string]ddb.AttributeValue, len(dependencies))
+	for index, dependency := range dependencies {
+		keys[index] = taskKey(dependency.RunID, dependency.Sequence)
+	}
+	items, err := world.items(ctx, keys...)
+	if err != nil {
+		return nil, err
+	}
 	states := make([]workflowops.Dependency, len(dependencies))
 	for index, dependency := range dependencies {
-		task, found, err := world.item(ctx, taskKey(dependency.RunID, dependency.Sequence))
-		if err != nil {
-			return nil, err
-		}
+		task, found := items[itemID(taskKey(dependency.RunID, dependency.Sequence))]
 		states[index] = workflowops.Dependency{
 			Task:       dependency,
 			Found:      found,
@@ -792,18 +1138,17 @@ func (world *World) waitStates(ctx context.Context, dependencies []workflowops.T
 	return states, nil
 }
 
-func (world *World) resolveWait(
+func (world *World) transitionWait(
 	ctx context.Context,
-	runID string,
-	sequence int,
-	status string,
+	task workflowops.Task,
+	status workflowops.Status,
 	output json.RawMessage,
 	message string,
-) error {
+) (bool, error) {
 	now := stamp(time.Now())
 	completed, err := world.nextCompletion(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	names := map[string]string{
 		"#status":    "status",
@@ -812,7 +1157,7 @@ func (world *World) resolveWait(
 	}
 	values := map[string]ddb.AttributeValue{
 		":waiting":   avs(string(workflowops.StatusWaiting)),
-		":status":    avs(status),
+		":status":    avs(string(status)),
 		":updated":   avs(now),
 		":completed": avs(strconv.FormatUint(completed, 10)),
 	}
@@ -829,21 +1174,21 @@ func (world *World) resolveWait(
 	}
 	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 awsv2.String(world.config.TableName),
-		Key:                       taskKey(runID, sequence),
+		Key:                       taskKey(task.RunID, task.Sequence),
 		UpdateExpression:          awsv2.String(set),
 		ConditionExpression:       awsv2.String("#status=:waiting"),
 		ExpressionAttributeNames:  names,
 		ExpressionAttributeValues: values,
 	})
 	if conditional(err) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           awsv2.String(world.config.TableName),
-		Key:                 taskKey(runID, workflowops.RootSequence),
+		Key:                 taskKey(task.RunID, workflowops.RootSequence),
 		UpdateExpression:    awsv2.String("SET #status=:queued, #updated=:updated"),
 		ConditionExpression: awsv2.String("#status=:waiting"),
 		ExpressionAttributeNames: map[string]string{
@@ -857,14 +1202,14 @@ func (world *World) resolveWait(
 		},
 	})
 	if conditional(err) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:        awsv2.String(world.config.TableName),
-		Key:              runKey(runID),
+		Key:              runKey(task.RunID),
 		UpdateExpression: awsv2.String("SET #status=:queued, #updated=:updated"),
 		ExpressionAttributeNames: map[string]string{
 			"#status":  "status",
@@ -876,9 +1221,12 @@ func (world *World) resolveWait(
 		},
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	return world.enqueueTask(ctx, workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence}, time.Time{})
+	if err := world.enqueueTask(ctx, workflowops.Task{RunID: task.RunID, Sequence: workflowops.RootSequence}, time.Time{}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (world *World) enqueueTask(ctx context.Context, task workflowops.Task, due time.Time) error {
@@ -922,6 +1270,37 @@ func (world *World) enqueueTask(ctx context.Context, task workflowops.Task, due 
 		},
 		ActionAfterCompletion: sch.ActionAfterCompletionDelete,
 	})
+	if err != nil {
+		return err
+	}
+	if err = world.recordTimer(ctx, task, name); err == nil {
+		return nil
+	}
+	cleanupErr := world.deleteTimer(ctx, name)
+	if cleanupErr != nil {
+		return errors.Join(err, cleanupErr)
+	}
+	if conditional(err) {
+		return nil
+	}
+	return err
+}
+
+func (world *World) recordTimer(ctx context.Context, task workflowops.Task, handle string) error {
+	_, err := world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:           awsv2.String(world.config.TableName),
+		Key:                 taskKey(task.RunID, task.Sequence),
+		UpdateExpression:    awsv2.String("SET #timer=:timer"),
+		ConditionExpression: awsv2.String("#status=:queued"),
+		ExpressionAttributeNames: map[string]string{
+			"#timer":  "timer",
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{
+			":timer":  avs(handle),
+			":queued": avs(string(workflowops.StatusQueued)),
+		},
+	})
 	return err
 }
 
@@ -963,22 +1342,81 @@ func (world *World) item(ctx context.Context, key map[string]ddb.AttributeValue)
 	return value, true, nil
 }
 
+// items reads task records in DynamoDB's 100-key batches. Dependency state is
+// immutable for wait resolution, so a single consistent batch per wait avoids
+// one request per dependency while preserving the storage boundary here.
+func (world *World) items(ctx context.Context, keys ...map[string]ddb.AttributeValue) (map[string]map[string]string, error) {
+	items := make(map[string]map[string]string, len(keys))
+	for len(keys) > 0 {
+		count := min(len(keys), 100)
+		request := map[string]ddb.KeysAndAttributes{
+			world.config.TableName: {
+				Keys:           keys[:count],
+				ConsistentRead: awsv2.Bool(true),
+			},
+		}
+		keys = keys[count:]
+		for len(request) > 0 {
+			result, err := world.dynamo.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{
+				RequestItems: request,
+			})
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range result.Responses[world.config.TableName] {
+				value := make(map[string]string, len(item))
+				for name, attribute := range item {
+					value[name] = readAttr(attribute)
+				}
+				items[itemID(item)] = value
+			}
+			request = result.UnprocessedKeys
+		}
+	}
+	return items, nil
+}
+
+func itemID(item map[string]ddb.AttributeValue) string {
+	return read(item, "pk") + "\x00" + read(item, "sk")
+}
+
 func stamp(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func allowsCreate(lease *workflowops.LeasedRun, runID string) bool {
+func allowsCreate(lease *workflowops.Lease, runID string) bool {
 	return lease != nil && lease.ID == runID && lease.Sequence == workflowops.RootSequence
 }
 
-func commandMetadata(command map[string]string) workflowops.CommandMetadata {
-	return workflowops.CommandMetadata{
-		Kind:        workflowops.Kind(command["kind"]),
-		Identity:    command["identity"],
-		Fingerprint: command["fingerprint"],
-		Input:       json.RawMessage(command["input"]),
-		ChildRunID:  command["child"],
-	}
+func matchesOperation(command map[string]string, request workflowops.OperationRequest) bool {
+	return workflowops.MatchesOperation(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+	)
+}
+
+func matchesRun(command map[string]string, request workflowops.RunRequest) bool {
+	return workflowops.MatchesRun(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+	)
+}
+
+func matchesWait(command map[string]string, request workflowops.WaitRequest, input json.RawMessage) bool {
+	return workflowops.MatchesWait(
+		workflowops.Kind(command["kind"]),
+		command["identity"],
+		command["fingerprint"],
+		json.RawMessage(command["input"]),
+		request,
+		input,
+	)
 }
 
 func completion(value string) uint64 {
