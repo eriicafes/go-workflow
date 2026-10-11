@@ -140,7 +140,11 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 			}
 		case *ast.CallExpr:
 			if banned, ok := bannedCall(pass, node); ok {
-				pass.Reportf(node.Pos(), "workflow body calls %s; use workflow.Step or workflow.Background", banned)
+				if banned == "time.Now" {
+					pass.Reportf(node.Pos(), "workflow body calls time.Now; use workflow.Now")
+				} else {
+					pass.Reportf(node.Pos(), "workflow body calls %s; use workflow.Step or workflow.Background", banned)
+				}
 			}
 			if isDurableOperation(pass, node) {
 				validateStepFunction(pass, node)

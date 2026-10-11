@@ -64,6 +64,7 @@ type command struct {
 	dueAt        time.Time
 	token        string
 	completion   uint64
+	attempt      int
 }
 
 // New creates an immediately usable in-memory World. It executes runners in
@@ -463,6 +464,24 @@ func (world *World) FinishOperation(_ context.Context, value workflowops.Operati
 	return err
 }
 
+func (world *World) RetryOperation(_ context.Context, value workflowops.Operation, cause error, due time.Time) error {
+	world.mu.Lock()
+	command, found := world.commands[value.RunID][value.Sequence]
+	if !found || command.status != workflowops.StatusRunning || command.token != value.Token {
+		world.mu.Unlock()
+		return workflowops.ErrLeaseLost
+	}
+	command.status = workflowops.StatusRetryWait
+	command.output = nil
+	command.err = cause.Error()
+	command.token = ""
+	command.dueAt = due
+	world.signalLocked()
+	world.mu.Unlock()
+	world.schedule(workflowops.Task{RunID: value.RunID, Sequence: value.Sequence}, due)
+	return nil
+}
+
 // CancelOperations marks unfinished tasks as cancelled. Repeating a cancellation is
 // a successful no-op.
 func (world *World) CancelOperations(_ context.Context, tasks ...workflowops.Task) error {
@@ -633,10 +652,12 @@ func (world *World) claim(task workflowops.Task) (*workflowops.Lease, bool) {
 		}, true
 	}
 	command, found := world.commands[task.RunID][task.Sequence]
-	if !found || command.status != workflowops.StatusQueued {
+	if !found || (command.status != workflowops.StatusQueued &&
+		(command.status != workflowops.StatusRetryWait || command.dueAt.After(time.Now()))) {
 		return nil, false
 	}
 	command.status, command.token = workflowops.StatusRunning, token
+	command.attempt++
 	return &workflowops.Lease{
 		ID:       run.id,
 		Identity: run.identity,
@@ -758,13 +779,14 @@ func (world *World) signalLocked() {
 
 func operation(runID string, command *command) workflowops.Operation {
 	return workflowops.Operation{
-		RunID:          runID,
-		Sequence:       command.sequence,
-		Status:         command.status,
-		Token:          command.token,
-		Error:          command.err,
-		IdempotencyKey: runID + ":" + strconv.Itoa(command.sequence),
-		DueAt:          command.dueAt,
+		RunID:    runID,
+		StepID:   runID + ":" + strconv.Itoa(command.sequence),
+		Sequence: command.sequence,
+		Status:   command.status,
+		Token:    command.token,
+		Error:    command.err,
+		DueAt:    command.dueAt,
+		Attempt:  command.attempt,
 	}
 }
 

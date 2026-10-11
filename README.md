@@ -153,7 +153,7 @@ The AWS and Vercel queues publish a `workflow.Task` after each root-run or
 command task is persisted. Claiming is lease-fenced, so a duplicate queue
 delivery is a successful no-op.
 
-`Workflow[T]` and `Result[T]` both implement `Wait`, `Value`, and `Unwrap`.
+`Run[T]` and `Result[T]` both implement `Wait`, `Value`, and `Unwrap`.
 `Background` creates a durable operation. `Map`, `All`, `Join`, `JoinSettled`,
 `Race`, `Timeout`, and `Sleep` compose them. Each operation is written as attempted
 before user code runs and receives an idempotency key. Command input, function

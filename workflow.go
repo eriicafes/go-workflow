@@ -29,24 +29,24 @@ type workflow[Out any] interface {
 	Workflow(Out)
 }
 
-// Workflow names a root workflow execution.
-type Workflow[Out any] struct {
+// Run names a root workflow execution.
+type Run[Out any] struct {
 	id     string
 	client Client
 }
 
-func (w *Workflow[Out]) ID() string {
+func (w *Run[Out]) ID() string {
 	return w.id
 }
 
 // Wait blocks until the run finishes.
-func (w *Workflow[Out]) Wait(ctx context.Context) error {
+func (w *Run[Out]) Wait(ctx context.Context) error {
 	_, err := w.rawValue(ctx)
 	return err
 }
 
 // Value blocks, then returns the typed workflow output.
-func (w *Workflow[Out]) Value(ctx context.Context) (Out, error) {
+func (w *Run[Out]) Value(ctx context.Context) (Out, error) {
 	var zero Out
 	raw, err := w.rawValue(ctx)
 	if err != nil {
@@ -58,7 +58,7 @@ func (w *Workflow[Out]) Value(ctx context.Context) (Out, error) {
 	return zero, nil
 }
 
-func (w *Workflow[Out]) Unwrap(ctx context.Context) Out {
+func (w *Run[Out]) Unwrap(ctx context.Context) Out {
 	value, err := w.Value(ctx)
 	if err != nil {
 		panic(err)
@@ -66,7 +66,7 @@ func (w *Workflow[Out]) Unwrap(ctx context.Context) Out {
 	return value
 }
 
-func (w *Workflow[Out]) rawValue(ctx context.Context) (json.RawMessage, error) {
+func (w *Run[Out]) rawValue(ctx context.Context) (json.RawMessage, error) {
 	if execution, active := executionFromContext(ctx); active {
 		task := w.Task()
 		if task == nil {
@@ -79,12 +79,12 @@ func (w *Workflow[Out]) rawValue(ctx context.Context) (json.RawMessage, error) {
 	return w.client.WaitRun(ctx, w.id)
 }
 
-func (w *Workflow[Out]) Task() *workflowops.Task {
+func (w *Run[Out]) Task() *workflowops.Task {
 	return &workflowops.Task{RunID: w.id, Sequence: workflowops.RootSequence}
 }
 
 // Events returns events emitted by this workflow after the supplied offset.
-func (w *Workflow[Out]) Events(ctx context.Context, after int64) ([]Event, error) {
+func (w *Run[Out]) Events(ctx context.Context, after int64) ([]Event, error) {
 	return w.client.Events(ctx, w.id, after)
 }
 
@@ -92,23 +92,23 @@ func (w *Workflow[Out]) Events(ctx context.Context, after int64) ([]Event, error
 //
 // TODO: retain the event offset and partial event data, then poll or subscribe
 // through Client so Read can block until data or terminal workflow completion.
-func (w *Workflow[Out]) Read(data []byte) (int, error) {
+func (w *Run[Out]) Read(data []byte) (int, error) {
 	return 0, errors.New("workflow: event streaming is not implemented")
 }
 
 // Get returns a handle for an existing workflow.
 // The handle is bound to the client in ctx. Use NewContext or Middleware before calling Get.
-func Get[Out any](ctx context.Context, id string) (*Workflow[Out], error) {
+func Get[Out any](ctx context.Context, id string) (*Run[Out], error) {
 	client, _, err := clientFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Workflow[Out]{id: id, client: client}, nil
+	return &Run[Out]{id: id, client: client}, nil
 }
 
 // Start enqueues a new workflow. A worker must register the corresponding Runner with its World.
 // The handle is bound to the client in ctx. Use NewContext or Middleware before calling Start.
-func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Workflow[Out], error) {
+func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
 	client, execution, err := clientFromContext(ctx)
 	if err != nil {
 		return nil, err
@@ -132,7 +132,7 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Workflow[
 		if err != nil {
 			return nil, err
 		}
-		return &Workflow[Out]{id: id, client: client}, nil
+		return &Run[Out]{id: id, client: client}, nil
 	}
 	id, err := client.CreateRun(ctx, nil, workflowops.RunRequest{
 		Identity:    identity,
@@ -144,7 +144,7 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Workflow[
 	if err != nil {
 		return nil, err
 	}
-	return &Workflow[Out]{id: id, client: client}, nil
+	return &Run[Out]{id: id, client: client}, nil
 }
 
 // Runners indexes named workflow runners by identity, retaining the last
@@ -181,13 +181,23 @@ func Use[In workflow[Out], Out any](function func(context.Context, In) (Out, err
 }
 
 // Step invokes a durable operation and waits for its value.
-func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In) (Out, error) {
-	return Background(ctx, fn, input).Value(ctx)
+func Step[In, Out any](
+	ctx context.Context,
+	fn func(context.Context, In) (Out, error),
+	input In,
+	options ...StepOptions,
+) (Out, error) {
+	return Background(ctx, fn, input, options...).Value(ctx)
 }
 
 // Background records a durable command. fn may be a named function or an
 // inline closure. The analyzer rejects closures that capture workflow state.
-func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In) Result[Out] {
+func Background[In, Out any](
+	ctx context.Context,
+	fn func(context.Context, In) (Out, error),
+	input In,
+	options ...StepOptions,
+) Result[Out] {
 	identity, err := functionIdentity(fn)
 	if err != nil {
 		return errorResult[Out](err)
@@ -196,7 +206,7 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 	if !active {
 		return errorResult[Out](ErrNoWorkflow)
 	}
-	return background(execution, ctx, identity, fn, input)
+	return background(execution, ctx, identity, fn, input, stepOptions(options))
 }
 
 func Sleep(ctx context.Context, duration time.Duration) error {
@@ -205,6 +215,16 @@ func Sleep(ctx context.Context, duration time.Duration) error {
 		return ErrNoWorkflow
 	}
 	return timer(execution, ctx, duration, workflowops.KindSleep, 3).Wait(ctx)
+}
+
+// Now returns the current time as a durable workflow value. Replaying the
+// workflow returns the time recorded by its original execution.
+func Now(ctx context.Context) (time.Time, error) {
+	execution, active := executionFromContext(ctx)
+	if !active {
+		return time.Time{}, ErrNoWorkflow
+	}
+	return now(execution, ctx).Value(ctx)
 }
 
 // Timeout starts a durable timer that cancels its containing workflow when it

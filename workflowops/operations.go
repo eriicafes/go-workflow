@@ -81,6 +81,9 @@ type World interface {
 	// FinishOperation records output or failure for a leased operation. The
 	// implementation must reject a stale lease token.
 	FinishOperation(context.Context, Operation, json.RawMessage, error) error
+	// RetryOperation records a failed attempt and releases it for a later
+	// durable claim. The implementation must reject a stale lease token.
+	RetryOperation(context.Context, Operation, error, time.Time) error
 	// WaitOperation waits for a durable operation to reach a terminal state.
 	WaitOperation(context.Context, Task) (json.RawMessage, error)
 	// AppendEvent persists one idempotent replay-safe output event.
@@ -111,6 +114,7 @@ type Kind string
 const (
 	KindRun         Kind = "run"
 	KindStep        Kind = "step"
+	KindNow         Kind = "now"
 	KindSleep       Kind = "sleep"
 	KindTimeout     Kind = "timeout"
 	KindCancel      Kind = "cancel"
@@ -168,14 +172,15 @@ type OperationRequest struct {
 
 // Operation is the persisted state of one replay position.
 type Operation struct {
-	RunID          string
-	Sequence       int
-	Status         Status
-	Token          string
-	Error          string
-	IdempotencyKey string
-	DueAt          time.Time
-	LeaseUntil     time.Time
+	RunID      string
+	StepID     string
+	Sequence   int
+	Status     Status
+	Token      string
+	Error      string
+	DueAt      time.Time
+	LeaseUntil time.Time
+	Attempt    int
 }
 
 // Dependency is the storage-neutral terminal state used to resolve a

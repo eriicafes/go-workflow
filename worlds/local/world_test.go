@@ -190,10 +190,10 @@ type failedSelectOutput struct {
 func (failedSelectInput) Workflow(failedSelectOutput) {}
 
 func failedSelect(ctx context.Context, _ failedSelectInput) (failedSelectOutput, error) {
-	results := workflow.Map(ctx, delayed, []delayedInput{
-		{Value: 1, Delay: 30 * time.Millisecond},
-		{Delay: 10 * time.Millisecond, Fail: true, Failure: "select failure"},
-	})
+	results := []workflow.Result[int]{
+		workflow.Background(ctx, delayed, delayedInput{Value: 1, Delay: 30 * time.Millisecond}, workflow.StepOptions{MaxRetries: 0}),
+		workflow.Background(ctx, delayed, delayedInput{Delay: 10 * time.Millisecond, Fail: true, Failure: "select failure"}, workflow.StepOptions{MaxRetries: 0}),
+	}
 	winner, selectErr := workflow.Select(ctx, workflow.Tasks(results)...)
 	waitErr := winner.Wait(ctx)
 	return failedSelectOutput{

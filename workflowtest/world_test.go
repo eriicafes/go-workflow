@@ -3,6 +3,7 @@ package workflowtest_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -70,6 +71,34 @@ func double(_ context.Context, value int) (int, error) {
 	return value * 2, nil
 }
 
+type retryInput struct{}
+type retryOutput struct {
+	Attempts int
+	Metadata workflow.StepMetadata
+}
+
+func (retryInput) Workflow(retryOutput) {}
+
+var retryCalls atomic.Int32
+
+func retryWorkflow(ctx context.Context, _ retryInput) (retryOutput, error) {
+	metadata := workflow.GetStepMetadata(ctx)
+	value, err := workflow.Step(ctx, retryStep, struct{}{})
+	return retryOutput{Attempts: value, Metadata: metadata}, err
+}
+
+func retryStep(ctx context.Context, _ struct{}) (int, error) {
+	metadata := workflow.GetStepMetadata(ctx)
+	attempt := int(retryCalls.Add(1))
+	if metadata.ID == "" || metadata.Name == "" || metadata.Attempt != attempt {
+		return 0, errors.New("unexpected step metadata")
+	}
+	if attempt < 4 {
+		return 0, errors.New("try again")
+	}
+	return attempt, nil
+}
+
 func TestWorldExecutesDurableSteps(t *testing.T) {
 	world := workflowtest.New(workflow.Use(stepWorkflow))
 	defer world.Close()
@@ -87,6 +116,53 @@ func TestWorldExecutesDurableSteps(t *testing.T) {
 	}
 	if output.Value != 42 {
 		t.Fatalf("output = %#v, want 42", output)
+	}
+}
+
+func TestStepRetriesAndMetadata(t *testing.T) {
+	retryCalls.Store(0)
+	world := workflowtest.New(workflow.Use(retryWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(workflow.NewContext(context.Background(), world), retryInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Attempts != 4 {
+		t.Fatalf("attempts = %d, want 4", output.Attempts)
+	}
+}
+
+type nowInput struct{}
+type nowOutput struct {
+	Value time.Time
+}
+
+func (nowInput) Workflow(nowOutput) {}
+
+func nowWorkflow(ctx context.Context, _ nowInput) (nowOutput, error) {
+	value, err := workflow.Now(ctx)
+	return nowOutput{Value: value}, err
+}
+
+func TestNowRecordsTimeAsDurableValue(t *testing.T) {
+	world := workflowtest.New(workflow.Use(nowWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(workflow.NewContext(context.Background(), world), nowInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Value.IsZero() {
+		t.Fatal("workflow.Now returned zero time")
 	}
 }
 

@@ -289,7 +289,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 			"SET #status=:running, #token=:token, #lease=:lease, #attempt=if_not_exists(#attempt,:zero)+:one",
 		),
 		ConditionExpression: awsv2.String(
-			"(#status=:queued AND (attribute_not_exists(#due) OR #due<=:now)) OR (#status=:running AND #lease<:now)",
+			"(#status IN (:queued,:retry) AND (attribute_not_exists(#due) OR #due<=:now)) OR (#status=:running AND #lease<:now)",
 		),
 		ExpressionAttributeNames: map[string]string{
 			"#status":  "status",
@@ -301,6 +301,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		ExpressionAttributeValues: map[string]ddb.AttributeValue{
 			":running": avs(string(workflowops.StatusRunning)),
 			":queued":  avs(string(workflowops.StatusQueued)),
+			":retry":   avs(string(workflowops.StatusRetryWait)),
 			":token":   avs(token),
 			":lease":   avs(stamp(until)),
 			":now":     avs(stamp(now)),
@@ -656,11 +657,11 @@ func (world *World) EnsureOperation(
 		return workflowops.Operation{}, err
 	}
 	return workflowops.Operation{
-		RunID:          request.RunID,
-		Sequence:       request.Sequence,
-		Status:         workflowops.StatusQueued,
-		DueAt:          due,
-		IdempotencyKey: task["idempotency"],
+		RunID:    request.RunID,
+		Sequence: request.Sequence,
+		Status:   workflowops.StatusQueued,
+		DueAt:    due,
+		StepID:   task["stepID"],
 	}, nil
 }
 
@@ -802,6 +803,41 @@ func (world *World) FinishOperation(
 	return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
 }
 
+func (world *World) RetryOperation(
+	ctx context.Context,
+	operation workflowops.Operation,
+	cause error,
+	due time.Time,
+) error {
+	_, err := world.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: awsv2.String(world.config.TableName),
+		Key:       taskKey(operation.RunID, operation.Sequence),
+		UpdateExpression: awsv2.String(
+			"SET #status=:retry, #error=:error, #due=:due, #updated=:updated REMOVE #token, #lease, #output",
+		),
+		ConditionExpression: awsv2.String("#status=:running AND #token=:token"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status", "#error": "error", "#due": "due", "#updated": "updated",
+			"#token": "token", "#lease": "lease", "#output": "output",
+		},
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{
+			":retry":   avs(string(workflowops.StatusRetryWait)),
+			":error":   avs(cause.Error()),
+			":due":     avs(stamp(due)),
+			":updated": avs(stamp(time.Now())),
+			":running": avs(string(workflowops.StatusRunning)),
+			":token":   avs(operation.Token),
+		},
+	})
+	if conditional(err) {
+		return workflowops.ErrLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	return world.enqueueTask(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence}, due)
+}
+
 func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage, error) {
 	ticker := time.NewTicker(world.config.PollInterval)
 	defer ticker.Stop()
@@ -911,13 +947,15 @@ func (world *World) operation(ctx context.Context, runID string, sequence int) (
 	if !found {
 		return workflowops.Operation{}, fmt.Errorf("workflow: operation %d not found", sequence)
 	}
+	attempt, _ := strconv.Atoi(task["attempt"])
 	operation := workflowops.Operation{
-		RunID:          runID,
-		Sequence:       sequence,
-		Status:         workflowops.Status(task["status"]),
-		Token:          task["token"],
-		Error:          task["error"],
-		IdempotencyKey: task["idempotency"],
+		RunID:    runID,
+		StepID:   task["stepID"],
+		Sequence: sequence,
+		Status:   workflowops.Status(task["status"]),
+		Token:    task["token"],
+		Error:    task["error"],
+		Attempt:  attempt,
 	}
 	if value := task["due"]; value != "" {
 		operation.DueAt, _ = time.Parse(time.RFC3339Nano, value)

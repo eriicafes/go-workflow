@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS workflow_tasks (
   lease_until timestamptz,
   lease_token text,
   attempt integer NOT NULL DEFAULT 0,
-  idempotency_key text NOT NULL,
+  step_id text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (run_id, sequence),
@@ -256,7 +256,7 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 	}
 	if _, err = tx.Exec(
 		ctx,
-		`INSERT INTO workflow_tasks (run_id, sequence, status, idempotency_key)
+		`INSERT INTO workflow_tasks (run_id, sequence, status, step_id)
 		 VALUES ($1, -1, $2, $3)`,
 		id,
 		string(workflowops.StatusQueued),
@@ -353,7 +353,7 @@ func (world *World) CreateRun(
 	}
 	if _, err = tx.Exec(
 		ctx,
-		`INSERT INTO workflow_tasks (run_id, sequence, status, idempotency_key)
+		`INSERT INTO workflow_tasks (run_id, sequence, status, step_id)
 		 VALUES ($1, -1, $2, $3)`,
 		childID,
 		string(workflowops.StatusQueued),
@@ -378,7 +378,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 		SELECT run_id, sequence
 			FROM workflow_tasks
 			WHERE (
-				(status = $3 AND (due_at IS NULL OR due_at <= now()))
+				(status IN ($3, $6) AND (due_at IS NULL OR due_at <= now()))
 				OR (status = $4 AND lease_until < now())
 			)
 			AND EXISTS (
@@ -406,6 +406,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 		string(workflowops.StatusQueued),
 		string(workflowops.StatusRunning),
 		string(workflowops.StatusCancelled),
+		string(workflowops.StatusRetryWait),
 	)
 	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
@@ -438,7 +439,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		  AND runs.id = tasks.run_id
 		  AND runs.status <> $7
 		  AND (
-			(tasks.status = $6 AND (tasks.due_at IS NULL OR tasks.due_at <= now()))
+			(tasks.status IN ($6, $8) AND (tasks.due_at IS NULL OR tasks.due_at <= now()))
 			OR (tasks.status = $5 AND tasks.lease_until < now())
 		  )
 		RETURNING runs.id, runs.workflow_identity, runs.input,
@@ -450,6 +451,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		string(workflowops.StatusRunning),
 		string(workflowops.StatusQueued),
 		string(workflowops.StatusCancelled),
+		string(workflowops.StatusRetryWait),
 	)
 	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
@@ -825,7 +827,7 @@ func (world *World) EnsureOperation(
 		`SELECT commands.kind, commands.identity, commands.fingerprint, commands.input,
 		        tasks.status, COALESCE(tasks.lease_token, ''),
 		        COALESCE(tasks.error, ''), COALESCE(commands.due_at, now()),
-		        COALESCE(tasks.lease_until, now()), tasks.idempotency_key
+		        COALESCE(tasks.lease_until, now()), tasks.step_id, tasks.attempt
 		 FROM workflow_commands commands
 		 JOIN workflow_tasks tasks USING (run_id, sequence)
 		 WHERE commands.run_id = $1 AND commands.sequence = $2`,
@@ -841,7 +843,8 @@ func (world *World) EnsureOperation(
 		&op.Error,
 		&op.DueAt,
 		&op.LeaseUntil,
-		&op.IdempotencyKey,
+		&op.StepID,
+		&op.Attempt,
 	)
 	if err == nil {
 		if !workflowops.MatchesOperation(workflowops.Kind(kind), identity, fingerprint, input, request) {
@@ -891,7 +894,7 @@ func (world *World) EnsureOperation(
 	if _, e = tx.Exec(
 		ctx,
 		`INSERT INTO workflow_tasks
-		 (run_id, sequence, status, due_at, idempotency_key)
+			 (run_id, sequence, status, due_at, step_id)
 		 VALUES ($1, $2, $3, $4, $5)`,
 		request.RunID,
 		request.Sequence,
@@ -905,10 +908,10 @@ func (world *World) EnsureOperation(
 		return op, e
 	}
 	op = workflowops.Operation{
-		RunID:          request.RunID,
-		Sequence:       request.Sequence,
-		Status:         workflowops.StatusQueued,
-		IdempotencyKey: key,
+		RunID:    request.RunID,
+		StepID:   key,
+		Sequence: request.Sequence,
+		Status:   workflowops.StatusQueued,
 	}
 	if request.DueAt != nil {
 		op.DueAt = *request.DueAt
@@ -932,13 +935,13 @@ func (world *World) EnsureWait(
 		ctx,
 		`SELECT commands.kind, commands.fingerprint, commands.input,
 		        tasks.status, COALESCE(tasks.lease_token, ''), COALESCE(tasks.error, ''),
-		        COALESCE(tasks.lease_until, now()), tasks.idempotency_key
+		        COALESCE(tasks.lease_until, now()), tasks.step_id
 		 FROM workflow_commands commands
 		 JOIN workflow_tasks tasks USING (run_id, sequence)
 		 WHERE commands.run_id = $1 AND commands.sequence = $2`,
 		request.RunID,
 		request.Sequence,
-	).Scan(&kind, &fingerprint, &input, &op.Status, &op.Token, &op.Error, &op.LeaseUntil, &op.IdempotencyKey)
+	).Scan(&kind, &fingerprint, &input, &op.Status, &op.Token, &op.Error, &op.LeaseUntil, &op.StepID)
 	if err == nil {
 		matches := workflowops.MatchesWait(
 			workflowops.Kind(kind),
@@ -993,7 +996,7 @@ func (world *World) EnsureWait(
 	}
 	if _, err = tx.Exec(
 		ctx,
-		`INSERT INTO workflow_tasks (run_id, sequence, status, idempotency_key)
+		`INSERT INTO workflow_tasks (run_id, sequence, status, step_id)
 		 VALUES ($1, $2, $3, $4)`,
 		request.RunID,
 		request.Sequence,
@@ -1278,11 +1281,11 @@ func (world *World) waitOperation(ctx context.Context, runID string, sequence in
 	err := world.pool.QueryRow(
 		ctx,
 		`SELECT status, COALESCE(lease_token, ''), COALESCE(error, ''),
-		        COALESCE(due_at, now()), COALESCE(lease_until, now()), idempotency_key
+		        COALESCE(due_at, now()), COALESCE(lease_until, now()), step_id, attempt
 		 FROM workflow_tasks WHERE run_id = $1 AND sequence = $2`,
 		runID,
 		sequence,
-	).Scan(&op.Status, &op.Token, &op.Error, &op.DueAt, &op.LeaseUntil, &op.IdempotencyKey)
+	).Scan(&op.Status, &op.Token, &op.Error, &op.DueAt, &op.LeaseUntil, &op.StepID, &op.Attempt)
 	if err != nil {
 		return op, err
 	}
@@ -1340,6 +1343,36 @@ func (world *World) FinishOperation(
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (world *World) RetryOperation(
+	ctx context.Context,
+	op workflowops.Operation,
+	cause error,
+	due time.Time,
+) error {
+	command, err := world.pool.Exec(
+		ctx,
+		`UPDATE workflow_tasks
+		 SET status = $4, output = NULL, error = $5, due_at = $6,
+		     lease_until = NULL, lease_token = NULL, updated_at = now()
+		 WHERE run_id = $1 AND sequence = $2 AND lease_token = $3 AND status = $7`,
+		op.RunID,
+		op.Sequence,
+		op.Token,
+		string(workflowops.StatusRetryWait),
+		cause.Error(),
+		due,
+		string(workflowops.StatusRunning),
+	)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return workflowops.ErrLeaseLost
+	}
+	_, err = world.pool.Exec(ctx, `SELECT pg_notify('go_workflow_jobs', $1)`, op.RunID)
+	return err
 }
 
 func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (json.RawMessage, error) {

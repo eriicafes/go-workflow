@@ -288,6 +288,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		token,
 		string(workflowops.StatusQueued),
 		string(workflowops.StatusRunning),
+		string(workflowops.StatusRetryWait),
 	)
 	if err != nil {
 		return nil, err
@@ -570,11 +571,11 @@ func (world *World) EnsureOperation(
 		return workflowops.Operation{}, err
 	}
 	return workflowops.Operation{
-		RunID:          request.RunID,
-		Sequence:       request.Sequence,
-		Status:         workflowops.StatusQueued,
-		DueAt:          due,
-		IdempotencyKey: key,
+		RunID:    request.RunID,
+		Sequence: request.Sequence,
+		Status:   workflowops.StatusQueued,
+		DueAt:    due,
+		StepID:   key,
 	}, nil
 }
 
@@ -686,6 +687,32 @@ func (world *World) FinishOperation(
 	return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
 }
 
+func (world *World) RetryOperation(
+	ctx context.Context,
+	operation workflowops.Operation,
+	cause error,
+	due time.Time,
+) error {
+	result, err := world.eval(
+		ctx,
+		retryTaskScript,
+		[]string{world.taskKey(operation.RunID, operation.Sequence)},
+		operation.Token,
+		stamp(due),
+		cause.Error(),
+		stamp(time.Now()),
+		string(workflowops.StatusRunning),
+		string(workflowops.StatusRetryWait),
+	)
+	if err != nil {
+		return err
+	}
+	if result != "1" {
+		return workflowops.ErrLeaseLost
+	}
+	return world.enqueueTask(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence}, due)
+}
+
 func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage, error) {
 	ticker := time.NewTicker(world.config.PollInterval)
 	defer ticker.Stop()
@@ -791,12 +818,13 @@ func (world *World) operation(ctx context.Context, runID string, sequence int) (
 		return workflowops.Operation{}, fmt.Errorf("workflow: operation %d not found", sequence)
 	}
 	operation := workflowops.Operation{
-		RunID:          runID,
-		Sequence:       sequence,
-		Status:         workflowops.Status(task["status"]),
-		Token:          task["token"],
-		Error:          task["error"],
-		IdempotencyKey: task["idempotency"],
+		RunID:    runID,
+		StepID:   task["stepID"],
+		Sequence: sequence,
+		Status:   workflowops.Status(task["status"]),
+		Token:    task["token"],
+		Error:    task["error"],
+		Attempt:  readSequence(task["attempt"]),
 	}
 	if value := task["due"]; value != "" {
 		operation.DueAt, _ = time.Parse(time.RFC3339Nano, value)
@@ -1212,7 +1240,7 @@ redis.call('HSET', KEYS[2],
   'kind', ARGV[7], 'identity', ARGV[1], 'fingerprint', ARGV[1], 'input', ARGV[2])
 redis.call('HSET', KEYS[3],
   'run', ARGV[4], 'sequence', ARGV[5], 'status', ARGV[8],
-  'idempotency', ARGV[6], 'attempt', '0',
+  'stepID', ARGV[6], 'attempt', '0',
   'created', ARGV[3], 'updated', ARGV[3])
 return 1
 `
@@ -1235,7 +1263,7 @@ redis.call('HSET', KEYS[4],
   'kind', ARGV[10], 'identity', ARGV[4], 'fingerprint', ARGV[4], 'input', ARGV[6])
 redis.call('HSET', KEYS[5],
   'run', ARGV[7], 'sequence', '-1', 'status', ARGV[11],
-  'idempotency', ARGV[9], 'attempt', '0',
+  'stepID', ARGV[9], 'attempt', '0',
   'created', ARGV[8], 'updated', ARGV[8])
 return 1
 `
@@ -1252,7 +1280,7 @@ redis.call('HSET', KEYS[2],
   'kind', ARGV[3], 'identity', ARGV[4], 'fingerprint', ARGV[5], 'input', ARGV[6])
 redis.call('HSET', KEYS[3],
   'run', ARGV[7], 'sequence', ARGV[8], 'status', ARGV[12],
-  'idempotency', ARGV[9], 'attempt', '0',
+  'stepID', ARGV[9], 'attempt', '0',
   'created', ARGV[10], 'updated', ARGV[10])
 if ARGV[11] ~= '' then
   redis.call('HSET', KEYS[3], 'due', ARGV[11])
@@ -1272,7 +1300,7 @@ redis.call('HSET', KEYS[2],
   'kind', ARGV[3], 'identity', ARGV[3], 'fingerprint', ARGV[4], 'input', ARGV[5])
 redis.call('HSET', KEYS[3],
   'run', ARGV[6], 'sequence', ARGV[7], 'status', ARGV[10],
-  'idempotency', ARGV[8], 'attempt', '0',
+  'stepID', ARGV[8], 'attempt', '0',
   'created', ARGV[9], 'updated', ARGV[9])
 for index = 4, #KEYS do
   redis.call('SADD', KEYS[index], ARGV[11])
@@ -1297,7 +1325,7 @@ end
 local status = redis.call('HGET', KEYS[1], 'status')
 local due = redis.call('HGET', KEYS[1], 'due')
 local lease = redis.call('HGET', KEYS[1], 'lease')
-local ready = status == ARGV[4] and (not due or due == '' or due <= ARGV[1])
+local ready = (status == ARGV[4] or status == ARGV[6]) and (not due or due == '' or due <= ARGV[1])
 local expired = status == ARGV[5] and lease and lease < ARGV[1]
 if ready or expired then
   redis.call('HSET', KEYS[1], 'status', ARGV[5], 'token', ARGV[3], 'lease', ARGV[2])
@@ -1305,6 +1333,17 @@ if ready or expired then
   return 1
 end
 return 0
+`
+
+const retryTaskScript = `
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[5]
+  or redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'status', ARGV[6], 'error', ARGV[3],
+  'due', ARGV[2], 'updated', ARGV[4])
+redis.call('HDEL', KEYS[1], 'token', 'lease', 'output')
+return 1
 `
 
 const heartbeatScript = `

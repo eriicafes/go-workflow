@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -10,6 +11,47 @@ import (
 	"github.com/eriicafes/go-workflow/internal"
 	"github.com/eriicafes/go-workflow/workflowops"
 )
+
+// StepMetadata describes the current durable step attempt. Its zero value is
+// returned outside a step.
+type StepMetadata struct {
+	// ID is the step's durable idempotency key.
+	ID string
+	// Name is the stable identity of the executing step function.
+	Name string
+	// StartedAt is when this attempt began executing.
+	StartedAt time.Time
+	// Attempt starts at one and increases for every retry.
+	Attempt int
+}
+
+// GetStepMetadata returns metadata for the currently executing step attempt.
+// It returns the zero value outside a step.
+func GetStepMetadata(ctx context.Context) StepMetadata {
+	value, _ := ctx.Value(stepMetadataContextKey{}).(StepMetadata)
+	return value
+}
+
+// StepID returns the key assigned to the currently executing durable step. It
+// is empty outside a step.
+func StepID(ctx context.Context) string {
+	return GetStepMetadata(ctx).ID
+}
+
+// StepOptions configures one durable step. When omitted, a step durably retries
+// an arbitrary error up to three times. When several values are supplied, the
+// last value wins.
+type StepOptions struct {
+	// MaxRetries is the number of retries after the initial attempt.
+	MaxRetries int
+}
+
+func stepOptions(values []StepOptions) StepOptions {
+	if len(values) == 0 {
+		return StepOptions{MaxRetries: 3}
+	}
+	return values[len(values)-1]
+}
 
 // Cancel durably cancels unfinished tasks. Cancelling an already cancelled
 // task is a successful no-op.
@@ -301,6 +343,7 @@ func background[In, Out any](
 	identity string,
 	fn func(context.Context, In) (Out, error),
 	input In,
+	options StepOptions,
 ) Result[Out] {
 	sequence := execution.Sequence()
 	raw, err := json.Marshal(input)
@@ -329,9 +372,20 @@ func background[In, Out any](
 	}
 	if sequence == execution.Target() {
 		stepCtx := context.WithValue(ctx, stepContextKey{}, true)
-		stepCtx = context.WithValue(stepCtx, idempotencyContextKey{}, op.IdempotencyKey)
-		value, callErr := fn(stepCtx, input)
+		attemptCtx := context.WithValue(stepCtx, stepMetadataContextKey{}, StepMetadata{
+			ID:        op.StepID,
+			Name:      identity,
+			StartedAt: time.Now(),
+			Attempt:   max(op.Attempt, 1),
+		})
+		value, callErr := fn(attemptCtx, input)
 		if callErr != nil {
+			if due, retry := retryAt(callErr, options, op.Attempt); retry {
+				if err := execution.World().RetryOperation(ctx, op, callErr, due); err != nil {
+					panic(err)
+				}
+				panic(internal.ErrReplayComplete)
+			}
 			if err := execution.World().FinishOperation(ctx, op, nil, callErr); err != nil {
 				panic(err)
 			}
@@ -344,6 +398,55 @@ func background[In, Out any](
 		panic(internal.ErrReplayComplete)
 	}
 	return suspendingOperationResult[Out](execution.World(), execution.RunID(), sequence)
+}
+
+func retryAt(cause error, options StepOptions, attempt int) (time.Time, bool) {
+	var fatal fatalError
+	if errors.As(cause, &fatal) {
+		return time.Time{}, false
+	}
+	attempt = max(attempt, 1)
+	if attempt > options.MaxRetries {
+		return time.Time{}, false
+	}
+	var retryable retryableError
+	if errors.As(cause, &retryable) {
+		return time.Now().Add(max(retryable.after, 0)), true
+	}
+	return time.Now(), true
+}
+
+func now(execution *workflowops.Execution, ctx context.Context) Result[time.Time] {
+	sequence := execution.Sequence()
+	if execution.Target() >= 0 && sequence > execution.Target() {
+		panic(fmt.Errorf("workflow: history mismatch: replay passed command %d", execution.Target()))
+	}
+	input := json.RawMessage("null")
+	op, err := execution.World().EnsureOperation(ctx, execution.Lease(), workflowops.OperationRequest{
+		RunID:       execution.RunID(),
+		Sequence:    sequence,
+		Kind:        workflowops.KindNow,
+		Identity:    string(workflowops.KindNow),
+		Fingerprint: fingerprint(string(workflowops.KindNow), 3),
+		Input:       input,
+	})
+	if err != nil {
+		return errorResult[time.Time](err)
+	}
+	if op.Status == workflowops.StatusCompleted || op.Status == workflowops.StatusFailed {
+		return suspendingOperationResult[time.Time](execution.World(), execution.RunID(), sequence)
+	}
+	if sequence != execution.Target() {
+		return suspendingOperationResult[time.Time](execution.World(), execution.RunID(), sequence)
+	}
+	output, err := json.Marshal(time.Now())
+	if err != nil {
+		return errorResult[time.Time](err)
+	}
+	if err := execution.World().FinishOperation(ctx, op, output, nil); err != nil {
+		panic(err)
+	}
+	panic(internal.ErrReplayComplete)
 }
 
 // Writer returns replay-safe workflow output. It returns a writer that fails

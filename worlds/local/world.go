@@ -70,21 +70,22 @@ type runRecord struct {
 }
 
 type commandRecord struct {
-	Sequence       int                `json:"sequence"`
-	Kind           workflowops.Kind   `json:"kind"`
-	Identity       string             `json:"identity"`
-	Fingerprint    string             `json:"fingerprint"`
-	Input          json.RawMessage    `json:"input"`
-	Dependencies   []workflowops.Task `json:"dependencies,omitempty"`
-	ChildID        string             `json:"childId,omitempty"`
-	Status         workflowops.Status `json:"status"`
-	Output         json.RawMessage    `json:"output,omitempty"`
-	Error          string             `json:"error,omitempty"`
-	DueAt          time.Time          `json:"dueAt,omitempty"`
-	Token          string             `json:"token,omitempty"`
-	LeaseUntil     time.Time          `json:"leaseUntil,omitempty"`
-	Completion     uint64             `json:"completion,omitempty"`
-	IdempotencyKey string             `json:"idempotencyKey"`
+	Sequence     int                `json:"sequence"`
+	Kind         workflowops.Kind   `json:"kind"`
+	Identity     string             `json:"identity"`
+	Fingerprint  string             `json:"fingerprint"`
+	Input        json.RawMessage    `json:"input"`
+	Dependencies []workflowops.Task `json:"dependencies,omitempty"`
+	ChildID      string             `json:"childId,omitempty"`
+	Status       workflowops.Status `json:"status"`
+	Output       json.RawMessage    `json:"output,omitempty"`
+	Error        string             `json:"error,omitempty"`
+	DueAt        time.Time          `json:"dueAt,omitempty"`
+	Token        string             `json:"token,omitempty"`
+	LeaseUntil   time.Time          `json:"leaseUntil,omitempty"`
+	Completion   uint64             `json:"completion,omitempty"`
+	Attempt      int                `json:"attempt,omitempty"`
+	StepID       string             `json:"stepID"`
 }
 
 type eventRecord struct {
@@ -365,14 +366,14 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	command = commandRecord{
-		Sequence:       request.Sequence,
-		Kind:           workflowops.KindRun,
-		Identity:       request.Identity,
-		Fingerprint:    request.Fingerprint,
-		Input:          clone(request.Input),
-		ChildID:        child,
-		Status:         workflowops.StatusCompleted,
-		IdempotencyKey: request.RunID + ":" + strconv.Itoa(request.Sequence),
+		Sequence:    request.Sequence,
+		Kind:        workflowops.KindRun,
+		Identity:    request.Identity,
+		Fingerprint: request.Fingerprint,
+		Input:       clone(request.Input),
+		ChildID:     child,
+		Status:      workflowops.StatusCompleted,
+		StepID:      request.RunID + ":" + strconv.Itoa(request.Sequence),
 	}
 	if err := writeJSON(world.root, commandName(request.RunID, request.Sequence), command); err != nil {
 		return "", err
@@ -515,14 +516,14 @@ func (world *World) EnsureOperation(
 		due = *request.DueAt
 	}
 	command = commandRecord{
-		Sequence:       request.Sequence,
-		Kind:           request.Kind,
-		Identity:       request.Identity,
-		Fingerprint:    request.Fingerprint,
-		Input:          clone(request.Input),
-		Status:         workflowops.StatusQueued,
-		DueAt:          due,
-		IdempotencyKey: request.RunID + ":" + strconv.Itoa(request.Sequence),
+		Sequence:    request.Sequence,
+		Kind:        request.Kind,
+		Identity:    request.Identity,
+		Fingerprint: request.Fingerprint,
+		Input:       clone(request.Input),
+		Status:      workflowops.StatusQueued,
+		DueAt:       due,
+		StepID:      request.RunID + ":" + strconv.Itoa(request.Sequence),
 	}
 	if err := writeJSON(world.root, commandName(request.RunID, request.Sequence), command); err != nil {
 		return workflowops.Operation{}, err
@@ -565,14 +566,14 @@ func (world *World) EnsureWait(
 		return workflowops.Operation{}, workflowops.HistoryMissingError("wait command", request.Sequence)
 	}
 	command = commandRecord{
-		Sequence:       request.Sequence,
-		Kind:           request.Kind,
-		Identity:       string(request.Kind),
-		Fingerprint:    request.Fingerprint,
-		Input:          clone(input),
-		Dependencies:   append([]workflowops.Task(nil), request.Dependencies...),
-		Status:         workflowops.StatusWaiting,
-		IdempotencyKey: request.RunID + ":" + strconv.Itoa(request.Sequence),
+		Sequence:     request.Sequence,
+		Kind:         request.Kind,
+		Identity:     string(request.Kind),
+		Fingerprint:  request.Fingerprint,
+		Input:        clone(input),
+		Dependencies: append([]workflowops.Task(nil), request.Dependencies...),
+		Status:       workflowops.StatusWaiting,
+		StepID:       request.RunID + ":" + strconv.Itoa(request.Sequence),
 	}
 	if err := writeJSON(world.root, commandName(request.RunID, request.Sequence), command); err != nil {
 		return workflowops.Operation{}, err
@@ -637,6 +638,37 @@ func (world *World) FinishOperation(
 	world.records.Lock()
 	defer world.records.Unlock()
 	return world.finishCommand(value.RunID, value.Sequence, value.Token, output, cause)
+}
+
+func (world *World) RetryOperation(
+	_ context.Context,
+	value workflowops.Operation,
+	cause error,
+	due time.Time,
+) error {
+	if err := world.mustStart(); err != nil {
+		return err
+	}
+	world.records.Lock()
+	defer world.records.Unlock()
+	command, found, err := world.readCommand(value.RunID, value.Sequence)
+	if err != nil {
+		return err
+	}
+	if !found || command.Status != workflowops.StatusRunning || command.Token != value.Token {
+		return workflowops.ErrLeaseLost
+	}
+	command.Status = workflowops.StatusRetryWait
+	command.Output = nil
+	command.Error = cause.Error()
+	command.Token = ""
+	command.LeaseUntil = time.Time{}
+	command.DueAt = due
+	if err := writeJSON(world.root, commandName(value.RunID, value.Sequence), command); err != nil {
+		return err
+	}
+	world.signalLocked()
+	return nil
 }
 
 // CancelOperations marks unfinished tasks as cancelled. Repeating a cancellation is
@@ -884,11 +916,12 @@ func (world *World) dispatchReady() (time.Time, error) {
 			return time.Time{}, err
 		}
 		for _, command := range commands {
-			if command.Status != workflowops.StatusQueued {
+			if command.Status != workflowops.StatusQueued && command.Status != workflowops.StatusRetryWait {
 				continue
 			}
 			if (command.Kind == workflowops.KindSleep ||
-				command.Kind == workflowops.KindTimeout) &&
+				command.Kind == workflowops.KindTimeout ||
+				command.Status == workflowops.StatusRetryWait) &&
 				command.DueAt.After(now) {
 				if next.IsZero() || command.DueAt.Before(next) {
 					next = command.DueAt
@@ -941,11 +974,13 @@ func (world *World) claim(runID string, sequence int) (*workflowops.Lease, bool)
 		}, true
 	}
 	command, found, err := world.readCommand(runID, sequence)
-	if err != nil || !found || command.Status != workflowops.StatusQueued {
+	if err != nil || !found || (command.Status != workflowops.StatusQueued &&
+		(command.Status != workflowops.StatusRetryWait || command.DueAt.After(time.Now()))) {
 		return nil, false
 	}
 	command.Status = workflowops.StatusRunning
 	command.Token = token
+	command.Attempt++
 	command.LeaseUntil = time.Now().Add(world.LeaseDuration())
 	if writeJSON(world.root, commandName(runID, sequence), command) != nil {
 		return nil, false
@@ -1307,14 +1342,15 @@ func eventDir(id string) string {
 
 func commandOperation(runID string, command commandRecord) workflowops.Operation {
 	return workflowops.Operation{
-		RunID:          runID,
-		Sequence:       command.Sequence,
-		Status:         workflowops.Status(command.Status),
-		Token:          command.Token,
-		Error:          command.Error,
-		IdempotencyKey: command.IdempotencyKey,
-		DueAt:          command.DueAt,
-		LeaseUntil:     command.LeaseUntil,
+		RunID:      runID,
+		StepID:     command.StepID,
+		Sequence:   command.Sequence,
+		Status:     workflowops.Status(command.Status),
+		Token:      command.Token,
+		Error:      command.Error,
+		Attempt:    command.Attempt,
+		DueAt:      command.DueAt,
+		LeaseUntil: command.LeaseUntil,
 	}
 }
 

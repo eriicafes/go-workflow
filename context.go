@@ -9,7 +9,7 @@ import (
 
 type clientContextKey struct{}
 type stepContextKey struct{}
-type idempotencyContextKey struct{}
+type stepMetadataContextKey struct{}
 
 // NewContext attaches client to ctx so application code can start, retrieve,
 // and cancel durable runs.
@@ -41,11 +41,4 @@ func executionFromContext(ctx context.Context) (*workflowops.Execution, bool) {
 		return nil, false
 	}
 	return workflowops.ExecutionFromContext(ctx)
-}
-
-// IdempotencyKey returns the key assigned to the currently executing durable
-// step. It is empty outside a step.
-func IdempotencyKey(ctx context.Context) string {
-	value, _ := ctx.Value(idempotencyContextKey{}).(string)
-	return value
 }

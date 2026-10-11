@@ -86,13 +86,13 @@ func merge(key map[string]ddb.AttributeValue, values map[string]string) map[stri
 
 func taskFields(runID string, sequence int, now time.Time) map[string]string {
 	return map[string]string{
-		"run":         runID,
-		"sequence":    strconv.Itoa(sequence),
-		"status":      string(workflowops.StatusQueued),
-		"idempotency": runID + ":" + strconv.Itoa(sequence),
-		"attempt":     "0",
-		"created":     stamp(now),
-		"updated":     stamp(now),
+		"run":      runID,
+		"sequence": strconv.Itoa(sequence),
+		"status":   string(workflowops.StatusQueued),
+		"stepID":   runID + ":" + strconv.Itoa(sequence),
+		"attempt":  "0",
+		"created":  stamp(now),
+		"updated":  stamp(now),
 	}
 }
 
