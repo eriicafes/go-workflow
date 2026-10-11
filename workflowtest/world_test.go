@@ -206,6 +206,46 @@ func TestNowReplaysBeforeATargetedStep(t *testing.T) {
 	}
 }
 
+type emptyDependenciesInput struct{}
+type emptyDependenciesOutput struct{}
+
+func (emptyDependenciesInput) Workflow(emptyDependenciesOutput) {}
+
+func emptyDependenciesWorkflow(ctx context.Context, _ emptyDependenciesInput) (emptyDependenciesOutput, error) {
+	if err := workflow.Join(ctx); err != nil {
+		return emptyDependenciesOutput{}, err
+	}
+	if err := workflow.JoinSettled(ctx); err != nil {
+		return emptyDependenciesOutput{}, err
+	}
+	if err := workflow.Cancel(ctx); err != nil {
+		return emptyDependenciesOutput{}, err
+	}
+	if winner, err := workflow.Select(ctx); winner != nil || err != nil {
+		return emptyDependenciesOutput{}, errors.New("unexpected empty select result")
+	}
+	if winner, err := workflow.SelectOk(ctx); winner != nil || err != nil {
+		return emptyDependenciesOutput{}, errors.New("unexpected empty select-ok result")
+	}
+	return emptyDependenciesOutput{}, nil
+}
+
+func TestEmptyDependenciesReturnImmediately(t *testing.T) {
+	world := workflowtest.New(workflow.Use(emptyDependenciesWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(
+		workflow.NewContext(context.Background(), world),
+		emptyDependenciesInput{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorldSchedulesTimersWithWallClockTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		world := workflowtest.New(workflow.Use(sleepWorkflow))

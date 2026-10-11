@@ -54,10 +54,10 @@ func stepOptions(values []StepOptions) StepOptions {
 }
 
 // Cancel durably cancels unfinished tasks. Cancelling an already cancelled
-// task is a successful no-op.
+// task or supplying no tasks is a successful no-op.
 func Cancel(ctx context.Context, tasks ...Task) error {
 	dependencies, err := dependenciesFor(tasks)
-	if err != nil {
+	if err != nil || len(dependencies) == 0 {
 		return err
 	}
 	if execution, active := executionFromContext(ctx); active {
@@ -129,14 +129,31 @@ func Map[In, Out any](
 // All maps inputs to durable background steps, then waits for their first
 // failure or for every result to complete. On success, it returns every output
 // in input order. On any error, it returns a nil output slice. Unfinished
-// steps continue running after a fail-fast dependency error.
+// mapped steps are cancelled after a fail-fast dependency error.
 func All[In, Out any](
 	ctx context.Context,
 	step func(context.Context, In) (Out, error),
 	inputs []In,
 ) ([]Out, error) {
 	results := Map(ctx, step, inputs)
-	if err := join(ctx, Tasks(results), false, fingerprint(string(workflowops.KindJoin), 2)); err != nil {
+	tasks := Tasks(results)
+	err := join(ctx, tasks, false, fingerprint(string(workflowops.KindJoin), 2))
+	if err != nil {
+		operations := make([]workflowops.Task, len(tasks))
+		for index, task := range tasks {
+			operation := task.Task()
+			if operation == nil {
+				return nil, errors.Join(err, fmt.Errorf("workflow: task %d is not durable", index))
+			}
+			operations[index] = *operation
+		}
+		execution, active := executionFromContext(ctx)
+		if !active {
+			return nil, errors.Join(err, ErrNoWorkflow)
+		}
+		if cancelErr := execution.World().CancelOperations(ctx, operations...); cancelErr != nil {
+			return nil, errors.Join(err, cancelErr)
+		}
 		return nil, err
 	}
 	values := make([]Out, len(results))
@@ -151,13 +168,15 @@ func All[In, Out any](
 }
 
 // Join waits for every supplied durable task. It returns the first terminal
-// failure in completion order, without waiting for unfinished tasks.
+// failure in completion order, without waiting for unfinished tasks. With no
+// tasks, it returns nil.
 func Join(ctx context.Context, tasks ...Task) error {
 	return join(ctx, tasks, false, fingerprint(string(workflowops.KindJoin), 2))
 }
 
 // JoinSettled waits until every supplied durable task has completed. Unlike
-// Join, failures in the supplied tasks do not cause the join to fail.
+// Join, failures in the supplied tasks do not cause the join to fail. With no
+// tasks, it returns nil.
 func JoinSettled(ctx context.Context, tasks ...Task) error {
 	return join(ctx, tasks, true, fingerprint(string(workflowops.KindJoinSettled), 2))
 }
@@ -168,7 +187,7 @@ func join(ctx context.Context, tasks []Task, settled bool, fingerprint string) e
 		return ErrNoWorkflow
 	}
 	dependencies, err := dependenciesFor(tasks)
-	if err != nil {
+	if err != nil || len(dependencies) == 0 {
 		return err
 	}
 	kind := workflowops.KindJoin
@@ -196,14 +215,15 @@ func join(ctx context.Context, tasks []Task, settled bool, fingerprint string) e
 }
 
 // Select waits for the first durable task to complete and returns that exact
-// task with its terminal error.
+// task with its terminal error. With no tasks, it returns nil, nil.
 func Select(ctx context.Context, tasks ...Task) (Task, error) {
 	return selectTask(ctx, workflowops.KindSelect, tasks...)
 }
 
 // SelectOk waits for the first successfully completed durable task. It ignores
 // failures while another task can still succeed, and returns the earliest
-// durable failure only when every task has failed.
+// durable failure only when every task has failed. With no tasks, it returns
+// nil, nil.
 func SelectOk(ctx context.Context, tasks ...Task) (Task, error) {
 	return selectTask(ctx, workflowops.KindSelectOk, tasks...)
 }
@@ -213,11 +233,8 @@ func selectTask(ctx context.Context, kind workflowops.Kind, tasks ...Task) (Task
 	if !active {
 		return nil, ErrNoWorkflow
 	}
-	if len(tasks) == 0 {
-		return nil, fmt.Errorf("workflow: %s requires a task", kind)
-	}
 	dependencies, err := dependenciesFor(tasks)
-	if err != nil {
+	if err != nil || len(dependencies) == 0 {
 		return nil, err
 	}
 	sequence := execution.Sequence()

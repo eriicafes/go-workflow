@@ -80,19 +80,24 @@ func TestWorldRunsStepsAndNestedWorkflows(t *testing.T) {
 }
 
 type delayedInput struct {
-	Value   int
-	Delay   time.Duration
-	Fail    bool
-	Failure string
+	Value    int
+	Delay    time.Duration
+	Fail     bool
+	Terminal bool
+	Failure  string
 }
 
 func delayed(_ context.Context, input delayedInput) (int, error) {
 	time.Sleep(input.Delay)
 	if input.Fail {
+		cause := errors.New("failed step")
 		if input.Failure != "" {
-			return 0, errors.New(input.Failure)
+			cause = errors.New(input.Failure)
 		}
-		return 0, errors.New("failed step")
+		if input.Terminal {
+			return 0, workflow.FatalError(cause)
+		}
+		return 0, cause
 	}
 	return input.Value, nil
 }
@@ -134,7 +139,7 @@ func allFailure(ctx context.Context, _ allInput) (allOutput, error) {
 	results, err := workflow.All(ctx, delayed, []delayedInput{
 		{Value: 1, Delay: 250 * time.Millisecond},
 		{Delay: 20 * time.Millisecond, Fail: true, Failure: "slow failure"},
-		{Delay: 10 * time.Millisecond, Fail: true, Failure: "fast failure"},
+		{Delay: 10 * time.Millisecond, Fail: true, Terminal: true, Failure: "fast failure"},
 	})
 	message := ""
 	if err != nil {
