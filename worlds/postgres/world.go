@@ -919,6 +919,87 @@ func (world *World) EnsureOperation(
 	return op, nil
 }
 
+// RecordOperation creates a completed replay command. On a repeated call, it
+// validates request against the stored command, does not overwrite the
+// persisted output, and returns it.
+func (world *World) RecordOperation(
+	ctx context.Context,
+	lease *workflowops.Lease,
+	request workflowops.OperationRequest,
+	output json.RawMessage,
+) (json.RawMessage, error) {
+	if !allowsCreate(lease, request.RunID) {
+		return nil, workflowops.ErrLeaseLost
+	}
+	tx, err := world.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err = checkLease(ctx, tx, lease); err != nil {
+		return nil, err
+	}
+
+	var kind, identity, fingerprint, status string
+	var input, existingOutput []byte
+	err = tx.QueryRow(
+		ctx,
+		`SELECT commands.kind, commands.identity, commands.fingerprint, commands.input,
+		        tasks.status, tasks.output
+		 FROM workflow_commands commands
+		 JOIN workflow_tasks tasks USING (run_id, sequence)
+		 WHERE commands.run_id = $1 AND commands.sequence = $2`,
+		request.RunID,
+		request.Sequence,
+	).Scan(&kind, &identity, &fingerprint, &input, &status, &existingOutput)
+	if err == nil {
+		if !workflowops.MatchesOperation(workflowops.Kind(kind), identity, fingerprint, input, request) ||
+			workflowops.Status(status) != workflowops.StatusCompleted {
+			return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return json.RawMessage(existingOutput), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	key := fmt.Sprintf("%s:%d", request.RunID, request.Sequence)
+	if _, err = tx.Exec(
+		ctx,
+		`INSERT INTO workflow_commands
+		 (run_id, sequence, kind, identity, fingerprint, input, input_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, md5($6::text))`,
+		request.RunID,
+		request.Sequence,
+		string(request.Kind),
+		request.Identity,
+		request.Fingerprint,
+		request.Input,
+	); err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(
+		ctx,
+		`INSERT INTO workflow_tasks
+		 (run_id, sequence, status, output, step_id)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		request.RunID,
+		request.Sequence,
+		string(workflowops.StatusCompleted),
+		output,
+		key,
+	); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return append(json.RawMessage(nil), output...), nil
+}
+
 func (world *World) EnsureWait(
 	ctx context.Context,
 	lease *workflowops.Lease,

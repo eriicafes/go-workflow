@@ -579,6 +579,66 @@ func (world *World) EnsureOperation(
 	}, nil
 }
 
+// RecordOperation creates a completed replay command. On a repeated call, it
+// validates request against the stored command, does not overwrite the
+// persisted output, and returns it.
+func (world *World) RecordOperation(
+	ctx context.Context,
+	lease *workflowops.Lease,
+	request workflowops.OperationRequest,
+	output json.RawMessage,
+) (json.RawMessage, error) {
+	if !allowsCreate(lease, request.RunID) {
+		return nil, workflowops.ErrLeaseLost
+	}
+	key := request.RunID + ":" + strconv.Itoa(request.Sequence)
+	created, err := world.eval(
+		ctx,
+		recordOperationScript,
+		[]string{
+			world.taskKey(lease.ID, lease.Sequence),
+			world.commandKey(request.RunID, request.Sequence),
+			world.taskKey(request.RunID, request.Sequence),
+		},
+		lease.Token,
+		string(workflowops.StatusRunning),
+		string(request.Kind),
+		request.Identity,
+		request.Fingerprint,
+		string(request.Input),
+		request.RunID,
+		strconv.Itoa(request.Sequence),
+		key,
+		string(output),
+		stamp(time.Now()),
+		string(workflowops.StatusCompleted),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if created == "-1" {
+		return nil, world.validateLease(ctx, lease)
+	}
+	if created != "0" && created != "1" {
+		return nil, fmt.Errorf("workflow/vercel: record operation returned %q", created)
+	}
+	command, err := world.hash(ctx, world.commandKey(request.RunID, request.Sequence))
+	if err != nil {
+		return nil, err
+	}
+	if !matchesOperation(command, request) {
+		return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+	}
+	task, err := world.hash(ctx, world.taskKey(request.RunID, request.Sequence))
+	if err != nil {
+		return nil, err
+	}
+	if workflowops.Status(task["status"]) != workflowops.StatusCompleted {
+		return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+	}
+	return json.RawMessage(task["output"]), nil
+}
+
 func (world *World) EnsureWait(
 	ctx context.Context,
 	lease *workflowops.Lease,
@@ -1285,6 +1345,23 @@ redis.call('HSET', KEYS[3],
 if ARGV[11] ~= '' then
   redis.call('HSET', KEYS[3], 'due', ARGV[11])
 end
+return 1
+`
+
+const recordOperationScript = `
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then
+  return -1
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  return 0
+end
+redis.call('HSET', KEYS[2],
+  'kind', ARGV[3], 'identity', ARGV[4], 'fingerprint', ARGV[5], 'input', ARGV[6])
+redis.call('HSET', KEYS[3],
+  'run', ARGV[7], 'sequence', ARGV[8], 'status', ARGV[12],
+  'stepID', ARGV[9], 'output', ARGV[10], 'attempt', '0',
+  'created', ARGV[11], 'updated', ARGV[11])
 return 1
 `
 

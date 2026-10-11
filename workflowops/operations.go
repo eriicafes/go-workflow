@@ -63,6 +63,10 @@ type World interface {
 	CleanupTimer(context.Context, Task) error
 	// EnsureOperation creates or verifies one deterministic replay command.
 	EnsureOperation(context.Context, *Lease, OperationRequest) (Operation, error)
+	// RecordOperation creates a completed replay command. On a repeated call,
+	// it validates request against the stored command, does not overwrite the
+	// persisted output, and returns it.
+	RecordOperation(context.Context, *Lease, OperationRequest, json.RawMessage) (json.RawMessage, error)
 	// EnsureWait creates or verifies a durable dependency barrier. Worlds resolve
 	// the barrier when its referenced tasks become terminal. The barrier itself
 	// is not executable worker work.

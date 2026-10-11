@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/internal"
@@ -15,7 +14,6 @@ import (
 // Engine replays workflow code for a leased root run or operation task.
 type Engine struct {
 	world   World
-	mu      sync.RWMutex
 	runners RunnerSet
 }
 
@@ -28,9 +26,7 @@ func NewEngine(world World, runners RunnerSet) *Engine {
 
 // Execute processes one World-issued lease.
 func (engine *Engine) Execute(ctx context.Context, leased *Lease) error {
-	engine.mu.RLock()
 	runner, ok := engine.runners[leased.Identity]
-	engine.mu.RUnlock()
 	if !ok {
 		return engine.world.FailRun(ctx, leased, fmt.Errorf("%w: %s", ErrUnknownWorkflow, leased.Identity))
 	}

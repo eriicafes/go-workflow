@@ -286,6 +286,51 @@ func (world *World) EnsureOperation(ctx context.Context, lease *workflowops.Leas
 	return op, nil
 }
 
+// RecordOperation creates a completed replay command. On a repeated call, it
+// validates request against the stored command, does not overwrite the
+// persisted output, and returns it.
+func (world *World) RecordOperation(
+	ctx context.Context,
+	lease *workflowops.Lease,
+	request workflowops.OperationRequest,
+	output json.RawMessage,
+) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !allowsCreate(lease, request.RunID) {
+		return nil, workflowops.ErrLeaseLost
+	}
+
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	run, found := world.runs[request.RunID]
+	if !found || run.status != workflowops.StatusRunning || run.token != lease.Token {
+		return nil, workflowops.ErrLeaseLost
+	}
+	commands := world.commandsForLocked(request.RunID)
+	if existing, found := commands[request.Sequence]; found {
+		if !matchesOperation(existing, request) ||
+			existing.childID != "" ||
+			existing.status != workflowops.StatusCompleted {
+			return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+		}
+		return clone(existing.output), nil
+	}
+	commands[request.Sequence] = &command{
+		sequence:    request.Sequence,
+		kind:        request.Kind,
+		identity:    request.Identity,
+		fingerprint: request.Fingerprint,
+		input:       clone(request.Input),
+		status:      workflowops.StatusCompleted,
+		output:      clone(output),
+		completion:  world.nextCompletionLocked(),
+	}
+	world.signalLocked()
+	return clone(output), nil
+}
+
 // EnsureWait creates or validates a durable dependency barrier.
 func (world *World) EnsureWait(ctx context.Context, lease *workflowops.Lease, request workflowops.WaitRequest) (workflowops.Operation, error) {
 	if err := ctx.Err(); err != nil {

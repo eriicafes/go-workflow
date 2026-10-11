@@ -532,6 +532,68 @@ func (world *World) EnsureOperation(
 	return commandOperation(request.RunID, command), nil
 }
 
+// RecordOperation creates a completed replay command. On a repeated call, it
+// validates request against the stored command, does not overwrite the
+// persisted output, and returns it.
+func (world *World) RecordOperation(
+	ctx context.Context,
+	lease *workflowops.Lease,
+	request workflowops.OperationRequest,
+	output json.RawMessage,
+) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := world.mustStart(); err != nil {
+		return nil, err
+	}
+	if !allowsCreate(lease, request.RunID) {
+		return nil, workflowops.ErrLeaseLost
+	}
+
+	world.records.Lock()
+	defer world.records.Unlock()
+	run, err := world.readRun(request.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if run.Status != workflowops.StatusRunning || run.Token != lease.Token {
+		return nil, workflowops.ErrLeaseLost
+	}
+	command, found, err := world.readCommand(request.RunID, request.Sequence)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if !matchesOperation(command, request) ||
+			command.ChildID != "" ||
+			command.Status != workflowops.StatusCompleted {
+			return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+		}
+		return clone(command.Output), nil
+	}
+	completion, err := world.nextCompletion()
+	if err != nil {
+		return nil, err
+	}
+	command = commandRecord{
+		Sequence:    request.Sequence,
+		Kind:        request.Kind,
+		Identity:    request.Identity,
+		Fingerprint: request.Fingerprint,
+		Input:       clone(request.Input),
+		Status:      workflowops.StatusCompleted,
+		Output:      clone(output),
+		Completion:  completion,
+		StepID:      request.RunID + ":" + strconv.Itoa(request.Sequence),
+	}
+	if err := writeJSON(world.root, commandName(request.RunID, request.Sequence), command); err != nil {
+		return nil, err
+	}
+	world.signal()
+	return clone(output), nil
+}
+
 func (world *World) EnsureWait(
 	ctx context.Context,
 	lease *workflowops.Lease,

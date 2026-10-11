@@ -665,6 +665,67 @@ func (world *World) EnsureOperation(
 	}, nil
 }
 
+// RecordOperation creates a completed replay command. On a repeated call, it
+// validates request against the stored command, does not overwrite the
+// persisted output, and returns it.
+func (world *World) RecordOperation(
+	ctx context.Context,
+	lease *workflowops.Lease,
+	request workflowops.OperationRequest,
+	output json.RawMessage,
+) (json.RawMessage, error) {
+	if !allowsCreate(lease, request.RunID) {
+		return nil, workflowops.ErrLeaseLost
+	}
+	if err := world.validateLease(ctx, lease); err != nil {
+		return nil, err
+	}
+	command, found, err := world.item(ctx, commandKey(request.RunID, request.Sequence))
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if !matchesOperation(command, request) {
+			return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+		}
+		task, found, err := world.item(ctx, taskKey(request.RunID, request.Sequence))
+		if err != nil {
+			return nil, err
+		}
+		if !found || workflowops.Status(task["status"]) != workflowops.StatusCompleted {
+			return nil, workflowops.HistoryMismatchError("native operation", request.Sequence)
+		}
+		return json.RawMessage(task["output"]), nil
+	}
+
+	now := time.Now()
+	task := taskFields(request.RunID, request.Sequence, now)
+	task["status"] = string(workflowops.StatusCompleted)
+	task["output"] = string(output)
+	_, err = world.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		TransactItems: []ddb.TransactWriteItem{
+			leaseCheck(world.config.TableName, lease),
+			put(world.config.TableName, commandKey(request.RunID, request.Sequence), map[string]string{
+				"kind":        string(request.Kind),
+				"identity":    request.Identity,
+				"fingerprint": request.Fingerprint,
+				"input":       string(request.Input),
+			}),
+			put(world.config.TableName, taskKey(request.RunID, request.Sequence), task),
+		},
+	})
+	if err != nil {
+		if conditional(err) {
+			if err := world.validateLease(ctx, lease); err != nil {
+				return nil, err
+			}
+			return world.RecordOperation(ctx, lease, request, output)
+		}
+		return nil, err
+	}
+	return append(json.RawMessage(nil), output...), nil
+}
+
 func (world *World) EnsureWait(
 	ctx context.Context,
 	lease *workflowops.Lease,

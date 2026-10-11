@@ -416,37 +416,57 @@ func retryAt(cause error, options StepOptions, attempt int) (time.Time, bool) {
 	return time.Now(), true
 }
 
-func now(execution *workflowops.Execution, ctx context.Context) Result[time.Time] {
+func now(execution *workflowops.Execution, ctx context.Context) (time.Time, error) {
+	var zero time.Time
 	sequence := execution.Sequence()
 	if execution.Target() >= 0 && sequence > execution.Target() {
 		panic(fmt.Errorf("workflow: history mismatch: replay passed command %d", execution.Target()))
 	}
-	input := json.RawMessage("null")
-	op, err := execution.World().EnsureOperation(ctx, execution.Lease(), workflowops.OperationRequest{
+	request := workflowops.OperationRequest{
 		RunID:       execution.RunID(),
 		Sequence:    sequence,
 		Kind:        workflowops.KindNow,
 		Identity:    string(workflowops.KindNow),
 		Fingerprint: fingerprint(string(workflowops.KindNow), 3),
-		Input:       input,
-	})
+		Input:       json.RawMessage("null"),
+	}
+	if execution.Target() != workflowops.RootSequence {
+		if sequence == execution.Target() {
+			return zero, fmt.Errorf("workflow: history mismatch: now command cannot be targeted")
+		}
+		op, err := execution.World().EnsureOperation(ctx, execution.Lease(), request)
+		if err != nil {
+			return zero, err
+		}
+		if op.Status != workflowops.StatusCompleted {
+			return zero, fmt.Errorf("workflow: history mismatch: now command %d is %s", sequence, op.Status)
+		}
+		raw, err := execution.World().WaitOperation(ctx, workflowops.Task{
+			RunID:    execution.RunID(),
+			Sequence: sequence,
+		})
+		if err != nil {
+			return zero, err
+		}
+		var value time.Time
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return zero, fmt.Errorf("workflow: decode now output: %w", err)
+		}
+		return value, nil
+	}
+	candidate, err := json.Marshal(time.Now())
 	if err != nil {
-		return errorResult[time.Time](err)
+		return zero, err
 	}
-	if op.Status == workflowops.StatusCompleted || op.Status == workflowops.StatusFailed {
-		return suspendingOperationResult[time.Time](execution.World(), execution.RunID(), sequence)
-	}
-	if sequence != execution.Target() {
-		return suspendingOperationResult[time.Time](execution.World(), execution.RunID(), sequence)
-	}
-	output, err := json.Marshal(time.Now())
+	raw, err := execution.World().RecordOperation(ctx, execution.Lease(), request, candidate)
 	if err != nil {
-		return errorResult[time.Time](err)
+		return zero, err
 	}
-	if err := execution.World().FinishOperation(ctx, op, output, nil); err != nil {
-		panic(err)
+	var value time.Time
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return zero, fmt.Errorf("workflow: decode now output: %w", err)
 	}
-	panic(internal.ErrReplayComplete)
+	return value, nil
 }
 
 // Writer returns replay-safe workflow output. It returns a writer that fails

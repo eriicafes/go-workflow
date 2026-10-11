@@ -166,6 +166,46 @@ func TestNowRecordsTimeAsDurableValue(t *testing.T) {
 	}
 }
 
+type nowThenStepInput struct {
+	Value int
+}
+
+type nowThenStepOutput struct {
+	Now   time.Time
+	Value int
+}
+
+func (nowThenStepInput) Workflow(nowThenStepOutput) {}
+
+func nowThenStepWorkflow(ctx context.Context, input nowThenStepInput) (nowThenStepOutput, error) {
+	value, err := workflow.Now(ctx)
+	if err != nil {
+		return nowThenStepOutput{}, err
+	}
+	doubled, err := workflow.Step(ctx, double, input.Value)
+	return nowThenStepOutput{Now: value, Value: doubled}, err
+}
+
+func TestNowReplaysBeforeATargetedStep(t *testing.T) {
+	world := workflowtest.New(workflow.Use(nowThenStepWorkflow))
+	defer world.Close()
+
+	run, err := workflow.Start(
+		workflow.NewContext(context.Background(), world),
+		nowThenStepInput{Value: 21},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Now.IsZero() || output.Value != 42 {
+		t.Fatalf("output = %#v, want a time and 42", output)
+	}
+}
+
 func TestWorldSchedulesTimersWithWallClockTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		world := workflowtest.New(workflow.Use(sleepWorkflow))

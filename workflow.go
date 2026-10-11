@@ -224,7 +224,7 @@ func Now(ctx context.Context) (time.Time, error) {
 	if !active {
 		return time.Time{}, ErrNoWorkflow
 	}
-	return now(execution, ctx).Value(ctx)
+	return now(execution, ctx)
 }
 
 // Timeout starts a durable timer that cancels its containing workflow when it
