@@ -305,6 +305,9 @@ func (world *World) CreateRun(
 	if !allowsCreate(lease, request.RunID) {
 		return "", workflowops.HistoryMissingError("nested run command", request.Sequence)
 	}
+	if err := checkLease(ctx, tx, lease); err != nil {
+		return "", err
+	}
 	childID, err = workflowops.NewRunID()
 	if err != nil {
 		return "", err
@@ -372,10 +375,16 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 	row := world.pool.QueryRow(
 		ctx,
 		`WITH candidate AS (
-			SELECT run_id, sequence
+		SELECT run_id, sequence
 			FROM workflow_tasks
-			WHERE (status = $3 AND (due_at IS NULL OR due_at <= now()))
-			   OR (status = $4 AND lease_until < now())
+			WHERE (
+				(status = $3 AND (due_at IS NULL OR due_at <= now()))
+				OR (status = $4 AND lease_until < now())
+			)
+			AND EXISTS (
+				  SELECT 1 FROM go_workflow_runs
+				  WHERE id = workflow_tasks.run_id AND status <> $5
+			  )
 			ORDER BY created_at
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
@@ -396,6 +405,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 		world.lease.Seconds(),
 		string(workflowops.StatusQueued),
 		string(workflowops.StatusRunning),
+		string(workflowops.StatusCancelled),
 	)
 	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
@@ -406,8 +416,9 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 	return &run, nil
 }
 
-// ClaimTask claims one known queue-delivered task. A completed or currently
-// leased task returns nil so duplicate queue delivery is safe to acknowledge.
+// ClaimTask claims one known queue-delivered task. A cancelled task returns
+// ErrCancelled. A completed or currently leased task returns nil so duplicate
+// queue delivery is safe to acknowledge.
 func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.Lease, error) {
 	token, err := workflowops.NewRunID()
 	if err != nil {
@@ -425,6 +436,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		WHERE tasks.run_id = $2
 		  AND tasks.sequence = $3
 		  AND runs.id = tasks.run_id
+		  AND runs.status <> $7
 		  AND (
 			(tasks.status = $6 AND (tasks.due_at IS NULL OR tasks.due_at <= now()))
 			OR (tasks.status = $5 AND tasks.lease_until < now())
@@ -437,9 +449,27 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		world.lease.Seconds(),
 		string(workflowops.StatusRunning),
 		string(workflowops.StatusQueued),
+		string(workflowops.StatusCancelled),
 	)
 	var run workflowops.Lease
 	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
+		var taskStatus, runStatus string
+		err = world.pool.QueryRow(
+			ctx,
+			`SELECT tasks.status, runs.status
+			 FROM workflow_tasks tasks
+			 JOIN go_workflow_runs runs ON runs.id = tasks.run_id
+			 WHERE tasks.run_id = $1 AND tasks.sequence = $2`,
+			task.RunID,
+			task.Sequence,
+		).Scan(&taskStatus, &runStatus)
+		if err == nil && (workflowops.Status(taskStatus) == workflowops.StatusCancelled ||
+			workflowops.Status(runStatus) == workflowops.StatusCancelled) {
+			return nil, workflowops.ErrCancelled
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -463,6 +493,19 @@ func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.Lease) er
 		return err
 	}
 	if command.RowsAffected() != 1 {
+		var status string
+		err = world.pool.QueryRow(
+			ctx,
+			"SELECT status FROM workflow_tasks WHERE run_id = $1 AND sequence = $2",
+			run.ID,
+			run.Sequence,
+		).Scan(&status)
+		if err == nil && workflowops.Status(status) == workflowops.StatusCancelled {
+			return workflowops.ErrCancelled
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		return workflowops.ErrLeaseLost
 	}
 	return nil
@@ -583,15 +626,38 @@ func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.T
 	pending := append([]workflowops.Task(nil), tasks...)
 	cleanup := make([]workflowops.Task, 0, len(tasks))
 	visitedRoots := make(map[string]bool)
+	visitedTasks := make(map[workflowops.Task]bool)
 	for len(pending) > 0 {
 		task := pending[0]
 		pending = pending[1:]
+		if visitedTasks[task] {
+			continue
+		}
+		visitedTasks[task] = true
 
 		if task.Sequence == workflowops.RootSequence {
 			if visitedRoots[task.RunID] {
 				continue
 			}
 			visitedRoots[task.RunID] = true
+			var status string
+			err := tx.QueryRow(
+				ctx,
+				"SELECT status FROM workflow_tasks WHERE run_id = $1 AND sequence = $2 FOR UPDATE",
+				task.RunID,
+				task.Sequence,
+			).Scan(&status)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return workflowops.ErrRunNotFound
+			}
+			if err != nil {
+				return err
+			}
+			all, err := runTasks(ctx, tx, task.RunID)
+			if err != nil {
+				return err
+			}
+			pending = append(pending, all...)
 			children, err := childRuns(ctx, tx, task.RunID)
 			if err != nil {
 				return err
@@ -666,6 +732,23 @@ func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.T
 		}
 	}
 	return nil
+}
+
+func runTasks(ctx context.Context, tx pgx.Tx, runID string) ([]workflowops.Task, error) {
+	rows, err := tx.Query(ctx, "SELECT sequence FROM workflow_tasks WHERE run_id = $1", runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []workflowops.Task
+	for rows.Next() {
+		var sequence int
+		if err := rows.Scan(&sequence); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, workflowops.Task{RunID: runID, Sequence: sequence})
+	}
+	return tasks, rows.Err()
 }
 
 func childRuns(ctx context.Context, tx pgx.Tx, runID string) ([]string, error) {
@@ -782,6 +865,9 @@ func (world *World) EnsureOperation(
 		return op, e
 	}
 	defer tx.Rollback(ctx)
+	if e = checkLease(ctx, tx, lease); e != nil {
+		return op, e
+	}
 	command, e := tx.Exec(
 		ctx,
 		`INSERT INTO workflow_commands
@@ -880,6 +966,9 @@ func (world *World) EnsureWait(
 		return op, err
 	}
 	defer tx.Rollback(ctx)
+	if err = checkLease(ctx, tx, lease); err != nil {
+		return op, err
+	}
 	key := fmt.Sprintf("%s:%d", request.RunID, request.Sequence)
 	command, err := tx.Exec(
 		ctx,
@@ -1332,6 +1421,34 @@ func (world *World) Events(ctx context.Context, runID string, after int64) ([]wo
 
 func allowsCreate(lease *workflowops.Lease, runID string) bool {
 	return lease != nil && lease.ID == runID && lease.Sequence == workflowops.RootSequence
+}
+
+// checkLease serializes command creation with cancellation. A root cancellation
+// takes the same row lock before it discovers and cancels descendant work.
+func checkLease(ctx context.Context, tx pgx.Tx, lease *workflowops.Lease) error {
+	var status, token string
+	err := tx.QueryRow(
+		ctx,
+		`SELECT status, COALESCE(lease_token, '')
+		 FROM workflow_tasks
+		 WHERE run_id = $1 AND sequence = $2
+		 FOR UPDATE`,
+		lease.ID,
+		lease.Sequence,
+	).Scan(&status, &token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return workflowops.ErrLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	if workflowops.Status(status) == workflowops.StatusCancelled {
+		return workflowops.ErrCancelled
+	}
+	if workflowops.Status(status) != workflowops.StatusRunning || token != lease.Token {
+		return workflowops.ErrLeaseLost
+	}
+	return nil
 }
 
 func statusLiteral(status workflowops.Status) string {

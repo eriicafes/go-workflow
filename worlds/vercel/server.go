@@ -4,6 +4,7 @@ package vercelworld
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/eriicafes/go-workflow"
@@ -41,7 +42,7 @@ func Queue(world *World, runners workflowops.RunnerSet) http.Handler {
 		if err == nil && lease != nil {
 			err = engine.Execute(request.Context(), lease)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, workflowops.ErrCancelled) {
 			http.Error(writer, err.Error(), http.StatusInternalServerError)
 			return
 		}

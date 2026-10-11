@@ -226,11 +226,14 @@ func (world *World) CreateRun(
 		ctx,
 		createChildScript,
 		[]string{
+			world.taskKey(lease.ID, lease.Sequence),
 			world.commandKey(request.RunID, request.Sequence),
 			world.runKey(child),
 			world.commandKey(child, workflowops.RootSequence),
 			world.taskKey(child, workflowops.RootSequence),
 		},
+		lease.Token,
+		string(workflowops.StatusRunning),
 		string(workflowops.KindRun),
 		request.Identity,
 		request.Fingerprint,
@@ -243,6 +246,9 @@ func (world *World) CreateRun(
 	)
 	if err != nil {
 		return "", err
+	}
+	if created == "-1" {
+		return "", world.validateLease(ctx, lease)
 	}
 	if created == "0" {
 		return world.CreateRun(ctx, lease, request)
@@ -257,6 +263,9 @@ func (world *World) CreateRun(
 	return child, nil
 }
 
+// ClaimTask claims a queue-delivered task. A cancelled task returns
+// ErrCancelled. A completed or actively leased task returns nil so duplicate
+// queue delivery is safe to acknowledge.
 func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*workflowops.Lease, error) {
 	run, err := world.hash(ctx, world.runKey(task.RunID))
 	if err != nil {
@@ -273,7 +282,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	claimed, err := world.eval(
 		ctx,
 		claimTaskScript,
-		[]string{world.taskKey(task.RunID, task.Sequence)},
+		[]string{world.taskKey(task.RunID, task.Sequence), world.runKey(task.RunID)},
 		stamp(now),
 		stamp(now.Add(world.config.LeaseDuration)),
 		token,
@@ -282,6 +291,9 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	)
 	if err != nil {
 		return nil, err
+	}
+	if claimed == "cancelled" {
+		return nil, workflowops.ErrCancelled
 	}
 	if claimed != "1" {
 		return nil, nil
@@ -306,6 +318,9 @@ func (world *World) HeartbeatRun(ctx context.Context, run *workflowops.Lease) er
 	)
 	if err != nil {
 		return err
+	}
+	if ok == "cancelled" {
+		return workflowops.ErrCancelled
 	}
 	if ok != "1" {
 		return workflowops.ErrLeaseLost
@@ -355,73 +370,82 @@ func (world *World) CancelOperations(ctx context.Context, tasks ...workflowops.T
 	pending := append([]workflowops.Task(nil), tasks...)
 	changed := make([]workflowops.Task, 0, len(tasks))
 	visitedRoots := make(map[string]bool)
+	visitedTasks := make(map[workflowops.Task]bool)
 	for len(pending) > 0 {
 		task := pending[0]
 		pending = pending[1:]
+		if visitedTasks[task] {
+			continue
+		}
+		visitedTasks[task] = true
+
 		if task.Sequence == workflowops.RootSequence {
 			if visitedRoots[task.RunID] {
 				continue
 			}
 			visitedRoots[task.RunID] = true
+			cancelled, err := world.cancelTask(ctx, task, true)
+			if err != nil {
+				return err
+			}
+			if cancelled {
+				changed = append(changed, task)
+			}
+			all, err := world.runTasks(ctx, task.RunID)
+			if err != nil {
+				return err
+			}
+			pending = append(pending, all...)
 			children, err := world.childRuns(ctx, task.RunID)
 			if err != nil {
 				return err
 			}
 			for _, childID := range children {
-				pending = append(pending, workflowops.Task{
-					RunID:    childID,
-					Sequence: workflowops.RootSequence,
-				})
+				pending = append(pending, workflowops.Task{RunID: childID, Sequence: workflowops.RootSequence})
 			}
-		}
-		record, err := world.hash(ctx, world.taskKey(task.RunID, task.Sequence))
-		if err != nil {
-			return err
-		}
-		if len(record) == 0 {
-			return workflowops.ErrRunNotFound
-		}
-		status := workflowops.Status(record["status"])
-		if status == workflowops.StatusCompleted || status == workflowops.StatusFailed {
-			continue
-		}
-		if status == workflowops.StatusCancelled {
 			if err := world.CleanupTimer(ctx, task); err != nil {
 				return err
 			}
 			continue
 		}
-		completion, err := world.redis.Incr(ctx, world.completionKey())
+
+		cancelled, err := world.cancelTask(ctx, task, false)
 		if err != nil {
 			return err
 		}
-		if err = world.redis.HSet(
-			ctx,
-			world.taskKey(task.RunID, task.Sequence),
-			"status", string(workflowops.StatusCancelled),
-			"error", workflowops.ErrCancelled.Error(),
-			"completed", strconv.FormatInt(completion, 10),
-			"updated", stamp(time.Now()),
-		); err != nil {
-			return err
-		}
-		changed = append(changed, task)
-		if task.Sequence == workflowops.RootSequence {
-			if err = world.redis.HSet(
-				ctx,
-				world.runKey(task.RunID),
-				"status", string(workflowops.StatusCancelled),
-				"error", workflowops.ErrCancelled.Error(),
-				"updated", stamp(time.Now()),
-			); err != nil {
-				return err
-			}
+		if cancelled {
+			changed = append(changed, task)
 		}
 		if err := world.CleanupTimer(ctx, task); err != nil {
 			return err
 		}
 	}
 	return world.resolveDependents(ctx, changed...)
+}
+
+func (world *World) cancelTask(ctx context.Context, task workflowops.Task, root bool) (bool, error) {
+	result, err := world.eval(
+		ctx,
+		cancelTaskScript,
+		[]string{world.taskKey(task.RunID, task.Sequence), world.completionKey(), world.runKey(task.RunID)},
+		stamp(time.Now()),
+		string(workflowops.StatusCancelled),
+		workflowops.ErrCancelled.Error(),
+		strconv.FormatBool(root),
+	)
+	if err != nil {
+		return false, err
+	}
+	switch result {
+	case "1":
+		return true, nil
+	case "0":
+		return false, nil
+	case "-1":
+		return false, workflowops.ErrRunNotFound
+	default:
+		return false, fmt.Errorf("workflow/vercel: unexpected cancellation result %q", result)
+	}
 }
 
 func (world *World) childRuns(ctx context.Context, runID string) ([]string, error) {
@@ -447,6 +471,46 @@ func (world *World) childRuns(ctx context.Context, runID string) ([]string, erro
 		}
 		cursor = next
 	}
+}
+
+func (world *World) runTasks(ctx context.Context, runID string) ([]workflowops.Task, error) {
+	var cursor uint64
+	var tasks []workflowops.Task
+	pattern := world.config.Prefix + ":run:" + runID + ":task:*"
+	for {
+		keys, next, err := world.redis.Scan(ctx, cursor, pattern, 100)
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			record, err := world.hash(ctx, key)
+			if err != nil {
+				return nil, err
+			}
+			tasks = append(tasks, workflowops.Task{RunID: runID, Sequence: readSequence(record["sequence"])})
+		}
+		if next == 0 {
+			return tasks, nil
+		}
+		cursor = next
+	}
+}
+
+func (world *World) validateLease(ctx context.Context, lease *workflowops.Lease) error {
+	record, err := world.hash(ctx, world.taskKey(lease.ID, lease.Sequence))
+	if err != nil {
+		return err
+	}
+	if len(record) == 0 {
+		return workflowops.ErrLeaseLost
+	}
+	if workflowops.Status(record["status"]) == workflowops.StatusCancelled {
+		return workflowops.ErrCancelled
+	}
+	if workflowops.Status(record["status"]) != workflowops.StatusRunning || record["token"] != lease.Token {
+		return workflowops.ErrLeaseLost
+	}
+	return nil
 }
 
 func (world *World) EnsureOperation(
@@ -476,9 +540,12 @@ func (world *World) EnsureOperation(
 		ctx,
 		createOperationScript,
 		[]string{
+			world.taskKey(lease.ID, lease.Sequence),
 			world.commandKey(request.RunID, request.Sequence),
 			world.taskKey(request.RunID, request.Sequence),
 		},
+		lease.Token,
+		string(workflowops.StatusRunning),
 		string(request.Kind),
 		request.Identity,
 		request.Fingerprint,
@@ -492,6 +559,9 @@ func (world *World) EnsureOperation(
 	)
 	if err != nil {
 		return workflowops.Operation{}, err
+	}
+	if created == "-1" {
+		return workflowops.Operation{}, world.validateLease(ctx, lease)
 	}
 	if created == "0" {
 		return world.EnsureOperation(ctx, lease, request)
@@ -530,7 +600,11 @@ func (world *World) EnsureWait(
 	if !allowsCreate(lease, request.RunID) {
 		return workflowops.Operation{}, workflowops.HistoryMissingError("wait command", request.Sequence)
 	}
-	keys := []string{world.commandKey(request.RunID, request.Sequence), world.taskKey(request.RunID, request.Sequence)}
+	keys := []string{
+		world.taskKey(lease.ID, lease.Sequence),
+		world.commandKey(request.RunID, request.Sequence),
+		world.taskKey(request.RunID, request.Sequence),
+	}
 	for _, dependency := range request.Dependencies {
 		keys = append(keys, world.dependentsKey(dependency))
 	}
@@ -538,6 +612,8 @@ func (world *World) EnsureWait(
 		ctx,
 		createWaitScript,
 		keys,
+		lease.Token,
+		string(workflowops.StatusRunning),
 		string(request.Kind),
 		request.Fingerprint,
 		string(input),
@@ -550,6 +626,9 @@ func (world *World) EnsureWait(
 	)
 	if err != nil {
 		return workflowops.Operation{}, err
+	}
+	if created == "-1" {
+		return workflowops.Operation{}, world.validateLease(ctx, lease)
 	}
 	if created == "0" {
 		return world.EnsureWait(ctx, lease, request)
@@ -753,81 +832,6 @@ func (world *World) finishTask(
 		return workflowops.ErrLeaseLost
 	}
 	return nil
-}
-
-// reconcileWaits is reserved for recovery or operator-initiated repair. Normal
-// task transitions use resolveDependents and never scan every task key.
-func (world *World) reconcileWaits(ctx context.Context) error {
-	var cursor uint64
-	for {
-		keys, next, err := world.redis.Scan(ctx, cursor, world.config.Prefix+":run:*:task:*", 100)
-		if err != nil {
-			return err
-		}
-		for _, key := range keys {
-			task, err := world.hash(ctx, key)
-			if err != nil || workflowops.Status(task["status"]) != workflowops.StatusWaiting {
-				if err != nil {
-					return err
-				}
-				continue
-			}
-			runID, sequence := task["run"], readSequence(task["sequence"])
-			command, err := world.hash(ctx, world.commandKey(runID, sequence))
-			if err != nil {
-				return err
-			}
-			kind := workflowops.Kind(command["kind"])
-			if !workflowops.IsWaitKind(kind) {
-				continue
-			}
-			var dependencies []workflowops.Task
-			if err = json.Unmarshal([]byte(command["input"]), &dependencies); err != nil {
-				return err
-			}
-			states, err := world.waitStates(ctx, dependencies)
-			if err != nil {
-				return err
-			}
-			resolution := workflowops.ResolveWait(kind, states)
-			if resolution.Pending {
-				continue
-			}
-			status := workflowops.StatusCompleted
-			message := ""
-			if resolution.Err != nil {
-				status = workflowops.StatusFailed
-				message = resolution.Err.Error()
-			}
-			resolved, err := world.eval(
-				ctx,
-				resolveWaitScript,
-				[]string{key, world.taskKey(runID, workflowops.RootSequence), world.runKey(runID), world.completionKey()},
-				string(status),
-				string(resolution.Output),
-				message,
-				stamp(time.Now()),
-				string(workflowops.StatusWaiting),
-				string(workflowops.StatusQueued),
-			)
-			if err != nil {
-				return err
-			}
-			if resolved == "1" {
-				task := workflowops.Task{
-					RunID:    runID,
-					Sequence: workflowops.RootSequence,
-				}
-				if err = world.enqueueTask(ctx, task, time.Time{}); err != nil {
-					return err
-				}
-			}
-		}
-		if next == 0 {
-			return nil
-		}
-		cursor = next
-	}
 }
 
 func (world *World) resolveDependents(ctx context.Context, changed ...workflowops.Task) error {
@@ -1214,52 +1218,64 @@ return 1
 `
 
 const createChildScript = `
-if redis.call('EXISTS', KEYS[1]) == 1 then
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then
+  return -1
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
   return 0
 end
-redis.call('HSET', KEYS[1],
-  'kind', ARGV[1], 'identity', ARGV[2], 'fingerprint', ARGV[3],
-  'input', ARGV[4], 'child', ARGV[5])
 redis.call('HSET', KEYS[2],
-  'identity', ARGV[2], 'input', ARGV[4], 'status', ARGV[9],
-  'created', ARGV[6], 'updated', ARGV[6])
+  'kind', ARGV[3], 'identity', ARGV[4], 'fingerprint', ARGV[5],
+  'input', ARGV[6], 'child', ARGV[7])
 redis.call('HSET', KEYS[3],
-  'kind', ARGV[8], 'identity', ARGV[2], 'fingerprint', ARGV[2], 'input', ARGV[4])
+  'identity', ARGV[4], 'input', ARGV[6], 'status', ARGV[11],
+  'created', ARGV[8], 'updated', ARGV[8])
 redis.call('HSET', KEYS[4],
-  'run', ARGV[5], 'sequence', '-1', 'status', ARGV[9],
-  'idempotency', ARGV[7], 'attempt', '0',
-  'created', ARGV[6], 'updated', ARGV[6])
+  'kind', ARGV[10], 'identity', ARGV[4], 'fingerprint', ARGV[4], 'input', ARGV[6])
+redis.call('HSET', KEYS[5],
+  'run', ARGV[7], 'sequence', '-1', 'status', ARGV[11],
+  'idempotency', ARGV[9], 'attempt', '0',
+  'created', ARGV[8], 'updated', ARGV[8])
 return 1
 `
 
 const createOperationScript = `
-if redis.call('EXISTS', KEYS[1]) == 1 then
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then
+  return -1
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
   return 0
 end
-redis.call('HSET', KEYS[1],
-  'kind', ARGV[1], 'identity', ARGV[2], 'fingerprint', ARGV[3], 'input', ARGV[4])
 redis.call('HSET', KEYS[2],
-  'run', ARGV[5], 'sequence', ARGV[6], 'status', ARGV[10],
-  'idempotency', ARGV[7], 'attempt', '0',
-  'created', ARGV[8], 'updated', ARGV[8])
-if ARGV[9] ~= '' then
-  redis.call('HSET', KEYS[2], 'due', ARGV[9])
+  'kind', ARGV[3], 'identity', ARGV[4], 'fingerprint', ARGV[5], 'input', ARGV[6])
+redis.call('HSET', KEYS[3],
+  'run', ARGV[7], 'sequence', ARGV[8], 'status', ARGV[12],
+  'idempotency', ARGV[9], 'attempt', '0',
+  'created', ARGV[10], 'updated', ARGV[10])
+if ARGV[11] ~= '' then
+  redis.call('HSET', KEYS[3], 'due', ARGV[11])
 end
 return 1
 `
 
 const createWaitScript = `
-if redis.call('EXISTS', KEYS[1]) == 1 then
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then
+  return -1
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
   return 0
 end
-redis.call('HSET', KEYS[1],
-  'kind', ARGV[1], 'identity', ARGV[1], 'fingerprint', ARGV[2], 'input', ARGV[3])
 redis.call('HSET', KEYS[2],
-  'run', ARGV[4], 'sequence', ARGV[5], 'status', ARGV[8],
-  'idempotency', ARGV[6], 'attempt', '0',
-  'created', ARGV[7], 'updated', ARGV[7])
-for index = 3, #KEYS do
-  redis.call('SADD', KEYS[index], ARGV[9])
+  'kind', ARGV[3], 'identity', ARGV[3], 'fingerprint', ARGV[4], 'input', ARGV[5])
+redis.call('HSET', KEYS[3],
+  'run', ARGV[6], 'sequence', ARGV[7], 'status', ARGV[10],
+  'idempotency', ARGV[8], 'attempt', '0',
+  'created', ARGV[9], 'updated', ARGV[9])
+for index = 4, #KEYS do
+  redis.call('SADD', KEYS[index], ARGV[11])
 end
 return 1
 `
@@ -1274,6 +1290,10 @@ return 1
 `
 
 const claimTaskScript = `
+if redis.call('HGET', KEYS[2], 'status') == 'cancelled'
+  or redis.call('HGET', KEYS[1], 'status') == 'cancelled' then
+  return 'cancelled'
+end
 local status = redis.call('HGET', KEYS[1], 'status')
 local due = redis.call('HGET', KEYS[1], 'due')
 local lease = redis.call('HGET', KEYS[1], 'lease')
@@ -1288,12 +1308,34 @@ return 0
 `
 
 const heartbeatScript = `
-if redis.call('HGET', KEYS[1], 'status') == ARGV[3]
+local status = redis.call('HGET', KEYS[1], 'status')
+if status == 'cancelled' then
+  return 'cancelled'
+end
+if status == ARGV[3]
   and redis.call('HGET', KEYS[1], 'token') == ARGV[1] then
   redis.call('HSET', KEYS[1], 'lease', ARGV[2])
   return 1
 end
-return 0
+return 'lost'
+`
+
+const cancelTaskScript = `
+local status = redis.call('HGET', KEYS[1], 'status')
+if not status then
+  return -1
+end
+if status == 'completed' or status == 'failed' or status == 'cancelled' then
+  return 0
+end
+local completed = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'status', ARGV[2], 'error', ARGV[3],
+  'completed', completed, 'updated', ARGV[1])
+redis.call('HDEL', KEYS[1], 'token', 'lease')
+if ARGV[4] == 'true' then
+  redis.call('HSET', KEYS[3], 'status', ARGV[2], 'error', ARGV[3], 'updated', ARGV[1])
+end
+return 1
 `
 
 const finishTaskScript = `

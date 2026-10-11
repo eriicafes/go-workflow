@@ -44,6 +44,8 @@ func (engine *Engine) Execute(ctx context.Context, leased *Lease) error {
 	switch {
 	case errors.Is(err, internal.ErrReplayComplete), errors.Is(err, internal.ErrReplaySuspended):
 		return nil
+	case errors.Is(err, ErrCancelled), errors.Is(err, ErrLeaseLost):
+		return nil
 	case errors.Is(context.Cause(ctx), ErrCancelled), errors.Is(context.Cause(ctx), ErrLeaseLost):
 		return nil
 	case err != nil:

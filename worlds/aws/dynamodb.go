@@ -40,6 +40,22 @@ func dependencyPartitionKey(task workflowops.Task) string {
 	return fmt.Sprintf("DEPENDENCY#%s#%010d", task.RunID, task.Sequence+1)
 }
 
+func leaseCheck(tableName string, lease *workflowops.Lease) ddb.TransactWriteItem {
+	return ddb.TransactWriteItem{ConditionCheck: &ddb.ConditionCheck{
+		TableName:           awsv2.String(tableName),
+		Key:                 taskKey(lease.ID, lease.Sequence),
+		ConditionExpression: awsv2.String("#status=:running AND #token=:token"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+			"#token":  "token",
+		},
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{
+			":running": avs(string(workflowops.StatusRunning)),
+			":token":   avs(lease.Token),
+		},
+	}}
+}
+
 func eventKey(runID string, sequence int) map[string]ddb.AttributeValue {
 	return key(runPartitionKey(runID), fmt.Sprintf("EVENT#%010d", sequence))
 }

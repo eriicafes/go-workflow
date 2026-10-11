@@ -4,6 +4,7 @@ package awsworld
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -32,7 +33,7 @@ func Queue(world *World, runners workflowops.RunnerSet) func(context.Context, ev
 			if err == nil && lease != nil {
 				err = engine.Execute(ctx, lease)
 			}
-			if err != nil {
+			if err != nil && !errors.Is(err, workflowops.ErrCancelled) {
 				response.BatchItemFailures = append(response.BatchItemFailures, events.SQSBatchItemFailure{ItemIdentifier: message.MessageId})
 			}
 		}
