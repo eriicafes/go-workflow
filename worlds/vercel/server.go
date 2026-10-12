@@ -13,13 +13,13 @@ import (
 
 // HTTP returns the worker HTTP API consumed by workflow.Client. When QStash is
 // configured, it also mounts the signed timer-delivery endpoint at the fixed
-// QStash webhook path.
-func HTTP(world *World, runners workflowops.RunnerSet) http.Handler {
+// QStash webhook path. That endpoint queues the task for Queue to execute.
+func HTTP(world *World) http.Handler {
 	api := workflow.NewHTTPHandler(world).(*http.ServeMux)
 	if world.config.QStash == nil {
 		return api
 	}
-	api.Handle(workflow.APIPrefix+"/webhook/qstash", qstashHandler(world, runners))
+	api.Handle("POST "+workflow.APIPrefix+"/webhook/qstash", qstashHandler(world))
 	return api
 }
 

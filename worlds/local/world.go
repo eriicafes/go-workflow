@@ -61,6 +61,7 @@ type runRecord struct {
 	ID         string             `json:"id"`
 	Identity   string             `json:"identity"`
 	Input      json.RawMessage    `json:"input"`
+	StartedAt  time.Time          `json:"startedAt"`
 	Status     workflowops.Status `json:"status"`
 	Output     json.RawMessage    `json:"output,omitempty"`
 	Error      string             `json:"error,omitempty"`
@@ -86,12 +87,6 @@ type commandRecord struct {
 	Completion   uint64             `json:"completion,omitempty"`
 	Attempt      int                `json:"attempt,omitempty"`
 	StepID       string             `json:"stepID"`
-}
-
-type eventRecord struct {
-	ID        int64     `json:"id"`
-	Data      []byte    `json:"data"`
-	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Open creates path with private permissions and returns a World which owns it.
@@ -209,7 +204,7 @@ func (world *World) Clear(ctx context.Context) error {
 	world.workers.Wait()
 	world.records.Lock()
 	defer world.records.Unlock()
-	for _, name := range []string{"runs", "commands", "events", "version.json"} {
+	for _, name := range []string{"runs", "commands", "hooks", "streams", "version.json"} {
 		if err := world.root.RemoveAll(name); err != nil {
 			return err
 		}
@@ -260,10 +255,11 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 		return "", err
 	}
 	run := runRecord{
-		ID:       id,
-		Identity: request.Identity,
-		Input:    clone(request.Input),
-		Status:   workflowops.StatusQueued,
+		ID:        id,
+		Identity:  request.Identity,
+		Input:     clone(request.Input),
+		StartedAt: time.Now(),
+		Status:    workflowops.StatusQueued,
 	}
 	if err := writeJSON(world.root, runName(id), run); err != nil {
 		return "", err
@@ -271,6 +267,50 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 	world.launch(id, workflowops.RootSequence)
 	world.signal()
 	return id, nil
+}
+
+// GetRun returns durable metadata for one local workflow run.
+func (world *World) GetRun(_ context.Context, id string) (workflowops.RunInfo, bool, error) {
+	run, err := world.readRun(id)
+	if errors.Is(err, fs.ErrNotExist) {
+		return workflowops.RunInfo{}, false, nil
+	}
+	if err != nil {
+		return workflowops.RunInfo{}, false, err
+	}
+	return workflowops.RunInfo{Identity: run.Identity, Status: run.Status, StartedAt: run.StartedAt}, true, nil
+}
+
+// Wake makes pending sleep commands immediately eligible for execution.
+func (world *World) Wake(_ context.Context, id string) (int, error) {
+	if err := world.mustStart(); err != nil {
+		return 0, err
+	}
+	world.records.Lock()
+	defer world.records.Unlock()
+	if _, err := world.readRun(id); err != nil {
+		return 0, err
+	}
+	commands, err := world.commands(id)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	count := 0
+	for _, command := range commands {
+		if command.Kind != workflowops.KindSleep || command.Status != workflowops.StatusQueued || !command.DueAt.After(now) {
+			continue
+		}
+		command.DueAt = now
+		if err := writeJSON(world.root, commandName(id, command.Sequence), command); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if count != 0 {
+		world.signal()
+	}
+	return count, nil
 }
 
 // WaitRun always reads durable state. Notifications only avoid needless rereads.
@@ -284,7 +324,7 @@ func (world *World) WaitRun(ctx context.Context, id string) (json.RawMessage, er
 		case workflowops.StatusCompleted:
 			return clone(record.Output), nil
 		case workflowops.StatusFailed:
-			return nil, errors.New(record.Error)
+			return nil, workflowops.DecodeFailure(record.Error)
 		case workflowops.StatusCancelled:
 			return nil, workflowops.ErrCancelled
 		}
@@ -295,31 +335,6 @@ func (world *World) WaitRun(ctx context.Context, id string) (json.RawMessage, er
 		case <-change:
 		}
 	}
-}
-
-func (world *World) Events(_ context.Context, id string, after int64) ([]workflow.Event, error) {
-	if _, err := world.readRun(id); err != nil {
-		return nil, err
-	}
-	names, err := listJSON(world.root, eventDir(id))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	events := make([]workflow.Event, 0, len(names))
-	for _, name := range names {
-		var event eventRecord
-		if err := readJSON(world.root, path.Join(eventDir(id), name), &event); err != nil {
-			return nil, err
-		}
-		if event.ID > after {
-			events = append(events, workflow.Event{ID: event.ID, Data: clone(event.Data), CreatedAt: event.CreatedAt})
-		}
-	}
-	sort.Slice(events, func(i, j int) bool { return events[i].ID < events[j].ID })
-	return events, nil
 }
 
 // CreateRun writes a child before writing its parent command reference.
@@ -357,10 +372,11 @@ func (world *World) CreateRun(
 		return "", err
 	}
 	run := runRecord{
-		ID:       child,
-		Identity: request.Identity,
-		Input:    clone(request.Input),
-		Status:   workflowops.StatusQueued,
+		ID:        child,
+		Identity:  request.Identity,
+		Input:     clone(request.Input),
+		StartedAt: time.Now(),
+		Status:    workflowops.StatusQueued,
 	}
 	if err := writeJSON(world.root, runName(child), run); err != nil {
 		return "", err
@@ -445,6 +461,9 @@ func (world *World) CompleteRun(_ context.Context, leased *workflowops.Lease, ou
 	if err := world.resolveDependentsLocked(workflowops.Task{RunID: run.ID, Sequence: workflowops.RootSequence}); err != nil {
 		return err
 	}
+	if err := world.closeStreamsLocked(run.ID); err != nil {
+		return err
+	}
 	world.signal()
 	return nil
 }
@@ -466,16 +485,27 @@ func (world *World) FailRun(_ context.Context, leased *workflowops.Lease, cause 
 	if err != nil {
 		return err
 	}
-	run.Status = workflowops.StatusFailed
-	run.Error = cause.Error()
+	run.Error = workflowops.EncodeFailure(cause)
 	run.Output = nil
-	run.Completion = completion
 	run.Token = ""
 	run.LeaseUntil = time.Time{}
+	started, err := world.startRollbacksLocked(&run)
+	if err != nil {
+		return err
+	}
+	if started {
+		world.signal()
+		return nil
+	}
+	run.Status = workflowops.StatusFailed
+	run.Completion = completion
 	if err := writeJSON(world.root, runName(run.ID), run); err != nil {
 		return err
 	}
 	if err := world.resolveDependentsLocked(workflowops.Task{RunID: run.ID, Sequence: workflowops.RootSequence}); err != nil {
+		return err
+	}
+	if err := world.closeStreamsLocked(run.ID); err != nil {
 		return err
 	}
 	world.signal()
@@ -521,7 +551,7 @@ func (world *World) EnsureOperation(
 		Identity:    request.Identity,
 		Fingerprint: request.Fingerprint,
 		Input:       clone(request.Input),
-		Status:      workflowops.StatusQueued,
+		Status:      operationStatus(request.Kind),
 		DueAt:       due,
 		StepID:      request.RunID + ":" + strconv.Itoa(request.Sequence),
 	}
@@ -530,6 +560,13 @@ func (world *World) EnsureOperation(
 	}
 	world.signal()
 	return commandOperation(request.RunID, command), nil
+}
+
+func operationStatus(kind workflowops.Kind) workflowops.Status {
+	if kind == workflowops.KindRollback || kind == workflowops.KindHook {
+		return workflowops.StatusWaiting
+	}
+	return workflowops.StatusQueued
 }
 
 // RecordOperation creates a completed replay command. On a repeated call, it
@@ -722,7 +759,7 @@ func (world *World) RetryOperation(
 	}
 	command.Status = workflowops.StatusRetryWait
 	command.Output = nil
-	command.Error = cause.Error()
+	command.Error = workflowops.EncodeFailure(cause)
 	command.Token = ""
 	command.LeaseUntil = time.Time{}
 	command.DueAt = due
@@ -853,7 +890,7 @@ func (world *World) finishCommand(runID string, sequence int, token string, outp
 		return err
 	}
 	if cause != nil {
-		command.Status, command.Error, command.Output = workflowops.StatusFailed, cause.Error(), nil
+		command.Status, command.Error, command.Output = workflowops.StatusFailed, workflowops.EncodeFailure(cause), nil
 	} else {
 		command.Status, command.Error, command.Output = workflowops.StatusCompleted, "", clone(output)
 	}
@@ -861,11 +898,71 @@ func (world *World) finishCommand(runID string, sequence int, token string, outp
 	if err := writeJSON(world.root, commandName(runID, sequence), command); err != nil {
 		return err
 	}
+	if command.Kind == workflowops.KindRollback {
+		if err := world.advanceRollbackLocked(runID); err != nil {
+			return err
+		}
+	}
 	if err := world.resolveDependentsLocked(workflowops.Task{RunID: runID, Sequence: sequence}); err != nil {
 		return err
 	}
 	world.signal()
 	return nil
+}
+
+func (world *World) startRollbacksLocked(run *runRecord) (bool, error) {
+	commands, err := world.commands(run.ID)
+	if err != nil {
+		return false, err
+	}
+	for index := len(commands) - 1; index >= 0; index-- {
+		command := commands[index]
+		if command.Kind != workflowops.KindRollback || command.Status != workflowops.StatusWaiting {
+			continue
+		}
+		command.Status = workflowops.StatusQueued
+		if err := writeJSON(world.root, commandName(run.ID, command.Sequence), command); err != nil {
+			return false, err
+		}
+		run.Status = workflowops.StatusRollingBack
+		if err := writeJSON(world.root, runName(run.ID), *run); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (world *World) advanceRollbackLocked(runID string) error {
+	run, err := world.readRun(runID)
+	if err != nil || run.Status != workflowops.StatusRollingBack {
+		return err
+	}
+	commands, err := world.commands(runID)
+	if err != nil {
+		return err
+	}
+	for index := len(commands) - 1; index >= 0; index-- {
+		command := commands[index]
+		if command.Kind != workflowops.KindRollback || command.Status != workflowops.StatusWaiting {
+			continue
+		}
+		command.Status = workflowops.StatusQueued
+		return writeJSON(world.root, commandName(runID, command.Sequence), command)
+	}
+	completion, err := world.nextCompletion()
+	if err != nil {
+		return err
+	}
+	run.Status = workflowops.StatusFailed
+	run.Completion = completion
+	if err := writeJSON(world.root, runName(runID), run); err != nil {
+		return err
+	}
+	if err := world.closeStreamsLocked(runID); err != nil {
+		return err
+	}
+	return world.resolveDependentsLocked(workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence})
 }
 
 func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (json.RawMessage, error) {
@@ -881,7 +978,7 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		case workflowops.StatusCompleted:
 			return clone(command.Output), nil
 		case workflowops.StatusFailed:
-			return nil, errors.New(command.Error)
+			return nil, workflowops.DecodeFailure(command.Error)
 		case workflowops.StatusCancelled:
 			return nil, workflowops.ErrCancelled
 		}
@@ -892,30 +989,6 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		case <-change:
 		}
 	}
-}
-
-func (world *World) AppendEvent(_ context.Context, task workflowops.Task, data []byte) error {
-	world.records.Lock()
-	defer world.records.Unlock()
-	if _, err := world.readRun(task.RunID); err != nil {
-		return err
-	}
-	name := path.Join(eventDir(task.RunID), strconv.Itoa(task.Sequence)+".json")
-	if _, err := world.root.Stat(name); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	event := eventRecord{
-		ID:        int64(task.Sequence),
-		Data:      clone(data),
-		CreatedAt: time.Now(),
-	}
-	if err := writeJSON(world.root, name, event); err != nil {
-		return err
-	}
-	world.signal()
-	return nil
 }
 
 func (world *World) scheduler() {
@@ -970,7 +1043,7 @@ func (world *World) dispatchReady() (time.Time, error) {
 		}
 		// A workflow records its full batch of commands before suspending. Do
 		// not run a command while its parent is still constructing that batch.
-		if run.Status != workflowops.StatusWaiting {
+		if run.Status != workflowops.StatusWaiting && run.Status != workflowops.StatusRollingBack {
 			continue
 		}
 		commands, err := world.commands(run.ID)
@@ -1028,11 +1101,12 @@ func (world *World) claim(runID string, sequence int) (*workflowops.Lease, bool)
 			return nil, false
 		}
 		return &workflowops.Lease{
-			ID:       runID,
-			Identity: run.Identity,
-			Input:    clone(run.Input),
-			Sequence: workflowops.RootSequence,
-			Token:    token,
+			ID:        runID,
+			Identity:  run.Identity,
+			Input:     clone(run.Input),
+			Sequence:  workflowops.RootSequence,
+			Token:     token,
+			StartedAt: run.StartedAt,
 		}, true
 	}
 	command, found, err := world.readCommand(runID, sequence)
@@ -1052,11 +1126,12 @@ func (world *World) claim(runID string, sequence int) (*workflowops.Lease, bool)
 		return nil, false
 	}
 	return &workflowops.Lease{
-		ID:       runID,
-		Identity: run.Identity,
-		Input:    clone(run.Input),
-		Sequence: sequence,
-		Token:    token,
+		ID:        runID,
+		Identity:  run.Identity,
+		Input:     clone(run.Input),
+		Sequence:  sequence,
+		Token:     token,
+		StartedAt: run.StartedAt,
 	}, true
 }
 
@@ -1183,7 +1258,7 @@ func (world *World) resolveWaitLocked(wait workflowops.Task) (bool, error) {
 		return false, err
 	}
 	if resolution.Err != nil {
-		command.Status, command.Error, command.Output = workflowops.StatusFailed, resolution.Err.Error(), nil
+		command.Status, command.Error, command.Output = workflowops.StatusFailed, workflowops.EncodeFailure(resolution.Err), nil
 	} else {
 		command.Status, command.Error, command.Output = workflowops.StatusCompleted, "", resolution.Output
 	}
@@ -1396,10 +1471,6 @@ func runName(id string) string {
 
 func commandName(id string, sequence int) string {
 	return path.Join("commands", id, strconv.Itoa(sequence)+".json")
-}
-
-func eventDir(id string) string {
-	return path.Join("events", id)
 }
 
 func commandOperation(runID string, command commandRecord) workflowops.Operation {

@@ -129,3 +129,8 @@ Use least-privilege IAM. The HTTP Lambda needs DynamoDB read/write and SQS send
 permissions. The queue Lambda additionally needs SQS receive/delete and, when
 long timers are enabled, EventBridge Scheduler permissions. Keep the DynamoDB
 table and SQS queue policies scoped to those roles.
+
+The HTTP handler also serves token-authorized webhooks at
+`/.well-known/workflow/v1/webhook/:token`. The token is the only authorization
+for that route. Treat the URL as a bearer capability and verify the provider's signature,
+timestamp, and replay protection in the workflow before acting on a request.

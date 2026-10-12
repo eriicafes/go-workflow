@@ -24,7 +24,8 @@ type World struct {
 	engine     *workflowops.Engine
 	runs       map[string]*run
 	commands   map[string]map[int]*command
-	events     map[string][]workflow.Event
+	streams    map[workflowops.Stream]*stream
+	hooks      map[string]*hook
 	changes    chan struct{}
 	nextID     uint64
 	completion uint64
@@ -43,6 +44,7 @@ type run struct {
 	id         string
 	identity   string
 	input      json.RawMessage
+	startedAt  time.Time
 	status     workflowops.Status
 	output     json.RawMessage
 	err        string
@@ -67,6 +69,20 @@ type command struct {
 	attempt      int
 }
 
+type stream struct {
+	data   []byte
+	closed bool
+	lock   string
+}
+
+type hook struct {
+	task      workflowops.Task
+	retention time.Duration
+	expiresAt time.Time
+	webhook   *workflowops.Webhook
+	response  json.RawMessage
+}
+
 // New creates an immediately usable in-memory World. It executes runners in
 // goroutines when root runs and durable operations are scheduled.
 func New(runners ...workflowops.Runner) *World {
@@ -77,7 +93,8 @@ func New(runners ...workflowops.Runner) *World {
 		cancel:   cancel,
 		runs:     make(map[string]*run),
 		commands: make(map[string]map[int]*command),
-		events:   make(map[string][]workflow.Event),
+		streams:  make(map[workflowops.Stream]*stream),
+		hooks:    make(map[string]*hook),
 		changes:  make(chan struct{}),
 	}
 	world.engine = workflowops.NewEngine(world, set)
@@ -119,16 +136,52 @@ func (world *World) createRoot(ctx context.Context, request workflowops.RunReque
 	}
 	id := world.idLocked()
 	world.runs[id] = &run{
-		id:       id,
-		identity: request.Identity,
-		input:    clone(request.Input),
-		status:   workflowops.StatusQueued,
+		id:        id,
+		identity:  request.Identity,
+		input:     clone(request.Input),
+		startedAt: time.Now(),
+		status:    workflowops.StatusQueued,
 	}
 	world.signalLocked()
 	world.mu.Unlock()
 
 	world.schedule(workflowops.Task{RunID: id, Sequence: workflowops.RootSequence}, time.Time{})
 	return id, nil
+}
+
+// GetRun returns durable metadata for one in-memory run.
+func (world *World) GetRun(_ context.Context, id string) (workflowops.RunInfo, bool, error) {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	run := world.runs[id]
+	if run == nil {
+		return workflowops.RunInfo{}, false, nil
+	}
+	return workflowops.RunInfo{Identity: run.identity, Status: run.status, StartedAt: run.startedAt}, true, nil
+}
+
+// Wake makes every pending sleep in a run immediately eligible to execute.
+func (world *World) Wake(_ context.Context, id string) (int, error) {
+	world.mu.Lock()
+	if world.runs[id] == nil {
+		world.mu.Unlock()
+		return 0, workflow.ErrRunNotFound
+	}
+	now := time.Now()
+	var tasks []workflowops.Task
+	for sequence, command := range world.commands[id] {
+		if command.kind != workflowops.KindSleep || command.status != workflowops.StatusQueued || !command.dueAt.After(now) {
+			continue
+		}
+		command.dueAt = now
+		tasks = append(tasks, workflowops.Task{RunID: id, Sequence: sequence})
+	}
+	if len(tasks) != 0 {
+		world.signalLocked()
+	}
+	world.mu.Unlock()
+	world.scheduleAll(tasks)
+	return len(tasks), nil
 }
 
 // WaitRun waits for a root run to complete.
@@ -146,7 +199,7 @@ func (world *World) WaitRun(ctx context.Context, id string) (json.RawMessage, er
 			world.mu.Unlock()
 			return output, nil
 		case workflowops.StatusFailed:
-			err := errors.New(run.err)
+			err := workflowops.DecodeFailure(run.err)
 			world.mu.Unlock()
 			return nil, err
 		case workflowops.StatusCancelled:
@@ -164,25 +217,97 @@ func (world *World) WaitRun(ctx context.Context, id string) (json.RawMessage, er
 	}
 }
 
-// Events returns replay-safe output records after the supplied event ID.
-func (world *World) Events(_ context.Context, id string, after int64) ([]workflow.Event, error) {
+func (world *World) ReadStream(_ context.Context, reference workflowops.Stream, offset int64) (workflowops.StreamRead, error) {
 	world.mu.Lock()
 	defer world.mu.Unlock()
-	if _, found := world.runs[id]; !found {
-		return nil, workflow.ErrRunNotFound
+	if _, found := world.runs[reference.RunID]; !found {
+		return workflowops.StreamRead{}, workflow.ErrRunNotFound
 	}
-	var result []workflow.Event
-	for _, event := range world.events[id] {
-		if event.ID <= after {
-			continue
+	value := world.streams[reference]
+	if value == nil {
+		return workflowops.StreamRead{Next: offset}, nil
+	}
+	if offset < 0 {
+		offset = max(int64(len(value.data))+offset, 0)
+	}
+	if offset > int64(len(value.data)) {
+		offset = int64(len(value.data))
+	}
+	return workflowops.StreamRead{
+		Data:   clone(value.data[offset:]),
+		Next:   int64(len(value.data)),
+		Closed: value.closed,
+	}, nil
+}
+
+func (world *World) LockStream(_ context.Context, reference workflowops.Stream, lock string) (bool, error) {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	if _, found := world.runs[reference.RunID]; !found {
+		return false, workflow.ErrRunNotFound
+	}
+	value := world.streams[reference]
+	if value == nil {
+		value = &stream{}
+		world.streams[reference] = value
+	}
+	if value.closed {
+		return false, workflowops.ErrCancelled
+	}
+	if value.lock != "" {
+		return false, nil
+	}
+	value.lock = lock
+	world.signalLocked()
+	return true, nil
+}
+
+func (world *World) AppendStream(_ context.Context, reference workflowops.Stream, lock string, data []byte) error {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	value := world.streams[reference]
+	if _, found := world.runs[reference.RunID]; !found {
+		return workflow.ErrRunNotFound
+	}
+	if value == nil {
+		value = &stream{}
+		world.streams[reference] = value
+	}
+	if value.closed || value.lock != lock {
+		return workflowops.ErrCancelled
+	}
+	value.data = append(value.data, data...)
+	world.signalLocked()
+	return nil
+}
+
+func (world *World) ReleaseStream(_ context.Context, reference workflowops.Stream, lock string, closeStream bool) error {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	value := world.streams[reference]
+	if _, found := world.runs[reference.RunID]; !found {
+		return workflow.ErrRunNotFound
+	}
+	if value == nil || value.lock != lock {
+		return workflowops.ErrCancelled
+	}
+	value.closed = value.closed || closeStream
+	value.lock = ""
+	world.signalLocked()
+	return nil
+}
+
+func (world *World) CloseStreams(_ context.Context, runID string) error {
+	world.mu.Lock()
+	defer world.mu.Unlock()
+	for reference, value := range world.streams {
+		if reference.RunID == runID {
+			value.closed = true
+			value.lock = ""
 		}
-		result = append(result, workflow.Event{
-			ID:        event.ID,
-			Data:      clone(event.Data),
-			CreatedAt: event.CreatedAt,
-		})
 	}
-	return result, nil
+	world.signalLocked()
+	return nil
 }
 
 // CreateRun records and schedules a root or nested workflow run.
@@ -226,10 +351,11 @@ func (world *World) CreateRun(ctx context.Context, lease *workflowops.Lease, req
 		completion:  world.nextCompletionLocked(),
 	}
 	world.runs[childID] = &run{
-		id:       childID,
-		identity: request.Identity,
-		input:    clone(request.Input),
-		status:   workflowops.StatusQueued,
+		id:        childID,
+		identity:  request.Identity,
+		input:     clone(request.Input),
+		startedAt: time.Now(),
+		status:    workflowops.StatusQueued,
 	}
 	world.signalLocked()
 	world.mu.Unlock()
@@ -268,13 +394,17 @@ func (world *World) EnsureOperation(ctx context.Context, lease *workflowops.Leas
 	if request.DueAt != nil {
 		dueAt = *request.DueAt
 	}
+	status := workflowops.StatusQueued
+	if request.Kind == workflowops.KindRollback || request.Kind == workflowops.KindHook {
+		status = workflowops.StatusWaiting
+	}
 	command := &command{
 		sequence:    request.Sequence,
 		kind:        request.Kind,
 		identity:    request.Identity,
 		fingerprint: request.Fingerprint,
 		input:       clone(request.Input),
-		status:      workflowops.StatusQueued,
+		status:      status,
 		dueAt:       dueAt,
 	}
 	commands[request.Sequence] = command
@@ -282,7 +412,9 @@ func (world *World) EnsureOperation(ctx context.Context, lease *workflowops.Leas
 	world.signalLocked()
 	world.mu.Unlock()
 
-	world.schedule(workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}, dueAt)
+	if status == workflowops.StatusQueued {
+		world.schedule(workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}, dueAt)
+	}
 	return op, nil
 }
 
@@ -454,12 +586,13 @@ func (world *World) CompleteRun(_ context.Context, leased *workflowops.Lease, ou
 	run.err = ""
 	run.token = ""
 	run.completion = world.nextCompletionLocked()
+	world.dropHooksLocked(run.id)
 	ready := world.resolveWaitsLocked()
 	world.signalLocked()
 	world.mu.Unlock()
 
 	world.scheduleAll(ready)
-	return nil
+	return world.CloseStreams(context.Background(), leased.ID)
 }
 
 // FailRun records a terminal root or operation failure.
@@ -479,11 +612,18 @@ func (world *World) FailRun(_ context.Context, leased *workflowops.Lease, cause 
 		world.mu.Unlock()
 		return workflowops.ErrLeaseLost
 	}
-	run.status = workflowops.StatusFailed
 	run.output = nil
-	run.err = cause.Error()
+	run.err = workflowops.EncodeFailure(cause)
 	run.token = ""
+	if rollback, found := world.startRollbackLocked(run); found {
+		world.signalLocked()
+		world.mu.Unlock()
+		world.schedule(rollback, time.Time{})
+		return nil
+	}
+	run.status = workflowops.StatusFailed
 	run.completion = world.nextCompletionLocked()
+	world.dropHooksLocked(run.id)
 	ready := world.resolveWaitsLocked()
 	world.signalLocked()
 	world.mu.Unlock()
@@ -503,9 +643,16 @@ func (world *World) FinishOperation(_ context.Context, value workflowops.Operati
 	if err == nil {
 		world.signalLocked()
 	}
+	terminal := false
+	if run := world.runs[value.RunID]; run != nil {
+		terminal = run.status == workflowops.StatusCompleted || run.status == workflowops.StatusFailed || run.status == workflowops.StatusCancelled
+	}
 	world.mu.Unlock()
 
 	world.scheduleAll(ready)
+	if err == nil && terminal {
+		return world.CloseStreams(context.Background(), value.RunID)
+	}
 	return err
 }
 
@@ -518,7 +665,7 @@ func (world *World) RetryOperation(_ context.Context, value workflowops.Operatio
 	}
 	command.status = workflowops.StatusRetryWait
 	command.output = nil
-	command.err = cause.Error()
+	command.err = workflowops.EncodeFailure(cause)
 	command.token = ""
 	command.dueAt = due
 	world.signalLocked()
@@ -613,7 +760,7 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 			world.mu.Unlock()
 			return output, nil
 		case workflowops.StatusFailed:
-			err := errors.New(command.err)
+			err := workflowops.DecodeFailure(command.err)
 			world.mu.Unlock()
 			return nil, err
 		case workflowops.StatusCancelled:
@@ -629,28 +776,6 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		case <-changes:
 		}
 	}
-}
-
-// AppendEvent persists one output record for task. Replaying the same task
-// keeps its original event rather than appending a duplicate.
-func (world *World) AppendEvent(_ context.Context, task workflowops.Task, data []byte) error {
-	world.mu.Lock()
-	defer world.mu.Unlock()
-	if _, found := world.runs[task.RunID]; !found {
-		return workflow.ErrRunNotFound
-	}
-	for _, event := range world.events[task.RunID] {
-		if event.ID == int64(task.Sequence) {
-			return nil
-		}
-	}
-	world.events[task.RunID] = append(world.events[task.RunID], workflow.Event{
-		ID:        int64(task.Sequence),
-		Data:      clone(data),
-		CreatedAt: time.Now(),
-	})
-	world.signalLocked()
-	return nil
 }
 
 func (world *World) scheduleAll(tasks []workflowops.Task) {
@@ -689,11 +814,12 @@ func (world *World) claim(task workflowops.Task) (*workflowops.Lease, bool) {
 		}
 		run.status, run.token = workflowops.StatusRunning, token
 		return &workflowops.Lease{
-			ID:       run.id,
-			Identity: run.identity,
-			Input:    clone(run.input),
-			Sequence: workflowops.RootSequence,
-			Token:    token,
+			ID:        run.id,
+			Identity:  run.identity,
+			Input:     clone(run.input),
+			Sequence:  workflowops.RootSequence,
+			Token:     token,
+			StartedAt: run.startedAt,
 		}, true
 	}
 	command, found := world.commands[task.RunID][task.Sequence]
@@ -704,11 +830,12 @@ func (world *World) claim(task workflowops.Task) (*workflowops.Lease, bool) {
 	command.status, command.token = workflowops.StatusRunning, token
 	command.attempt++
 	return &workflowops.Lease{
-		ID:       run.id,
-		Identity: run.identity,
-		Input:    clone(run.input),
-		Sequence: task.Sequence,
-		Token:    token,
+		ID:        run.id,
+		Identity:  run.identity,
+		Input:     clone(run.input),
+		Sequence:  task.Sequence,
+		Token:     token,
+		StartedAt: run.startedAt,
 	}, true
 }
 
@@ -724,11 +851,45 @@ func (world *World) finishCommandLocked(runID string, sequence int, token string
 	} else {
 		command.status = workflowops.StatusFailed
 		command.output = nil
-		command.err = cause.Error()
+		command.err = workflowops.EncodeFailure(cause)
 	}
 	command.token = ""
 	command.completion = world.nextCompletionLocked()
-	return nil, world.resolveWaitsLocked()
+	ready := world.resolveWaitsLocked()
+	if command.kind == workflowops.KindRollback {
+		if rollback, found := world.advanceRollbackLocked(runID); found {
+			ready = append(ready, rollback)
+		}
+	}
+	return nil, ready
+}
+
+func (world *World) startRollbackLocked(run *run) (workflowops.Task, bool) {
+	commands := world.commands[run.id]
+	for sequence := len(commands) - 1; sequence >= 0; sequence-- {
+		command := commands[sequence]
+		if command == nil || command.kind != workflowops.KindRollback || command.status != workflowops.StatusWaiting {
+			continue
+		}
+		command.status = workflowops.StatusQueued
+		run.status = workflowops.StatusRollingBack
+		return workflowops.Task{RunID: run.id, Sequence: sequence}, true
+	}
+	return workflowops.Task{}, false
+}
+
+func (world *World) advanceRollbackLocked(runID string) (workflowops.Task, bool) {
+	run := world.runs[runID]
+	if run == nil || run.status != workflowops.StatusRollingBack {
+		return workflowops.Task{}, false
+	}
+	if task, found := world.startRollbackLocked(run); found {
+		return task, true
+	}
+	run.status = workflowops.StatusFailed
+	run.completion = world.nextCompletionLocked()
+	world.dropHooksLocked(run.id)
+	return workflowops.Task{}, false
 }
 
 func (world *World) resolveWaitsLocked() []workflowops.Task {
@@ -755,7 +916,7 @@ func (world *World) resolveWaitsLocked() []workflowops.Task {
 				} else {
 					command.status = workflowops.StatusFailed
 					command.output = nil
-					command.err = resolution.Err.Error()
+					command.err = workflowops.EncodeFailure(resolution.Err)
 				}
 				command.completion = world.nextCompletionLocked()
 				if run := world.runs[runID]; run.status == workflowops.StatusWaiting {

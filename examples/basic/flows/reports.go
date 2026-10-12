@@ -2,7 +2,6 @@ package flows
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -24,7 +23,9 @@ func GenerateReport(ctx context.Context, input workflowdefs.GenerateReport) (wor
 		sources = append(sources, group...)
 	}
 
-	fmt.Fprintf(workflow.Writer(ctx), "found %d sources\n", len(sources))
+	if _, err := workflow.Step(ctx, steps.WriteReportProgress, len(sources)); err != nil {
+		return workflowdefs.GenerateReportResult{}, err
+	}
 
 	return workflowdefs.GenerateReportResult{
 		Summary: strings.Join(sources, ", "),

@@ -5,7 +5,6 @@ package vercelworld
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -299,12 +298,17 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 	if claimed != "1" {
 		return nil, nil
 	}
+	startedAt, err := time.Parse(time.RFC3339Nano, run["created"])
+	if err != nil {
+		return nil, err
+	}
 	return &workflowops.Lease{
-		ID:       task.RunID,
-		Identity: run["identity"],
-		Input:    json.RawMessage(run["input"]),
-		Token:    token,
-		Sequence: task.Sequence,
+		ID:        task.RunID,
+		Identity:  run["identity"],
+		Input:     json.RawMessage(run["input"]),
+		Token:     token,
+		Sequence:  task.Sequence,
+		StartedAt: startedAt,
 	}, nil
 }
 
@@ -345,23 +349,51 @@ func (world *World) CompleteRun(ctx context.Context, run *workflowops.Lease, out
 	); err != nil {
 		return err
 	}
+	if err := world.CloseStreams(ctx, run.ID); err != nil {
+		return err
+	}
 	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 }
 
 func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause error) error {
-	if err := world.finishTask(ctx, run, workflowops.StatusFailed, nil, cause.Error()); err != nil {
+	if err := world.finishTask(ctx, run, workflowops.StatusFailed, nil, workflowops.EncodeFailure(cause)); err != nil {
 		return err
 	}
 	if run.Sequence != workflowops.RootSequence {
 		return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
 	}
+	rollback, found, err := world.nextRollback(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := world.setTaskStatus(ctx, workflowops.Task{RunID: run.ID, Sequence: workflowops.RootSequence}, workflowops.StatusRollingBack); err != nil {
+			return err
+		}
+		if err := world.setTaskStatus(ctx, rollback, workflowops.StatusQueued); err != nil {
+			return err
+		}
+		if err := world.redis.HSet(
+			ctx,
+			world.runKey(run.ID),
+			"status", string(workflowops.StatusRollingBack),
+			"error", workflowops.EncodeFailure(cause),
+			"updated", stamp(time.Now()),
+		); err != nil {
+			return err
+		}
+		return world.enqueueTask(ctx, rollback, time.Time{})
+	}
 	if err := world.redis.HSet(
 		ctx,
 		world.runKey(run.ID),
 		"status", string(workflowops.StatusFailed),
-		"error", cause.Error(),
+		"error", workflowops.EncodeFailure(cause),
 		"updated", stamp(time.Now()),
 	); err != nil {
+		return err
+	}
+	if err := world.CloseStreams(ctx, run.ID); err != nil {
 		return err
 	}
 	return world.resolveDependents(ctx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence})
@@ -497,6 +529,41 @@ func (world *World) runTasks(ctx context.Context, runID string) ([]workflowops.T
 	}
 }
 
+func (world *World) nextRollback(ctx context.Context, runID string) (workflowops.Task, bool, error) {
+	tasks, err := world.runTasks(ctx, runID)
+	if err != nil {
+		return workflowops.Task{}, false, err
+	}
+	var next workflowops.Task
+	found := false
+	for _, task := range tasks {
+		command, err := world.hash(ctx, world.commandKey(runID, task.Sequence))
+		if err != nil {
+			return workflowops.Task{}, false, err
+		}
+		if workflowops.Kind(command["kind"]) != workflowops.KindRollback {
+			continue
+		}
+		record, err := world.hash(ctx, world.taskKey(runID, task.Sequence))
+		if err != nil {
+			return workflowops.Task{}, false, err
+		}
+		if workflowops.Status(record["status"]) == workflowops.StatusWaiting && (!found || task.Sequence > next.Sequence) {
+			next, found = task, true
+		}
+	}
+	return next, found, nil
+}
+
+func (world *World) setTaskStatus(ctx context.Context, task workflowops.Task, status workflowops.Status) error {
+	return world.redis.HSet(
+		ctx,
+		world.taskKey(task.RunID, task.Sequence),
+		"status", string(status),
+		"updated", stamp(time.Now()),
+	)
+}
+
 func (world *World) validateLease(ctx context.Context, lease *workflowops.Lease) error {
 	record, err := world.hash(ctx, world.taskKey(lease.ID, lease.Sequence))
 	if err != nil {
@@ -537,6 +604,10 @@ func (world *World) EnsureOperation(
 		due = *request.DueAt
 	}
 	key := request.RunID + ":" + strconv.Itoa(request.Sequence)
+	status := workflowops.StatusQueued
+	if request.Kind == workflowops.KindRollback || request.Kind == workflowops.KindHook {
+		status = workflowops.StatusWaiting
+	}
 	created, err := world.eval(
 		ctx,
 		createOperationScript,
@@ -556,7 +627,7 @@ func (world *World) EnsureOperation(
 		key,
 		stamp(time.Now()),
 		stamp(due),
-		string(workflowops.StatusQueued),
+		string(status),
 	)
 	if err != nil {
 		return workflowops.Operation{}, err
@@ -567,13 +638,15 @@ func (world *World) EnsureOperation(
 	if created == "0" {
 		return world.EnsureOperation(ctx, lease, request)
 	}
-	if err := world.enqueueTask(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}, due); err != nil {
-		return workflowops.Operation{}, err
+	if status == workflowops.StatusQueued {
+		if err := world.enqueueTask(ctx, workflowops.Task{RunID: request.RunID, Sequence: request.Sequence}, due); err != nil {
+			return workflowops.Operation{}, err
+		}
 	}
 	return workflowops.Operation{
 		RunID:    request.RunID,
 		Sequence: request.Sequence,
-		Status:   workflowops.StatusQueued,
+		Status:   status,
 		DueAt:    due,
 		StepID:   key,
 	}, nil
@@ -732,9 +805,16 @@ func (world *World) FinishOperation(
 	output json.RawMessage,
 	cause error,
 ) error {
+	command, err := world.hash(ctx, world.commandKey(operation.RunID, operation.Sequence))
+	if err != nil {
+		return err
+	}
+	if len(command) == 0 {
+		return workflowops.ErrRunNotFound
+	}
 	status, message := workflowops.StatusCompleted, ""
 	if cause != nil {
-		status, message, output = workflowops.StatusFailed, cause.Error(), nil
+		status, message, output = workflowops.StatusFailed, workflowops.EncodeFailure(cause), nil
 	}
 	run := &workflowops.Lease{
 		ID:       operation.RunID,
@@ -744,7 +824,38 @@ func (world *World) FinishOperation(
 	if err := world.finishTask(ctx, run, status, output, message); err != nil {
 		return err
 	}
-	return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
+	if workflowops.Kind(command["kind"]) != workflowops.KindRollback {
+		return world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence})
+	}
+	if err := world.resolveDependents(ctx, workflowops.Task{RunID: operation.RunID, Sequence: operation.Sequence}); err != nil {
+		return err
+	}
+	next, found, err := world.nextRollback(ctx, operation.RunID)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := world.setTaskStatus(ctx, next, workflowops.StatusQueued); err != nil {
+			return err
+		}
+		return world.enqueueTask(ctx, next, time.Time{})
+	}
+	root := workflowops.Task{RunID: operation.RunID, Sequence: workflowops.RootSequence}
+	if err := world.setTaskStatus(ctx, root, workflowops.StatusFailed); err != nil {
+		return err
+	}
+	if err := world.redis.HSet(
+		ctx,
+		world.runKey(operation.RunID),
+		"status", string(workflowops.StatusFailed),
+		"updated", stamp(time.Now()),
+	); err != nil {
+		return err
+	}
+	if err := world.CloseStreams(ctx, operation.RunID); err != nil {
+		return err
+	}
+	return world.resolveDependents(ctx, root)
 }
 
 func (world *World) RetryOperation(
@@ -759,7 +870,7 @@ func (world *World) RetryOperation(
 		[]string{world.taskKey(operation.RunID, operation.Sequence)},
 		operation.Token,
 		stamp(due),
-		cause.Error(),
+		workflowops.EncodeFailure(cause),
 		stamp(time.Now()),
 		string(workflowops.StatusRunning),
 		string(workflowops.StatusRetryWait),
@@ -788,7 +899,7 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 			return json.RawMessage(run["output"]), nil
 		}
 		if workflowops.Status(run["status"]) == workflowops.StatusFailed {
-			return nil, errors.New(run["error"])
+			return nil, workflowops.DecodeFailure(run["error"])
 		}
 		if workflowops.Status(run["status"]) == workflowops.StatusCancelled {
 			return nil, workflowops.ErrCancelled
@@ -799,6 +910,65 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 		case <-ticker.C:
 		}
 	}
+}
+
+// GetRun returns durable metadata for one Vercel workflow run.
+func (world *World) GetRun(ctx context.Context, runID string) (workflowops.RunInfo, bool, error) {
+	run, err := world.hash(ctx, world.runKey(runID))
+	if err != nil || len(run) == 0 {
+		return workflowops.RunInfo{}, len(run) != 0, err
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, run["created"])
+	if err != nil {
+		return workflowops.RunInfo{}, false, err
+	}
+	return workflowops.RunInfo{Identity: run["identity"], Status: workflowops.Status(run["status"]), StartedAt: startedAt}, true, nil
+}
+
+// Wake makes pending sleep operations immediately eligible and queues them.
+func (world *World) Wake(ctx context.Context, runID string) (int, error) {
+	if _, found, err := world.GetRun(ctx, runID); err != nil || !found {
+		if err != nil {
+			return 0, err
+		}
+		return 0, workflowops.ErrRunNotFound
+	}
+	tasks, err := world.runTasks(ctx, runID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, task := range tasks {
+		command, err := world.hash(ctx, world.commandKey(task.RunID, task.Sequence))
+		if err != nil {
+			return count, err
+		}
+		if workflowops.Kind(command["kind"]) != workflowops.KindSleep {
+			continue
+		}
+		record, err := world.hash(ctx, world.taskKey(task.RunID, task.Sequence))
+		if err != nil {
+			return count, err
+		}
+		if workflowops.Status(record["status"]) != workflowops.StatusQueued {
+			continue
+		}
+		due, err := time.Parse(time.RFC3339Nano, record["due"])
+		if err != nil || !due.After(time.Now()) {
+			continue
+		}
+		if err := world.CleanupTimer(ctx, task); err != nil {
+			return count, err
+		}
+		if err := world.redis.HSet(ctx, world.taskKey(task.RunID, task.Sequence), "due", stamp(time.Now()), "updated", stamp(time.Now())); err != nil {
+			return count, err
+		}
+		if err := world.enqueueTask(ctx, task, time.Time{}); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (json.RawMessage, error) {
@@ -817,7 +987,7 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 			return json.RawMessage(item["output"]), nil
 		}
 		if operation.Status == workflowops.StatusFailed {
-			return nil, errors.New(operation.Error)
+			return nil, workflowops.DecodeFailure(operation.Error)
 		}
 		if operation.Status == workflowops.StatusCancelled {
 			return nil, workflowops.ErrCancelled
@@ -829,46 +999,6 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		}
 	}
 }
-func (world *World) AppendEvent(ctx context.Context, task workflowops.Task, data []byte) error {
-	_, err := world.eval(
-		ctx,
-		appendEventScript,
-		[]string{world.eventKey(task.RunID, task.Sequence), world.eventsKey(task.RunID)},
-		base64.StdEncoding.EncodeToString(data),
-		strconv.Itoa(task.Sequence),
-		stamp(time.Now()),
-	)
-	return err
-}
-func (world *World) Events(ctx context.Context, runID string, after int64) ([]workflow.Event, error) {
-	sequences, err := world.redis.ZRangeByScore(ctx, world.eventsKey(runID), "-inf", "+inf")
-	if err != nil {
-		return nil, err
-	}
-	events := make([]workflow.Event, 0, len(sequences))
-	for _, sequence := range sequences {
-		id, err := strconv.ParseInt(sequence, 10, 64)
-		if err != nil || id <= after {
-			continue
-		}
-		event, err := world.hash(ctx, world.eventKey(runID, int(id)))
-		if err != nil {
-			return nil, err
-		}
-		data, err := base64.StdEncoding.DecodeString(event["data"])
-		if err != nil {
-			return nil, err
-		}
-		created, _ := time.Parse(time.RFC3339Nano, event["created"])
-		events = append(events, workflow.Event{
-			ID:        id,
-			Data:      data,
-			CreatedAt: created,
-		})
-	}
-	return events, nil
-}
-
 func (world *World) operation(ctx context.Context, runID string, sequence int) (workflowops.Operation, error) {
 	task, err := world.hash(ctx, world.taskKey(runID, sequence))
 	if err != nil {
@@ -971,7 +1101,7 @@ func (world *World) resolveWait(ctx context.Context, wait workflowops.Task) (boo
 	}
 	status, message := workflowops.StatusCompleted, ""
 	if resolution.Err != nil {
-		status, message = workflowops.StatusFailed, resolution.Err.Error()
+		status, message = workflowops.StatusFailed, workflowops.EncodeFailure(resolution.Err)
 	}
 	resolved, err := world.eval(ctx, resolveWaitScript, []string{world.taskKey(wait.RunID, wait.Sequence), world.taskKey(wait.RunID, workflowops.RootSequence), world.runKey(wait.RunID), world.completionKey()}, string(status), string(resolution.Output), message, stamp(time.Now()), string(workflowops.StatusWaiting), string(workflowops.StatusQueued))
 	if err != nil || resolved != "1" {
@@ -1230,13 +1360,6 @@ func (world *World) taskKey(runID string, sequence int) string {
 func (world *World) dependentsKey(task workflowops.Task) string {
 	return world.config.Prefix + ":dependents:" + task.RunID + ":" + strconv.Itoa(task.Sequence)
 }
-func (world *World) eventKey(runID string, sequence int) string {
-	return world.config.Prefix + ":run:" + runID + ":event:" + strconv.Itoa(sequence)
-}
-func (world *World) eventsKey(runID string) string {
-	return world.config.Prefix + ":run:" + runID + ":events"
-}
-
 func (world *World) completionKey() string {
 	return world.config.Prefix + ":completion"
 }
@@ -1247,9 +1370,19 @@ func stamp(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
+func parseStamp(value string) time.Time {
+	result, _ := time.Parse(time.RFC3339Nano, value)
+	return result
+}
+
 func completion(value string) uint64 {
 	result, _ := strconv.ParseUint(value, 10, 64)
 	return result
+}
+
+func parseSequence(value string) int {
+	sequence, _ := strconv.Atoi(value)
+	return sequence
 }
 
 func allowsCreate(lease *workflowops.Lease, runID string) bool {
@@ -1498,15 +1631,6 @@ if redis.call('HGET', KEYS[2], 'status') == ARGV[5] then
   redis.call('HSET', KEYS[2], 'status', ARGV[6], 'updated', ARGV[4])
   redis.call('HSET', KEYS[3], 'status', ARGV[6], 'updated', ARGV[4])
 end
-return 1
-`
-
-const appendEventScript = `
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  return 0
-end
-redis.call('HSET', KEYS[1], 'data', ARGV[1], 'created', ARGV[3])
-redis.call('ZADD', KEYS[2], ARGV[2], ARGV[2])
 return 1
 `
 

@@ -6,7 +6,7 @@ registries, workflow interfaces, or SDK-specific context type.
 
 `workflow.NewContext` is the boundary between application code and scheduling.
 Clients communicate only with a worker HTTP endpoint. They never receive an
-World or database handle. The Postgres worker inserts root runs and sends
+a World or database handle. The Postgres worker inserts root runs and sends
 `pg_notify` in the same transaction. Durable primitives create immutable
 ordered commands and queued tasks. A worker leases one task, then replays the
 parent function privately until it reaches that exact command. This is also
@@ -20,8 +20,13 @@ importing workflow implementations.
 ```go
 package workflowdefs
 
-type GenerateReport struct { Topic string }
-type GenerateReportResult struct { Summary string }
+type GenerateReport struct {
+	Topic string
+}
+
+type GenerateReportResult struct {
+	Summary string
+}
 
 func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
@@ -34,19 +39,33 @@ or database. Its state is lost when the process exits.
 
 ```go
 // import localworld "github.com/eriicafes/go-workflow/worlds/local"
-runners := workflow.Runners(workflow.Use(flows.GenerateReport))
+runners := workflow.Runners(
+	workflow.Use(flows.GenerateReport),
+)
 
 world, err := localworld.Open(".workflow-data", runners)
-if err != nil { log.Fatal(err) }
+if err != nil {
+	log.Fatal(err)
+}
 defer world.Close()
-if err := world.Start(context.Background()); err != nil { log.Fatal(err) }
+if err := world.Start(context.Background()); err != nil {
+	log.Fatal(err)
+}
 
 run, err := workflow.Start(
-    workflow.NewContext(context.Background(), world),
-    workflowdefs.GenerateReport{Topic: "workflows"},
+	workflow.NewContext(context.Background(), world),
+	workflowdefs.GenerateReport{
+		Topic: "workflows",
+	},
 )
-if err != nil { log.Fatal(err) }
+if err != nil {
+	log.Fatal(err)
+}
 result, err := run.Value(context.Background())
+if err != nil {
+	log.Fatal(err)
+}
+log.Printf("report summary: %s", result.Summary)
 ```
 
 ## Implementations and steps
@@ -56,25 +75,139 @@ accept either named functions or inline closures. The analyzer requires a
 closure to receive workflow-relevant values through its explicit input.
 Calling a step function directly is normal Go and repeats during replay.
 
+## Rollbacks
+
+Register a compensation after the work it reverses. If the workflow later
+fails, registered compensations run as durable steps in reverse registration
+order. Successful workflows never execute them.
+
+```go
+invoice, err := workflow.Step(ctx, steps.CreateInvoice, input)
+if err != nil {
+	return Report{}, err
+}
+if err := workflow.OnRollback(ctx, steps.VoidInvoice, invoice.ID); err != nil {
+	return Report{}, err
+}
+```
+
+`OnRollback` compensations return only `error`. They use the same retry and
+step metadata behavior as ordinary durable steps.
+
 ```go
 package flows
 
-func GenerateReport(ctx context.Context, input workflowdefs.GenerateReport) (workflowdefs.GenerateReportResult, error) {
-    sources, err := workflow.Step(ctx, steps.FindSources, input.Topic)
-    if err != nil { return workflowdefs.GenerateReportResult{}, err }
+func GenerateReport(
+	ctx context.Context,
+	input workflowdefs.GenerateReport,
+) (workflowdefs.GenerateReportResult, error) {
+	sources, err := workflow.Step(
+		ctx,
+		steps.FindSources,
+		input.Topic,
+	)
+	if err != nil {
+		return workflowdefs.GenerateReportResult{}, err
+	}
 
-    fmt.Fprintf(workflow.Writer(ctx), "found %d sources\n", len(sources))
-    return workflowdefs.GenerateReportResult{Summary: strings.Join(sources, ", ")}, nil
+	if _, err := workflow.Step(
+		ctx,
+		steps.WriteReportProgress,
+		len(sources),
+	); err != nil {
+		return workflowdefs.GenerateReportResult{}, err
+	}
+
+	return workflowdefs.GenerateReportResult{
+		Summary: strings.Join(sources, ", "),
+	}, nil
 }
 
 package steps
 
 func FindSources(ctx context.Context, topic string) ([]string, error) {
-    // I/O belongs in a durable operation.
-    // workflow.IdempotencyKey(ctx) is stable for this operation sequence.
-    return query(ctx, topic)
+	// I/O belongs in a durable operation.
+	// workflow.StepID(ctx) is stable for this operation sequence.
+	return query(ctx, topic)
+}
+
+func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
+	writer, release, err := workflow.Writer(ctx)
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer release()
+
+	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
+	return struct{}{}, err
 }
 ```
+
+## Streams
+
+Streams are run-owned byte streams backed by the selected world rather than by
+the event log. Only steps can acquire a writer or reader. A stream has one
+active writer at a time. Another writer waits until the current writer releases
+its lock or closes the stream. Closing is visible to every reader. Runs close
+any remaining streams when they reach a terminal state.
+
+```go
+func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
+	writer, release, err := workflow.Writer(
+		ctx,
+		workflow.WriterOption{Namespace: "progress"},
+	)
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer release()
+
+	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
+	return struct{}{}, err
+}
+
+reader, err := run.ReaderAt(
+	ctx,
+	-128,
+	workflow.ReaderOption{Namespace: "progress"},
+)
+if err != nil {
+	return err
+}
+// io.ReadAll(reader) waits for new data until the stream closes.
+```
+
+`workflow.Writer` and `workflow.Reader` are step-only. `run.Writer` and
+`run.Reader` are for application handlers or durable steps; a root workflow
+body receives `ErrNoWorkflow`. `ReaderAt` accepts negative offsets relative to
+the stream's end. `Release` completes the writer's step-local lifetime without
+closing. `Close` closes the stream for every reader. Use `bufio.Writer` when
+writes need application-side buffering.
+
+## Hooks and webhooks
+
+`NewHook` records or derives a replay-stable token but does not claim it until
+`Value` or `GetConflict` is reached during workflow replay. `ResumeHook` delivers
+a typed payload, and `ResumeHookWithRetries` handles a resume racing a newly
+started run. Pass an explicit token when an external caller must know the URL
+before the workflow reaches the hook.
+
+```go
+hook := workflow.NewHook[string](workflow.HookOption{
+	Token: input.Token,
+})
+value, err := hook.Value(ctx)
+```
+
+`NewWebhook[T]` receives and decodes a JSON request body as `T`. Call
+`webhook.Request(ctx)` when the workflow needs the reconstructed
+`*http.Request` instead. Its URL is `/.well-known/workflow/v1/webhook/:token`,
+served by `NewHTTPHandler`. The token is the route's only authorization, so
+verify provider signatures before trusting the request payload.
+
+`WebhookOption` can require one HTTP method, return a static
+`*http.Response`, or set `Manual: true`. A manual webhook waits until a
+durable step calls `webhook.ReplyWebhook(ctx, response)`.
 
 ## Application and worker
 
@@ -86,33 +219,59 @@ implementation package, owns the world, and exposes the workflow HTTP API.
 // cmd/app/main.go
 client := workflow.NewHTTPClient("http://workflow-worker:8081")
 
-type app struct { workflows workflow.Client }
+type app struct {
+	workflows workflow.Client
+}
 
 func (a app) createReport(w http.ResponseWriter, r *http.Request) {
-    var input workflowdefs.GenerateReport
-    if err := json.NewDecoder(r.Body).Decode(&input); err != nil { /* 400 */ }
+	var input workflowdefs.GenerateReport
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid report input", http.StatusBadRequest)
+		return
+	}
 
-    run, err := workflow.Start(workflow.NewContext(r.Context(), a.workflows), input)
-    if err != nil { /* 500 */ }
-    // Reply 202 with run.ID(). The request does not execute workflow code.
+	run, err := workflow.Start(
+		workflow.NewContext(r.Context(), a.workflows),
+		input,
+	)
+	if err != nil {
+		http.Error(w, "start report workflow", http.StatusInternalServerError)
+		return
+	}
+
+	// Reply 202 with run.ID(). The request does not execute workflow code.
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(run.ID()))
 }
 
 server := app{workflows: client}
-http.ListenAndServe(":8080", http.HandlerFunc(server.createReport))
+if err := http.ListenAndServe(":8080", http.HandlerFunc(server.createReport)); err != nil {
+	log.Fatal(err)
+}
 ```
 
 ```go
 // cmd/worker/main.go
-world, err := postgresworld.Open(ctx, postgresworld.Config{URL: os.Getenv("DATABASE_URL")})
-if err != nil { log.Fatal(err) }
+world, err := postgresworld.Open(ctx, postgresworld.Config{
+	URL: os.Getenv("DATABASE_URL"),
+})
+if err != nil {
+	log.Fatal(err)
+}
 defer world.Close()
 
- runners := workflow.Runners(
-    workflow.Use(flows.GenerateReport),
+runners := workflow.Runners(
+	workflow.Use(flows.GenerateReport),
 )
 
-go postgresworld.Run(ctx, world, runners)
-http.ListenAndServe(":8081", postgresworld.HTTP(world))
+go func() {
+	if err := postgresworld.Run(ctx, world, runners); err != nil {
+		log.Printf("workflow worker stopped: %v", err)
+	}
+}()
+if err := http.ListenAndServe(":8081", postgresworld.HTTP(world)); err != nil {
+	log.Fatal(err)
+}
 ```
 
 Run these independently with `go run ./examples/basic/cmd/app` and `go run
@@ -127,8 +286,14 @@ World packages own deployment-specific entry points:
 
 ```go
 // Postgres: a long-running poller.
-go postgresworld.Run(ctx, postgresWorld, runners)
-http.ListenAndServe(":8081", postgresworld.HTTP(postgresWorld))
+go func() {
+	if err := postgresworld.Run(ctx, postgresWorld, runners); err != nil {
+		log.Printf("workflow worker stopped: %v", err)
+	}
+}()
+if err := http.ListenAndServe(":8081", postgresworld.HTTP(postgresWorld)); err != nil {
+	log.Fatal(err)
+}
 
 // AWS: install this as the Lambda SQS handler.
 lambda.Start(awsworld.Queue(awsWorld, runners))
@@ -137,8 +302,12 @@ lambda.Start(awsworld.Queue(awsWorld, runners))
 lambda.Start(lambdaurl.Wrap(awsworld.HTTP(awsWorld)))
 
 // Vercel: deploy separate Queue-consumer and app-facing API functions.
-http.ListenAndServe(":8081", vercelworld.Queue(vercelWorld, runners))
-http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld, runners))
+if err := http.ListenAndServe(":8081", vercelworld.Queue(vercelWorld, runners)); err != nil {
+	log.Fatal(err)
+}
+if err := http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld, runners)); err != nil {
+	log.Fatal(err)
+}
 ```
 
 The examples are split accordingly:
@@ -166,12 +335,33 @@ records one winner-selection command. `All` is `Map` followed by `Join`: on a
 failure it returns the result slice and the first completion failure without
 waiting for unfinished mapped work.
 
-`workflow.Writer(ctx)` stores replay-safe ordered `log` commands and events.
-The Go package deliberately serves no Dev UI. `Workflow.Events` and the Postgres
-operation tables are the contract for `go-dev` or a production proxy.
+Application handlers use run handles for lifecycle queries; workflow bodies
+coordinate only through durable operations, while steps perform I/O:
+
+```go
+metadata := workflow.GetWorkflowMetadata(ctx) // Current workflow or step.
+run, err := workflow.Get[Report](ctx, id)     // Handler context.
+if err != nil {
+	return err
+}
+
+status, err := run.Status()
+if err != nil {
+	return err
+}
+if status == workflow.StatusWaiting {
+	if _, err := run.Wake(); err != nil {
+		return err
+	}
+}
+_ = metadata.RunID
+```
+
+The Go package deliberately serves no Dev UI. Streams and the
+Postgres operation tables are the contract for `go-dev` or a production proxy.
 
 `workflow.Start` is also valid inside workflows and steps. It records a nested
-run command and returns the same child `Workflow` ID on replay.
+run command and returns the same child `Run` ID on replay.
 
 ## go-dev static checks
 
@@ -181,9 +371,9 @@ every `go-dev` rebuild:
 ```go
 session := dev.New()
 session.Catch(session.Run(dev.Cmd{
-    Run: dev.Package("./cmd/api"),
-    Prepare: dev.Hooks(workflowdev.Check()),
-    Watch: dev.Values("."),
+	Run:     dev.Package("./cmd/api"),
+	Prepare: dev.Hooks(workflowdev.Check()),
+	Watch:   dev.Values("."),
 }))
 session.Catch(session.Wait())
 ```

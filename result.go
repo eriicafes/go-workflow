@@ -13,7 +13,7 @@ import (
 // Task is a durable workflow or operation handle.
 type Task interface {
 	Wait(context.Context) error
-	Task() *workflowops.Task
+	Task() (*workflowops.Task, error)
 }
 
 // Tasks converts a homogeneous slice into durable task handles.
@@ -67,7 +67,7 @@ func errorResult[T any](err error) Result[T] {
 func (state *resultState[T]) wait(ctx context.Context) (T, error) {
 	state.once.Do(func() {
 		defer close(state.done)
-		if execution, active := executionFromContext(ctx); active && state.await {
+		if execution, active := workflowExecutionFromContext(ctx); active && state.await {
 			if err := awaitSuspendingTask(ctx, execution, &state.task); err != nil {
 				state.err = err
 				return
@@ -97,10 +97,6 @@ func (result Result[T]) Wait(ctx context.Context) error {
 }
 
 func (result Result[T]) Value(ctx context.Context) (T, error) {
-	if result.state == nil {
-		var zero T
-		return zero, fmt.Errorf("workflow: zero Result")
-	}
 	return result.state.wait(ctx)
 }
 
@@ -112,11 +108,8 @@ func (result Result[T]) Unwrap(ctx context.Context) T {
 	return value
 }
 
-func (result Result[T]) Task() *workflowops.Task {
-	if result.state == nil {
-		return nil
-	}
-	return &result.state.task
+func (result Result[T]) Task() (*workflowops.Task, error) {
+	return &result.state.task, nil
 }
 
 func awaitSuspendingTask(ctx context.Context, execution *workflowops.Execution, task *workflowops.Task) error {

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/workflowops"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -100,7 +99,7 @@ CREATE TABLE IF NOT EXISTS go_workflow_runs (
   workflow_identity text NOT NULL,
   input jsonb NOT NULL,
   output jsonb,
-  status text NOT NULL CHECK (status IN (%s, %s, %s, %s, %s, %s)),
+  status text NOT NULL CHECK (status IN (%s, %s, %s, %s, %s, %s, %s)),
   error text,
   lease_until timestamptz,
   lease_token text,
@@ -109,12 +108,6 @@ CREATE TABLE IF NOT EXISTS go_workflow_runs (
 );
 
 CREATE INDEX IF NOT EXISTS go_workflow_runs_queue_idx ON go_workflow_runs (created_at) WHERE status = %s;
-
-ALTER TABLE go_workflow_runs
-  DROP CONSTRAINT IF EXISTS go_workflow_runs_status_check;
-ALTER TABLE go_workflow_runs
-  ADD CONSTRAINT go_workflow_runs_status_check
-  CHECK (status IN (%s, %s, %s, %s, %s, %s));
 
 CREATE TABLE IF NOT EXISTS workflow_commands (
   run_id text NOT NULL REFERENCES go_workflow_runs(id) ON DELETE CASCADE,
@@ -172,31 +165,43 @@ CREATE TABLE IF NOT EXISTS workflow_completion_events (
   UNIQUE (run_id, sequence)
 );
 
-CREATE TABLE IF NOT EXISTS go_workflow_events (
-  id bigserial PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS go_workflow_streams (
   run_id text NOT NULL REFERENCES go_workflow_runs(id) ON DELETE CASCADE,
-  operation_sequence integer,
-  data bytea NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  namespace text NOT NULL,
+  data bytea NOT NULL DEFAULT ''::bytea,
+  closed boolean NOT NULL DEFAULT false,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, namespace)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS go_workflow_events_operation_idx
-  ON go_workflow_events(run_id, operation_sequence)
-  WHERE operation_sequence IS NOT NULL;
+CREATE TABLE IF NOT EXISTS go_workflow_stream_locks (
+  run_id text NOT NULL REFERENCES go_workflow_runs(id) ON DELETE CASCADE,
+  namespace text NOT NULL,
+  token text NOT NULL,
+  PRIMARY KEY (run_id, namespace)
+);
+
+CREATE TABLE IF NOT EXISTS go_workflow_hooks (
+  token text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES go_workflow_runs(id) ON DELETE CASCADE,
+  sequence integer NOT NULL,
+  retention_ns bigint NOT NULL DEFAULT 0,
+  expires_at timestamptz,
+	webhook jsonb,
+	response jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (run_id, sequence)
+    REFERENCES workflow_tasks(run_id, sequence) ON DELETE CASCADE
+);
 `,
 	statusLiteral(workflowops.StatusQueued),
 	statusLiteral(workflowops.StatusRunning),
 	statusLiteral(workflowops.StatusWaiting),
+	statusLiteral(workflowops.StatusRollingBack),
 	statusLiteral(workflowops.StatusCompleted),
 	statusLiteral(workflowops.StatusFailed),
 	statusLiteral(workflowops.StatusCancelled),
 	statusLiteral(workflowops.StatusQueued),
-	statusLiteral(workflowops.StatusQueued),
-	statusLiteral(workflowops.StatusRunning),
-	statusLiteral(workflowops.StatusWaiting),
-	statusLiteral(workflowops.StatusCompleted),
-	statusLiteral(workflowops.StatusFailed),
-	statusLiteral(workflowops.StatusCancelled),
 	statusLiteral(workflowops.StatusQueued),
 	statusLiteral(workflowops.StatusRunning),
 	statusLiteral(workflowops.StatusWaiting),
@@ -399,7 +404,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 		JOIN go_workflow_runs runs ON runs.id = candidate.run_id
 		WHERE tasks.run_id = candidate.run_id
 		  AND tasks.sequence = candidate.sequence
-		RETURNING runs.id, runs.workflow_identity, runs.input,
+		RETURNING runs.id, runs.workflow_identity, runs.input, runs.created_at,
 		          tasks.lease_token, tasks.sequence`,
 		token,
 		world.lease.Seconds(),
@@ -409,7 +414,7 @@ func (world *World) ClaimRun(ctx context.Context) (*workflowops.Lease, error) {
 		string(workflowops.StatusRetryWait),
 	)
 	var run workflowops.Lease
-	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
+	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.StartedAt, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -442,7 +447,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 			(tasks.status IN ($6, $8) AND (tasks.due_at IS NULL OR tasks.due_at <= now()))
 			OR (tasks.status = $5 AND tasks.lease_until < now())
 		  )
-		RETURNING runs.id, runs.workflow_identity, runs.input,
+		RETURNING runs.id, runs.workflow_identity, runs.input, runs.created_at,
 		          tasks.lease_token, tasks.sequence`,
 		token,
 		task.RunID,
@@ -454,7 +459,7 @@ func (world *World) ClaimTask(ctx context.Context, task workflowops.Task) (*work
 		string(workflowops.StatusRetryWait),
 	)
 	var run workflowops.Lease
-	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
+	if err := row.Scan(&run.ID, &run.Identity, &run.Input, &run.StartedAt, &run.Token, &run.Sequence); errors.Is(err, pgx.ErrNoRows) {
 		var taskStatus, runStatus string
 		err = world.pool.QueryRow(
 			ctx,
@@ -559,6 +564,9 @@ func (world *World) CompleteRun(ctx context.Context, run *workflowops.Lease, out
 		); err != nil {
 			return err
 		}
+		if err := closeStreamsTx(ctx, tx, run.ID); err != nil {
+			return err
+		}
 	}
 	if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: run.ID, Sequence: run.Sequence}); err != nil {
 		return err
@@ -581,7 +589,7 @@ func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause e
 		run.ID,
 		run.Sequence,
 		run.Token,
-		cause.Error(),
+		workflowops.EncodeFailure(cause),
 		string(workflowops.StatusFailed),
 	)
 	if err != nil {
@@ -591,18 +599,60 @@ func (world *World) FailRun(ctx context.Context, run *workflowops.Lease, cause e
 		return workflowops.ErrLeaseLost
 	}
 	if run.Sequence == workflowops.RootSequence {
+		var rollbackSequence int
+		err = tx.QueryRow(
+			ctx,
+			`SELECT tasks.sequence
+			 FROM workflow_tasks tasks
+			 JOIN workflow_commands commands USING (run_id, sequence)
+			 WHERE tasks.run_id = $1 AND commands.kind = $2 AND tasks.status = $3
+			 ORDER BY tasks.sequence DESC LIMIT 1 FOR UPDATE`,
+			run.ID,
+			string(workflowops.KindRollback),
+			string(workflowops.StatusWaiting),
+		).Scan(&rollbackSequence)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			if _, err = tx.Exec(
+				ctx,
+				`UPDATE go_workflow_runs SET status = $3, error = $2, updated_at = now() WHERE id = $1`,
+				run.ID,
+				workflowops.EncodeFailure(cause),
+				string(workflowops.StatusRollingBack),
+			); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(
+				ctx,
+				`UPDATE workflow_tasks SET status = $3, updated_at = now() WHERE run_id = $1 AND sequence = $2`,
+				run.ID,
+				rollbackSequence,
+				string(workflowops.StatusQueued),
+			); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(ctx, `SELECT pg_notify('go_workflow_jobs',$1)`, run.ID); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
 		_, err = tx.Exec(
 			ctx,
 			`UPDATE go_workflow_runs
 			 SET status = $3, error = $2, updated_at = now()
 			 WHERE id = $1`,
 			run.ID,
-			cause.Error(),
+			workflowops.EncodeFailure(cause),
 			string(workflowops.StatusFailed),
 		)
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
+		if err := closeStreamsTx(ctx, tx, run.ID); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.Exec(
 		ctx,
@@ -801,7 +851,7 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 			if message == nil {
 				return nil, errors.New("workflow: run failed")
 			}
-			return nil, errors.New(*message)
+			return nil, workflowops.DecodeFailure(*message)
 		}
 		if workflowops.Status(status) == workflowops.StatusCancelled {
 			return nil, workflowops.ErrCancelled
@@ -812,6 +862,64 @@ func (world *World) WaitRun(ctx context.Context, runID string) (json.RawMessage,
 		case <-ticker.C:
 		}
 	}
+}
+
+// GetRun returns durable metadata for one Postgres workflow run.
+func (world *World) GetRun(ctx context.Context, runID string) (workflowops.RunInfo, bool, error) {
+	var info workflowops.RunInfo
+	err := world.pool.QueryRow(
+		ctx,
+		`SELECT workflow_identity, status, created_at FROM go_workflow_runs WHERE id = $1`,
+		runID,
+	).Scan(&info.Identity, &info.Status, &info.StartedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return workflowops.RunInfo{}, false, nil
+	}
+	if err != nil {
+		return workflowops.RunInfo{}, false, err
+	}
+	return info, true, nil
+}
+
+// Wake makes every pending sleep in a run immediately eligible for a worker.
+func (world *World) Wake(ctx context.Context, runID string) (int, error) {
+	rows, err := world.pool.Query(
+		ctx,
+		`UPDATE workflow_tasks tasks
+		 SET due_at = now(), updated_at = now()
+		 FROM workflow_commands commands
+		 WHERE tasks.run_id = $1
+		   AND tasks.run_id = commands.run_id
+		   AND tasks.sequence = commands.sequence
+		   AND commands.kind = $2
+		   AND tasks.status = $3
+		   AND tasks.due_at > now()
+		 RETURNING tasks.sequence`,
+		runID,
+		string(workflowops.KindSleep),
+		string(workflowops.StatusQueued),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var sequence int
+		if err := rows.Scan(&sequence); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if count != 0 {
+		if _, err := world.pool.Exec(ctx, `SELECT pg_notify('go_workflow_jobs', $1)`, runID); err != nil {
+			return 0, err
+		}
+	}
+	return count, nil
 }
 
 func (world *World) EnsureOperation(
@@ -891,6 +999,10 @@ func (world *World) EnsureOperation(
 	if command.RowsAffected() == 0 {
 		return world.EnsureOperation(ctx, lease, request)
 	}
+	status := workflowops.StatusQueued
+	if request.Kind == workflowops.KindRollback || request.Kind == workflowops.KindHook {
+		status = workflowops.StatusWaiting
+	}
 	if _, e = tx.Exec(
 		ctx,
 		`INSERT INTO workflow_tasks
@@ -898,7 +1010,7 @@ func (world *World) EnsureOperation(
 		 VALUES ($1, $2, $3, $4, $5)`,
 		request.RunID,
 		request.Sequence,
-		string(workflowops.StatusQueued),
+		string(status),
 		due,
 		key,
 	); e != nil {
@@ -911,7 +1023,7 @@ func (world *World) EnsureOperation(
 		RunID:    request.RunID,
 		StepID:   key,
 		Sequence: request.Sequence,
-		Status:   workflowops.StatusQueued,
+		Status:   status,
 	}
 	if request.DueAt != nil {
 		op.DueAt = *request.DueAt
@@ -1224,7 +1336,7 @@ func (world *World) resolveWait(ctx context.Context, tx pgx.Tx, wait workflowops
 	}
 	status, message := workflowops.StatusCompleted, any(nil)
 	if resolution.Err != nil {
-		status, message = workflowops.StatusFailed, resolution.Err.Error()
+		status, message = workflowops.StatusFailed, workflowops.EncodeFailure(resolution.Err)
 	}
 	command, err := tx.Exec(ctx, `UPDATE workflow_tasks SET status=$3, output=$4, error=$5, updated_at=now() WHERE run_id=$1 AND sequence=$2 AND status=$6`, wait.RunID, wait.Sequence, string(status), resolution.Output, message, string(workflowops.StatusWaiting))
 	if err != nil || command.RowsAffected() != 1 {
@@ -1384,7 +1496,7 @@ func (world *World) FinishOperation(
 	var message any
 	if cause != nil {
 		status = workflowops.StatusFailed
-		message = cause.Error()
+		message = workflowops.EncodeFailure(cause)
 		output = nil
 	}
 	tx, err := world.pool.Begin(ctx)
@@ -1392,6 +1504,15 @@ func (world *World) FinishOperation(
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var kind string
+	if err = tx.QueryRow(
+		ctx,
+		"SELECT kind FROM workflow_commands WHERE run_id = $1 AND sequence = $2",
+		op.RunID,
+		op.Sequence,
+	).Scan(&kind); err != nil {
+		return err
+	}
 	command, err := tx.Exec(
 		ctx,
 		`UPDATE workflow_tasks
@@ -1423,7 +1544,67 @@ func (world *World) FinishOperation(
 	if _, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: op.RunID, Sequence: op.Sequence}); err != nil {
 		return err
 	}
+	if workflowops.Kind(kind) == workflowops.KindRollback {
+		if err = world.advanceRollback(ctx, tx, op.RunID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func (world *World) advanceRollback(ctx context.Context, tx pgx.Tx, runID string) error {
+	var sequence int
+	err := tx.QueryRow(
+		ctx,
+		`SELECT tasks.sequence
+		 FROM workflow_tasks tasks
+		 JOIN workflow_commands commands USING (run_id, sequence)
+		 WHERE tasks.run_id = $1 AND commands.kind = $2 AND tasks.status = $3
+		 ORDER BY tasks.sequence DESC LIMIT 1 FOR UPDATE`,
+		runID,
+		string(workflowops.KindRollback),
+		string(workflowops.StatusWaiting),
+	).Scan(&sequence)
+	if err == nil {
+		if _, err = tx.Exec(
+			ctx,
+			`UPDATE workflow_tasks SET status = $3, updated_at = now() WHERE run_id = $1 AND sequence = $2`,
+			runID,
+			sequence,
+			string(workflowops.StatusQueued),
+		); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `SELECT pg_notify('go_workflow_jobs',$1)`, runID)
+		return err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	command, err := tx.Exec(
+		ctx,
+		`UPDATE go_workflow_runs SET status = $2, updated_at = now() WHERE id = $1 AND status = $3`,
+		runID,
+		string(workflowops.StatusFailed),
+		string(workflowops.StatusRollingBack),
+	)
+	if err != nil || command.RowsAffected() == 0 {
+		return err
+	}
+	if _, err = tx.Exec(
+		ctx,
+		`INSERT INTO workflow_completion_events (run_id, sequence) VALUES ($1, $2)
+		 ON CONFLICT (run_id, sequence) DO NOTHING`,
+		runID,
+		workflowops.RootSequence,
+	); err != nil {
+		return err
+	}
+	if err := closeStreamsTx(ctx, tx, runID); err != nil {
+		return err
+	}
+	_, err = world.resolveDependents(ctx, tx, workflowops.Task{RunID: runID, Sequence: workflowops.RootSequence})
+	return err
 }
 
 func (world *World) RetryOperation(
@@ -1442,7 +1623,7 @@ func (world *World) RetryOperation(
 		op.Sequence,
 		op.Token,
 		string(workflowops.StatusRetryWait),
-		cause.Error(),
+		workflowops.EncodeFailure(cause),
 		due,
 		string(workflowops.StatusRunning),
 	)
@@ -1481,7 +1662,7 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 			if message == nil {
 				return nil, errors.New("workflow: operation failed")
 			}
-			return nil, errors.New(*message)
+			return nil, workflowops.DecodeFailure(*message)
 		}
 		if workflowops.Status(status) == workflowops.StatusCancelled {
 			return nil, workflowops.ErrCancelled
@@ -1492,45 +1673,6 @@ func (world *World) WaitOperation(ctx context.Context, task workflowops.Task) (j
 		case <-ticker.C:
 		}
 	}
-}
-
-func (world *World) AppendEvent(ctx context.Context, task workflowops.Task, data []byte) error {
-	_, err := world.pool.Exec(
-		ctx,
-		`INSERT INTO go_workflow_events (run_id, operation_sequence, data)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (run_id, operation_sequence)
-		 WHERE operation_sequence IS NOT NULL DO NOTHING`,
-		task.RunID,
-		task.Sequence,
-		data,
-	)
-	return err
-}
-
-func (world *World) Events(ctx context.Context, runID string, after int64) ([]workflow.Event, error) {
-	rows, err := world.pool.Query(
-		ctx,
-		`SELECT id, data, created_at
-		 FROM go_workflow_events
-		 WHERE run_id = $1 AND id > $2
-		 ORDER BY id`,
-		runID,
-		after,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var events []workflow.Event
-	for rows.Next() {
-		var event workflow.Event
-		if err := rows.Scan(&event.ID, &event.Data, &event.CreatedAt); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
 }
 
 func allowsCreate(lease *workflowops.Lease, runID string) bool {

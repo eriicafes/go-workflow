@@ -5,38 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/eriicafes/go-workflow/internal"
 	"github.com/eriicafes/go-workflow/workflowops"
 )
-
-// StepMetadata describes the current durable step attempt. Its zero value is
-// returned outside a step.
-type StepMetadata struct {
-	// ID is the step's durable idempotency key.
-	ID string
-	// Name is the stable identity of the executing step function.
-	Name string
-	// StartedAt is when this attempt began executing.
-	StartedAt time.Time
-	// Attempt starts at one and increases for every retry.
-	Attempt int
-}
-
-// GetStepMetadata returns metadata for the currently executing step attempt.
-// It returns the zero value outside a step.
-func GetStepMetadata(ctx context.Context) StepMetadata {
-	value, _ := ctx.Value(stepMetadataContextKey{}).(StepMetadata)
-	return value
-}
-
-// StepID returns the key assigned to the currently executing durable step. It
-// is empty outside a step.
-func StepID(ctx context.Context) string {
-	return GetStepMetadata(ctx).ID
-}
 
 // StepOptions configures one durable step. When omitted, a step durably retries
 // an arbitrary error up to three times. When several values are supplied, the
@@ -60,7 +33,7 @@ func Cancel(ctx context.Context, tasks ...Task) error {
 	if err != nil || len(dependencies) == 0 {
 		return err
 	}
-	if execution, active := executionFromContext(ctx); active {
+	if execution, active := workflowExecutionFromContext(ctx); active {
 		return cancel(execution, ctx, dependencies)
 	}
 	client, _, err := clientFromContext(ctx)
@@ -141,13 +114,13 @@ func All[In, Out any](
 	if err != nil {
 		operations := make([]workflowops.Task, len(tasks))
 		for index, task := range tasks {
-			operation := task.Task()
-			if operation == nil {
-				return nil, errors.Join(err, fmt.Errorf("workflow: task %d is not durable", index))
+			operation, taskErr := task.Task()
+			if taskErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("workflow: task %d: %w", index, taskErr))
 			}
 			operations[index] = *operation
 		}
-		execution, active := executionFromContext(ctx)
+		execution, active := workflowExecutionFromContext(ctx)
 		if !active {
 			return nil, errors.Join(err, ErrNoWorkflow)
 		}
@@ -182,7 +155,7 @@ func JoinSettled(ctx context.Context, tasks ...Task) error {
 }
 
 func join(ctx context.Context, tasks []Task, settled bool, fingerprint string) error {
-	execution, active := executionFromContext(ctx)
+	execution, active := workflowExecutionFromContext(ctx)
 	if !active {
 		return ErrNoWorkflow
 	}
@@ -229,7 +202,7 @@ func SelectOk(ctx context.Context, tasks ...Task) (Task, error) {
 }
 
 func selectTask(ctx context.Context, kind workflowops.Kind, tasks ...Task) (Task, error) {
-	execution, active := executionFromContext(ctx)
+	execution, active := workflowExecutionFromContext(ctx)
 	if !active {
 		return nil, ErrNoWorkflow
 	}
@@ -288,11 +261,17 @@ func selectWithCancel(ctx context.Context, kind workflowops.Kind, tasks ...Task)
 	if winner == nil {
 		return nil, selectErr
 	}
-	winnerTask := winner.Task()
+	winnerTask, err := winner.Task()
+	if err != nil {
+		return winner, err
+	}
 	losers := make([]Task, 0, len(tasks)-1)
 	for _, task := range tasks {
-		value := task.Task()
-		if value == nil || (value.RunID == winnerTask.RunID && value.Sequence == winnerTask.Sequence) {
+		value, err := task.Task()
+		if err != nil {
+			return winner, err
+		}
+		if value.RunID == winnerTask.RunID && value.Sequence == winnerTask.Sequence {
 			continue
 		}
 		losers = append(losers, task)
@@ -357,7 +336,7 @@ func timer(
 func background[In, Out any](
 	execution *workflowops.Execution,
 	ctx context.Context,
-	identity string,
+	name string,
 	fn func(context.Context, In) (Out, error),
 	input In,
 	options StepOptions,
@@ -374,8 +353,8 @@ func background[In, Out any](
 		RunID:       execution.RunID(),
 		Sequence:    sequence,
 		Kind:        workflowops.KindStep,
-		Identity:    identity,
-		Fingerprint: fingerprint(identity, 3),
+		Identity:    name,
+		Fingerprint: fingerprint(name, 3),
 		Input:       raw,
 	})
 	if err != nil {
@@ -389,13 +368,24 @@ func background[In, Out any](
 	}
 	if sequence == execution.Target() {
 		stepCtx := context.WithValue(ctx, stepContextKey{}, true)
+		streams := &stepStreams{}
+		stepCtx = context.WithValue(stepCtx, stepStreamsContextKey{}, streams)
 		attemptCtx := context.WithValue(stepCtx, stepMetadataContextKey{}, StepMetadata{
 			ID:        op.StepID,
-			Name:      identity,
+			Name:      name,
 			StartedAt: time.Now(),
 			Attempt:   max(op.Attempt, 1),
 		})
-		value, callErr := fn(attemptCtx, input)
+		var value Out
+		var callErr error
+		func() {
+			defer func() {
+				if releaseErr := streams.release(); releaseErr != nil && callErr == nil {
+					callErr = releaseErr
+				}
+			}()
+			value, callErr = fn(attemptCtx, input)
+		}()
 		if callErr != nil {
 			if due, retry := retryAt(callErr, options, op.Attempt); retry {
 				if err := execution.World().RetryOperation(ctx, op, callErr, due); err != nil {
@@ -415,6 +405,59 @@ func background[In, Out any](
 		panic(internal.ErrReplayComplete)
 	}
 	return suspendingOperationResult[Out](execution.World(), execution.RunID(), sequence)
+}
+
+func rollback[In any](
+	execution *workflowops.Execution,
+	ctx context.Context,
+	name string,
+	fn func(context.Context, In) error,
+	input In,
+	options StepOptions,
+) error {
+	sequence := execution.Sequence()
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	op, err := execution.World().EnsureOperation(ctx, execution.Lease(), workflowops.OperationRequest{
+		RunID:       execution.RunID(),
+		Sequence:    sequence,
+		Kind:        workflowops.KindRollback,
+		Identity:    name,
+		Fingerprint: fingerprint(name, 3),
+		Input:       raw,
+	})
+	if err != nil {
+		return err
+	}
+	if sequence != execution.Target() {
+		return nil
+	}
+	stepCtx := context.WithValue(ctx, stepContextKey{}, true)
+	attemptCtx := context.WithValue(stepCtx, stepMetadataContextKey{}, StepMetadata{
+		ID:        op.StepID,
+		Name:      name,
+		StartedAt: time.Now(),
+		Attempt:   max(op.Attempt, 1),
+	})
+	if callErr := fn(attemptCtx, input); callErr != nil {
+		if due, retry := retryAt(callErr, options, op.Attempt); retry {
+			if err := execution.World().RetryOperation(ctx, op, callErr, due); err != nil {
+				return err
+			}
+			panic(internal.ErrReplayComplete)
+		}
+		if err := execution.World().FinishOperation(ctx, op, nil, callErr); err != nil {
+			return err
+		}
+		panic(internal.ErrReplayComplete)
+	}
+	output, _ := json.Marshal(struct{}{})
+	if err := execution.World().FinishOperation(ctx, op, output, nil); err != nil {
+		return err
+	}
+	panic(internal.ErrReplayComplete)
 }
 
 func retryAt(cause error, options StepOptions, attempt int) (time.Time, bool) {
@@ -486,61 +529,12 @@ func now(execution *workflowops.Execution, ctx context.Context) (time.Time, erro
 	return value, nil
 }
 
-// Writer returns replay-safe workflow output. It returns a writer that fails
-// with ErrNoWorkflow outside a workflow body.
-func Writer(ctx context.Context) io.Writer {
-	execution, ok := executionFromContext(ctx)
-	if !ok {
-		return errorWriter{}
-	}
-	return eventWriter{execution: execution, ctx: ctx}
-}
-
-type errorWriter struct{}
-
-func (errorWriter) Write([]byte) (int, error) { return 0, ErrNoWorkflow }
-
-type eventWriter struct {
-	execution *workflowops.Execution
-	ctx       context.Context
-}
-
-func (writer eventWriter) Write(data []byte) (int, error) {
-	if len(data) == 0 {
-		return 0, nil
-	}
-	sequence := writer.execution.Sequence()
-	raw, _ := json.Marshal(data)
-	op, err := writer.execution.World().EnsureOperation(writer.ctx, writer.execution.Lease(), workflowops.OperationRequest{
-		RunID:       writer.execution.RunID(),
-		Sequence:    sequence,
-		Kind:        workflowops.KindLog,
-		Identity:    string(workflowops.KindLog),
-		Fingerprint: fingerprint(string(workflowops.KindLog), 2),
-		Input:       raw,
-	})
-	if err != nil {
-		return 0, err
-	}
-	if sequence == writer.execution.Target() {
-		task := workflowops.Task{RunID: writer.execution.RunID(), Sequence: sequence}
-		if err := writer.execution.World().AppendEvent(writer.ctx, task, data); err != nil {
-			return 0, err
-		}
-		if err := writer.execution.World().FinishOperation(writer.ctx, op, raw, nil); err != nil {
-			panic(err)
-		}
-		panic(internal.ErrReplayComplete)
-	}
-	return len(data), nil
-}
-
 func dependenciesFor(tasks []Task) ([]workflowops.Task, error) {
 	dependencies := make([]workflowops.Task, len(tasks))
 	for index, value := range tasks {
-		task := value.Task()
-		if task == nil {
-			return nil, fmt.Errorf("workflow: task %d is not durable", index)
+		task, err := value.Task()
+		if err != nil {
+			return nil, fmt.Errorf("workflow: task %d: %w", index, err)
 		}
 		dependencies[index] = *task
 	}

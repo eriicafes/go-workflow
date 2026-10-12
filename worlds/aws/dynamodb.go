@@ -1,6 +1,7 @@
 package awsworld
 
 import (
+	"encoding/base64"
 	"fmt"
 	"maps"
 	"strconv"
@@ -25,6 +26,14 @@ func commandKey(runID string, sequence int) map[string]ddb.AttributeValue {
 
 func taskKey(runID string, sequence int) map[string]ddb.AttributeValue {
 	return key(runPartitionKey(runID), fmt.Sprintf("TASK#%010d", sequence+1))
+}
+
+func streamKey(runID, namespace string) map[string]ddb.AttributeValue {
+	return key(runPartitionKey(runID), "STREAM#"+base64.RawURLEncoding.EncodeToString([]byte(namespace)))
+}
+
+func hookKey(token string) map[string]ddb.AttributeValue {
+	return key("HOOK", base64.RawURLEncoding.EncodeToString([]byte(token)))
 }
 
 // dependentWaitKey stores the reverse edge used to find waits affected by a
@@ -54,10 +63,6 @@ func leaseCheck(tableName string, lease *workflowops.Lease) ddb.TransactWriteIte
 			":token":   avs(lease.Token),
 		},
 	}}
-}
-
-func eventKey(runID string, sequence int) map[string]ddb.AttributeValue {
-	return key(runPartitionKey(runID), fmt.Sprintf("EVENT#%010d", sequence))
 }
 
 func put(tableName string, key map[string]ddb.AttributeValue, values map[string]string) ddb.TransactWriteItem {

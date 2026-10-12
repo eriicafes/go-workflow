@@ -6,7 +6,7 @@ The Vercel workflow world requires:
   its REST endpoint and token.
 - A Vercel Queue topic for workflow task notifications.
 - A Queue consumer route running `vercelworld.Queue(world, runners)`.
-- An optional HTTP route running `vercelworld.HTTP(world, runners)` when another service,
+- An optional HTTP route running `vercelworld.HTTP(world)` when another service,
   a UI, or a proxy uses `workflow.NewHTTPClient`.
 
 Configure the queue endpoint, OIDC token, and topic as
@@ -35,7 +35,7 @@ RedisRESTURL:   os.Getenv("UPSTASH_REDIS_REST_URL"),
 RedisRESTToken: os.Getenv("UPSTASH_REDIS_REST_TOKEN"),
 ```
 
-Deploy `vercelworld.HTTP(world, runners)` as a separate app-facing API function
+Deploy `vercelworld.HTTP(world)` as a separate app-facing API function
 only when another service, a UI, or a proxy needs remote access. It shares the
 Redis and Queue configuration. Pass the workflow runners so it can execute a
 QStash timer if long timers are enabled. The basic example keeps the two
@@ -64,10 +64,11 @@ QStash: &vercelworld.QStashConfig{
 ```
 
 `WebhookEndpoint` must be the HTTPS application origin with no path. The world
-publishes QStash messages to, and `vercelworld.HTTP(world, runners)` mounts a
+publishes QStash messages to, and `vercelworld.HTTP(world)` mounts a
 private consumer at,
 `/.well-known/workflow/v1/webhook/qstash`. QStash signs each request and the
-handler verifies it before claiming the task. The world stores QStash's message
+handler verifies it before placing the task on the Vercel Queue. `Queue` claims
+and executes that task. The world stores QStash's message
 ID only for those long timers, so cancellation removes the pending QStash
 delivery without attempting to cancel ordinary Vercel Queue messages.
 
@@ -76,11 +77,16 @@ delivery without attempting to cancel ordinary Vercel Queue messages.
 Deploy vercelworld.Queue(world, runners) as a Vercel Queue push consumer, not
 as an ordinary public route. Vercel queue consumer functions are not externally
 reachable. Only Queue delivery can invoke them, so the consumer handler assumes
-trusted delivery. The QStash path on `vercelworld.HTTP(world, runners)` must be
+trusted delivery. The QStash path on `vercelworld.HTTP(world)` must be
 public, but it rejects requests without a valid QStash signature.
 
-`vercelworld.HTTP(world, runners)` is a separate app-facing API. It performs no
+`vercelworld.HTTP(world)` is a separate app-facing API. It performs no
 authentication or per-run authorization. Prefer an internal application-to-
 workflow route. If it is exposed across a trust boundary, put your
 authentication and authorization middleware in front of it and enforce which
 callers may start each workflow or read each run.
+
+The same HTTP function serves token-authorized webhooks at
+`/.well-known/workflow/v1/webhook/:token`. The token is the only authorization
+for that route. Treat the URL as a bearer capability and verify the provider's signature,
+timestamp, and replay protection in the workflow before acting on a request.

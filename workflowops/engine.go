@@ -34,7 +34,7 @@ func (engine *Engine) Execute(ctx context.Context, leased *Lease) error {
 	defer cancel(nil)
 	stop := engine.heartbeat(ctx, leased, cancel)
 	defer stop()
-	execution := &Execution{world: engine.world, lease: leased}
+	execution := &Execution{world: engine.world, lease: leased, name: runner.Name()}
 	ctx = context.WithValue(ctx, executionContextKey{}, execution)
 	output, err := engine.replay(runner, ctx, execution, leased.Input)
 	switch {

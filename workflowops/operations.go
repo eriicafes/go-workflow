@@ -17,26 +17,26 @@ const RootSequence = -1
 
 // Runner is the erased, executable form of a workflow function.
 type Runner struct {
-	identity string
-	execute  func(context.Context, json.RawMessage) (json.RawMessage, error)
+	name    string
+	execute func(context.Context, json.RawMessage) (json.RawMessage, error)
 }
 
-// RunnerSet maps workflow identities to their executable runners.
+// RunnerSet maps workflow names to their executable runners.
 type RunnerSet map[string]Runner
 
-// NewRunner constructs a runner from its stable identity and decoder/executor.
-func NewRunner(identity string, execute func(context.Context, json.RawMessage) (json.RawMessage, error)) Runner {
-	return Runner{identity: identity, execute: execute}
+// NewRunner constructs a runner from its stable name and decoder/executor.
+func NewRunner(name string, execute func(context.Context, json.RawMessage) (json.RawMessage, error)) Runner {
+	return Runner{name: name, execute: execute}
 }
 
-// Identity is the workflow's stable type identity.
-func (runner Runner) Identity() string { return runner.identity }
+// Name is the workflow input type's fully qualified name.
+func (runner Runner) Name() string { return runner.name }
 
-// Event is one replay-safe workflow output record.
-type Event struct {
-	ID        int64
-	Data      []byte
-	CreatedAt time.Time
+// RunInfo is the durable metadata for a workflow run.
+type RunInfo struct {
+	Identity  string
+	Status    Status
+	StartedAt time.Time
 }
 
 // Client schedules and reads workflow runs.
@@ -50,8 +50,32 @@ type Client interface {
 	// WaitRun waits until the root run completes, then returns its encoded output
 	// or its terminal failure.
 	WaitRun(context.Context, string) (json.RawMessage, error)
-	// Events returns replay-safe output records after the supplied event ID.
-	Events(context.Context, string, int64) ([]Event, error)
+	// GetRun returns metadata for one root workflow run.
+	GetRun(context.Context, string) (RunInfo, bool, error)
+	// Wake makes every pending Sleep operation in a run immediately eligible for
+	// execution and returns the number of sleeps made ready.
+	Wake(context.Context, string) (int, error)
+	// ReadStream returns durable stream bytes at or after offset. A negative
+	// offset is interpreted relative to the current end of the stream.
+	ReadStream(context.Context, Stream, int64) (StreamRead, error)
+	// LockStream acquires token as the stream's exclusive writer. It returns
+	// false when another writer still owns the stream.
+	LockStream(context.Context, Stream, string) (bool, error)
+	// AppendStream appends raw bytes and flushes them durably when token owns
+	// the stream writer lock.
+	AppendStream(context.Context, Stream, string, []byte) error
+	// ReleaseStream releases token's writer lock. Closing makes the stream
+	// terminal for every reader.
+	ReleaseStream(context.Context, Stream, string, bool) error
+	// GetHook returns an active or retained hook token.
+	GetHook(context.Context, string) (Hook, bool, error)
+	// ResumeWebhook delivers one serialized payload to the current owner of token.
+	ResumeWebhook(context.Context, string, json.RawMessage) error
+	// ReplyWebhook records the serialized HTTP response for a manually
+	// responded webhook.
+	ReplyWebhook(context.Context, string, json.RawMessage) error
+	// WaitWebhookResponse waits for a manual webhook response to be recorded.
+	WaitWebhookResponse(context.Context, string) (json.RawMessage, error)
 }
 
 // World is the storage and dispatch protocol consumed by Engine.
@@ -90,8 +114,55 @@ type World interface {
 	RetryOperation(context.Context, Operation, error, time.Time) error
 	// WaitOperation waits for a durable operation to reach a terminal state.
 	WaitOperation(context.Context, Task) (json.RawMessage, error)
-	// AppendEvent persists one idempotent replay-safe output event.
-	AppendEvent(context.Context, Task, []byte) error
+	// RegisterHook claims a hook token for a waiting hook operation. The lease
+	// fences registration to the replay currently defining that operation.
+	RegisterHook(context.Context, *Lease, HookRequest) (Hook, error)
+	// CloseStreams closes every open stream belonging to runID when its root
+	// reaches a terminal state.
+	CloseStreams(context.Context, string) error
+}
+
+// Stream is a serializable reference to one run-owned byte stream. Namespace
+// permits a workflow to use independent streams concurrently.
+type Stream struct {
+	RunID     string `json:"runId"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// StreamRead is one ordered range of a stream. Next is the byte offset after
+// Data. Closed means no later bytes can be appended.
+type StreamRead struct {
+	Data   []byte
+	Next   int64
+	Closed bool
+}
+
+// HookRequest describes a token claimed by a waiting hook operation.
+type HookRequest struct {
+	Token        string
+	Task         Task
+	MinRetention time.Duration
+	Force        bool
+	Webhook      *Webhook
+}
+
+// Hook identifies a token's current operation and optional expiry. Conflict is
+// the prior owner that prevented a non-forced registration from succeeding.
+type Hook struct {
+	Token      string
+	Task       Task
+	Conflict   *Task
+	ExpiresAt  time.Time
+	Registered bool
+	Webhook    *Webhook
+}
+
+// Webhook describes the HTTP behavior attached to a hook. A nil value means
+// the hook is not exposed as a webhook.
+type Webhook struct {
+	Method   string          `json:"method,omitempty"`
+	Response json.RawMessage `json:"response,omitempty"`
+	Manual   bool            `json:"manual,omitempty"`
 }
 
 // Task identifies a durable workflow command. RootSequence identifies a root
@@ -118,11 +189,12 @@ type Kind string
 const (
 	KindRun         Kind = "run"
 	KindStep        Kind = "step"
+	KindRollback    Kind = "rollback"
+	KindHook        Kind = "hook"
 	KindNow         Kind = "now"
 	KindSleep       Kind = "sleep"
 	KindTimeout     Kind = "timeout"
 	KindCancel      Kind = "cancel"
-	KindLog         Kind = "log"
 	KindAwait       Kind = "await"
 	KindJoin        Kind = "join"
 	KindJoinSettled Kind = "join-settled"
@@ -145,22 +217,24 @@ func IsWaitKind(kind Kind) bool {
 type Status string
 
 const (
-	StatusQueued    Status = "queued"
-	StatusRunning   Status = "running"
-	StatusRetryWait Status = "retry_wait"
-	StatusWaiting   Status = "waiting"
-	StatusCompleted Status = "completed"
-	StatusFailed    Status = "failed"
-	StatusCancelled Status = "cancelled"
+	StatusQueued      Status = "queued"
+	StatusRunning     Status = "running"
+	StatusRetryWait   Status = "retry_wait"
+	StatusWaiting     Status = "waiting"
+	StatusRollingBack Status = "rolling_back"
+	StatusCompleted   Status = "completed"
+	StatusFailed      Status = "failed"
+	StatusCancelled   Status = "cancelled"
 )
 
 // Lease is a World-issued work lease protected by Token.
 type Lease struct {
-	ID       string
-	Identity string
-	Token    string
-	Input    json.RawMessage
-	Sequence int
+	ID        string
+	Identity  string
+	Token     string
+	Input     json.RawMessage
+	Sequence  int
+	StartedAt time.Time
 }
 
 // OperationRequest is one deterministic replay position.
@@ -238,7 +312,7 @@ func ResolveWait(kind Kind, dependencies []Dependency) WaitResolution {
 		if value.Error == "" {
 			return errors.New("workflow: dependency failed")
 		}
-		return errors.New(value.Error)
+		return DecodeFailure(value.Error)
 	}
 	if kind == KindAwait {
 		if len(dependencies) != 1 {

@@ -34,9 +34,7 @@ func qstashWebhookEndpoint(webhookEndpoint string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func qstashHandler(world *World, runners workflowops.RunnerSet) http.Handler {
-	engine := workflowops.NewEngine(world, runners)
-	config := *world.config.QStash
+func qstashHandler(world *World) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			writer.WriteHeader(http.StatusMethodNotAllowed)
@@ -48,7 +46,7 @@ func qstashHandler(world *World, runners workflowops.RunnerSet) http.Handler {
 			http.Error(writer, "invalid QStash message", http.StatusBadRequest)
 			return
 		}
-		if err := verifyQStashSignature(request.Header.Get("Upstash-Signature"), body, config); err != nil {
+		if err := verifyQStashSignature(request.Header.Get("Upstash-Signature"), body, world.config.QStash); err != nil {
 			http.Error(writer, "invalid QStash signature", http.StatusUnauthorized)
 			return
 		}
@@ -57,11 +55,7 @@ func qstashHandler(world *World, runners workflowops.RunnerSet) http.Handler {
 			http.Error(writer, "invalid QStash message", http.StatusBadRequest)
 			return
 		}
-		lease, err := world.ClaimTask(request.Context(), task)
-		if err == nil && lease != nil {
-			err = engine.Execute(request.Context(), lease)
-		}
-		if err != nil && !errors.Is(err, workflowops.ErrCancelled) {
+		if err := world.enqueueTask(request.Context(), task, time.Time{}); err != nil {
 			http.Error(writer, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -69,7 +63,7 @@ func qstashHandler(world *World, runners workflowops.RunnerSet) http.Handler {
 	})
 }
 
-func verifyQStashSignature(signature string, body []byte, config QStashConfig) error {
+func verifyQStashSignature(signature string, body []byte, config *QStashConfig) error {
 	signature = strings.TrimSpace(signature)
 	if signature == "" {
 		return errors.New("workflow/vercel: missing QStash signature")

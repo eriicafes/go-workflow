@@ -11,6 +11,7 @@ type executionContextKey struct{}
 type Execution struct {
 	world World
 	lease *Lease
+	name  string
 	mu    sync.Mutex
 	next  int
 }
@@ -35,6 +36,9 @@ func (execution *Execution) World() World { return execution.world }
 
 // RunID returns the root workflow run being replayed.
 func (execution *Execution) RunID() string { return execution.lease.ID }
+
+// Name returns the active workflow function's fully qualified name.
+func (execution *Execution) Name() string { return execution.name }
 
 // Target returns the targeted task sequence, or a negative value for root replay.
 func (execution *Execution) Target() int { return execution.lease.Sequence }

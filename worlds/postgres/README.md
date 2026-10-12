@@ -27,3 +27,8 @@ authorization. Prefer a private service-to-service route from the application
 to the worker. If the handler is reachable across a trust boundary, wrap it in
 your authentication and authorization middleware before serving it. The
 middleware must decide which callers may start each workflow and read each run.
+
+The same handler serves token-authorized webhooks at
+`/.well-known/workflow/v1/webhook/:token`. The token is the only authorization
+for that route. Treat the URL as a bearer capability and verify the provider's signature,
+timestamp, and replay protection in the workflow before acting on a request.

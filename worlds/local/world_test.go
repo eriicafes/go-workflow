@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,6 +78,48 @@ func TestWorldRunsStepsAndNestedWorkflows(t *testing.T) {
 	}
 	if output.Value != 42 {
 		t.Fatalf("output = %#v, want 42", output)
+	}
+}
+
+type hookInput struct {
+	Token string
+}
+
+type hookOutput struct {
+	Value string
+}
+
+func (hookInput) Workflow(hookOutput) {}
+
+func hookWorkflow(ctx context.Context, input hookInput) (hookOutput, error) {
+	hook := workflow.NewHook[string](workflow.HookOption{Token: input.Token})
+	value, err := hook.Value(ctx)
+	return hookOutput{Value: value}, err
+}
+
+func TestWorldResumesHook(t *testing.T) {
+	world, err := localworld.Open(t.TempDir(), workflow.Runners(workflow.Use(hookWorkflow)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer world.Close()
+	if err := world.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := workflow.NewContext(context.Background(), world)
+	run, err := workflow.Start(ctx, hookInput{Token: "local-hook"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workflow.ResumeHookWithRetries(ctx, "local-hook", "resumed", 20); err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Value != "resumed" {
+		t.Fatalf("value = %q, want resumed", output.Value)
 	}
 }
 
@@ -292,6 +336,61 @@ func TestWorldComposesMappedResults(t *testing.T) {
 	}
 	if failedSelectOutput.SelectError != "select failure" || failedSelectOutput.WaitError != "select failure" {
 		t.Fatalf("failed Select output = %#v", failedSelectOutput)
+	}
+}
+
+type rollbackInput struct{}
+type rollbackOutput struct{}
+
+func (rollbackInput) Workflow(rollbackOutput) {}
+
+func TestWorldRollsBackInReverseRegistrationOrder(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		order []string
+	)
+	step := func(context.Context, string) (struct{}, error) { return struct{}{}, nil }
+	rollback := func(_ context.Context, value string) error {
+		mu.Lock()
+		order = append(order, value)
+		mu.Unlock()
+		return nil
+	}
+	flow := func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
+		if _, err := workflow.Step(ctx, step, "first"); err != nil {
+			return rollbackOutput{}, err
+		}
+		if err := workflow.OnRollback(ctx, rollback, "first"); err != nil {
+			return rollbackOutput{}, err
+		}
+		if _, err := workflow.Step(ctx, step, "second"); err != nil {
+			return rollbackOutput{}, err
+		}
+		if err := workflow.OnRollback(ctx, rollback, "second"); err != nil {
+			return rollbackOutput{}, err
+		}
+		return rollbackOutput{}, errors.New("failed")
+	}
+	runners := workflow.Runners(workflow.Use(flow))
+	world, err := localworld.Open(t.TempDir(), runners)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer world.Close()
+	if err := world.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	run, err := workflow.Start(workflow.NewContext(context.Background(), world), rollbackInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Wait(context.Background()); err == nil || err.Error() != "failed" {
+		t.Fatalf("run error = %v, want failed", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := order, []string{"second", "first"}; !slices.Equal(got, want) {
+		t.Fatalf("rollback order = %v, want %v", got, want)
 	}
 }
 

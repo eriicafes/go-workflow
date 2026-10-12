@@ -24,7 +24,7 @@ func TestStartRequiresClientContext(t *testing.T) {
 	}
 }
 
-func TestRunnersDeduplicatesIdentities(t *testing.T) {
+func TestRunnersDeduplicatesNames(t *testing.T) {
 	var unnamed workflow.Runner
 	runners := workflow.Runners(
 		unnamed,
@@ -99,7 +99,10 @@ func TestDurablePrimitivesRequireWorkflowContext(t *testing.T) {
 	if _, err := workflow.Background(ctx, func(context.Context, string) (string, error) { return "", nil }, "input").Value(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
 		t.Fatalf("Background error = %v", err)
 	}
-	if _, err := workflow.Writer(ctx).Write([]byte("log")); !errors.Is(err, workflow.ErrNoWorkflow) {
+	if _, _, err := workflow.Writer(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
 		t.Fatalf("Writer error = %v", err)
+	}
+	if _, err := workflow.Reader(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
+		t.Fatalf("Reader error = %v", err)
 	}
 }

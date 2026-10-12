@@ -20,6 +20,19 @@ var (
 
 	// ErrCancelled means the durable task was cancelled.
 	ErrCancelled = workflowops.ErrCancelled
+
+	// ErrHookNotFound means no active or retained hook owns a token.
+	ErrHookNotFound = workflowops.ErrHookNotFound
+
+	// ErrHookNotRegistered means a hook has not yet created its durable task.
+	// Call Value, Wait, or GetConflict before using it as a dependency.
+	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
+
+	// ErrHookConflict means another run already owns the requested hook token.
+	ErrHookConflict = workflowops.ErrHookConflict
+
+	// ErrHookForceClaimed means a newer run replaced this hook's token claim.
+	ErrHookForceClaimed = workflowops.ErrHookForceClaimed
 )
 
 type fatalError struct{ cause error }

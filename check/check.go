@@ -128,6 +128,10 @@ func isContextType(value types.Type) bool {
 func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 	ast.Inspect(body, func(node ast.Node) bool {
 		switch node := node.(type) {
+		case *ast.FuncLit:
+			// Durable step closures are validated independently. Their bodies are
+			// allowed to perform step-only operations.
+			return false
 		case *ast.GoStmt:
 			pass.Reportf(node.Pos(), "workflow body must not start a goroutine; use workflow.Background")
 		case *ast.SelectStmt:
@@ -139,6 +143,15 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 				}
 			}
 		case *ast.CallExpr:
+			if isSDKCall(pass, node, "Writer") || isSDKCall(pass, node, "Reader") ||
+				isSDKCall(pass, node, "ReaderAt") ||
+				isSDKMethod(pass, node, "Writer") || isSDKMethod(pass, node, "Reader") ||
+				isSDKMethod(pass, node, "ReaderAt") {
+				pass.Reportf(node.Pos(), "workflow streams can only be read or written inside a durable step")
+			}
+			if isSDKMethod(pass, node, "ReplyWebhook") {
+				pass.Reportf(node.Pos(), "Webhook.ReplyWebhook can only be called inside a durable step")
+			}
 			if banned, ok := bannedCall(pass, node); ok {
 				if banned == "time.Now" {
 					pass.Reportf(node.Pos(), "workflow body calls time.Now; use workflow.Now")
@@ -152,6 +165,15 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 		}
 		return true
 	})
+}
+
+func isSDKMethod(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != name {
+		return false
+	}
+	function, ok := pass.TypesInfo.ObjectOf(selector.Sel).(*types.Func)
+	return ok && function.Pkg() != nil && function.Pkg().Path() == workflowPackage
 }
 
 func validateStepFunction(pass *analysis.Pass, call *ast.CallExpr) {
@@ -204,7 +226,7 @@ func isSDKCall(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 }
 
 func isDurableOperation(pass *analysis.Pass, call *ast.CallExpr) bool {
-	for _, name := range []string{"Step", "Background", "Map", "All"} {
+	for _, name := range []string{"Step", "Background", "Map", "All", "OnRollback"} {
 		if isSDKCall(pass, call, name) {
 			return true
 		}

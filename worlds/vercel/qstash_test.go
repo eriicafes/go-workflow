@@ -14,7 +14,7 @@ import (
 )
 
 func TestVerifyQStashSignature(t *testing.T) {
-	config := QStashConfig{
+	config := &QStashConfig{
 		WebhookEndpoint:   "https://worker.example.com",
 		CurrentSigningKey: "current",
 		NextSigningKey:    "next",
@@ -53,7 +53,7 @@ func TestHTTPMountsQStashHandler(t *testing.T) {
 	}}}
 	request := httptest.NewRequest(http.MethodPost, workflow.APIPrefix+"/webhook/qstash", nil)
 	response := httptest.NewRecorder()
-	HTTP(world, nil).ServeHTTP(response, request)
+	HTTP(world).ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
