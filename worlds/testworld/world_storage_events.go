@@ -1,0 +1,441 @@
+package testworld
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"maps"
+	"sort"
+	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
+)
+
+func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.EventResult{}, err
+	}
+	if input.Event.EventType == worlds.EventTypeRunCreated || input.Event.EventType == worlds.EventTypeNoop || !input.Event.EventType.Valid() {
+		return worlds.EventResult{}, worlds.ErrEventInvalid
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.runs[input.RunID]; !ok {
+		return worlds.EventResult{}, worlds.ErrWorkflowNotFound
+	}
+	if result, duplicate, err := m.admitLocked(input.RunID, input.Event); err != nil || duplicate {
+		return result, err
+	}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
+	before := m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor, event.EventID)
+	m.events[input.RunID] = append(m.events[input.RunID], event)
+	m.materializeLocked(event)
+	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: before}, nil
+}
+
+func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.EventResult{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createRunLocked(input)
+}
+
+func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	if input.RunID == "" {
+		return worlds.EventResult{}, worlds.ErrEventInvalid
+	}
+	if _, exists := m.runs[input.RunID]; exists {
+		return worlds.EventResult{}, worlds.ErrEventInvalid
+	}
+	now := time.Now().UTC()
+	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: bytes.Clone(input.Input), Attributes: maps.Clone(input.Attributes), CreatedAt: now, UpdatedAt: now}
+	if run.Attributes == nil {
+		run.Attributes = make(map[string]string)
+	}
+	m.runs[input.RunID] = run
+	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}}
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated}, nil
+}
+
+type runCreatedData struct {
+	WorkflowName string            `json:"workflowName"`
+	Input        []byte            `json:"input"`
+	Attributes   map[string]string `json:"attributes"`
+}
+
+func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
+	if len(input.Events) == 0 {
+		return worlds.EventBatchResult{}, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.runs[input.RunID]; !ok {
+		return worlds.EventBatchResult{}, worlds.ErrWorkflowNotFound
+	}
+	checkpoint := m.checkpointLocked()
+	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events))}
+	for _, value := range input.Events {
+		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeNoop || !value.EventType.Valid() {
+			m.restoreLocked(checkpoint)
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
+		if _, duplicate, err := m.admitLocked(input.RunID, value); err != nil || duplicate {
+			m.restoreLocked(checkpoint)
+			if err != nil {
+				return worlds.EventBatchResult{}, err
+			}
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
+		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: time.Now().UTC()}
+		m.events[input.RunID] = append(m.events[input.RunID], event)
+		m.materializeLocked(event)
+		result.Events = append(result.Events, worlds.EventResult{EventID: event.EventID, EventType: event.EventType})
+	}
+	return result, nil
+}
+
+type memoryCheckpoint struct {
+	runs   map[worlds.RunID]worlds.Run
+	events map[worlds.RunID][]worlds.Event
+	steps  map[worlds.RunID]map[worlds.StepID]worlds.Step
+	hooks  map[worlds.HookID]worlds.Hook
+	tokens map[string]worlds.HookID
+}
+
+func (m *World) checkpointLocked() memoryCheckpoint {
+	checkpoint := memoryCheckpoint{runs: make(map[worlds.RunID]worlds.Run, len(m.runs)), events: make(map[worlds.RunID][]worlds.Event, len(m.events)), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step, len(m.steps)), hooks: make(map[worlds.HookID]worlds.Hook, len(m.hooks)), tokens: make(map[string]worlds.HookID, len(m.tokens))}
+	for id, run := range m.runs {
+		checkpoint.runs[id] = cloneRun(run)
+	}
+	for id, events := range m.events {
+		checkpoint.events[id] = append([]worlds.Event(nil), events...)
+	}
+	for runID, steps := range m.steps {
+		checkpoint.steps[runID] = make(map[worlds.StepID]worlds.Step, len(steps))
+		for id, step := range steps {
+			checkpoint.steps[runID][id] = step
+		}
+	}
+	for id, hook := range m.hooks {
+		checkpoint.hooks[id] = hook
+	}
+	for token, id := range m.tokens {
+		checkpoint.tokens[token] = id
+	}
+	return checkpoint
+}
+
+func (m *World) restoreLocked(checkpoint memoryCheckpoint) {
+	m.runs, m.events, m.steps, m.hooks, m.tokens = checkpoint.runs, checkpoint.events, checkpoint.steps, checkpoint.hooks, checkpoint.tokens
+}
+
+// admitLocked implements the state-based queue fence. A duplicate start is
+// inert and returns the previously committed lifecycle event instead of
+// granting another execution.
+func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEvent) (worlds.EventResult, bool, error) {
+	run := m.runs[runID]
+	if run.Status.Terminal() {
+		if requested.EventType == worlds.EventTypeRunCancelled && run.Status == worlds.StatusCancelled {
+			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+		}
+		return worlds.EventResult{}, false, worlds.ErrRunTerminal
+	}
+	if requested.EventType == worlds.EventTypeRunStarted && run.Status == worlds.StatusRunning {
+		return m.lastResultLocked(runID, requested.EventType, ""), true, nil
+	}
+	if requested.EventType == worlds.EventTypeStepStarted {
+		step := m.steps[runID][worlds.StepID(requested.CorrelationID)]
+		if step.StepID == "" {
+			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+		}
+		if step.Status == worlds.StatusRunning {
+			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+		}
+		if step.Status != worlds.StatusPending {
+			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+		}
+	}
+	if requested.EventType == worlds.EventTypeHookReceived {
+		var received worlds.WebhookReceivedEventData
+		if json.Unmarshal(requested.Data, &received) == nil && received.Request != nil {
+			hook := m.hooks[worlds.HookID(requested.CorrelationID)]
+			if hook.Webhook == nil || hook.ReceivedEventID != "" || m.tokens[hook.Token] != hook.HookID {
+				return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			}
+		}
+	}
+	return worlds.EventResult{}, false, nil
+}
+
+func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType, correlation string) worlds.EventResult {
+	for index := len(m.events[runID]) - 1; index >= 0; index-- {
+		event := m.events[runID][index]
+		if event.EventType == eventType && (correlation == "" || event.CorrelationID == correlation) {
+			return worlds.EventResult{EventID: event.EventID, EventType: event.EventType}
+		}
+	}
+	return worlds.EventResult{}
+}
+
+func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string, next worlds.EventID) []worlds.Event {
+	log := m.events[runID]
+	start := len(log)
+	if count != nil {
+		start = *count
+		if start < 0 {
+			start = 0
+		}
+		if start > len(log) {
+			start = len(log)
+		}
+	} else if cursor != "" {
+		if slot, err := worlds.EventSlot(worlds.EventID(cursor)); err == nil {
+			start = int(slot)
+		}
+	}
+	result := make([]worlds.Event, 0, len(log)-start)
+	for _, event := range log[start:] {
+		result = append(result, cloneEvent(event))
+	}
+	return result
+}
+
+type attrSetData struct {
+	Changes []worlds.RunsAttributeChange `json:"changes"`
+}
+type stepCreatedData struct {
+	StepName string `json:"stepName"`
+	Input    []byte `json:"input"`
+}
+type stepResultData struct {
+	Output     []byte     `json:"output"`
+	Error      []byte     `json:"error"`
+	RetryAfter *time.Time `json:"retryAfter"`
+}
+type hookCreatedData struct {
+	Token    string          `json:"token"`
+	Metadata []byte          `json:"metadata"`
+	Webhook  *worlds.Webhook `json:"webhook"`
+}
+
+func (m *World) materializeLocked(event worlds.Event) {
+	run := m.runs[event.RunID]
+	now := event.CreatedAt
+	run.UpdatedAt = now
+	switch event.EventType {
+	case worlds.EventTypeRunStarted:
+		run.Status, run.StartedAt = worlds.StatusRunning, &now
+	case worlds.EventTypeRunCompleted:
+		run.Status, run.CompletedAt, run.Output = worlds.StatusCompleted, &now, bytes.Clone(event.Data)
+	case worlds.EventTypeRunFailed:
+		run.Status, run.CompletedAt, run.Error = worlds.StatusFailed, &now, bytes.Clone(event.Data)
+	case worlds.EventTypeRunCancelled:
+		run.Status, run.CompletedAt = worlds.StatusCancelled, &now
+	case worlds.EventTypeAttrSet:
+		var value attrSetData
+		if json.Unmarshal(event.Data, &value) == nil {
+			for _, change := range value.Changes {
+				if change.Value == nil {
+					delete(run.Attributes, change.Key)
+				} else {
+					run.Attributes[change.Key] = *change.Value
+				}
+			}
+		}
+	case worlds.EventTypeStepCreated:
+		var value stepCreatedData
+		_ = json.Unmarshal(event.Data, &value)
+		if m.steps[event.RunID] == nil {
+			m.steps[event.RunID] = make(map[worlds.StepID]worlds.Step)
+		}
+		id := worlds.StepID(event.CorrelationID)
+		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, Input: bytes.Clone(value.Input), CreatedAt: now, UpdatedAt: now}
+	case worlds.EventTypeStepStarted:
+		m.updateStepLocked(event, worlds.StatusRunning)
+	case worlds.EventTypeStepCompleted:
+		m.updateStepLocked(event, worlds.StatusCompleted)
+	case worlds.EventTypeStepFailed:
+		m.updateStepLocked(event, worlds.StatusFailed)
+	case worlds.EventTypeStepRetrying:
+		m.updateStepLocked(event, worlds.StatusPending)
+	case worlds.EventTypeStepCancelled:
+		m.updateStepLocked(event, worlds.StatusCancelled)
+	case worlds.EventTypeHookCreated:
+		var value hookCreatedData
+		_ = json.Unmarshal(event.Data, &value)
+		id := worlds.HookID(event.CorrelationID)
+		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Metadata: bytes.Clone(value.Metadata), Webhook: cloneWebhook(value.Webhook), CreatedAt: now, UpdatedAt: now}
+		m.hooks[id], m.tokens[value.Token] = hook, id
+	case worlds.EventTypeHookReceived:
+		id := worlds.HookID(event.CorrelationID)
+		hook := m.hooks[id]
+		hook.UpdatedAt, hook.ReceivedAt = now, &now
+		var value worlds.WebhookReceivedEventData
+		if json.Unmarshal(event.Data, &value) == nil {
+			if value.Request != nil {
+				hook.ReceivedEventID = event.EventID
+			}
+			if value.Response != nil && value.ResponseTo == hook.ReceivedEventID {
+				delete(m.tokens, hook.Token)
+			}
+		}
+		m.hooks[id] = hook
+	case worlds.EventTypeHookDisposed:
+		id := worlds.HookID(event.CorrelationID)
+		hook := m.hooks[id]
+		delete(m.tokens, hook.Token)
+	}
+	m.runs[event.RunID] = run
+}
+
+func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
+	step := m.steps[event.RunID][worlds.StepID(event.CorrelationID)]
+	if step.StepID == "" {
+		return
+	}
+	step.Status, step.UpdatedAt = status, event.CreatedAt
+	if status == worlds.StatusRunning {
+		step.Attempt++
+		step.StartedAt = &event.CreatedAt
+	}
+	if status == worlds.StatusCompleted || status == worlds.StatusFailed {
+		step.CompletedAt = &event.CreatedAt
+	}
+	var result stepResultData
+	if json.Unmarshal(event.Data, &result) == nil {
+		step.Output, step.Error, step.RetryAfter = bytes.Clone(result.Output), bytes.Clone(result.Error), result.RetryAfter
+	}
+	m.steps[event.RunID][step.StepID] = step
+}
+
+func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Page[worlds.Event]{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	log, ok := m.events[input.RunID]
+	if !ok {
+		return worlds.Page[worlds.Event]{}, worlds.ErrWorkflowNotFound
+	}
+	values := make([]worlds.Event, len(log))
+	for i := range log {
+		values[i] = cloneEvent(log[i])
+	}
+	if input.Pagination.Desc {
+		for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+			values[i], values[j] = values[j], values[i]
+		}
+	}
+	if input.Pagination.Desc {
+		for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+			values[i], values[j] = values[j], values[i]
+		}
+		return page(values, input.Pagination), nil
+	}
+	return eventPage(values, input.Pagination), nil
+}
+
+func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID})
+	if err != nil {
+		return worlds.Page[worlds.Event]{}, err
+	}
+	filtered := make([]worlds.Event, 0)
+	for _, event := range all.Data {
+		if event.CorrelationID == input.CorrelationID {
+			filtered = append(filtered, event)
+		}
+	}
+	return page(filtered, input.Pagination), nil
+}
+
+func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[worlds.Event] {
+	start := 0
+	if pagination.Cursor != "" {
+		if slot, err := worlds.EventSlot(worlds.EventID(pagination.Cursor)); err == nil {
+			start = int(slot)
+		}
+	}
+	if start > len(values) {
+		start = len(values)
+	}
+	limit := pagination.Limit
+	if limit <= 0 {
+		limit = len(values) - start
+	}
+	end := start + limit
+	if end > len(values) {
+		end = len(values)
+	}
+	result := worlds.Page[worlds.Event]{Data: values[start:end], HasMore: end < len(values)}
+	if result.HasMore && end != 0 {
+		result.Cursor = string(values[end-1].EventID)
+	}
+	return result
+}
+
+func (m *World) analyticsRunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
+	run, err := m.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID})
+	if err != nil {
+		return worlds.AnalyticsRun{}, err
+	}
+	return analyticsRun(run), nil
+}
+
+func (m *World) analyticsRunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
+	runs, err := m.RunsList(ctx, worlds.RunsListInput{WorkflowName: input.WorkflowName, Status: input.Status})
+	if err != nil {
+		return worlds.Page[worlds.AnalyticsRun]{}, err
+	}
+	values := make([]worlds.AnalyticsRun, 0, len(runs.Data))
+	for _, run := range runs.Data {
+		if input.StartTime != nil && run.CreatedAt.Before(*input.StartTime) {
+			continue
+		}
+		if input.EndTime != nil && run.CreatedAt.After(*input.EndTime) {
+			continue
+		}
+		matched := true
+		for key, value := range input.Attributes {
+			if run.Attributes[key] != value {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			values = append(values, analyticsRun(run))
+		}
+	}
+	return page(values, input.Pagination), nil
+}
+func (m *World) analyticsAttributesList(ctx context.Context, input worlds.AnalyticsAttributesListInput) (worlds.Page[worlds.AnalyticsAttribute], error) {
+	runs, err := m.analyticsRunsList(ctx, worlds.AnalyticsRunsListInput{WorkflowName: input.WorkflowName, StartTime: input.StartTime, EndTime: input.EndTime})
+	if err != nil {
+		return worlds.Page[worlds.AnalyticsAttribute]{}, err
+	}
+	items := map[string]worlds.AnalyticsAttribute{}
+	for _, run := range runs.Data {
+		for key := range run.Attributes {
+			item := items[key]
+			if item.Key == "" {
+				item = worlds.AnalyticsAttribute{Key: key, FirstSeenAt: run.CreatedAt}
+			}
+			item.RunCount++
+			item.LastSeenAt = run.UpdatedAt
+			items[key] = item
+		}
+	}
+	values := make([]worlds.AnalyticsAttribute, 0, len(items))
+	for _, item := range items {
+		values = append(values, item)
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Key < values[j].Key })
+	return page(values, input.Pagination), nil
+}

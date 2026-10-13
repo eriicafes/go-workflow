@@ -7,5 +7,5 @@ var (
 	ErrReplayComplete = errors.New("workflow: targeted replay complete")
 
 	// ErrReplaySuspended stops a root replay after it persists an unresolved dependency.
-	ErrReplaySuspended = errors.New("workflow: replay suspended for durable dependency")
+	ErrReplaySuspended = errors.New("workflow: replay suspended")
 )

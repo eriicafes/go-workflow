@@ -1,6 +1,7 @@
 package vercelworld
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 
@@ -65,7 +66,7 @@ func (world *World) ReadStream(ctx context.Context, reference workflowops.Stream
 		offset = int64(len(data))
 	}
 	return workflowops.StreamRead{
-		Data:   append([]byte(nil), data[offset:]...),
+		Data:   bytes.Clone(data[offset:]),
 		Next:   int64(len(data)),
 		Closed: stream["closed"] == "1",
 	}, nil
