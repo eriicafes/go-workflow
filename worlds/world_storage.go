@@ -45,16 +45,19 @@ type StorageHooks interface {
 
 type (
 	RunsGetInput struct {
-		RunID RunID
+		RunID       RunID
+		ResolveData ResolveData
 	}
 	RunsListInput struct {
 		WorkflowName string
 		Status       []Status
 		Pagination   Pagination
+		ResolveData  ResolveData
 	}
 	RunsWaitForTerminalStatusInput struct {
-		RunID   RunID
-		Timeout time.Duration
+		RunID       RunID
+		Timeout     time.Duration
+		ResolveData ResolveData
 	}
 	RunsAttributeChange struct {
 		Key   string
@@ -82,13 +85,15 @@ type Run struct {
 
 type (
 	StepsGetInput struct {
-		RunID  RunID
-		StepID StepID
+		RunID       RunID
+		StepID      StepID
+		ResolveData ResolveData
 	}
 
 	StepsListInput struct {
-		RunID      RunID
-		Pagination Pagination
+		RunID       RunID
+		Pagination  Pagination
+		ResolveData ResolveData
 	}
 )
 
@@ -110,13 +115,17 @@ type Step struct {
 
 type (
 	HooksGetInput struct {
-		HookID HookID
+		HookID      HookID
+		ResolveData ResolveData
 	}
 	HooksGetByTokenInput struct {
-		Token string
+		Token       string
+		ResolveData ResolveData
 	}
 	HooksListInput struct {
-		Pagination Pagination
+		Pagination  Pagination
+		RunID       RunID
+		ResolveData ResolveData
 	}
 	HooksClaimInput struct {
 		RunID   RunID
@@ -219,14 +228,16 @@ type (
 	EventsCreateOptions struct {
 		EventCount  *int
 		SinceCursor string
+		ResolveData EventsResolveData
 	}
 	EventsCreateBatchInput struct {
 		RunID  RunID
 		Events []EventsCreateEvent
 	}
 	EventsGetInput struct {
-		RunID   RunID
-		EventID EventID
+		RunID       RunID
+		EventID     EventID
+		ResolveData EventsResolveData
 	}
 	EventsCreateEvent struct {
 		EventType     EventType
@@ -234,18 +245,23 @@ type (
 		Data          []byte
 	}
 	EventsListInput struct {
-		RunID      RunID
-		Pagination Pagination
+		RunID       RunID
+		Pagination  Pagination
+		ResolveData EventsResolveData
 	}
 	EventsListByCorrelationIDInput struct {
 		RunID         RunID
 		CorrelationID string
 		Pagination    Pagination
+		ResolveData   EventsResolveData
 	}
 	EventResult struct {
-		EventID   EventID
-		EventType EventType
-		Events    []Event
+		EventID             EventID
+		EventType           EventType
+		Events              []Event
+		Step                *Step
+		StepCreated         bool
+		AllocatedEventCount int
 	}
 	EventBatchResult struct {
 		Events []EventResult

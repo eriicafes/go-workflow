@@ -20,28 +20,30 @@ type World struct {
 	steps    map[worlds.RunID]map[worlds.StepID]worlds.Step
 	hooks    map[worlds.HookID]worlds.Hook
 	tokens   map[string]worlds.HookID
-	streams  map[worlds.RunID]map[worlds.StreamNamespace]*memoryStream
+	streams  map[worlds.RunID]map[string]*memoryStream
 	queued   []queuedMessage
 	autoRun  bool
 	onChange func(Snapshot)
 }
 
 // Snapshot is the portable event/projection state used by provider Worlds.
-// Writer sessions are deliberately excluded: a process restart releases every
-// lease and lets the owning step acquire a fresh one.
+// Writer sessions are retained so a durable World preserves exclusive stream
+// ownership across reloads.
 type Snapshot struct {
 	Runs    map[worlds.RunID]worlds.Run
 	Events  map[worlds.RunID][]worlds.Event
 	Steps   map[worlds.RunID]map[worlds.StepID]worlds.Step
 	Hooks   map[worlds.HookID]worlds.Hook
 	Tokens  map[string]worlds.HookID
-	Streams map[worlds.RunID]map[worlds.StreamNamespace]StreamSnapshot
+	Streams map[worlds.RunID]map[string]StreamSnapshot
 	Queued  []QueueSnapshot
 }
 
 type StreamSnapshot struct {
-	Chunks [][]byte
-	Closed bool
+	Chunks   [][]byte
+	Closed   bool
+	Session  worlds.StreamID
+	Sequence int
 }
 
 type QueueSnapshot struct {
@@ -76,7 +78,7 @@ func NewWithSnapshotAndQueue(snapshot Snapshot, onChange func(Snapshot), runners
 
 func newWorld(autoRun bool, onChange func(Snapshot), runners ...worlds.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[worlds.StreamNamespace]*memoryStream), autoRun: autoRun, onChange: onChange}
+	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, onChange: onChange}
 	w.runtime = worlds.NewRuntime(w, worlds.Runners(runners...))
 	return w
 }
@@ -104,11 +106,11 @@ func (w *World) restore(snapshot Snapshot) *World {
 	if snapshot.Tokens != nil {
 		w.tokens = snapshot.Tokens
 	}
-	w.streams = make(map[worlds.RunID]map[worlds.StreamNamespace]*memoryStream, len(snapshot.Streams))
+	w.streams = make(map[worlds.RunID]map[string]*memoryStream, len(snapshot.Streams))
 	for runID, values := range snapshot.Streams {
-		w.streams[runID] = make(map[worlds.StreamNamespace]*memoryStream, len(values))
+		w.streams[runID] = make(map[string]*memoryStream, len(values))
 		for namespace, value := range values {
-			w.streams[runID][namespace] = &memoryStream{chunks: value.Chunks, closed: value.Closed}
+			w.streams[runID][namespace] = &memoryStream{chunks: value.Chunks, closed: value.Closed, session: value.Session, sequence: value.Sequence}
 		}
 	}
 	w.queued = make([]queuedMessage, len(snapshot.Queued))
@@ -128,7 +130,7 @@ func (w *World) notify() {
 func (w *World) Snapshot() Snapshot {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	result := Snapshot{Runs: make(map[worlds.RunID]worlds.Run, len(w.runs)), Events: make(map[worlds.RunID][]worlds.Event, len(w.events)), Steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step, len(w.steps)), Hooks: make(map[worlds.HookID]worlds.Hook, len(w.hooks)), Tokens: make(map[string]worlds.HookID, len(w.tokens)), Streams: make(map[worlds.RunID]map[worlds.StreamNamespace]StreamSnapshot, len(w.streams)), Queued: make([]QueueSnapshot, len(w.queued))}
+	result := Snapshot{Runs: make(map[worlds.RunID]worlds.Run, len(w.runs)), Events: make(map[worlds.RunID][]worlds.Event, len(w.events)), Steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step, len(w.steps)), Hooks: make(map[worlds.HookID]worlds.Hook, len(w.hooks)), Tokens: make(map[string]worlds.HookID, len(w.tokens)), Streams: make(map[worlds.RunID]map[string]StreamSnapshot, len(w.streams)), Queued: make([]QueueSnapshot, len(w.queued))}
 	for id, value := range w.runs {
 		result.Runs[id] = cloneRun(value)
 	}
@@ -151,13 +153,13 @@ func (w *World) Snapshot() Snapshot {
 		result.Tokens[token] = id
 	}
 	for runID, values := range w.streams {
-		result.Streams[runID] = make(map[worlds.StreamNamespace]StreamSnapshot, len(values))
+		result.Streams[runID] = make(map[string]StreamSnapshot, len(values))
 		for namespace, value := range values {
 			chunks := make([][]byte, len(value.chunks))
 			for i, chunk := range value.chunks {
 				chunks[i] = append([]byte(nil), chunk...)
 			}
-			result.Streams[runID][namespace] = StreamSnapshot{Chunks: chunks, Closed: value.closed}
+			result.Streams[runID][namespace] = StreamSnapshot{Chunks: chunks, Closed: value.closed, Session: value.session, Sequence: value.sequence}
 		}
 	}
 	for i, value := range w.queued {

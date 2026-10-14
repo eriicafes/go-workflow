@@ -19,6 +19,9 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
 	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
+	if input.ResolveData == worlds.ResolveDataNone {
+		value.Input, value.Output = nil, nil
+	}
 	return value, nil
 }
 
@@ -27,6 +30,10 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	defer w.mu.RUnlock()
 	values := make([]worlds.Step, 0, len(w.steps[input.RunID]))
 	for _, step := range w.steps[input.RunID] {
+		step.Input, step.Output, step.Error = bytes.Clone(step.Input), bytes.Clone(step.Output), bytes.Clone(step.Error)
+		if input.ResolveData == worlds.ResolveDataNone {
+			step.Input, step.Output = nil, nil
+		}
 		values = append(values, step)
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i].CreatedAt.Before(values[j].CreatedAt) })

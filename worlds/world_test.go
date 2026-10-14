@@ -85,48 +85,67 @@ func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_stream", Namespace: "output", Chunk: []byte("one")}); err != nil {
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_stream", Name: "output", Chunk: []byte("one")}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_stream", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}})
 	if err != nil || result.EventID != worlds.EventIDForSlot(2) {
 		t.Fatalf("event result=%#v err=%v", result, err)
 	}
-	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Namespace: "output"})
-	if err != nil || len(chunks.Chunks) != 1 || string(chunks.Chunks[0].Data) != "one" {
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Name: "output"})
+	if err != nil || len(chunks.Data) != 1 || string(chunks.Data[0].Data) != "one" {
 		t.Fatalf("chunks=%#v err=%v", chunks, err)
 	}
 }
 
-func TestStreamNamespacesHaveExclusiveWriterSessions(t *testing.T) {
+func TestStreamNamesHaveExclusiveWriterSessions(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream_lock", WorkflowName: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_one"})
+	first, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_one"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_two"}); !errors.Is(err, worlds.ErrStreamLocked) {
-		t.Fatalf("same namespace error = %v", err)
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_two"}); !errors.Is(err, worlds.ErrStreamLocked) {
+		t.Fatalf("same stream name error = %v", err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "logs", WriterID: "step_two"}); err != nil {
-		t.Fatalf("different namespace should acquire: %v", err)
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "logs", WriterID: "step_two"}); err != nil {
+		t.Fatalf("different stream name should acquire: %v", err)
 	}
 	if err := first.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
-	second, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_two"})
+	second, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_two"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := second.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_three"}); !errors.Is(err, worlds.ErrRunTerminal) {
-		t.Fatalf("closed namespace error = %v", err)
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_three"}); !errors.Is(err, worlds.ErrRunTerminal) {
+		t.Fatalf("closed stream name error = %v", err)
+	}
+}
+
+func TestEventResultReportsMaterializedStep(t *testing.T) {
+	world := testworld.New()
+	ctx := context.Background()
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_result", WorkflowName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{
+		RunID: "wrun_step_result",
+		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_result", Data: []byte(`{"stepName":"result"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.StepCreated || created.AllocatedEventCount != 1 || created.Step == nil || created.Step.StepID != "step_result" || created.Step.StepName != "result" {
+		t.Fatalf("created result = %#v", created)
 	}
 }
 

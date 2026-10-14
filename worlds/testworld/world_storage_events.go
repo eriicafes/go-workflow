@@ -26,15 +26,25 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	if result, duplicate, err := m.admitLocked(input.RunID, input.Event); err != nil || duplicate {
 		if duplicate {
-			result.Events = m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)
+			result.Events = resolveEventData(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 		}
 		return result, err
 	}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
-	before := m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)
+	before := resolveEventData(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
-	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: before}, nil
+	return m.eventResultLocked(event, before, true), nil
+}
+
+func resolveEventData(events []worlds.Event, resolveData worlds.EventsResolveData) []worlds.Event {
+	if resolveData != worlds.EventsResolveDataNone {
+		return events
+	}
+	for index := range events {
+		events[index].Data = nil
+	}
+	return events
 }
 
 func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
@@ -65,7 +75,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	}
 	m.runs[input.RunID] = run
 	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated}, nil
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, AllocatedEventCount: 1}, nil
 }
 
 type runCreatedData struct {
@@ -101,7 +111,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: time.Now().UTC()}
 		m.events[input.RunID] = append(m.events[input.RunID], event)
 		m.materializeLocked(event)
-		result.Events = append(result.Events, worlds.EventResult{EventID: event.EventID, EventType: event.EventType})
+		result.Events = append(result.Events, m.eventResultLocked(event, nil, true))
 	}
 	return result, nil
 }
@@ -114,7 +124,11 @@ func (m *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	defer m.mu.RUnlock()
 	for _, event := range m.events[input.RunID] {
 		if event.EventID == input.EventID {
-			return cloneEvent(event), nil
+			result := cloneEvent(event)
+			if input.ResolveData == worlds.EventsResolveDataNone {
+				result.Data = nil
+			}
+			return result, nil
 		}
 	}
 	if _, ok := m.runs[input.RunID]; !ok {
@@ -165,7 +179,7 @@ func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
-	result.EventID, result.EventType = event.EventID, event.EventType
+	result.EventResult = m.eventResultLocked(event, result.Events, true)
 	return result, nil
 }
 
@@ -280,10 +294,28 @@ func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType,
 	for index := len(m.events[runID]) - 1; index >= 0; index-- {
 		event := m.events[runID][index]
 		if event.EventType == eventType && (correlation == "" || event.CorrelationID == correlation) {
-			return worlds.EventResult{EventID: event.EventID, EventType: event.EventType}
+			return m.eventResultLocked(event, nil, false)
 		}
 	}
 	return worlds.EventResult{}
+}
+
+func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, created bool) worlds.EventResult {
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: events}
+	if created {
+		result.AllocatedEventCount = 1
+	}
+	if event.EventType != worlds.EventTypeStepCreated {
+		return result
+	}
+	step := m.steps[event.RunID][worlds.StepID(event.CorrelationID)]
+	if step.StepID == "" {
+		return result
+	}
+	step.Input, step.Output, step.Error = bytes.Clone(step.Input), bytes.Clone(step.Output), bytes.Clone(step.Error)
+	result.Step = &step
+	result.StepCreated = created
+	return result
 }
 
 func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string) []worlds.Event {
@@ -466,22 +498,24 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	for i := range log {
 		values[i] = cloneEvent(log[i])
 	}
-	if input.Pagination.Desc {
+	if input.Pagination.SortOrder == worlds.SortOrderDescending {
 		for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
 			values[i], values[j] = values[j], values[i]
 		}
 	}
-	if input.Pagination.Desc {
-		for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
-			values[i], values[j] = values[j], values[i]
+	if input.ResolveData == worlds.EventsResolveDataNone {
+		for index := range values {
+			values[index].Data = nil
 		}
+	}
+	if input.Pagination.SortOrder == worlds.SortOrderDescending {
 		return page(values, input.Pagination), nil
 	}
 	return eventPage(values, input.Pagination), nil
 }
 
 func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID})
+	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData})
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}

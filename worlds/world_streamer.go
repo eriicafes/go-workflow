@@ -14,7 +14,7 @@ type Streamer interface {
 	StreamsClose(context.Context, StreamsCloseInput) error
 	StreamsGetChunks(context.Context, StreamsGetChunksInput) (StreamChunksResult, error)
 	StreamsGetInfo(context.Context, StreamsGetInfoInput) (StreamInfo, error)
-	StreamsList(context.Context, StreamsListInput) ([]StreamNamespace, error)
+	StreamsList(context.Context, StreamsListInput) ([]string, error)
 }
 
 type StreamWriteSession interface {
@@ -28,20 +28,20 @@ type StreamWriteSession interface {
 
 type (
 	StreamsCreateWriteSessionInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
-		WriterID  string
+		RunID    RunID
+		Name     string
+		WriterID string
 	}
 	StreamsWriteSessionInput struct {
 		RunID     RunID
-		Namespace StreamNamespace
+		Name      string
 		SessionID StreamID
 		Sequence  int
 		Chunks    [][]byte
 	}
 	StreamsCloseWriteSessionInput struct {
 		RunID     RunID
-		Namespace StreamNamespace
+		Name      string
 		SessionID StreamID
 		Close     bool
 	}
@@ -50,38 +50,38 @@ type (
 		Chunks   [][]byte
 	}
 	StreamsWriteInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
-		Chunk     []byte
+		RunID RunID
+		Name  string
+		Chunk []byte
 	}
 	StreamsWriteMultiInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
-		Chunks    [][]byte
+		RunID  RunID
+		Name   string
+		Chunks [][]byte
 	}
 	StreamsCloseInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
+		RunID RunID
+		Name  string
 	}
 	StreamsGetChunksInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
-		Cursor    string
-		Limit     int
-		Wait      time.Duration
+		RunID  RunID
+		Name   string
+		Cursor string
+		Limit  int
+		Wait   time.Duration
 	}
 	StreamsGetInfoInput struct {
-		RunID     RunID
-		Namespace StreamNamespace
+		RunID RunID
+		Name  string
 	}
 	StreamsListInput struct {
 		RunID RunID
 	}
 	StreamChunksResult struct {
-		Chunks     []StreamChunk
+		Data       []StreamChunk
 		Cursor     string
 		HasMore    bool
-		Closed     bool
+		Done       bool
 		RetryAfter time.Duration
 	}
 )
@@ -93,5 +93,5 @@ type StreamChunk struct {
 
 type StreamInfo struct {
 	TailIndex int
-	Closed    bool
+	Done      bool
 }

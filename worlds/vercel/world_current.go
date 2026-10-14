@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
@@ -125,6 +127,10 @@ func Queue(world *World, runners worlds.RunnerSet) http.Handler {
 			writer.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		if request.Header.Get("Authorization") != "Bearer "+world.config.OIDCToken {
+			http.Error(writer, "unauthorized queue delivery", http.StatusUnauthorized)
+			return
+		}
 		defer request.Body.Close()
 		body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1<<20))
 		if err != nil {
@@ -134,6 +140,12 @@ func Queue(world *World, runners worlds.RunnerSet) http.Handler {
 		var message queueMessage
 		if err := json.Unmarshal(body, &message); err != nil || message.ID == "" {
 			http.Error(writer, "invalid queue message", http.StatusBadRequest)
+			return
+		}
+		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > 0 {
+			seconds := max(1, int(time.Until(*message.Input.NotBefore).Round(time.Second)/time.Second))
+			writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+			http.Error(writer, "queue delivery is early", http.StatusTooEarly)
 			return
 		}
 		if err := runtime.Execute(request.Context(), message.Input); err != nil {

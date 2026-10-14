@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -23,6 +24,7 @@ type World struct {
 	pool     *pgxpool.Pool
 	ownsPool bool
 	interval time.Duration
+	reloadMu sync.Mutex
 }
 
 func Open(ctx context.Context, config Config, runners ...worlds.Runner) (*World, error) {
@@ -95,6 +97,20 @@ func (w *World) save(snapshot testworld.Snapshot) {
 		INSERT INTO go_workflow_world_state (id, state) VALUES (TRUE, $1::jsonb)
 		ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = now()`, data)
 }
+
+// reload refreshes the worker view before it claims work. A worker and API
+// server commonly run in different processes, so queue state cannot be kept
+// only in the constructor's in-memory snapshot.
+func (w *World) reload(ctx context.Context) error {
+	w.reloadMu.Lock()
+	defer w.reloadMu.Unlock()
+	snapshot, err := loadSnapshot(ctx, w.pool)
+	if err != nil {
+		return err
+	}
+	w.World = testworld.NewWithSnapshotAndQueue(snapshot, w.save)
+	return nil
+}
 func (w *World) Close() {
 	w.World.Close()
 	if w.ownsPool {
@@ -109,6 +125,9 @@ func HTTP(w *World) http.Handler { return worlds.HTTPHandler(w, nil, "") }
 func Run(ctx context.Context, world *World, runners worlds.RunnerSet) error {
 	runtime := worlds.NewRuntime(world, runners)
 	for {
+		if err := world.reload(ctx); err != nil {
+			return err
+		}
 		for _, message := range world.QueuedMessages() {
 			if message.Input.NotBefore != nil && time.Now().Before(*message.Input.NotBefore) {
 				continue

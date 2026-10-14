@@ -43,14 +43,32 @@ func (s Status) Terminal() bool {
 	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
 }
 
+type ResolveData string
+
+const (
+	ResolveDataAll  ResolveData = "all"
+	ResolveDataNone ResolveData = "none"
+)
+
+type EventsResolveData string
+
+const (
+	EventsResolveDataAll            EventsResolveData = "all"
+	EventsResolveDataNone           EventsResolveData = "none"
+	EventsResolveDataSkipStepInputs EventsResolveData = "skip-step-inputs"
+)
+
+type SortOrder string
+
+const (
+	SortOrderAscending  SortOrder = "asc"
+	SortOrderDescending SortOrder = "desc"
+)
+
 type RunID string
 type StepID string
 type HookID string
 type WaitID string
-
-// StreamNamespace is the logical writer channel within a run. It is distinct
-// from the opaque StreamID used to identify one writer session.
-type StreamNamespace string
 type StreamID string
 type EventID string
 
@@ -82,9 +100,9 @@ func NewHookToken() string {
 
 type (
 	Pagination struct {
-		Cursor string
-		Limit  int
-		Desc   bool
+		Cursor    string
+		Limit     int
+		SortOrder SortOrder
 	}
 	Page[T any] struct {
 		Data    []T

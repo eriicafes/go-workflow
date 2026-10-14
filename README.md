@@ -155,7 +155,7 @@ any remaining streams when they reach a terminal state.
 func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
 	writer, release, err := workflow.Writer(
 		ctx,
-		workflow.WriterOption{Namespace: "progress"},
+		workflow.WriterOption{Name: "progress"},
 	)
 	if err != nil {
 		return struct{}{}, err
@@ -169,7 +169,7 @@ func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
 reader, err := run.ReaderAt(
 	ctx,
 	-128,
-	workflow.ReaderOption{Namespace: "progress"},
+	workflow.ReaderOption{Name: "progress"},
 )
 if err != nil {
 	return err

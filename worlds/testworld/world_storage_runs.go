@@ -19,7 +19,11 @@ func (m *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	if !ok {
 		return worlds.Run{}, worlds.ErrRunNotFound
 	}
-	return cloneRun(value), nil
+	value = cloneRun(value)
+	if input.ResolveData == worlds.ResolveDataNone {
+		value.Input, value.Output = nil, nil
+	}
+	return value, nil
 }
 
 func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
@@ -42,10 +46,14 @@ func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 				continue
 			}
 		}
-		values = append(values, cloneRun(run))
+		run = cloneRun(run)
+		if input.ResolveData == worlds.ResolveDataNone {
+			run.Input, run.Output = nil, nil
+		}
+		values = append(values, run)
 	}
 	sort.Slice(values, func(i, j int) bool {
-		if input.Pagination.Desc {
+		if input.Pagination.SortOrder == worlds.SortOrderDescending {
 			return values[i].CreatedAt.After(values[j].CreatedAt)
 		}
 		return values[i].CreatedAt.Before(values[j].CreatedAt)

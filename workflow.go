@@ -183,7 +183,7 @@ func (r *Run[Out]) ReaderAt(ctx context.Context, offset int64, options ...Reader
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newStreamReader(ctx, r.client, r.id, opts.Namespace, offset), nil
+	return newStreamReader(ctx, r.client, r.id, opts.Name, offset), nil
 }
 
 // Writer obtains a writer for this run's stream from application code. Close
@@ -193,7 +193,7 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.Writ
 		return nil, nil, ErrNoWorkflow
 	}
 	opts := writerOption(options)
-	return newStreamWriter(ctx, r.client, r.id, opts.Namespace, string(worlds.NewStreamID()))
+	return newStreamWriter(ctx, r.client, r.id, opts.Name, string(worlds.NewStreamID()))
 }
 
 // Get returns a handle for an existing workflow. The handle is bound to the

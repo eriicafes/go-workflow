@@ -28,7 +28,7 @@ type Client interface {
 
 	StreamsGetChunks(context.Context, worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error)
 	StreamsGetInfo(context.Context, worlds.StreamsGetInfoInput) (worlds.StreamInfo, error)
-	StreamsList(context.Context, worlds.StreamsListInput) ([]worlds.StreamNamespace, error)
+	StreamsList(context.Context, worlds.StreamsListInput) ([]string, error)
 	StreamsWrite(context.Context, worlds.StreamsWriteInput) error
 	StreamsWriteMulti(context.Context, worlds.StreamsWriteMultiInput) error
 	StreamsClose(context.Context, worlds.StreamsCloseInput) error
@@ -100,7 +100,7 @@ func (c worldClient) StreamsGetInfo(ctx context.Context, input worlds.StreamsGet
 	return c.world.StreamsGetInfo(ctx, input)
 }
 
-func (c worldClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]worlds.StreamNamespace, error) {
+func (c worldClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
 	return c.world.StreamsList(ctx, input)
 }
 
@@ -264,8 +264,8 @@ func (c *httpClient) StreamsGetInfo(ctx context.Context, input worlds.StreamsGet
 	return output, err
 }
 
-func (c *httpClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]worlds.StreamNamespace, error) {
-	var output []worlds.StreamNamespace
+func (c *httpClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
+	var output []string
 	err := c.call(ctx, "streams.list", input, &output)
 	return output, err
 }
@@ -287,25 +287,25 @@ func (c *httpClient) streamsCreateWriteSession(ctx context.Context, input worlds
 	if err := c.call(ctx, "streams.createWriteSession", input, &id); err != nil {
 		return nil, err
 	}
-	return httpStreamWriteSession{client: c, runID: input.RunID, namespace: input.Namespace, id: id}, nil
+	return httpStreamWriteSession{client: c, runID: input.RunID, name: input.Name, id: id}, nil
 }
 
 type httpStreamWriteSession struct {
-	client    *httpClient
-	runID     worlds.RunID
-	namespace worlds.StreamNamespace
-	id        worlds.StreamID
+	client *httpClient
+	runID  worlds.RunID
+	name   string
+	id     worlds.StreamID
 }
 
 func (s httpStreamWriteSession) ID() worlds.StreamID { return s.id }
 func (s httpStreamWriteSession) Write(ctx context.Context, input worlds.StreamWriteSessionWriteInput) error {
-	return s.client.call(ctx, "streams.writeSession", worlds.StreamsWriteSessionInput{RunID: s.runID, Namespace: s.namespace, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
+	return s.client.call(ctx, "streams.writeSession", worlds.StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
 }
 func (s httpStreamWriteSession) Close(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Namespace: s.namespace, SessionID: s.id, Close: true}, nil)
+	return s.client.call(ctx, "streams.closeWriteSession", worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: true}, nil)
 }
 func (s httpStreamWriteSession) Release(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Namespace: s.namespace, SessionID: s.id}, nil)
+	return s.client.call(ctx, "streams.closeWriteSession", worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
 }
 
 func (c *httpClient) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {

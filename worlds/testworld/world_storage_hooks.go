@@ -15,7 +15,11 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if !ok {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return cloneHook(value), nil
+	value = cloneHook(value)
+	if input.ResolveData == worlds.ResolveDataNone {
+		value.Metadata = nil
+	}
+	return value, nil
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -30,7 +34,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if !ok {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: id})
+	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: id, ResolveData: input.ResolveData})
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
@@ -38,7 +42,14 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	defer w.mu.RUnlock()
 	values := make([]worlds.Hook, 0, len(w.hooks))
 	for _, hook := range w.hooks {
-		values = append(values, cloneHook(hook))
+		if input.RunID != "" && hook.RunID != input.RunID {
+			continue
+		}
+		hook = cloneHook(hook)
+		if input.ResolveData == worlds.ResolveDataNone {
+			hook.Metadata = nil
+		}
+		values = append(values, hook)
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i].CreatedAt.Before(values[j].CreatedAt) })
 	return page(values, input.Pagination), nil

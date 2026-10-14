@@ -104,14 +104,12 @@ func (w *World) QueuedMessages() []QueueMessage {
 // DispatchQueued resumes queue deliveries restored from a snapshot. It is a
 // no-op for provider Worlds, which own delivery through their queue service.
 func (w *World) DispatchQueued(ctx context.Context) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	for _, message := range w.QueuedMessages() {
-		if message.Input.NotBefore != nil && time.Now().Before(*message.Input.NotBefore) {
-			continue
-		}
 		go func(message QueueMessage) {
-			if w.runtime.Execute(ctx, message.Input) == nil {
-				_ = w.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID})
-			}
+			w.deliver(message.ID, message.Input)
 		}(message)
 	}
 }

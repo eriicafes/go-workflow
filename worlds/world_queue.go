@@ -13,6 +13,7 @@ type Queue interface {
 
 type (
 	QueueInput struct {
+		QueueName      string
 		RunID          RunID
 		StepID         *StepID
 		NotBefore      *time.Time
