@@ -173,16 +173,15 @@ const (
 	EventTypeHookConflict  EventType = "hook_conflict"
 	EventTypeWaitCreated   EventType = "wait_created"
 	EventTypeWaitCompleted EventType = "wait_completed"
-	EventTypeNoop          EventType = "noop"
 )
 
 func (t EventType) Valid() bool {
 	switch t {
 	case EventTypeRunCreated, EventTypeRunStarted, EventTypeRunCompleted, EventTypeRunFailed,
 		EventTypeRunCancelled, EventTypeAttrSet, EventTypeStepCreated, EventTypeStepStarted,
-		EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeStepCancelled, EventTypeHookCreated,
-		EventTypeHookReceived, EventTypeHookDisposed, EventTypeHookConflict, EventTypeWaitCreated,
-		EventTypeWaitCompleted, EventTypeNoop:
+		EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeStepCancelled,
+		EventTypeHookCreated, EventTypeHookReceived, EventTypeHookDisposed, EventTypeHookConflict,
+		EventTypeWaitCreated, EventTypeWaitCompleted:
 		return true
 	default:
 		return false

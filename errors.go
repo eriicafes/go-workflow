@@ -4,43 +4,25 @@ import (
 	"errors"
 	"time"
 
-	"github.com/eriicafes/go-workflow/workflowops"
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 var (
-	// ErrNoClient means Start was called without workflow.NewContext. Start is
-	// valid from application, workflow, and step contexts when that client is present.
-	ErrNoClient = errors.New("workflow: context has no client")
-
-	// ErrNoWorkflow means a durable primitive was called outside a workflow body.
-	ErrNoWorkflow = errors.New("workflow: context has no active workflow")
-
-	// ErrRunNotFound means the requested durable run does not exist.
-	ErrRunNotFound = workflowops.ErrRunNotFound
-
-	// ErrCancelled means the durable task was cancelled.
-	ErrCancelled = workflowops.ErrCancelled
-
-	// ErrHookNotFound means no active or retained hook owns a token.
-	ErrHookNotFound = workflowops.ErrHookNotFound
-
-	// ErrHookNotRegistered means a hook has not yet created its durable task.
-	// Call Value, Wait, or GetConflict before using it as a dependency.
+	ErrNoClient          = errors.New("workflow: context has no client")
+	ErrNoWorkflow        = errors.New("workflow: context has no active workflow")
+	ErrRunCancelled      = worlds.ErrRunCancelled
+	ErrHookNotFound      = worlds.ErrHookNotFound
 	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
-
-	// ErrHookConflict means another run already owns the requested hook token.
-	ErrHookConflict = workflowops.ErrHookConflict
-
-	// ErrHookForceClaimed means a newer run replaced this hook's token claim.
-	ErrHookForceClaimed = workflowops.ErrHookForceClaimed
+	ErrHookConflict      = worlds.ErrHookConflict
+	ErrHookForceClaimed  = errors.New("workflow: hook token was force claimed")
 )
 
 type fatalError struct{ cause error }
 
-func (errorValue fatalError) Error() string { return errorValue.cause.Error() }
-func (errorValue fatalError) Unwrap() error { return errorValue.cause }
+func (e fatalError) Error() string { return e.cause.Error() }
+func (e fatalError) Unwrap() error { return e.cause }
 
-// FatalError marks a step failure as terminal. It bypasses StepOptions retries.
+// FatalError marks a step failure as terminal and bypasses retries.
 func FatalError(cause error) error {
 	if cause == nil {
 		return nil
@@ -53,11 +35,10 @@ type retryableError struct {
 	after time.Duration
 }
 
-func (errorValue retryableError) Error() string { return errorValue.cause.Error() }
-func (errorValue retryableError) Unwrap() error { return errorValue.cause }
+func (e retryableError) Error() string { return e.cause.Error() }
+func (e retryableError) Unwrap() error { return e.cause }
 
-// RetryableError requests a durable retry after after. It still respects the
-// step's MaxRetries limit.
+// RetryableError requests a retry after after, subject to StepOptions.
 func RetryableError(cause error, after time.Duration) error {
 	if cause == nil {
 		return nil

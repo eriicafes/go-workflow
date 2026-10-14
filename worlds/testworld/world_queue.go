@@ -36,7 +36,7 @@ func (w *World) deliver(id string, input worlds.QueueInput) {
 		case <-timer.C:
 		}
 	}
-	if w.engine.Execute(w.ctx, input) == nil {
+	if w.runtime.Execute(w.ctx, input) == nil {
 		_ = w.QueueCancel(w.ctx, worlds.QueueCancelInput{MessageID: id})
 	}
 }

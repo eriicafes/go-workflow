@@ -15,19 +15,22 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
-	if input.Event.EventType == worlds.EventTypeRunCreated || input.Event.EventType == worlds.EventTypeNoop || !input.Event.EventType.Valid() {
+	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[input.RunID]; !ok {
-		return worlds.EventResult{}, worlds.ErrWorkflowNotFound
+		return worlds.EventResult{}, worlds.ErrRunNotFound
 	}
 	if result, duplicate, err := m.admitLocked(input.RunID, input.Event); err != nil || duplicate {
+		if duplicate {
+			result.Events = m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)
+		}
 		return result, err
 	}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
-	before := m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor, event.EventID)
+	before := m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
 	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: before}, nil
@@ -76,12 +79,12 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[input.RunID]; !ok {
-		return worlds.EventBatchResult{}, worlds.ErrWorkflowNotFound
+		return worlds.EventBatchResult{}, worlds.ErrRunNotFound
 	}
 	checkpoint := m.checkpointLocked()
 	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events))}
 	for _, value := range input.Events {
-		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeNoop || !value.EventType.Valid() {
+		if value.EventType == worlds.EventTypeRunCreated || !value.EventType.Valid() {
 			m.restoreLocked(checkpoint)
 			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
 		}
@@ -161,12 +164,45 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	}
+	if requested.EventType == worlds.EventTypeStepCancelled {
+		step := m.steps[runID][worlds.StepID(requested.CorrelationID)]
+		if step.StepID == "" {
+			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+		}
+		if step.Status == worlds.StatusCancelled {
+			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+		}
+		if step.Status.Terminal() {
+			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+		}
+	}
+	if requested.EventType == worlds.EventTypeWaitCompleted {
+		for _, event := range m.events[runID] {
+			if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == requested.CorrelationID {
+				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType}, true, nil
+			}
+		}
+	}
 	if requested.EventType == worlds.EventTypeHookReceived {
 		var received worlds.WebhookReceivedEventData
 		if json.Unmarshal(requested.Data, &received) == nil && received.Request != nil {
 			hook := m.hooks[worlds.HookID(requested.CorrelationID)]
 			if hook.Webhook == nil || hook.ReceivedEventID != "" || m.tokens[hook.Token] != hook.HookID {
 				return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			}
+		}
+		if json.Unmarshal(requested.Data, &received) == nil && received.Response != nil {
+			hook := m.hooks[worlds.HookID(requested.CorrelationID)]
+			if hook.Webhook == nil || hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || m.tokens[hook.Token] != hook.HookID {
+				return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			}
+		}
+	}
+	if requested.EventType == worlds.EventTypeHookCreated {
+		var created hookCreatedData
+		if json.Unmarshal(requested.Data, &created) == nil {
+			if _, exists := m.tokens[created.Token]; exists {
+				return worlds.EventResult{}, false, worlds.ErrHookConflict
 			}
 		}
 	}
@@ -183,7 +219,7 @@ func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType,
 	return worlds.EventResult{}
 }
 
-func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string, next worlds.EventID) []worlds.Event {
+func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string) []worlds.Event {
 	log := m.events[runID]
 	start := len(log)
 	if count != nil {
@@ -322,7 +358,7 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	defer m.mu.RUnlock()
 	log, ok := m.events[input.RunID]
 	if !ok {
-		return worlds.Page[worlds.Event]{}, worlds.ErrWorkflowNotFound
+		return worlds.Page[worlds.Event]{}, worlds.ErrRunNotFound
 	}
 	values := make([]worlds.Event, len(log))
 	for i := range log {

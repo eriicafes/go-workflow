@@ -198,7 +198,11 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 		if !ok {
 			return nil, nil
 		}
-		for _, event := range execution.Events() {
+		page, err := execution.World().EventsList(ctx, worlds.EventsListInput{RunID: execution.Run().RunID})
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range page.Data {
 			if event.EventType != worlds.EventTypeHookReceived {
 				continue
 			}

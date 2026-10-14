@@ -2,22 +2,14 @@ package workflow
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"io"
-	"sync"
 	"time"
 
-	"github.com/eriicafes/go-workflow/workflowops"
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// WriterOption selects an independent, namespaced byte stream for a run.
-// Bytes are flushed to durable storage by each Write. Use bufio.NewWriter when
-// an application needs to buffer several writes before flushing.
-type WriterOption struct {
-	Namespace string
-}
+type WriterOption struct{ Name worlds.StreamID }
 
 func writerOption(values []WriterOption) WriterOption {
 	if len(values) == 0 {
@@ -26,10 +18,17 @@ func writerOption(values []WriterOption) WriterOption {
 	return values[len(values)-1]
 }
 
-// ReaderOption selects an independent, namespaced byte stream for a run.
-type ReaderOption struct {
-	Namespace string
+func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
+	execution, ok := stepExecutionFromContext(ctx)
+	if !ok {
+		return nil, nil, ErrNoWorkflow
+	}
+	stepID, _ := execution.TargetStepID()
+	opts := writerOption(options)
+	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, string(stepID))
 }
+
+type ReaderOption struct{ Name worlds.StreamID }
 
 func readerOption(values []ReaderOption) ReaderOption {
 	if len(values) == 0 {
@@ -38,170 +37,151 @@ func readerOption(values []ReaderOption) ReaderOption {
 	return values[len(values)-1]
 }
 
-// Reader opens the current run's stream. It is available only in a durable step.
 func Reader(ctx context.Context, options ...ReaderOption) (io.Reader, error) {
 	execution, ok := stepExecutionFromContext(ctx)
 	if !ok {
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newReader(ctx, execution.World(), workflowops.Stream{RunID: execution.RunID(), Namespace: opts.Namespace}, 0), nil
+	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, 0), nil
 }
 
-// ReaderAt is Reader starting at offset. Negative offsets are relative to the
-// stream's current end, so -1 starts at its last byte.
 func ReaderAt(ctx context.Context, offset int64, options ...ReaderOption) (io.Reader, error) {
 	execution, ok := stepExecutionFromContext(ctx)
 	if !ok {
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newReader(ctx, execution.World(), workflowops.Stream{RunID: execution.RunID(), Namespace: opts.Namespace}, offset), nil
+	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, offset), nil
 }
 
-func newReader(ctx context.Context, client Client, ref workflowops.Stream, offset int64) *stream {
-	return &stream{ctx: ctx, client: client, ref: ref, offset: offset}
+type streamWriter struct {
+	ctx      context.Context
+	client   Client
+	runID    worlds.RunID
+	name     worlds.StreamID
+	session  worlds.StreamWriteSession
+	closed   bool
+	sequence int
 }
 
-func (value *stream) Read(data []byte) (int, error) {
-	for len(value.buf) == 0 {
-		if value.closed {
-			return 0, io.EOF
-		}
-		read, err := value.client.ReadStream(value.ctx, value.ref, value.offset)
+func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name worlds.StreamID, writerID string) (io.WriteCloser, func() error, error) {
+	writer := &streamWriter{ctx: ctx, client: client, runID: runID, name: name}
+	if sessionClient, ok := client.(interface {
+		streamsCreateWriteSession(context.Context, worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error)
+	}); ok {
+		session, err := sessionClient.streamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: name, WriterID: writerID})
 		if err != nil {
-			return 0, err
+			return nil, nil, err
 		}
-		value.offset, value.closed, value.buf = read.Next, read.Closed, read.Data
-		if len(value.buf) != 0 || value.closed {
-			continue
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-value.ctx.Done():
-			timer.Stop()
-			return 0, value.ctx.Err()
-		case <-timer.C:
-		}
+		writer.session = session
 	}
-	n := copy(data, value.buf)
-	value.buf = value.buf[n:]
-	return n, nil
+	return writer, writer.release, nil
 }
 
-// Writer obtains the current run's stream writer. It is available only in a
-// durable step. It waits for an active writer to release the stream. release
-// completes this writer's lifetime without closing the stream. Close closes
-// the stream for all readers.
-func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
-	execution, ok := stepExecutionFromContext(ctx)
-	if !ok {
-		return nil, nil, ErrNoWorkflow
-	}
-	opts := writerOption(options)
-	streams, ok := ctx.Value(stepStreamsContextKey{}).(*stepStreams)
-	if !ok {
-		streams = &stepStreams{}
-	}
-	value, err := streams.acquire(ctx, execution.World(), workflowops.Stream{
-		RunID:     execution.RunID(),
-		Namespace: opts.Namespace,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return value, value.release, nil
-}
-
-type stepStreams struct {
-	mu      sync.Mutex
-	writers []*stream
-}
-
-func (value *stepStreams) acquire(ctx context.Context, client Client, reference workflowops.Stream) (*stream, error) {
-	lock, err := streamLockToken()
-	if err != nil {
-		return nil, err
-	}
-	for {
-		acquired, err := client.LockStream(ctx, reference, lock)
-		if err != nil {
-			return nil, err
-		}
-		if acquired {
-			break
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	writer := &stream{ctx: ctx, client: client, ref: reference, lock: lock}
-	value.mu.Lock()
-	value.writers = append(value.writers, writer)
-	value.mu.Unlock()
-	return writer, nil
-}
-
-func (value *stepStreams) release() error {
-	value.mu.Lock()
-	writers := append([]*stream(nil), value.writers...)
-	value.writers = nil
-	value.mu.Unlock()
-	var result error
-	for _, writer := range writers {
-		if err := writer.release(); err != nil && result == nil {
-			result = err
-		}
-	}
-	return result
-}
-
-// stream is the private provider-backed implementation returned as standard
-// io interfaces. Its lock token is private to this writer instance.
-type stream struct {
-	ctx    context.Context
-	client Client
-	ref    workflowops.Stream
-	lock   string
-	offset int64
-	buf    []byte
-	closed bool
-}
-
-func (value *stream) Write(data []byte) (int, error) {
-	if value.closed {
+func (w *streamWriter) Write(data []byte) (int, error) {
+	if w.closed {
 		return 0, errors.New("workflow: stream writer is closed")
 	}
-	if err := value.client.AppendStream(value.ctx, value.ref, value.lock, data); err != nil {
+	if w.session != nil {
+		if err := w.session.Write(w.ctx, worlds.StreamWriteSessionWriteInput{Sequence: w.sequence, Chunks: [][]byte{data}}); err != nil {
+			return 0, err
+		}
+	} else if err := w.client.StreamsWrite(w.ctx, worlds.StreamsWriteInput{RunID: w.runID, Name: w.name, Chunk: data}); err != nil {
 		return 0, err
 	}
+	w.sequence++
 	return len(data), nil
 }
 
-func (value *stream) Close() error {
-	if value.closed {
+func (w *streamWriter) Close() error {
+	if w.closed {
 		return nil
 	}
-	value.closed = true
-	return value.client.ReleaseStream(value.ctx, value.ref, value.lock, true)
+	if err := w.client.StreamsClose(w.ctx, worlds.StreamsCloseInput{RunID: w.runID, Name: w.name}); err != nil {
+		return err
+	}
+	if w.session != nil {
+		if err := w.session.Close(w.ctx); err != nil {
+			return err
+		}
+	}
+	w.closed = true
+	return nil
 }
 
-func (value *stream) release() error {
-	if value.closed {
+func (w *streamWriter) release() error {
+	if w.closed {
 		return nil
 	}
-	value.closed = true
-	return value.client.ReleaseStream(value.ctx, value.ref, value.lock, false)
+	if w.session != nil {
+		if err := w.session.Close(w.ctx); err != nil {
+			return err
+		}
+	}
+	w.closed = true
+	return nil
 }
 
-func streamLockToken() (string, error) {
-	data := make([]byte, 16)
-	if _, err := rand.Read(data); err != nil {
-		return "", err
+type streamReader struct {
+	ctx    context.Context
+	client Client
+	runID  worlds.RunID
+	name   worlds.StreamID
+	cursor string
+	buf    []byte
+	closed bool
+	skip   int64
+}
+
+func newStreamReader(ctx context.Context, client Client, runID worlds.RunID, name worlds.StreamID, offset int64) *streamReader {
+	reader := &streamReader{ctx: ctx, client: client, runID: runID, name: name}
+	if offset >= 0 {
+		reader.skip = offset
+		return reader
 	}
-	return hex.EncodeToString(data), nil
+	reader.skip = max(reader.currentLength()+offset, 0)
+	return reader
+}
+
+func (r *streamReader) Read(data []byte) (int, error) {
+	for len(r.buf) == 0 {
+		if r.closed {
+			return 0, io.EOF
+		}
+		chunks, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: r.cursor, Wait: 100 * time.Millisecond})
+		if err != nil {
+			return 0, err
+		}
+		r.cursor, r.closed = chunks.Cursor, chunks.Closed
+		for _, chunk := range chunks.Chunks {
+			r.buf = append(r.buf, chunk.Data...)
+		}
+		if r.skip != 0 {
+			discard := min(r.skip, int64(len(r.buf)))
+			r.buf = r.buf[discard:]
+			r.skip -= discard
+		}
+	}
+	n := copy(data, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+func (r *streamReader) currentLength() int64 {
+	cursor := ""
+	var length int64
+	for {
+		result, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: cursor})
+		if err != nil {
+			return 0
+		}
+		for _, chunk := range result.Chunks {
+			length += int64(len(chunk.Data))
+		}
+		if !result.HasMore {
+			return length
+		}
+		cursor = result.Cursor
+	}
 }

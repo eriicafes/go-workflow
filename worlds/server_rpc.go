@@ -11,62 +11,67 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-const rpcContentType = "application/cbor"
+// RPCContentType is the content type accepted and returned by HTTPHandler's
+// RPC endpoint.
+const RPCContentType = "application/cbor"
 
-type rpcRequest struct {
+// RPCRequest is the CBOR envelope sent to an HTTPHandler RPC endpoint.
+type RPCRequest struct {
 	Method string          `cbor:"method"`
 	Input  cbor.RawMessage `cbor:"input"`
 }
 
-type rpcResponse struct {
+// RPCResponse is the CBOR envelope returned by an HTTPHandler RPC endpoint.
+type RPCResponse struct {
 	Output cbor.RawMessage `cbor:"output,omitempty"`
-	Error  *rpcError       `cbor:"error,omitempty"`
+	Error  *RPCError       `cbor:"error,omitempty"`
 }
 
-type rpcError struct {
+// RPCError describes a failed RPC request.
+type RPCError struct {
 	Code    string `cbor:"code"`
 	Message string `cbor:"message"`
 }
 
 func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
 	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
-	if err != nil || mediaType != rpcContentType {
+	if err != nil || mediaType != RPCContentType {
 		http.Error(writer, "workflow: Content-Type must be application/cbor", http.StatusUnsupportedMediaType)
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 8<<20))
 	if err != nil {
-		writeRPC(writer, rpcResponse{Error: newRPCError(err)})
+		writeRPC(writer, RPCResponse{Error: newRPCError(err)})
 		return
 	}
-	var envelope rpcRequest
+	var envelope RPCRequest
 	if err := cbor.Unmarshal(body, &envelope); err != nil || envelope.Method == "" {
 		if err == nil {
 			err = fmt.Errorf("workflow: missing RPC method")
 		}
-		writeRPC(writer, rpcResponse{Error: newRPCError(err)})
+		writeRPC(writer, RPCResponse{Error: newRPCError(err)})
 		return
 	}
 	output, err := dispatchRPC(request.Context(), world, envelope)
 	if err != nil {
-		writeRPC(writer, rpcResponse{Error: newRPCError(err)})
+		writeRPC(writer, RPCResponse{Error: newRPCError(err)})
 		return
 	}
-	writeRPC(writer, rpcResponse{Output: output})
+	writeRPC(writer, RPCResponse{Output: output})
 }
 
-func writeRPC(writer http.ResponseWriter, response rpcResponse) {
+func writeRPC(writer http.ResponseWriter, response RPCResponse) {
 	body, err := cbor.Marshal(response)
 	if err != nil {
 		http.Error(writer, "workflow: could not encode RPC response", http.StatusInternalServerError)
 		return
 	}
-	writer.Header().Set("Content-Type", rpcContentType)
+	writer.Header().Set("Content-Type", RPCContentType)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(body)
 }
 
-func dispatchRPC(ctx context.Context, world World, request rpcRequest) (cbor.RawMessage, error) {
+func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.RawMessage, error) {
 	switch request.Method {
 	case "world.capabilities":
 		return encodeRPC(world.Capabilities())
@@ -336,15 +341,106 @@ func dispatchRPC(ctx context.Context, world World, request rpcRequest) (cbor.Raw
 			}
 			return encodeRPC(value)
 		}
+	case "client.runs.create":
+		input, err := decodeRPC[ClientRunsCreateInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if input.RunID == "" {
+			input.RunID = NewRunID()
+		}
+		if _, err := world.EventsCreateRun(ctx, input); err != nil {
+			return nil, err
+		}
+		if _, err := world.Queue(ctx, QueueInput{RunID: input.RunID, IdempotencyKey: string(input.RunID)}); err != nil {
+			return nil, err
+		}
+		return encodeRPC(input.RunID)
+	case "client.runs.cancel":
+		input, err := decodeRPC[ClientRunsCancelInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled}}); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
+	case "client.runs.wake":
+		input, err := decodeRPC[ClientRunsWakeInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		value, err := WakeRun(ctx, world, input.RunID, input.CorrelationIDs)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(value)
+	case "client.streams.write":
+		input, err := decodeRPC[StreamsWriteInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if err := world.StreamsWrite(ctx, input); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
+	case "client.streams.writeMulti":
+		input, err := decodeRPC[StreamsWriteMultiInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if err := world.StreamsWriteMulti(ctx, input); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
+	case "client.streams.close":
+		input, err := decodeRPC[StreamsCloseInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if err := world.StreamsClose(ctx, input); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
+	case "client.hooks.resume":
+		input, err := decodeRPC[ClientHooksResumeInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		hook, err := world.HooksGetByToken(ctx, HooksGetByTokenInput{Token: input.Token})
+		if err != nil {
+			return nil, err
+		}
+		result, err := world.EventsCreate(ctx, EventsCreateInput{RunID: hook.RunID, Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: input.Data}})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)}); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
 	default:
 		return nil, fmt.Errorf("workflow: unknown RPC method %q", request.Method)
 	}
 }
 
-func newRPCError(err error) *rpcError {
+type (
+	ClientRunsCreateInput = EventsCreateRunInput
+	ClientRunsCancelInput struct{ RunID RunID }
+	ClientRunsWakeInput   struct {
+		RunID          RunID
+		CorrelationIDs []string
+	}
+	ClientHooksResumeInput struct {
+		Token string
+		Data  []byte
+	}
+)
+
+func newRPCError(err error) *RPCError {
 	code := "internal"
 	switch {
-	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
+	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
 		code = "not_found"
 	case errors.Is(err, ErrEventInvalid):
 		code = "invalid_argument"
@@ -355,7 +451,7 @@ func newRPCError(err error) *rpcError {
 	case errors.Is(err, context.DeadlineExceeded):
 		code = "deadline_exceeded"
 	}
-	return &rpcError{Code: code, Message: err.Error()}
+	return &RPCError{Code: code, Message: err.Error()}
 }
 
 func decodeRPC[T any](raw cbor.RawMessage) (T, error) {

@@ -17,7 +17,7 @@ func (m *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	defer m.mu.RUnlock()
 	value, ok := m.runs[input.RunID]
 	if !ok {
-		return worlds.Run{}, worlds.ErrWorkflowNotFound
+		return worlds.Run{}, worlds.ErrRunNotFound
 	}
 	return cloneRun(value), nil
 }

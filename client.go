@@ -3,189 +3,321 @@ package workflow
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/eriicafes/go-workflow/workflowops"
+	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/fxamacker/cbor/v2"
 )
 
-// Client schedules and reads workflow runs.
-type Client = workflowops.Client
+// Client is the application-facing workflow control and read API. It does not
+// grant arbitrary event, queue, or stream-write access.
+type Client interface {
+	RunsCreate(context.Context, worlds.ClientRunsCreateInput) (worlds.RunID, error)
+	RunsGet(context.Context, worlds.RunsGetInput) (worlds.Run, error)
+	RunsList(context.Context, worlds.RunsListInput) (worlds.Page[worlds.Run], error)
+	RunsWaitForTerminalStatus(context.Context, worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error)
+	RunsCancel(context.Context, worlds.ClientRunsCancelInput) error
+	RunsWake(context.Context, worlds.ClientRunsWakeInput) (int, error)
+	RunsSetAttributes(context.Context, worlds.RunsSetAttributesInput) error
 
-type httpClient struct {
-	endpoint string
-	http     *http.Client
+	StepsGet(context.Context, worlds.StepsGetInput) (worlds.Step, error)
+	StepsList(context.Context, worlds.StepsListInput) (worlds.Page[worlds.Step], error)
+
+	StreamsGetChunks(context.Context, worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error)
+	StreamsGetInfo(context.Context, worlds.StreamsGetInfoInput) (worlds.StreamInfo, error)
+	StreamsList(context.Context, worlds.StreamsListInput) ([]worlds.StreamID, error)
+	StreamsWrite(context.Context, worlds.StreamsWriteInput) error
+	StreamsWriteMulti(context.Context, worlds.StreamsWriteMultiInput) error
+	StreamsClose(context.Context, worlds.StreamsCloseInput) error
+
+	HooksGetByToken(context.Context, worlds.HooksGetByTokenInput) (worlds.Hook, error)
+	HooksResume(context.Context, worlds.ClientHooksResumeInput) error
+
+	Analytics() worlds.Analytics
+	Capabilities() worlds.Capabilities
 }
 
-// NewHTTPClient creates an HTTP-backed workflow client for a worker endpoint.
-func NewHTTPClient(endpoint string) Client {
+// NewClient exposes world through the limited application client surface.
+func NewClient(world worlds.World) Client { return worldClient{world: world} }
+
+type worldClient struct{ world worlds.World }
+
+func (c worldClient) RunsCreate(ctx context.Context, input worlds.ClientRunsCreateInput) (worlds.RunID, error) {
+	runID := input.RunID
+	if runID == "" {
+		runID = worlds.NewRunID()
+	}
+	if _, err := c.world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes}); err != nil {
+		return "", err
+	}
+	if _, err := c.world.Queue(ctx, worlds.QueueInput{RunID: runID, IdempotencyKey: string(runID)}); err != nil {
+		return "", err
+	}
+	return runID, nil
+}
+
+func (c worldClient) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	return c.world.RunsGet(ctx, input)
+}
+
+func (c worldClient) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	return c.world.RunsList(ctx, input)
+}
+
+func (c worldClient) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	return c.world.RunsWaitForTerminalStatus(ctx, input)
+}
+
+func (c worldClient) RunsCancel(ctx context.Context, input worlds.ClientRunsCancelInput) error {
+	_, err := c.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}})
+	return err
+}
+
+func (c worldClient) RunsWake(ctx context.Context, input worlds.ClientRunsWakeInput) (int, error) {
+	return worlds.WakeRun(ctx, c.world, input.RunID, input.CorrelationIDs)
+}
+
+func (c worldClient) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttributesInput) error {
+	return c.world.RunsSetAttributes(ctx, input)
+}
+
+func (c worldClient) StepsGet(ctx context.Context, input worlds.StepsGetInput) (worlds.Step, error) {
+	return c.world.StepsGet(ctx, input)
+}
+
+func (c worldClient) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	return c.world.StepsList(ctx, input)
+}
+
+func (c worldClient) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	return c.world.StreamsGetChunks(ctx, input)
+}
+
+func (c worldClient) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
+	return c.world.StreamsGetInfo(ctx, input)
+}
+
+func (c worldClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]worlds.StreamID, error) {
+	return c.world.StreamsList(ctx, input)
+}
+
+func (c worldClient) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
+	return c.world.StreamsWrite(ctx, input)
+}
+
+func (c worldClient) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
+	return c.world.StreamsWriteMulti(ctx, input)
+}
+
+func (c worldClient) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
+	return c.world.StreamsClose(ctx, input)
+}
+
+func (c worldClient) streamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
+	return c.world.StreamsCreateWriteSession(ctx, input)
+}
+
+func (c worldClient) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	return c.world.HooksGetByToken(ctx, input)
+}
+
+func (c worldClient) HooksResume(ctx context.Context, input worlds.ClientHooksResumeInput) error {
+	hook, err := c.world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: input.Token})
+	if err != nil {
+		return err
+	}
+	result, err := c.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: hook.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: input.Data}})
+	if err != nil {
+		return err
+	}
+	_, err = c.world.Queue(ctx, worlds.QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)})
+	return err
+}
+
+func (c worldClient) Analytics() worlds.Analytics { return c.world.Analytics() }
+
+func (c worldClient) Capabilities() worlds.Capabilities { return c.world.Capabilities() }
+
+// NewHTTPClient connects to a World's HTTPHandler. The last non-nil optional
+// HTTP client replaces http.DefaultClient.
+func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
 	parsed, err := url.ParseRequestURI(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		panic("workflow: client endpoint must be an absolute HTTP URL")
 	}
-	return &httpClient{endpoint: strings.TrimRight(endpoint, "/"), http: http.DefaultClient}
-}
-
-func (client *httpClient) CreateRun(
-	ctx context.Context,
-	lease *workflowops.Lease,
-	input workflowops.RunRequest,
-) (string, error) {
-	if lease != nil {
-		return "", errors.New("workflow: HTTP client cannot create child runs")
+	client := http.DefaultClient
+	if len(clients) != 0 {
+		client = clients[len(clients)-1]
 	}
-	if input.RunID != "" ||
-		input.Sequence != workflowops.RootSequence ||
-		(input.Kind != "" && input.Kind != workflowops.KindRun) {
-		return "", errors.New("workflow: HTTP client can create root runs only")
-	}
-	var response startResponse
-	err := client.request(
-		ctx,
-		http.MethodPost,
-		APIPrefix+"/runs",
-		startRequest{
-			Identity: input.Identity,
-			Input:    input.Input,
-		},
-		&response,
-	)
-	return response.ID, err
+	return &httpClient{endpoint: strings.TrimRight(endpoint, "/"), client: client}
 }
 
-func (client *httpClient) WaitRun(ctx context.Context, id string) (json.RawMessage, error) {
-	var response runResponse
-	err := client.request(
-		ctx,
-		http.MethodGet,
-		APIPrefix+"/runs/"+url.PathEscape(id),
-		nil,
-		&response,
-	)
-	return response.Output, err
+type httpClient struct {
+	endpoint string
+	client   *http.Client
 }
 
-func (client *httpClient) GetRun(ctx context.Context, id string) (workflowops.RunInfo, bool, error) {
-	var response runInfoResponse
-	err := client.request(ctx, http.MethodGet, APIPrefix+"/runs/"+url.PathEscape(id)+"/info", nil, &response)
-	return response.Info, response.Found, err
-}
-
-func (client *httpClient) Wake(ctx context.Context, id string) (int, error) {
-	var response wakeResponse
-	err := client.request(ctx, http.MethodPost, APIPrefix+"/runs/"+url.PathEscape(id)+"/wake", nil, &response)
-	return response.StoppedCount, err
-}
-
-func (client *httpClient) CancelOperations(ctx context.Context, tasks ...workflowops.Task) error {
-	if len(tasks) == 0 {
-		return nil
-	}
-	return client.request(
-		ctx,
-		http.MethodPost,
-		APIPrefix+"/runs/cancel",
-		cancelRequest{Tasks: tasks},
-		nil,
-	)
-}
-
-func (client *httpClient) ReadStream(ctx context.Context, stream workflowops.Stream, offset int64) (workflowops.StreamRead, error) {
-	var response streamReadResponse
-	path := fmt.Sprintf(
-		"%s/%s/streams?namespace=%s&offset=%d",
-		APIPrefix+"/runs",
-		url.PathEscape(stream.RunID),
-		url.QueryEscape(stream.Namespace),
-		offset,
-	)
-	err := client.request(ctx, http.MethodGet, path, nil, &response)
-	return response.StreamRead, err
-}
-
-func (client *httpClient) LockStream(ctx context.Context, stream workflowops.Stream, lock string) (bool, error) {
-	var response streamLockResponse
-	err := client.request(ctx, http.MethodPost, APIPrefix+"/streams/lock", streamLockRequest{
-		Stream: stream,
-		Lock:   lock,
-	}, &response)
-	return response.Acquired, err
-}
-
-func (client *httpClient) AppendStream(ctx context.Context, stream workflowops.Stream, lock string, data []byte) error {
-	return client.request(ctx, http.MethodPost, APIPrefix+"/streams/append", streamAppendRequest{
-		Stream: stream,
-		Lock:   lock,
-		Data:   data,
-	}, nil)
-}
-
-func (client *httpClient) ReleaseStream(ctx context.Context, stream workflowops.Stream, lock string, closeStream bool) error {
-	return client.request(ctx, http.MethodPost, APIPrefix+"/streams/release", streamReleaseRequest{
-		Stream: stream,
-		Lock:   lock,
-		Close:  closeStream,
-	}, nil)
-}
-
-func (client *httpClient) GetHook(ctx context.Context, token string) (workflowops.Hook, bool, error) {
-	var response hookResponse
-	err := client.request(ctx, http.MethodGet, APIPrefix+"/hooks/"+url.PathEscape(token), nil, &response)
-	if err != nil {
-		return workflowops.Hook{}, false, err
-	}
-	return response.Hook, response.Found, nil
-}
-
-func (client *httpClient) ResumeWebhook(ctx context.Context, token string, payload json.RawMessage) error {
-	return client.request(ctx, http.MethodPost, APIPrefix+"/hooks/"+url.PathEscape(token), hookResumeRequest{Payload: payload}, nil)
-}
-
-func (client *httpClient) ReplyWebhook(ctx context.Context, token string, response json.RawMessage) error {
-	return client.request(ctx, http.MethodPost, APIPrefix+"/webhooks/"+url.PathEscape(token)+"/response", response, nil)
-}
-
-func (client *httpClient) WaitWebhookResponse(ctx context.Context, token string) (json.RawMessage, error) {
-	var response json.RawMessage
-	err := client.request(ctx, http.MethodGet, APIPrefix+"/webhooks/"+url.PathEscape(token)+"/response", nil, &response)
-	return response, err
-}
-
-func (client *httpClient) request(ctx context.Context, method, path string, input, output any) error {
-	var body io.Reader
+func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
+	var raw cbor.RawMessage
 	if input != nil {
-		encoded, err := json.Marshal(input)
+		encoded, err := cbor.Marshal(input)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(encoded)
+		raw = encoded
 	}
-	request, err := http.NewRequestWithContext(ctx, method, client.endpoint+path, body)
+	body, err := cbor.Marshal(worlds.RPCRequest{Method: method, Input: raw})
 	if err != nil {
 		return err
 	}
-	if input != nil {
-		request.Header.Set("Content-Type", "application/json")
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/rpc", bytes.NewReader(body))
+	if err != nil {
+		return err
 	}
-	response, err := client.http.Do(request)
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response, err := c.client.Do(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		var failure errorResponse
-		if json.NewDecoder(response.Body).Decode(&failure) == nil && failure.Error != "" {
-			return workflowops.DecodeFailure(failure.Error)
-		}
-		return fmt.Errorf("workflow: HTTP request failed with %s", response.Status)
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("workflow: RPC request failed with %s", response.Status)
+	}
+	var envelope worlds.RPCResponse
+	if err := cbor.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("workflow: decode RPC response: %w", err)
+	}
+	if envelope.Error != nil {
+		return fmt.Errorf("workflow: RPC %s: %s", envelope.Error.Code, envelope.Error.Message)
 	}
 	if output == nil {
 		return nil
 	}
-	return json.NewDecoder(response.Body).Decode(output)
+	if err := cbor.Unmarshal(envelope.Output, output); err != nil {
+		return fmt.Errorf("workflow: decode RPC output: %w", err)
+	}
+	return nil
+}
+
+func (c *httpClient) RunsCreate(ctx context.Context, input worlds.ClientRunsCreateInput) (worlds.RunID, error) {
+	var output worlds.RunID
+	err := c.call(ctx, "client.runs.create", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	var output worlds.Run
+	err := c.call(ctx, "runs.get", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	var output worlds.Page[worlds.Run]
+	err := c.call(ctx, "runs.list", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	var output worlds.Run
+	err := c.call(ctx, "runs.waitForTerminalStatus", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsCancel(ctx context.Context, input worlds.ClientRunsCancelInput) error {
+	return c.call(ctx, "client.runs.cancel", input, nil)
+}
+
+func (c *httpClient) RunsWake(ctx context.Context, input worlds.ClientRunsWakeInput) (int, error) {
+	var output int
+	err := c.call(ctx, "client.runs.wake", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttributesInput) error {
+	return c.call(ctx, "runs.setAttributes", input, nil)
+}
+
+func (c *httpClient) StepsGet(ctx context.Context, input worlds.StepsGetInput) (worlds.Step, error) {
+	var output worlds.Step
+	err := c.call(ctx, "steps.get", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	var output worlds.Page[worlds.Step]
+	err := c.call(ctx, "steps.list", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	var output worlds.StreamChunksResult
+	err := c.call(ctx, "streams.getChunks", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
+	var output worlds.StreamInfo
+	err := c.call(ctx, "streams.getInfo", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]worlds.StreamID, error) {
+	var output []worlds.StreamID
+	err := c.call(ctx, "streams.list", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
+	return c.call(ctx, "client.streams.write", input, nil)
+}
+
+func (c *httpClient) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
+	return c.call(ctx, "client.streams.writeMulti", input, nil)
+}
+
+func (c *httpClient) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
+	return c.call(ctx, "client.streams.close", input, nil)
+}
+
+func (c *httpClient) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	var output worlds.Hook
+	err := c.call(ctx, "hooks.getByToken", input, &output)
+	return output, err
+}
+
+func (c *httpClient) HooksResume(ctx context.Context, input worlds.ClientHooksResumeInput) error {
+	return c.call(ctx, "client.hooks.resume", input, nil)
+}
+
+func (c *httpClient) Analytics() worlds.Analytics { return httpAnalytics{client: c} }
+
+func (c *httpClient) Capabilities() worlds.Capabilities {
+	var output worlds.Capabilities
+	if err := c.call(context.Background(), "world.capabilities", nil, &output); err != nil {
+		return worlds.Capabilities{}
+	}
+	return output
+}
+
+type httpAnalytics struct{ client *httpClient }
+
+func (a httpAnalytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
+	var output worlds.AnalyticsRun
+	err := a.client.call(ctx, "analytics.runs.get", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
+	var output worlds.Page[worlds.AnalyticsRun]
+	err := a.client.call(ctx, "analytics.runs.list", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) AttributesList(ctx context.Context, input worlds.AnalyticsAttributesListInput) (worlds.Page[worlds.AnalyticsAttribute], error) {
+	var output worlds.Page[worlds.AnalyticsAttribute]
+	err := a.client.call(ctx, "analytics.attributes.list", input, &output)
+	return output, err
 }
