@@ -32,6 +32,10 @@ type retryInput struct{}
 type retryOutput struct{}
 type wakeInput struct{}
 type wakeOutput struct{}
+type childRunInput struct{}
+type childRunOutput struct{ Value string }
+type parentRunInput struct{}
+type parentRunOutput struct{ Value string }
 type collectionInput struct{}
 type collectionOutput struct {
 	All              []int
@@ -55,6 +59,8 @@ func (*pointerWorkflowInput) Workflow(pointerWorkflowOutput) {}
 func (unencodableInput) Workflow(unencodableOutput)          {}
 func (retryInput) Workflow(retryOutput)                      {}
 func (wakeInput) Workflow(wakeOutput)                        {}
+func (childRunInput) Workflow(childRunOutput)                {}
+func (parentRunInput) Workflow(parentRunOutput)              {}
 func (collectionInput) Workflow(collectionOutput)            {}
 
 func increment(_ context.Context, value int) (int, error) { return value + 1, nil }
@@ -72,6 +78,43 @@ func collectionStep(_ context.Context, input collectionStepInput) (int, error) {
 func collectionVoidStep(ctx context.Context, input collectionStepInput) (struct{}, error) {
 	_, err := collectionStep(ctx, input)
 	return struct{}{}, err
+}
+
+func TestStartReplaysChildRunAndWakesParent(t *testing.T) {
+	child := func(ctx context.Context, _ childRunInput) (childRunOutput, error) {
+		value, err := workflow.Step(ctx, func(_ context.Context, _ struct{}) (string, error) { return "child", nil }, struct{}{})
+		return childRunOutput{Value: value}, err
+	}
+	parent := func(ctx context.Context, _ parentRunInput) (parentRunOutput, error) {
+		run, err := workflow.Start(ctx, childRunInput{})
+		if err != nil {
+			return parentRunOutput{}, err
+		}
+		result, err := run.Await(ctx)
+		return parentRunOutput{Value: result.Value}, err
+	}
+	world := testworld.New(workflow.Use(child), workflow.Use(parent))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, parentRunInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := run.Await(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value != "child" {
+		t.Fatalf("result = %#v", result)
+	}
+	runs, err := world.RunsList(ctx, worlds.RunsListInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs.Data) != 2 {
+		t.Fatalf("run count = %d, want 2", len(runs.Data))
+	}
 }
 
 func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {

@@ -14,6 +14,13 @@ type queuedMessage struct {
 	input worlds.QueueInput
 }
 
+// QueueMessage is an inspectable durable queue item for provider workers.
+// A successful worker must acknowledge it with QueueCancel.
+type QueueMessage struct {
+	ID    string
+	Input worlds.QueueInput
+}
+
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
@@ -22,7 +29,10 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	id := ulid.Make().String()
 	w.queued = append(w.queued, queuedMessage{id: id, input: input})
 	w.mu.Unlock()
-	go w.deliver(id, input)
+	w.notify()
+	if w.autoRun {
+		go w.deliver(id, input)
+	}
 	return worlds.QueueResult{MessageID: id}, nil
 }
 
@@ -45,6 +55,7 @@ func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer w.notify()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for index, message := range w.queued {
@@ -76,4 +87,43 @@ func (w *World) Queued() []worlds.QueueInput {
 		values[index] = message.input
 	}
 	return values
+}
+
+// QueuedMessages returns queue IDs and inputs so a provider worker can
+// acknowledge work after executing it.
+func (w *World) QueuedMessages() []QueueMessage {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	values := make([]QueueMessage, len(w.queued))
+	for index, message := range w.queued {
+		values[index] = QueueMessage{ID: message.id, Input: cloneQueueInput(message.input)}
+	}
+	return values
+}
+
+// DispatchQueued resumes queue deliveries restored from a snapshot. It is a
+// no-op for provider Worlds, which own delivery through their queue service.
+func (w *World) DispatchQueued(ctx context.Context) {
+	for _, message := range w.QueuedMessages() {
+		if message.Input.NotBefore != nil && time.Now().Before(*message.Input.NotBefore) {
+			continue
+		}
+		go func(message QueueMessage) {
+			if w.runtime.Execute(ctx, message.Input) == nil {
+				_ = w.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID})
+			}
+		}(message)
+	}
+}
+
+func cloneQueueInput(value worlds.QueueInput) worlds.QueueInput {
+	if value.StepID != nil {
+		stepID := *value.StepID
+		value.StepID = &stepID
+	}
+	if value.NotBefore != nil {
+		notBefore := *value.NotBefore
+		value.NotBefore = &notBefore
+	}
+	return value
 }

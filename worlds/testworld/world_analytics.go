@@ -2,7 +2,10 @@ package testworld
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
+	"sort"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -19,6 +22,55 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 }
 func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAttributesListInput) (worlds.Page[worlds.AnalyticsAttribute], error) {
 	return a.world.analyticsAttributesList(ctx, input)
+}
+func (a analytics) WaitsGet(ctx context.Context, input worlds.AnalyticsWaitsGetInput) (worlds.AnalyticsWait, error) {
+	page, err := a.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: input.RunID})
+	if err != nil {
+		return worlds.AnalyticsWait{}, err
+	}
+	for _, value := range page.Data {
+		if value.WaitID == input.WaitID {
+			return value, nil
+		}
+	}
+	return worlds.AnalyticsWait{}, worlds.ErrEventNotFound
+}
+func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsListInput) (worlds.Page[worlds.AnalyticsWait], error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Page[worlds.AnalyticsWait]{}, err
+	}
+	a.world.mu.RLock()
+	defer a.world.mu.RUnlock()
+	if _, ok := a.world.runs[input.RunID]; !ok {
+		return worlds.Page[worlds.AnalyticsWait]{}, worlds.ErrRunNotFound
+	}
+	values := map[worlds.WaitID]worlds.AnalyticsWait{}
+	for _, event := range a.world.events[input.RunID] {
+		switch event.EventType {
+		case worlds.EventTypeWaitCreated:
+			var data struct {
+				DueAt          time.Time `json:"dueAt"`
+				Cancel         bool      `json:"cancel"`
+				QueueMessageID string    `json:"queueMessageId"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil {
+				values[worlds.WaitID(event.CorrelationID)] = worlds.AnalyticsWait{RunID: input.RunID, WaitID: worlds.WaitID(event.CorrelationID), DueAt: data.DueAt, Cancel: data.Cancel, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+			}
+		case worlds.EventTypeWaitCompleted:
+			id := worlds.WaitID(event.CorrelationID)
+			if value, ok := values[id]; ok {
+				at := event.CreatedAt
+				value.CompletedAt = &at
+				values[id] = value
+			}
+		}
+	}
+	result := make([]worlds.AnalyticsWait, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	return page(result, input.Pagination), nil
 }
 
 func analyticsRun(run worlds.Run) worlds.AnalyticsRun {

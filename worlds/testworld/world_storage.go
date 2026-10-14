@@ -37,6 +37,16 @@ func cloneWebhook(value *worlds.Webhook) *worlds.Webhook {
 	return &result
 }
 
+func cloneHook(value worlds.Hook) worlds.Hook {
+	value.Metadata = bytes.Clone(value.Metadata)
+	value.Webhook = cloneWebhook(value.Webhook)
+	if value.RetainUntil != nil {
+		until := *value.RetainUntil
+		value.RetainUntil = &until
+	}
+	return value
+}
+
 func page[T any](values []T, pagination worlds.Pagination) worlds.Page[T] {
 	limit := pagination.Limit
 	if limit <= 0 {

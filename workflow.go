@@ -96,12 +96,16 @@ func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 	var zero Out
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
+		wait := worlds.DurableRunWait(ctx, worlds.DurableRunWaitOptions{Execution: execution, Position: execution.NextPosition(), RunID: r.id})
+		if wait.Err != nil {
+			return zero, wait.Err
+		}
+		if !wait.Done {
+			execution.Suspend()
+		}
 		run, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
 		if err != nil {
 			return zero, err
-		}
-		if !run.Status.Terminal() {
-			execution.Suspend()
 		}
 		if run.Status == worlds.StatusCompleted {
 			if err := json.Unmarshal(run.Output, &zero); err != nil {
@@ -179,7 +183,7 @@ func (r *Run[Out]) ReaderAt(ctx context.Context, offset int64, options ...Reader
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newStreamReader(ctx, r.client, r.id, opts.Name, offset), nil
+	return newStreamReader(ctx, r.client, r.id, opts.Namespace, offset), nil
 }
 
 // Writer obtains a writer for this run's stream from application code. Close
@@ -189,7 +193,7 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.Writ
 		return nil, nil, ErrNoWorkflow
 	}
 	opts := writerOption(options)
-	return newStreamWriter(ctx, r.client, r.id, opts.Name, string(worlds.NewStreamID()))
+	return newStreamWriter(ctx, r.client, r.id, opts.Namespace, string(worlds.NewStreamID()))
 }
 
 // Get returns a handle for an existing workflow. The handle is bound to the
@@ -212,6 +216,13 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out],
 	raw, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
+	}
+	if execution, ok := workflowExecutionFromContext(ctx); ok {
+		id, err := worlds.DurableRunStart(ctx, worlds.DurableRunStartOptions{Execution: execution, Position: execution.NextPosition(), WorkflowName: name, Input: raw})
+		if err != nil {
+			return nil, err
+		}
+		return &Run[Out]{id: id, client: client}, nil
 	}
 	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{WorkflowName: name, Input: raw})
 	if err != nil {

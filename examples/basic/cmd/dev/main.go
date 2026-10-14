@@ -14,12 +14,15 @@ func main() {
 		Run:        dev.Package("./cmd/app"),
 		Watch:      dev.Values("cmd", "flows", "steps", "workflowdefs"),
 		ServerAddr: ":8080",
-		Commands: dev.Commands(dev.Cmd{
-			Run:     dev.Package("./cmd/worker/pg"),
-			Prepare: dev.Hooks(workflowdev.Check("./...")),
-			Watch:   dev.Values("cmd", "flows", "steps", "workflowdefs"),
-			Phase:   dev.Before,
-		}),
+		Commands: dev.Commands(
+			dev.Cmd{
+				Run:     dev.Package("./cmd/worker/pg"),
+				Prepare: dev.Hooks(workflowdev.Check("./...")),
+				Watch:   dev.Values("cmd", "flows", "steps", "workflowdefs"),
+				Phase:   dev.Before,
+			},
+			workflowdev.Web("http://localhost:8081/v1/workflow"),
+		),
 	})
 	session.Catch(task.Run())
 

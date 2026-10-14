@@ -8,6 +8,7 @@ import (
 type Analytics interface {
 	AnalyticsRuns
 	AnalyticsAttributes
+	AnalyticsWaits
 }
 
 type AnalyticsRuns interface {
@@ -17,6 +18,11 @@ type AnalyticsRuns interface {
 
 type AnalyticsAttributes interface {
 	AttributesList(context.Context, AnalyticsAttributesListInput) (Page[AnalyticsAttribute], error)
+}
+
+type AnalyticsWaits interface {
+	WaitsGet(context.Context, AnalyticsWaitsGetInput) (AnalyticsWait, error)
+	WaitsList(context.Context, AnalyticsWaitsListInput) (Page[AnalyticsWait], error)
 }
 
 type (
@@ -37,6 +43,14 @@ type (
 		EndTime      *time.Time
 		Pagination   Pagination
 	}
+	AnalyticsWaitsGetInput struct {
+		RunID  RunID
+		WaitID WaitID
+	}
+	AnalyticsWaitsListInput struct {
+		RunID      RunID
+		Pagination Pagination
+	}
 )
 
 type AnalyticsRun struct {
@@ -55,4 +69,14 @@ type AnalyticsAttribute struct {
 	RunCount    int
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
+}
+
+type AnalyticsWait struct {
+	RunID          RunID
+	WaitID         WaitID
+	DueAt          time.Time
+	Cancel         bool
+	QueueMessageID string
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
 }

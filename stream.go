@@ -9,7 +9,9 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-type WriterOption struct{ Name worlds.StreamID }
+// WriterOption selects a logical namespace within a run. A writer holds an
+// exclusive lease for its namespace until Close or the returned release call.
+type WriterOption struct{ Namespace worlds.StreamNamespace }
 
 func writerOption(values []WriterOption) WriterOption {
 	if len(values) == 0 {
@@ -25,10 +27,10 @@ func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func(
 	}
 	stepID, _ := execution.TargetStepID()
 	opts := writerOption(options)
-	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, string(stepID))
+	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Namespace, string(stepID))
 }
 
-type ReaderOption struct{ Name worlds.StreamID }
+type ReaderOption struct{ Namespace worlds.StreamNamespace }
 
 func readerOption(values []ReaderOption) ReaderOption {
 	if len(values) == 0 {
@@ -43,7 +45,7 @@ func Reader(ctx context.Context, options ...ReaderOption) (io.Reader, error) {
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, 0), nil
+	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Namespace, 0), nil
 }
 
 func ReaderAt(ctx context.Context, offset int64, options ...ReaderOption) (io.Reader, error) {
@@ -52,29 +54,43 @@ func ReaderAt(ctx context.Context, offset int64, options ...ReaderOption) (io.Re
 		return nil, ErrNoWorkflow
 	}
 	opts := readerOption(options)
-	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, offset), nil
+	return newStreamReader(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Namespace, offset), nil
 }
 
 type streamWriter struct {
-	ctx      context.Context
-	client   Client
-	runID    worlds.RunID
-	name     worlds.StreamID
-	session  worlds.StreamWriteSession
-	closed   bool
-	sequence int
+	ctx       context.Context
+	client    Client
+	runID     worlds.RunID
+	namespace worlds.StreamNamespace
+	session   worlds.StreamWriteSession
+	closed    bool
+	sequence  int
 }
 
-func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name worlds.StreamID, writerID string) (io.WriteCloser, func() error, error) {
-	writer := &streamWriter{ctx: ctx, client: client, runID: runID, name: name}
+func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, namespace worlds.StreamNamespace, writerID string) (io.WriteCloser, func() error, error) {
+	writer := &streamWriter{ctx: ctx, client: client, runID: runID, namespace: namespace}
 	if sessionClient, ok := client.(interface {
 		streamsCreateWriteSession(context.Context, worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error)
 	}); ok {
-		session, err := sessionClient.streamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: name, WriterID: writerID})
-		if err != nil {
-			return nil, nil, err
+		for {
+			session, err := sessionClient.streamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Namespace: namespace, WriterID: writerID})
+			if !errors.Is(err, worlds.ErrStreamLocked) {
+				if err != nil {
+					return nil, nil, err
+				}
+				writer.session = session
+				break
+			}
+			timer := time.NewTimer(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
-		writer.session = session
+	} else {
+		return nil, nil, errors.New("workflow: client does not support exclusive stream sessions")
 	}
 	return writer, writer.release, nil
 }
@@ -87,8 +103,6 @@ func (w *streamWriter) Write(data []byte) (int, error) {
 		if err := w.session.Write(w.ctx, worlds.StreamWriteSessionWriteInput{Sequence: w.sequence, Chunks: [][]byte{data}}); err != nil {
 			return 0, err
 		}
-	} else if err := w.client.StreamsWrite(w.ctx, worlds.StreamsWriteInput{RunID: w.runID, Name: w.name, Chunk: data}); err != nil {
-		return 0, err
 	}
 	w.sequence++
 	return len(data), nil
@@ -97,9 +111,6 @@ func (w *streamWriter) Write(data []byte) (int, error) {
 func (w *streamWriter) Close() error {
 	if w.closed {
 		return nil
-	}
-	if err := w.client.StreamsClose(w.ctx, worlds.StreamsCloseInput{RunID: w.runID, Name: w.name}); err != nil {
-		return err
 	}
 	if w.session != nil {
 		if err := w.session.Close(w.ctx); err != nil {
@@ -115,7 +126,7 @@ func (w *streamWriter) release() error {
 		return nil
 	}
 	if w.session != nil {
-		if err := w.session.Close(w.ctx); err != nil {
+		if err := w.session.Release(w.ctx); err != nil {
 			return err
 		}
 	}
@@ -124,18 +135,18 @@ func (w *streamWriter) release() error {
 }
 
 type streamReader struct {
-	ctx    context.Context
-	client Client
-	runID  worlds.RunID
-	name   worlds.StreamID
-	cursor string
-	buf    []byte
-	closed bool
-	skip   int64
+	ctx       context.Context
+	client    Client
+	runID     worlds.RunID
+	namespace worlds.StreamNamespace
+	cursor    string
+	buf       []byte
+	closed    bool
+	skip      int64
 }
 
-func newStreamReader(ctx context.Context, client Client, runID worlds.RunID, name worlds.StreamID, offset int64) *streamReader {
-	reader := &streamReader{ctx: ctx, client: client, runID: runID, name: name}
+func newStreamReader(ctx context.Context, client Client, runID worlds.RunID, namespace worlds.StreamNamespace, offset int64) *streamReader {
+	reader := &streamReader{ctx: ctx, client: client, runID: runID, namespace: namespace}
 	if offset >= 0 {
 		reader.skip = offset
 		return reader
@@ -149,7 +160,7 @@ func (r *streamReader) Read(data []byte) (int, error) {
 		if r.closed {
 			return 0, io.EOF
 		}
-		chunks, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: r.cursor, Wait: 100 * time.Millisecond})
+		chunks, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Namespace: r.namespace, Cursor: r.cursor, Wait: 100 * time.Millisecond})
 		if err != nil {
 			return 0, err
 		}
@@ -172,7 +183,7 @@ func (r *streamReader) currentLength() int64 {
 	cursor := ""
 	var length int64
 	for {
-		result, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: cursor})
+		result, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Namespace: r.namespace, Cursor: cursor})
 		if err != nil {
 			return 0
 		}

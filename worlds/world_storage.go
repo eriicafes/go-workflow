@@ -31,6 +31,7 @@ type StorageEvents interface {
 	EventsCreateRun(context.Context, EventsCreateRunInput) (EventResult, error)
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
+	EventsGet(context.Context, EventsGetInput) (Event, error)
 	EventsList(context.Context, EventsListInput) (Page[Event], error)
 	EventsListByCorrelationID(context.Context, EventsListByCorrelationIDInput) (Page[Event], error)
 }
@@ -39,6 +40,7 @@ type StorageHooks interface {
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 	HooksList(context.Context, HooksListInput) (Page[Hook], error)
+	HooksClaim(context.Context, HooksClaimInput) (HooksClaimResult, error)
 }
 
 type (
@@ -116,6 +118,16 @@ type (
 	HooksListInput struct {
 		Pagination Pagination
 	}
+	HooksClaimInput struct {
+		RunID   RunID
+		Event   EventsCreateEvent
+		Options EventsCreateOptions
+		Force   bool
+	}
+	HooksClaimResult struct {
+		EventResult
+		ForcedRunID RunID
+	}
 	WebhookRequest struct {
 		Method string              `json:"method"`
 		URL    string              `json:"url"`
@@ -150,37 +162,41 @@ type Hook struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	ReceivedAt      *time.Time
+	MinRetention    time.Duration
+	RetainUntil     *time.Time
 }
 
 type EventType string
 
 const (
-	EventTypeRunCreated    EventType = "run_created"
-	EventTypeRunStarted    EventType = "run_started"
-	EventTypeRunCompleted  EventType = "run_completed"
-	EventTypeRunFailed     EventType = "run_failed"
-	EventTypeRunCancelled  EventType = "run_cancelled"
-	EventTypeAttrSet       EventType = "attr_set"
-	EventTypeStepCreated   EventType = "step_created"
-	EventTypeStepStarted   EventType = "step_started"
-	EventTypeStepCompleted EventType = "step_completed"
-	EventTypeStepFailed    EventType = "step_failed"
-	EventTypeStepRetrying  EventType = "step_retrying"
-	EventTypeStepCancelled EventType = "step_cancelled"
-	EventTypeHookCreated   EventType = "hook_created"
-	EventTypeHookReceived  EventType = "hook_received"
-	EventTypeHookDisposed  EventType = "hook_disposed"
-	EventTypeHookConflict  EventType = "hook_conflict"
-	EventTypeWaitCreated   EventType = "wait_created"
-	EventTypeWaitCompleted EventType = "wait_completed"
+	EventTypeRunCreated       EventType = "run_created"
+	EventTypeRunSpawned       EventType = "run_spawned"
+	EventTypeRunStarted       EventType = "run_started"
+	EventTypeRunCompleted     EventType = "run_completed"
+	EventTypeRunFailed        EventType = "run_failed"
+	EventTypeRunCancelled     EventType = "run_cancelled"
+	EventTypeAttrSet          EventType = "attr_set"
+	EventTypeStepCreated      EventType = "step_created"
+	EventTypeStepStarted      EventType = "step_started"
+	EventTypeStepCompleted    EventType = "step_completed"
+	EventTypeStepFailed       EventType = "step_failed"
+	EventTypeStepRetrying     EventType = "step_retrying"
+	EventTypeStepCancelled    EventType = "step_cancelled"
+	EventTypeHookCreated      EventType = "hook_created"
+	EventTypeHookReceived     EventType = "hook_received"
+	EventTypeHookDisposed     EventType = "hook_disposed"
+	EventTypeHookConflict     EventType = "hook_conflict"
+	EventTypeHookForceClaimed EventType = "hook_force_claimed"
+	EventTypeWaitCreated      EventType = "wait_created"
+	EventTypeWaitCompleted    EventType = "wait_completed"
 )
 
 func (t EventType) Valid() bool {
 	switch t {
-	case EventTypeRunCreated, EventTypeRunStarted, EventTypeRunCompleted, EventTypeRunFailed,
+	case EventTypeRunCreated, EventTypeRunSpawned, EventTypeRunStarted, EventTypeRunCompleted, EventTypeRunFailed,
 		EventTypeRunCancelled, EventTypeAttrSet, EventTypeStepCreated, EventTypeStepStarted,
 		EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeStepCancelled,
-		EventTypeHookCreated, EventTypeHookReceived, EventTypeHookDisposed, EventTypeHookConflict,
+		EventTypeHookCreated, EventTypeHookReceived, EventTypeHookDisposed, EventTypeHookConflict, EventTypeHookForceClaimed,
 		EventTypeWaitCreated, EventTypeWaitCompleted:
 		return true
 	default:
@@ -207,6 +223,10 @@ type (
 	EventsCreateBatchInput struct {
 		RunID  RunID
 		Events []EventsCreateEvent
+	}
+	EventsGetInput struct {
+		RunID   RunID
+		EventID EventID
 	}
 	EventsCreateEvent struct {
 		EventType     EventType

@@ -14,7 +14,7 @@ var (
 	ErrHookNotFound      = worlds.ErrHookNotFound
 	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
 	ErrHookConflict      = worlds.ErrHookConflict
-	ErrHookForceClaimed  = errors.New("workflow: hook token was force claimed")
+	ErrHookForceClaimed  = worlds.ErrHookForceClaimed
 )
 
 type fatalError struct{ cause error }

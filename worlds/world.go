@@ -47,6 +47,10 @@ type RunID string
 type StepID string
 type HookID string
 type WaitID string
+
+// StreamNamespace is the logical writer channel within a run. It is distinct
+// from the opaque StreamID used to identify one writer session.
+type StreamNamespace string
 type StreamID string
 type EventID string
 

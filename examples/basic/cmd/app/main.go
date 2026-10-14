@@ -14,6 +14,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/examples/basic/workflowdefs"
+	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
@@ -53,7 +54,7 @@ func workflowClient() (workflow.Client, func() error, error) {
 		return client, func() error { return nil }, nil
 	}
 
-	runners := workflow.Runners(
+	runners := worlds.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)
@@ -68,7 +69,7 @@ func workflowClient() (workflow.Client, func() error, error) {
 	}
 
 	log.Print("using local workflow world at .workflows")
-	return world, world.Close, nil
+	return workflow.NewClient(world), world.Close, nil
 }
 
 func (a app) createReport(w http.ResponseWriter, r *http.Request) {

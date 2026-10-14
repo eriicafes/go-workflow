@@ -237,7 +237,7 @@ func (e *Runtime) completeRun(ctx context.Context, runID RunID, eventCount int, 
 	if err != nil {
 		return err
 	}
-	return nil
+	return e.wakeRunDependents(ctx, runID)
 }
 
 // failRun executes registered compensations before recording the terminal root
@@ -270,7 +270,82 @@ func (e *Runtime) failRun(ctx context.Context, execution *Execution, failure err
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return e.wakeRunDependents(ctx, execution.run.RunID)
+}
+
+// wakeRunDependents completes every parent wait that names a terminal child.
+// Providers may add an index later; this protocol-level fallback keeps the
+// event format correct for every current World implementation.
+func (e *Runtime) wakeRunDependents(ctx context.Context, childID RunID) error {
+	page, err := e.world.RunsList(ctx, RunsListInput{})
+	if err != nil {
+		return err
+	}
+	for {
+		for _, parent := range page.Data {
+			if parent.RunID == childID || parent.Status.Terminal() {
+				continue
+			}
+			events, err := e.eventsFor(ctx, parent.RunID)
+			if err != nil {
+				return err
+			}
+			completed := make(map[string]struct{})
+			for _, event := range events {
+				if event.EventType == EventTypeWaitCompleted {
+					completed[event.CorrelationID] = struct{}{}
+				}
+			}
+			for _, event := range events {
+				if event.EventType != EventTypeWaitCreated {
+					continue
+				}
+				var wait runWaitData
+				if json.Unmarshal(event.Data, &wait) != nil || wait.RunID != childID {
+					continue
+				}
+				if _, done := completed[event.CorrelationID]; done {
+					continue
+				}
+				result, err := e.world.EventsCreate(ctx, EventsCreateInput{RunID: parent.RunID, Event: EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: event.CorrelationID}})
+				if errors.Is(err, ErrRunTerminal) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				if _, err := e.world.Queue(ctx, QueueInput{RunID: parent.RunID, IdempotencyKey: "run-wait:" + string(result.EventID)}); err != nil {
+					return err
+				}
+			}
+		}
+		if !page.HasMore {
+			return nil
+		}
+		page, err = e.world.RunsList(ctx, RunsListInput{Pagination: Pagination{Cursor: page.Cursor}})
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (e *Runtime) eventsFor(ctx context.Context, runID RunID) ([]Event, error) {
+	page, err := e.world.EventsList(ctx, EventsListInput{RunID: runID})
+	if err != nil {
+		return nil, err
+	}
+	values := page.Data
+	for page.HasMore {
+		page, err = e.world.EventsList(ctx, EventsListInput{RunID: runID, Pagination: Pagination{Cursor: page.Cursor}})
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, page.Data...)
+	}
+	return values, nil
 }
 
 // finishStep records a targeted step result and queues either its retry or a

@@ -42,7 +42,7 @@ func newExecution(world World, run Run, events []Event, target *StepID) *Executi
 }
 
 func (e *Execution) indexEvent(index int, event Event) {
-	if event.EventType != EventTypeStepCreated && event.EventType != EventTypeWaitCreated && event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
+	if event.EventType != EventTypeRunSpawned && event.EventType != EventTypeStepCreated && event.EventType != EventTypeWaitCreated && event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
 		return
 	}
 	var data struct {

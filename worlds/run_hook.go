@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type (
 	// DurableHookOptions identifies one replay-local hook declaration.
 	DurableHookOptions struct {
-		Execution *Execution
-		Position  int
-		Token     string
-		Webhook   *Webhook
+		Execution    *Execution
+		Position     int
+		Token        string
+		Webhook      *Webhook
+		MinRetention time.Duration
+		Force        bool
 	}
 
 	// DurableHookResult is the replay state consumed by a workflow hook.
@@ -35,9 +38,10 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 		// First execution: persist the token that will resume this replay.
 		hookID := NewHookID()
 		data, err := json.Marshal(hookCreatedData{
-			Position: options.Position,
-			Token:    options.Token,
-			Webhook:  options.Webhook,
+			Position:     options.Position,
+			Token:        options.Token,
+			Webhook:      options.Webhook,
+			MinRetention: options.MinRetention,
 		})
 		if err != nil {
 			return DurableHookResult[T]{HookID: hookID, Token: options.Token, Err: err}
@@ -48,16 +52,16 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 			Data:          data,
 		}
 		eventCount := len(options.Execution.events)
-		result, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
-			RunID:   options.Execution.Run().RunID,
-			Event:   event,
-			Options: EventsCreateOptions{EventCount: &eventCount},
-		})
+		claim, err := options.Execution.World().HooksClaim(ctx, HooksClaimInput{RunID: options.Execution.Run().RunID, Event: event, Options: EventsCreateOptions{EventCount: &eventCount}, Force: options.Force})
 		if err != nil {
 			if errors.Is(err, ErrHookConflict) {
 				return createHookConflict[T](ctx, options, hookID)
 			}
 			return DurableHookResult[T]{HookID: hookID, Token: options.Token, Err: err}
+		}
+		result := claim.EventResult
+		if claim.ForcedRunID != "" {
+			_, _ = options.Execution.World().Queue(ctx, QueueInput{RunID: claim.ForcedRunID, IdempotencyKey: "hook-force:" + string(hookID)})
 		}
 		options.Execution.Merge(result, Event{
 			RunID:         options.Execution.Run().RunID,
@@ -107,15 +111,18 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Data: data, Done: true, ReceivedEventID: event.EventID}
 		case EventTypeHookDisposed:
 			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Done: true, Err: ErrHookNotActive}
+		case EventTypeHookForceClaimed:
+			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Done: true, Err: ErrHookForceClaimed}
 		}
 	}
 	return DurableHookResult[T]{HookID: hookID, Token: createdData.Token}
 }
 
 type hookCreatedData struct {
-	Position int      `json:"position"`
-	Token    string   `json:"token"`
-	Webhook  *Webhook `json:"webhook,omitempty"`
+	Position     int           `json:"position"`
+	Token        string        `json:"token"`
+	Webhook      *Webhook      `json:"webhook,omitempty"`
+	MinRetention time.Duration `json:"minRetention,omitempty"`
 }
 
 type hookConflictData struct {

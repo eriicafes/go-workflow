@@ -12,28 +12,28 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/examples/basic/workflowdefs"
-	"github.com/eriicafes/go-workflow/workflowtest"
+	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
 func TestReportWorkflows(t *testing.T) {
-	world := workflowtest.New(
+	world := testworld.New(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)
 	defer world.Close()
 
-	server := app{workflows: world}
+	server := app{workflows: workflow.NewClient(world)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	reportID := startWorkflow(t, server.createReport, "/reports")
-	raw, err := world.WaitRun(ctx, reportID)
+	run, err := workflow.Get[workflowdefs.GenerateReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), reportID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var output workflowdefs.GenerateReportResult
-	if err := json.Unmarshal(raw, &output); err != nil {
+	output, err := run.Await(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if output.Summary != "source for durable workflows, source for durable workflows examples" {
@@ -41,12 +41,12 @@ func TestReportWorkflows(t *testing.T) {
 	}
 
 	publishID := startWorkflow(t, server.publishReport, "/reports/publish")
-	raw, err = world.WaitRun(ctx, publishID)
+	publish, err := workflow.Get[workflowdefs.PublishReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), publishID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var published workflowdefs.PublishReportResult
-	if err := json.Unmarshal(raw, &published); err != nil {
+	published, err := publish.Await(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if published.Report != output {

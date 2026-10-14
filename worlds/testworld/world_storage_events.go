@@ -18,6 +18,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[input.RunID]; !ok {
@@ -40,6 +41,7 @@ func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
+	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.createRunLocked(input)
@@ -76,6 +78,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if len(input.Events) == 0 {
 		return worlds.EventBatchResult{}, nil
 	}
+	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.runs[input.RunID]; !ok {
@@ -100,6 +103,69 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		m.materializeLocked(event)
 		result.Events = append(result.Events, worlds.EventResult{EventID: event.EventID, EventType: event.EventType})
 	}
+	return result, nil
+}
+
+func (m *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Event{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, event := range m.events[input.RunID] {
+		if event.EventID == input.EventID {
+			return cloneEvent(event), nil
+		}
+	}
+	if _, ok := m.runs[input.RunID]; !ok {
+		return worlds.Event{}, worlds.ErrRunNotFound
+	}
+	return worlds.Event{}, worlds.ErrEventNotFound
+}
+
+// HooksClaim serializes token ownership and records a forced takeover in the
+// previous owner's run before making the token visible to the claimant.
+func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	if input.Event.EventType != worlds.EventTypeHookCreated {
+		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+	}
+	var created hookCreatedData
+	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
+		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+	}
+	defer m.notify()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	claimant, ok := m.runs[input.RunID]
+	if !ok {
+		return worlds.HooksClaimResult{}, worlds.ErrRunNotFound
+	}
+	if claimant.Status.Terminal() {
+		return worlds.HooksClaimResult{}, worlds.ErrRunTerminal
+	}
+	m.expireTokenLocked(created.Token, time.Now().UTC())
+	result := worlds.HooksClaimResult{EventResult: worlds.EventResult{Events: m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)}}
+	if ownerID := m.tokens[created.Token]; ownerID != "" {
+		owner := m.hooks[ownerID]
+		if !input.Force {
+			return worlds.HooksClaimResult{}, worlds.ErrHookConflict
+		}
+		if m.runs[owner.RunID].Status.Terminal() {
+			delete(m.tokens, created.Token)
+		} else {
+			forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookForceClaimed, CorrelationID: string(ownerID), CreatedAt: time.Now().UTC()}
+			m.events[owner.RunID] = append(m.events[owner.RunID], forced)
+			m.materializeLocked(forced)
+			result.ForcedRunID = owner.RunID
+		}
+	}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
+	m.events[input.RunID] = append(m.events[input.RunID], event)
+	m.materializeLocked(event)
+	result.EventID, result.EventType = event.EventID, event.EventType
 	return result, nil
 }
 
@@ -201,6 +267,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	if requested.EventType == worlds.EventTypeHookCreated {
 		var created hookCreatedData
 		if json.Unmarshal(requested.Data, &created) == nil {
+			m.expireTokenLocked(created.Token, time.Now().UTC())
 			if _, exists := m.tokens[created.Token]; exists {
 				return worlds.EventResult{}, false, worlds.ErrHookConflict
 			}
@@ -255,9 +322,10 @@ type stepResultData struct {
 	RetryAfter *time.Time `json:"retryAfter"`
 }
 type hookCreatedData struct {
-	Token    string          `json:"token"`
-	Metadata []byte          `json:"metadata"`
-	Webhook  *worlds.Webhook `json:"webhook"`
+	Token        string          `json:"token"`
+	Metadata     []byte          `json:"metadata"`
+	Webhook      *worlds.Webhook `json:"webhook"`
+	MinRetention time.Duration   `json:"minRetention"`
 }
 
 func (m *World) materializeLocked(event worlds.Event) {
@@ -306,7 +374,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value hookCreatedData
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Metadata: bytes.Clone(value.Metadata), Webhook: cloneWebhook(value.Webhook), CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Metadata: bytes.Clone(value.Metadata), Webhook: cloneWebhook(value.Webhook), MinRetention: value.MinRetention, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)
@@ -318,16 +386,50 @@ func (m *World) materializeLocked(event worlds.Event) {
 				hook.ReceivedEventID = event.EventID
 			}
 			if value.Response != nil && value.ResponseTo == hook.ReceivedEventID {
-				delete(m.tokens, hook.Token)
+				m.completeHookLocked(&hook, now)
 			}
+		}
+		if hook.Webhook == nil || (hook.Webhook != nil && !hook.Webhook.Manual && hook.ReceivedEventID != "") {
+			m.completeHookLocked(&hook, now)
 		}
 		m.hooks[id] = hook
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)
 		hook := m.hooks[id]
 		delete(m.tokens, hook.Token)
+	case worlds.EventTypeHookForceClaimed:
+		id := worlds.HookID(event.CorrelationID)
+		hook := m.hooks[id]
+		if m.tokens[hook.Token] == id {
+			delete(m.tokens, hook.Token)
+		}
 	}
 	m.runs[event.RunID] = run
+}
+
+func (m *World) completeHookLocked(hook *worlds.Hook, now time.Time) {
+	if hook.MinRetention <= 0 {
+		if m.tokens[hook.Token] == hook.HookID {
+			delete(m.tokens, hook.Token)
+		}
+		hook.RetainUntil = nil
+		return
+	}
+	until := now.Add(hook.MinRetention)
+	hook.RetainUntil = &until
+}
+
+func (m *World) expireTokenLocked(token string, now time.Time) {
+	id := m.tokens[token]
+	if id == "" {
+		return
+	}
+	hook := m.hooks[id]
+	if hook.RetainUntil != nil && !hook.RetainUntil.After(now) {
+		delete(m.tokens, token)
+		hook.RetainUntil = nil
+		m.hooks[id] = hook
+	}
 }
 
 func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {

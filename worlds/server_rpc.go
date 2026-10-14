@@ -165,6 +165,16 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(value)
+	case "events.get":
+		input, err := decodeRPC[EventsGetInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		value, err := world.EventsGet(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(value)
 	case "events.list":
 		input, err := decodeRPC[EventsListInput](request.Input)
 		if err != nil {
@@ -254,6 +264,34 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
+	case "streams.createWriteSession":
+		input, err := decodeRPC[StreamsCreateWriteSessionInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		session, err := world.StreamsCreateWriteSession(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(session.ID())
+	case "streams.writeSession":
+		input, err := decodeRPC[StreamsWriteSessionInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if err := world.StreamsWriteSession(ctx, input); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
+	case "streams.closeWriteSession":
+		input, err := decodeRPC[StreamsCloseWriteSessionInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		if err := world.StreamsCloseWriteSession(ctx, input); err != nil {
+			return nil, err
+		}
+		return encodeRPC(struct{}{})
 	case "streams.writeMulti":
 		input, err := decodeRPC[StreamsWriteMultiInput](request.Input)
 		if err != nil {
@@ -304,7 +342,11 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(value)
-	case "analytics.runs.get", "analytics.runs.list", "analytics.attributes.list":
+	case "analytics.runs.get", "analytics.runs.list", "analytics.attributes.list",
+		"analytics.steps.get", "analytics.steps.list",
+		"analytics.events.get", "analytics.events.getMany", "analytics.events.list", "analytics.events.listByCorrelationId",
+		"analytics.hooks.get", "analytics.hooks.list",
+		"analytics.waits.get", "analytics.waits.list":
 		analytics := world.Analytics()
 		if analytics == nil {
 			return nil, errors.New("workflow: analytics capability is unavailable")
@@ -330,7 +372,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 				return nil, err
 			}
 			return encodeRPC(value)
-		default:
+		case "analytics.attributes.list":
 			input, err := decodeRPC[AnalyticsAttributesListInput](request.Input)
 			if err != nil {
 				return nil, err
@@ -340,6 +382,115 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 				return nil, err
 			}
 			return encodeRPC(value)
+		case "analytics.steps.get":
+			input, err := decodeRPC[StepsGetInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.StepsGet(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.steps.list":
+			input, err := decodeRPC[StepsListInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.StepsList(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.events.get":
+			input, err := decodeRPC[EventsGetInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.EventsGet(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.events.getMany":
+			input, err := decodeRPC[rpcEventsGetManyInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			values := make([]Event, 0, len(input.EventIDs))
+			for _, eventID := range input.EventIDs {
+				value, err := world.EventsGet(ctx, EventsGetInput{RunID: input.RunID, EventID: eventID})
+				if errors.Is(err, ErrEventNotFound) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, value)
+			}
+			return encodeRPC(values)
+		case "analytics.events.list":
+			input, err := decodeRPC[EventsListInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.EventsList(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.events.listByCorrelationId":
+			input, err := decodeRPC[EventsListByCorrelationIDInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.EventsListByCorrelationID(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.hooks.get":
+			input, err := decodeRPC[HooksGetInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.HooksGet(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.hooks.list":
+			input, err := decodeRPC[HooksListInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := world.HooksList(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.waits.get":
+			input, err := decodeRPC[AnalyticsWaitsGetInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := analytics.WaitsGet(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		case "analytics.waits.list":
+			input, err := decodeRPC[AnalyticsWaitsListInput](request.Input)
+			if err != nil {
+				return nil, err
+			}
+			value, err := analytics.WaitsList(ctx, input)
+			if err != nil {
+				return nil, err
+			}
+			return encodeRPC(value)
+		default:
+			return nil, fmt.Errorf("workflow: unknown analytics RPC method %q", request.Method)
 		}
 	case "client.runs.create":
 		input, err := decodeRPC[ClientRunsCreateInput](request.Input)
@@ -425,6 +576,10 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 }
 
 type (
+	rpcEventsGetManyInput struct {
+		RunID    RunID
+		EventIDs []EventID
+	}
 	ClientRunsCreateInput = EventsCreateRunInput
 	ClientRunsCancelInput struct{ RunID RunID }
 	ClientRunsWakeInput   struct {
@@ -440,11 +595,11 @@ type (
 func newRPCError(err error) *RPCError {
 	code := "internal"
 	switch {
-	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
+	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrEventNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
 		code = "not_found"
 	case errors.Is(err, ErrEventInvalid):
 		code = "invalid_argument"
-	case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable):
+	case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict):
 		code = "conflict"
 	case errors.Is(err, context.Canceled):
 		code = "cancelled"

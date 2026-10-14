@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
@@ -83,16 +85,79 @@ func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_stream", Name: "strm_test", Chunk: []byte("one")}); err != nil {
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_stream", Namespace: "output", Chunk: []byte("one")}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_stream", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}})
 	if err != nil || result.EventID != worlds.EventIDForSlot(2) {
 		t.Fatalf("event result=%#v err=%v", result, err)
 	}
-	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Name: "strm_test"})
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Namespace: "output"})
 	if err != nil || len(chunks.Chunks) != 1 || string(chunks.Chunks[0].Data) != "one" {
 		t.Fatalf("chunks=%#v err=%v", chunks, err)
+	}
+}
+
+func TestStreamNamespacesHaveExclusiveWriterSessions(t *testing.T) {
+	world := testworld.New()
+	ctx := context.Background()
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream_lock", WorkflowName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_two"}); !errors.Is(err, worlds.ErrStreamLocked) {
+		t.Fatalf("same namespace error = %v", err)
+	}
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "logs", WriterID: "step_two"}); err != nil {
+		t.Fatalf("different namespace should acquire: %v", err)
+	}
+	if err := first.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Namespace: "audit", WriterID: "step_three"}); !errors.Is(err, worlds.ErrRunTerminal) {
+		t.Fatalf("closed namespace error = %v", err)
+	}
+}
+
+func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
+	world := testworld.New()
+	ctx := context.Background()
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_wait_analytics", WorkflowName: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueAt := time.Now().Add(time.Minute).UTC()
+	payload, err := json.Marshal(map[string]any{"dueAt": dueAt, "cancel": true, "queueMessageId": "queue_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_wait_analytics", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_1", Data: payload}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: "wrun_wait_analytics", EventID: created.EventID})
+	if err != nil || event.CorrelationID != "wait_1" {
+		t.Fatalf("event = %#v, %v", event, err)
+	}
+	analytics := world.Analytics()
+	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: "wrun_wait_analytics", WaitID: "wait_1"})
+	if err != nil || wait.QueueMessageID != "queue_1" || !wait.Cancel {
+		t.Fatalf("wait = %#v, %v", wait, err)
+	}
+	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_wait_analytics"})
+	if err != nil || len(page.Data) != 1 || page.Data[0].WaitID != "wait_1" {
+		t.Fatalf("wait page = %#v, %v", page, err)
 	}
 }
 
@@ -138,22 +203,26 @@ func TestWebhookHandlerOnlyResumesPublicWebhooksWithTheConfiguredMethod(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	createHook := func(id, token string, webhook *worlds.Webhook) {
+	createHook := func(runID, id, token string, webhook *worlds.Webhook) {
 		data, err := json.Marshal(map[string]any{"token": token, "webhook": webhook})
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{
-			RunID: "wrun_webhook",
+			RunID: worlds.RunID(runID),
 			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: id, Data: data},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	createHook("hook_public", "public", &worlds.Webhook{Method: http.MethodPatch})
-	createHook("hook_internal", "internal", nil)
-	createHook("hook_static", "static", &worlds.Webhook{Method: http.MethodPost, Response: &worlds.WebhookResponse{Status: http.StatusCreated, Header: map[string][]string{"X-Webhook": {"static"}}, Body: []byte("ack")}})
+	createHook("wrun_webhook", "hook_public", "public", &worlds.Webhook{Method: http.MethodPatch})
+	createHook("wrun_webhook", "hook_internal", "internal", nil)
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_static", WorkflowName: "webhook"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createHook("wrun_static", "hook_static", "static", &worlds.Webhook{Method: http.MethodPost, Response: &worlds.WebhookResponse{Status: http.StatusCreated, Header: map[string][]string{"X-Webhook": {"static"}}, Body: []byte("ack")}})
 
 	handler := worlds.HTTPHandler(world, nil, "")
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/public", nil)

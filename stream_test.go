@@ -117,8 +117,8 @@ func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testi
 	if _, err := run.Await(ctx); err != nil {
 		t.Fatal(err)
 	}
-	name := worlds.StreamID("audit")
-	writer, release, err := run.Writer(ctx, workflow.WriterOption{Name: name})
+	namespace := worlds.StreamNamespace("audit")
+	writer, release, err := run.Writer(ctx, workflow.WriterOption{Namespace: namespace})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testi
 	if err := release(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := run.ReaderAt(ctx, -3, workflow.ReaderOption{Name: name})
+	reader, err := run.ReaderAt(ctx, -3, workflow.ReaderOption{Namespace: namespace})
 	if err != nil {
 		t.Fatal(err)
 	}

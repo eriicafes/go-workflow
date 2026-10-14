@@ -37,7 +37,7 @@ func PublishReport(ctx context.Context, input workflowdefs.PublishReport) (workf
 	if err != nil {
 		return workflowdefs.PublishReportResult{}, err
 	}
-	report, err := reportRun.Value(ctx)
+	report, err := reportRun.Await(ctx)
 	if err != nil {
 		return workflowdefs.PublishReportResult{}, err
 	}
