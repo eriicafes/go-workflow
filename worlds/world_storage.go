@@ -16,30 +16,70 @@ type Storage interface {
 }
 
 type StorageRuns interface {
+	// RunsGet returns the run identified by RunID. It returns ErrRunNotFound when
+	// the run does not exist. It applies ResolveData to the returned run.
 	RunsGet(context.Context, RunsGetInput) (Run, error)
+	// RunsList returns runs that match the input filters. It applies Pagination
+	// and ResolveData to the result.
 	RunsList(context.Context, RunsListInput) (Page[Run], error)
+	// RunsWaitForTerminalStatus waits for a terminal run or Timeout. It returns
+	// the current run when Timeout expires.
 	RunsWaitForTerminalStatus(context.Context, RunsWaitForTerminalStatusInput) (Run, error)
+	// RunsSetAttributes applies Changes to the identified run as one durable
+	// update.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
 }
 
 type StorageSteps interface {
+	// StepsGet returns the step identified by RunID and StepID. It returns
+	// ErrStepNotFound when the step does not exist. It applies ResolveData to the
+	// returned step.
 	StepsGet(context.Context, StepsGetInput) (Step, error)
+	// StepsList returns the steps in a run. It applies Pagination and ResolveData
+	// to the result.
 	StepsList(context.Context, StepsListInput) (Page[Step], error)
 }
 
 type StorageEvents interface {
+	// EventsCreateRun creates the identified run and its initial run_created
+	// event. It does not deduplicate calls. It returns ErrRunAlreadyExists when
+	// the run already exists. Its result has AllocatedEventCount set to one.
 	EventsCreateRun(context.Context, EventsCreateRunInput) (EventResult, error)
+	// EventsCreate appends a valid lifecycle event to a run. It enforces the
+	// transition rules and returns events selected by EventsCreateOptions. It
+	// sets AllocatedEventCount to one when it appends an event and zero when it
+	// returns a previously appended event. For a step_created event, it returns
+	// the materialized Step and sets StepCreated only when it appended that step.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
+	// EventsCreateBatch appends Events in order. It appends none of them when an
+	// event is invalid or cannot be admitted.
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
+	// EventsGet returns the event identified by RunID and EventID. It returns
+	// ErrEventNotFound when the event does not exist. It applies ResolveData to
+	// the returned event.
 	EventsGet(context.Context, EventsGetInput) (Event, error)
+	// EventsList returns the events in a run. It applies Pagination and
+	// ResolveData to the result.
 	EventsList(context.Context, EventsListInput) (Page[Event], error)
+	// EventsListByCorrelationID returns events in a run that match CorrelationID.
+	// It applies Pagination and ResolveData to the result.
 	EventsListByCorrelationID(context.Context, EventsListByCorrelationIDInput) (Page[Event], error)
 }
 
 type StorageHooks interface {
+	// HooksGet returns the hook identified by HookID. It returns ErrHookNotFound
+	// when the hook does not exist. It applies ResolveData to the returned hook.
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
+	// HooksGetByToken returns the active hook for Token. It returns
+	// ErrHookNotFound when the token is unclaimed or expired. It applies
+	// ResolveData to the returned hook.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
+	// HooksList returns hooks that match the input filters. It applies Pagination
+	// and ResolveData to the result.
 	HooksList(context.Context, HooksListInput) (Page[Hook], error)
+	// HooksClaim atomically claims the hook token in Event and appends the event.
+	// It returns ErrHookConflict when another active hook owns the token and
+	// Force is false.
 	HooksClaim(context.Context, HooksClaimInput) (HooksClaimResult, error)
 }
 
@@ -256,11 +296,16 @@ type (
 		ResolveData   EventsResolveData
 	}
 	EventResult struct {
-		EventID             EventID
-		EventType           EventType
-		Events              []Event
-		Step                *Step
-		StepCreated         bool
+		// EventID and EventType identify the appended or previously admitted event.
+		EventID   EventID
+		EventType EventType
+		// Events contains replay events selected by EventsCreateOptions.
+		Events []Event
+		// Step is set for a step_created event when its materialized step exists.
+		Step *Step
+		// StepCreated reports whether this call appended the step_created event.
+		StepCreated bool
+		// AllocatedEventCount is the number of events newly appended by this call.
 		AllocatedEventCount int
 	}
 	EventBatchResult struct {

@@ -12,16 +12,25 @@ type Analytics interface {
 }
 
 type AnalyticsRuns interface {
+	// RunsGet returns analytics for RunID. It returns ErrRunNotFound when the run
+	// does not exist.
 	RunsGet(context.Context, AnalyticsRunsGetInput) (AnalyticsRun, error)
+	// RunsList returns analytics runs that match the input filters. It applies
+	// Pagination to the result.
 	RunsList(context.Context, AnalyticsRunsListInput) (Page[AnalyticsRun], error)
 }
 
 type AnalyticsAttributes interface {
+	// AttributesList returns attribute aggregates that match the input filters.
+	// It applies Pagination to the result.
 	AttributesList(context.Context, AnalyticsAttributesListInput) (Page[AnalyticsAttribute], error)
 }
 
 type AnalyticsWaits interface {
+	// WaitsGet returns the wait identified by RunID and WaitID. It returns
+	// ErrEventNotFound when the wait does not exist.
 	WaitsGet(context.Context, AnalyticsWaitsGetInput) (AnalyticsWait, error)
+	// WaitsList returns the waits in a run. It applies Pagination to the result.
 	WaitsList(context.Context, AnalyticsWaitsListInput) (Page[AnalyticsWait], error)
 }
 

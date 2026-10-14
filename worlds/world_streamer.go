@@ -6,19 +6,37 @@ import (
 )
 
 type Streamer interface {
+	// StreamsCreateWriteSession creates an exclusive writer session for RunID and
+	// Name. It returns ErrStreamLocked when another session owns the stream.
 	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
+	// StreamsWriteSession appends Chunks for SessionID at Sequence. It returns
+	// ErrStreamLocked when the session is not current or Sequence is not next.
 	StreamsWriteSession(context.Context, StreamsWriteSessionInput) error
+	// StreamsCloseWriteSession releases SessionID. It closes the stream when
+	// Close is true. It returns ErrStreamLocked when SessionID is not current.
 	StreamsCloseWriteSession(context.Context, StreamsCloseWriteSessionInput) error
+	// StreamsWrite appends Chunk when no writer session owns the stream. It
+	// returns ErrStreamLocked when a session owns the stream.
 	StreamsWrite(context.Context, StreamsWriteInput) error
+	// StreamsWriteMulti appends Chunks when no writer session owns the stream. It
+	// returns ErrStreamLocked when a session owns the stream.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
+	// StreamsClose marks a stream done when no writer session owns it. It returns
+	// ErrStreamLocked when a session owns the stream.
 	StreamsClose(context.Context, StreamsCloseInput) error
+	// StreamsGetChunks returns chunks after Cursor. It waits for up to Wait when
+	// no chunk is available and the stream is not done.
 	StreamsGetChunks(context.Context, StreamsGetChunksInput) (StreamChunksResult, error)
+	// StreamsGetInfo returns a stream's current tail index and completion state.
 	StreamsGetInfo(context.Context, StreamsGetInfoInput) (StreamInfo, error)
+	// StreamsList returns the names of streams created for a run.
 	StreamsList(context.Context, StreamsListInput) ([]string, error)
 }
 
 type StreamWriteSession interface {
+	// ID returns this writer session's lease ID.
 	ID() StreamID
+	// Write appends Chunks at Sequence for this session.
 	Write(context.Context, StreamWriteSessionWriteInput) error
 	// Close closes the logical stream and releases this session's lease.
 	Close(context.Context) error
