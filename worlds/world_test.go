@@ -17,9 +17,22 @@ import (
 
 const httpPrefix = "/v1/workflow"
 
+func TestNormalizeBaseURL(t *testing.T) {
+	baseURL, err := worlds.NormalizeBaseURL("https://workflows.example.com/v1/workflow/")
+	if err != nil || baseURL != "https://workflows.example.com/v1/workflow" {
+		t.Fatalf("NormalizeBaseURL = %q, %v", baseURL, err)
+	}
+	for _, value := range []string{"", "/v1/workflow", "ftp://workflows.example.com/v1/workflow", "https://workflows.example.com/v1/workflow?key=value", "https://user:password@workflows.example.com/v1/workflow"} {
+		if _, err := worlds.NormalizeBaseURL(value); err == nil {
+			t.Errorf("NormalizeBaseURL(%q) succeeded", value)
+		}
+	}
+}
+
 type rpcRequest struct {
-	Method string          `cbor:"method"`
-	Input  cbor.RawMessage `cbor:"input"`
+	Method      string          `cbor:"method"`
+	Input       cbor.RawMessage `cbor:"input"`
+	SpecVersion *int            `cbor:"specVersion,omitempty"`
 }
 
 type rpcResponse struct {
@@ -42,6 +55,9 @@ func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
 	}
 	if created.EventID != worlds.EventIDForSlot(1) || created.EventType != worlds.EventTypeRunCreated || len(created.Events) != 0 {
 		t.Fatalf("unexpected creation result: %#v", created)
+	}
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_test", WorkflowName: "test"}); !errors.Is(err, worlds.ErrRunAlreadyExists) {
+		t.Fatalf("duplicate run error = %v, want ErrRunAlreadyExists", err)
 	}
 	started, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_test", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}, Options: worlds.EventsCreateOptions{EventCount: ptr(0)}})
 	if err != nil {
@@ -366,6 +382,12 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	if result.EventID != worlds.EventIDForSlot(1) {
 		t.Fatalf("result=%#v", result)
 	}
+
+	request = httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/cbor")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertRPCError(t, response, "conflict")
 
 	body, err = cbor.Marshal(rpcRequest{Method: "world.capabilities"})
 	if err != nil {

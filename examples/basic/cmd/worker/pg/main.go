@@ -18,7 +18,10 @@ func main() {
 	ctx := context.Background()
 	world, err := postgresworld.Open(
 		ctx,
-		postgresworld.Config{URL: os.Getenv("DATABASE_URL")},
+		postgresworld.Config{
+			BaseURL: os.Getenv("WORKFLOW_BASE_URL"),
+			URL:     os.Getenv("DATABASE_URL"),
+		},
 	)
 	if err != nil {
 		log.Fatal(err)

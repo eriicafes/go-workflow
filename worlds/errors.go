@@ -5,6 +5,7 @@ import "errors"
 var (
 	ErrWorkflowNotFound       = errors.New("workflow: workflow not found")
 	ErrRunNotFound            = errors.New("workflow: run not found")
+	ErrRunAlreadyExists       = errors.New("workflow: run already exists")
 	ErrRunTerminal            = errors.New("workflow: run is terminal")
 	ErrRunCancelled           = errors.New("workflow: run cancelled")
 	ErrStepNotFound           = errors.New("workflow: step not found")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -16,6 +17,9 @@ import (
 )
 
 type Config struct {
+	// BaseURL is the absolute public URL of HTTP(world), including
+	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	BaseURL      string
 	URL          string
 	PollInterval time.Duration
 }
@@ -24,6 +28,7 @@ type World struct {
 	pool     *pgxpool.Pool
 	ownsPool bool
 	interval time.Duration
+	baseURL  string
 	reloadMu sync.Mutex
 }
 
@@ -47,6 +52,13 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config, runners ...worl
 	if pool == nil {
 		return nil, errors.New("workflow/postgres: pool is required")
 	}
+	if config.BaseURL == "" {
+		return nil, errors.New("workflow/postgres: base URL is required")
+	}
+	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("workflow/postgres: invalid base URL: %w", err)
+	}
 	if config.PollInterval <= 0 {
 		config.PollInterval = 250 * time.Millisecond
 	}
@@ -57,10 +69,12 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config, runners ...worl
 	if err != nil {
 		return nil, err
 	}
-	w := &World{pool: pool, interval: config.PollInterval}
+	w := &World{pool: pool, interval: config.PollInterval, baseURL: baseURL}
 	w.World = testworld.NewWithSnapshotAndQueue(snapshot, w.save, runners...)
 	return w, nil
 }
+
+func (w *World) BaseURL() string { return w.baseURL }
 
 func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, `

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -25,6 +26,10 @@ type WebhookOption struct {
 // CreateWebhook immediately registers a single-use webhook at the current
 // workflow replay position.
 func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webhook[T], error) {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return nil, ErrNoWorkflow
+	}
 	option := WebhookOption{}
 	if len(options) != 0 {
 		option = options[len(options)-1]
@@ -42,25 +47,25 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 		},
 	}
 	if err := hook.create(ctx); err != nil {
-		return &Webhook[T]{hook: hook}, err
+		return &Webhook[T]{hook: hook, baseURL: execution.World().BaseURL()}, err
 	}
-	return &Webhook[T]{hook: hook}, nil
+	return &Webhook[T]{hook: hook, baseURL: execution.World().BaseURL()}, nil
 }
 
 // Webhook receives a JSON request body of type T through its token-authorized
 // HTTP route.
 type Webhook[T any] struct {
-	hook *Hook[webhookPayload]
+	hook    *Hook[webhookPayload]
+	baseURL string
 }
 
 func (w *Webhook[T]) Token() string { return w.hook.Token() }
 
 func (w *Webhook[T]) ID() string { return w.hook.ID() }
 
-// URL returns the default route. Mounting HTTPHandler at another prefix
-// changes the route by replacing /v1/workflow with that prefix.
+// URL returns this webhook's absolute public URL.
 func (w *Webhook[T]) URL() string {
-	return "/v1/workflow/webhooks/" + url.PathEscape(w.Token())
+	return strings.TrimRight(w.baseURL, "/") + "/webhooks/" + url.PathEscape(w.Token())
 }
 
 // MarshalJSON preserves the webhook declaration when it crosses a durable
@@ -71,11 +76,13 @@ func (w *Webhook[T]) MarshalJSON() ([]byte, error) {
 		HookID   worlds.HookID   `json:"hookId"`
 		Received worlds.EventID  `json:"receivedEventId"`
 		Webhook  *worlds.Webhook `json:"webhook"`
+		BaseURL  string          `json:"baseURL"`
 	}{
 		Token:    w.hook.token,
 		HookID:   w.hook.id,
 		Received: w.hook.received,
 		Webhook:  w.hook.webhook,
+		BaseURL:  w.baseURL,
 	})
 }
 
@@ -86,11 +93,13 @@ func (w *Webhook[T]) UnmarshalJSON(data []byte) error {
 		HookID   worlds.HookID   `json:"hookId"`
 		Received worlds.EventID  `json:"receivedEventId"`
 		Webhook  *worlds.Webhook `json:"webhook"`
+		BaseURL  string          `json:"baseURL"`
 	}
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
 	w.hook = &Hook[webhookPayload]{token: value.Token, id: value.HookID, received: value.Received, webhook: value.Webhook}
+	w.baseURL = value.BaseURL
 	return nil
 }
 

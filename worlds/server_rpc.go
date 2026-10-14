@@ -17,8 +17,9 @@ const RPCContentType = "application/cbor"
 
 // RPCRequest is the CBOR envelope sent to an HTTPHandler RPC endpoint.
 type RPCRequest struct {
-	Method string          `cbor:"method"`
-	Input  cbor.RawMessage `cbor:"input"`
+	Method      string          `cbor:"method"`
+	Input       cbor.RawMessage `cbor:"input"`
+	SpecVersion *int            `cbor:"specVersion,omitempty"`
 }
 
 // RPCResponse is the CBOR envelope returned by an HTTPHandler RPC endpoint.
@@ -31,6 +32,17 @@ type RPCResponse struct {
 type RPCError struct {
 	Code    string `cbor:"code"`
 	Message string `cbor:"message"`
+}
+
+// specVersionMismatchError is private because a client can only act on the
+// invalid_argument RPC response; it is not a storage or runtime condition.
+type specVersionMismatchError struct {
+	client int
+	server int
+}
+
+func (e *specVersionMismatchError) Error() string {
+	return fmt.Sprintf("workflow: RPC spec version does not match world: client=%d server=%d", e.client, e.server)
 }
 
 func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
@@ -72,6 +84,9 @@ func writeRPC(writer http.ResponseWriter, response RPCResponse) {
 }
 
 func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.RawMessage, error) {
+	if request.SpecVersion != nil && *request.SpecVersion != world.SpecVersion() {
+		return nil, &specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
+	}
 	switch request.Method {
 	case "world.capabilities":
 		return encodeRPC(world.Capabilities())
@@ -593,13 +608,14 @@ type (
 )
 
 func newRPCError(err error) *RPCError {
+	var specVersionMismatch *specVersionMismatchError
 	code := "internal"
 	switch {
 	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrEventNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
 		code = "not_found"
-	case errors.Is(err, ErrEventInvalid):
+	case errors.Is(err, ErrEventInvalid), errors.As(err, &specVersionMismatch):
 		code = "invalid_argument"
-	case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict):
+	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict):
 		code = "conflict"
 	case errors.Is(err, context.Canceled):
 		code = "cancelled"

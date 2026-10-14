@@ -8,6 +8,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
+const baseURL = "http://localhost/v1/workflow"
+
 // World is the in-memory reference World. Production Worlds use durable
 // provider storage; this implementation is reserved for tests.
 type World struct {
@@ -52,6 +54,7 @@ type QueueSnapshot struct {
 }
 
 func (w *World) Close()                      { w.cancel() }
+func (*World) BaseURL() string               { return baseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {

@@ -27,6 +27,8 @@ import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
 import { encode } from "cbor-x";
 import { HTTPWorldError, RPCClient, type RPC } from "./rpc.js";
 
+const HTTP_WORLD_SPEC_VERSION = 1;
+
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
 export type { RPC } from "./rpc.js";
@@ -61,10 +63,18 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 }
 
 export class HTTPWorld implements World {
-	readonly specVersion = SPEC_VERSION_CURRENT;
+	/**
+	 * The RPC server protocol version sent with every request. It is separate
+	 * from `specVersion`, which identifies the Workflow SDK World interface.
+	 */
+	readonly _specVersion = HTTP_WORLD_SPEC_VERSION;
+	/**
+	 * The RPC server capabilities remain available separately because they
+	 * describe its RPC surface, not the Workflow SDK's optional capabilities.
+	 */
 	readonly _capabilities: Capabilities;
-	// The RPC server capabilities remain available separately because they
-	// describe its RPC surface, not the Workflow SDK's optional capabilities.
+
+	readonly specVersion = SPEC_VERSION_CURRENT;
 	readonly capabilities: World["capabilities"];
 	readonly runs: World["runs"];
 	readonly steps: World["steps"];
@@ -87,6 +97,7 @@ export class HTTPWorld implements World {
 	};
 
 	constructor(client: RPCClient, capabilities: Capabilities) {
+		client.specVersion = this._specVersion;
 		this._capabilities = capabilities;
 		this.capabilities = HTTPWorld.createCapabilities();
 		this.runs = HTTPWorld.createRuns(client, this._capabilities);

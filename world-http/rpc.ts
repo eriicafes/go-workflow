@@ -183,6 +183,7 @@ export class RPCClient {
 	readonly baseURL: string;
 	readonly fetch: typeof globalThis.fetch;
 	readonly headers: HeadersInit;
+	specVersion?: number;
 
 	constructor(options: ClientOptions) {
 		const { baseURL, fetch: fetchImplementation = globalThis.fetch, headers = {} } = options;
@@ -198,7 +199,11 @@ export class RPCClient {
 	}
 
 	async call<T = never>(method: string, input: unknown, options: CallOptions = {}): Promise<T> {
-		const encodedBody = encode({ method, input: encode(toWire(input)) });
+		const encodedBody = encode({
+			method,
+			input: encode(toWire(input)),
+			...(this.specVersion === undefined ? {} : { specVersion: this.specVersion }),
+		});
 		const body = new Uint8Array(encodedBody.byteLength);
 		body.set(encodedBody);
 		const headers = new Headers(this.headers);

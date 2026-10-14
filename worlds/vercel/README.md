@@ -16,6 +16,7 @@ The queue endpoint includes `/api/v3`, for example
 
 ```go
 world, err := vercelworld.New(vercelworld.Config{
+    BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
     RedisURL: os.Getenv("REDIS_URL"), // rediss://default:password@host:6379
     QueueURL: os.Getenv("VERCEL_QUEUE_URL"),
     OIDCToken: os.Getenv("VERCEL_OIDC_TOKEN"),
@@ -87,6 +88,6 @@ authentication and authorization middleware in front of it and enforce which
 callers may start each workflow or read each run.
 
 The same HTTP function serves token-authorized webhooks at
-`/.well-known/workflow/v1/webhook/:token`. The token is the only authorization
+`/v1/workflow/webhooks/:token`. The token is the only authorization
 for that route. Treat the URL as a bearer capability and verify the provider's signature,
 timestamp, and replay protection in the workflow before acting on a request.

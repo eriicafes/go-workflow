@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -16,6 +17,9 @@ import (
 )
 
 type Config struct {
+	// BaseURL is the absolute public URL of HTTP(world), including
+	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	BaseURL                                                                    string
 	RedisURL, RedisRESTURL, RedisRESTToken, QueueURL, OIDCToken, Topic, Prefix string
 	HTTPClient                                                                 *http.Client
 }
@@ -27,9 +31,14 @@ type World struct {
 }
 
 func New(config Config, runners ...worlds.Runner) (*World, error) {
-	if config.QueueURL == "" || config.OIDCToken == "" || config.Topic == "" {
-		return nil, errors.New("workflow/vercel: queue, OIDC token, and topic are required")
+	if config.BaseURL == "" || config.QueueURL == "" || config.OIDCToken == "" || config.Topic == "" {
+		return nil, errors.New("workflow/vercel: base URL, queue, OIDC token, and topic are required")
 	}
+	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("workflow/vercel: invalid base URL: %w", err)
+	}
+	config.BaseURL = baseURL
 	store, err := newRedisStore(config.RedisURL, config.RedisRESTURL, config.RedisRESTToken, config.HTTPClient)
 	if err != nil {
 		return nil, err
@@ -46,6 +55,8 @@ func New(config Config, runners ...worlds.Runner) (*World, error) {
 	w.World = testworld.NewWithSnapshotAndQueue(snapshot, w.save, runners...)
 	return w, nil
 }
+
+func (w *World) BaseURL() string { return w.config.BaseURL }
 
 func (w *World) load(ctx context.Context) (testworld.Snapshot, error) {
 	values, err := w.redis.HGetAll(ctx, w.key)

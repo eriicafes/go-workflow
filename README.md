@@ -199,15 +199,15 @@ hook := workflow.NewHook[string](workflow.HookOption{
 value, err := hook.Value(ctx)
 ```
 
-`NewWebhook[T]` receives and decodes a JSON request body as `T`. Call
+`CreateWebhook[T]` receives and decodes a JSON request body as `T`. Call
 `webhook.Request(ctx)` when the workflow needs the reconstructed
-`*http.Request` instead. Its URL is `/.well-known/workflow/v1/webhook/:token`,
-served by `NewHTTPHandler`. The token is the route's only authorization, so
+`*http.Request` instead. Its URL is the World-configured absolute public base
+URL followed by `/webhooks/:token`, served by `worlds.HTTPHandler`. The token is the route's only authorization, so
 verify provider signatures before trusting the request payload.
 
 `WebhookOption` can require one HTTP method, return a static
 `*http.Response`, or set `Manual: true`. A manual webhook waits until a
-durable step calls `webhook.ReplyWebhook(ctx, response)`.
+durable step calls `webhook.RespondWith(ctx, response)`.
 
 ## Application and worker
 
@@ -253,7 +253,8 @@ if err := http.ListenAndServe(":8080", http.HandlerFunc(server.createReport)); e
 ```go
 // cmd/worker/main.go
 world, err := postgresworld.Open(ctx, postgresworld.Config{
-	URL: os.Getenv("DATABASE_URL"),
+	BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // e.g. https://workflows.example.com/v1/workflow
+	URL:     os.Getenv("DATABASE_URL"),
 })
 if err != nil {
 	log.Fatal(err)

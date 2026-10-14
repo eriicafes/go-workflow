@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 )
 
 type Config struct {
+	// BaseURL is the absolute public URL of HTTP(world), including
+	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	BaseURL             string
 	TableName, QueueURL string
 	Scheduler           *SchedulerConfig
 }
@@ -34,9 +38,14 @@ type World struct {
 }
 
 func New(config Config, dynamoClient *dynamodb.Client, queueClient *sqs.Client, runners ...worlds.Runner) (*World, error) {
-	if config.TableName == "" || config.QueueURL == "" || dynamoClient == nil || queueClient == nil {
-		return nil, errors.New("workflow/aws: table, queue, DynamoDB, and SQS are required")
+	if config.BaseURL == "" || config.TableName == "" || config.QueueURL == "" || dynamoClient == nil || queueClient == nil {
+		return nil, errors.New("workflow/aws: base URL, table, queue, DynamoDB, and SQS are required")
 	}
+	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("workflow/aws: invalid base URL: %w", err)
+	}
+	config.BaseURL = baseURL
 	snapshot, err := loadSnapshot(context.Background(), config.TableName, dynamoClient)
 	if err != nil {
 		return nil, err
@@ -45,6 +54,8 @@ func New(config Config, dynamoClient *dynamodb.Client, queueClient *sqs.Client, 
 	w.World = testworld.NewWithSnapshotAndQueue(snapshot, w.save, runners...)
 	return w, nil
 }
+
+func (w *World) BaseURL() string { return w.config.BaseURL }
 
 const statePK = "WORLD#STATE"
 

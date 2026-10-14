@@ -15,6 +15,7 @@ import (
 
 func main() {
 	world, err := vercelworld.New(vercelworld.Config{
+		BaseURL:   os.Getenv("WORKFLOW_BASE_URL"),
 		RedisURL:  os.Getenv("REDIS_URL"),
 		QueueURL:  os.Getenv("VERCEL_QUEUE_URL"),
 		OIDCToken: os.Getenv("VERCEL_OIDC_TOKEN"),

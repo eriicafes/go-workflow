@@ -5,7 +5,10 @@ the workflow tables automatically. `postgresworld.New` uses an existing `pgxpool
 without taking ownership of it.
 
 ```go
-world, err := postgresworld.Open(ctx, postgresworld.Config{URL: os.Getenv("DATABASE_URL")})
+world, err := postgresworld.Open(ctx, postgresworld.Config{
+    BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
+    URL: os.Getenv("DATABASE_URL"),
+})
 client := world // same-process app and worker
 ```
 
@@ -29,6 +32,6 @@ your authentication and authorization middleware before serving it. The
 middleware must decide which callers may start each workflow and read each run.
 
 The same handler serves token-authorized webhooks at
-`/.well-known/workflow/v1/webhook/:token`. The token is the only authorization
+`/v1/workflow/webhooks/:token`. The token is the only authorization
 for that route. Treat the URL as a bearer capability and verify the provider's signature,
 timestamp, and replay protection in the workflow before acting on a request.

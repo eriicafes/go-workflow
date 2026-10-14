@@ -56,6 +56,19 @@ func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
 	assertRPCError(t, response, "not_found")
 }
 
+func TestRPCRejectsMismatchedSpecVersion(t *testing.T) {
+	version := worlds.SpecVersion + 1
+	body, err := cbor.Marshal(rpcRequest{Method: "world.capabilities", SpecVersion: &version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response := httptest.NewRecorder()
+	worlds.HTTPHandler(testworld.New(), nil, "").ServeHTTP(response, request)
+	assertRPCError(t, response, "invalid_argument")
+}
+
 func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 	world := testworld.New()
 	defer world.Close()

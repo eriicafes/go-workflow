@@ -62,7 +62,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	if _, exists := m.runs[input.RunID]; exists {
-		return worlds.EventResult{}, worlds.ErrEventInvalid
+		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
 	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})

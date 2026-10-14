@@ -6,18 +6,29 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/oklog/ulid/v2"
 )
 
 const SpecVersion = 1
 
+// World bundles the durable services used by the runtime.
 type World interface {
 	Storage
 	Queue
 	Streamer
+	// BaseURL returns the absolute public URL where HTTPHandler is mounted,
+	// including its workflow path prefix and without a trailing slash.
+	BaseURL() string
+	// Analytics returns the Analytics interface when analytics are enabled,
+	// otherwise nil.
 	Analytics() Analytics
+	// Capabilities reports the optional behavior this World implements.
 	Capabilities() Capabilities
+	// SpecVersion returns the RPC protocol version implemented by this World.
 	SpecVersion() int
 }
 
@@ -27,6 +38,16 @@ type World interface {
 type Capabilities struct {
 	Analytics     bool `cbor:"analytics"`
 	SetAttributes bool `cbor:"setAttributes"`
+}
+
+// NormalizeBaseURL validates an HTTP handler's public URL and removes its
+// trailing slash.
+func NormalizeBaseURL(value string) (string, error) {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("workflow: base URL must be an absolute HTTP URL without a query or fragment")
+	}
+	return strings.TrimRight(value, "/"), nil
 }
 
 type Status string

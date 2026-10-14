@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,10 +32,24 @@ type webhookSerializationOutput struct {
 type webhookResponseInput struct{}
 type webhookResponseOutput struct{ Rejected bool }
 
+type webhookWorld struct {
+	*testworld.World
+	baseURL string
+}
+
+func (w *webhookWorld) BaseURL() string { return w.baseURL }
+
 func (webhookInput) Workflow(webhookOutput)                           {}
 func (webhookRequestInput) Workflow(webhookRequestOutput)             {}
 func (webhookSerializationInput) Workflow(webhookSerializationOutput) {}
 func (webhookResponseInput) Workflow(webhookResponseOutput)           {}
+
+func TestCreateWebhookRequiresWorkflowExecution(t *testing.T) {
+	_, err := workflow.CreateWebhook[struct{}](context.Background())
+	if !errors.Is(err, workflow.ErrNoWorkflow) {
+		t.Fatalf("CreateWebhook error = %v, want ErrNoWorkflow", err)
+	}
+}
 
 func TestCreateWebhookRejectsLargeResponse(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookInput) (webhookOutput, error) {
@@ -161,7 +176,7 @@ func TestWebhookRequestReconstructsMethodHeadersAndBody(t *testing.T) {
 }
 
 func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookSerializationInput) (webhookSerializationOutput, error) {
+	runner := workflow.Use(func(ctx context.Context, _ webhookSerializationInput) (webhookSerializationOutput, error) {
 		webhook, err := workflow.CreateWebhook[webhookOutput](ctx)
 		if err != nil {
 			return webhookSerializationOutput{}, err
@@ -178,7 +193,11 @@ func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
 			return webhookSerializationOutput{}, io.ErrUnexpectedEOF
 		}
 		return webhookSerializationOutput{Token: restored.Token(), URL: restored.URL()}, nil
-	}))
+	})
+	world := &webhookWorld{
+		World:   testworld.NewWithSnapshotAndQueue(testworld.Snapshot{}, nil, runner),
+		baseURL: "https://webhooks.example.com/v1/workflow",
+	}
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -186,8 +205,15 @@ func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	queued := world.QueuedMessages()
+	if len(queued) != 1 {
+		t.Fatalf("queued messages = %#v", queued)
+	}
+	if err := worlds.NewRuntime(world, worlds.Runners(runner)).Execute(ctx, queued[0].Input); err != nil {
+		t.Fatal(err)
+	}
 	output, err := run.Await(ctx)
-	if err != nil || output.Token == "" || output.URL != "/v1/workflow/webhooks/"+output.Token {
+	if err != nil || output.Token == "" || output.URL != "https://webhooks.example.com/v1/workflow/webhooks/"+output.Token {
 		t.Fatalf("round trip = %#v, %v", output, err)
 	}
 }

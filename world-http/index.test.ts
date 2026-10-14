@@ -37,6 +37,7 @@ test("creates a world from capabilities and maps Go CBOR fields", async () => {
 
 	expect(world.specVersion).toBe(SPEC_VERSION_CURRENT);
 	expect(world._capabilities).toEqual({ analytics: false, setAttributes: true });
+	expect(requests[0]?.envelope.specVersion).toBe(1);
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
 		hookForceClaim: true,
@@ -47,6 +48,7 @@ test("creates a world from capabilities and maps Go CBOR fields", async () => {
 	expect(run.runId).toBe("wrun_01");
 	expect(run.workflowName).toBe("report");
 	expect(run.attributes).toEqual({ "external-id": "42" });
+	expect(requests[1]?.envelope.specVersion).toBe(1);
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
 });

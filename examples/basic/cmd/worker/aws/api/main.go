@@ -23,6 +23,7 @@ func main() {
 
 	world, err := awsworld.New(
 		awsworld.Config{
+			BaseURL:   os.Getenv("WORKFLOW_BASE_URL"),
 			TableName: os.Getenv("WORKFLOW_TABLE"),
 			QueueURL:  os.Getenv("WORKFLOW_QUEUE_URL"),
 		},
