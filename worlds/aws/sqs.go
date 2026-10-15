@@ -21,7 +21,7 @@ type sqsAPI interface {
 const maxSQSDelay = 15 * time.Minute
 
 // queueMessage is the SQS and Scheduler message body. The queue item stays
-// authoritative; the body only identifies it.
+// authoritative, and the body only identifies it.
 type queueMessage struct {
 	ID    string            `json:"id"`
 	Input worlds.QueueInput `json:"input"`

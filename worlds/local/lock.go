@@ -6,7 +6,8 @@ import (
 	"syscall"
 )
 
-// ErrInUse reports that another World holds the storage directory.
+// ErrInUse is returned by Start when another World, in this or another
+// process, holds the storage directory.
 var ErrInUse = errors.New("workflow/local: storage is already in use")
 
 const lockName = "locks/world.lock"

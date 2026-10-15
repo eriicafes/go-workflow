@@ -128,7 +128,7 @@ func remove(root *os.Root, name string) error {
 }
 
 // fileKey turns a user-controlled name into a portable, case-insensitive-safe
-// file name. Long names are hashed; records keep the original name.
+// file name. Long names are hashed, while records keep the original name.
 func fileKey(value string) string {
 	encoded := hex.EncodeToString([]byte(value))
 	if len(encoded) <= 128 {

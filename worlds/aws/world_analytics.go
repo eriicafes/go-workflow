@@ -25,8 +25,9 @@ func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInp
 	return analyticsRun(run), nil
 }
 
-// RunsList bounds the run index by creation time and filters status on the
-// index and attributes on the fresh items.
+// RunsList reads a global secondary index, which is eventually consistent. A
+// run created a moment ago may be missing from the result. The runs it returns
+// are read consistently.
 func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err

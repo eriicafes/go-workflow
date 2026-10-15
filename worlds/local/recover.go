@@ -8,8 +8,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// recoverLocked restores the commit invariants after an interrupted process:
-// event files past a run's EventCount are discarded with the views they
+// recoverLocked restores the commit invariants after an interrupted process.
+// Event files past a run's EventCount are discarded with the views they
 // touched, partially created runs are removed, and stream sessions, which only
 // live as long as the process that opened them, are released.
 func (w *World) recoverLocked() error {
@@ -122,7 +122,7 @@ func (w *World) rebuildRun(runID worlds.RunID) error {
 		}
 		ownHooks[id] = true
 	}
-	// Only rewrite claims this run could have made; a token that now belongs
+	// Only rewrite claims this run could have made. A token that now belongs
 	// to another run's hook was legitimately claimed after this run released it.
 	for token := range tokens {
 		if token == "" {

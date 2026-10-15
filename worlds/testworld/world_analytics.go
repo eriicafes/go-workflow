@@ -10,8 +10,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// analytics is required only because worlds.Analytics.RunsGet/RunsList have the same
-// names as StorageRuns methods but different input types.
+// analytics is required only because worlds.Analytics.RunsGet/RunsList have the
+// same names as StorageRuns methods but different input types.
 type analytics struct{ world *World }
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {

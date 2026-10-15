@@ -22,20 +22,23 @@ const (
 	qstashLeeway    = 30 * time.Second
 )
 
-// QStashConfig enables timers longer than Vercel Queues' seven-day delay.
-// QStash holds the timer and calls the signed route mounted by HTTP(world),
-// which moves the delivery onto Vercel Queues.
+// QStashConfig configures QStash to deliver work due more than seven days
+// ahead, beyond the Vercel Queues delay limit. QStash holds such a delivery
+// until it is due, then calls the signed route served by HTTP(world), which
+// publishes it to Vercel Queues.
 type QStashConfig struct {
 	// BaseURL is the QStash API root. Empty uses https://qstash.upstash.io.
 	BaseURL string
-	// Token authorizes publishing and cancelling QStash messages.
+	// Token authorizes publishing and cancelling QStash messages. It is
+	// required.
 	Token string
 	// WebhookEndpoint optionally overrides the HTTPS origin, without a path,
 	// that serves HTTP(world). QStash then calls
-	// <WebhookEndpoint>/v1/workflow/qstash. Empty uses <BaseURL>/qstash.
+	// <WebhookEndpoint>/v1/workflow/qstash. Empty uses <Config.BaseURL>/qstash.
+	// The resulting URL must be HTTPS.
 	WebhookEndpoint string
 	// CurrentSigningKey and NextSigningKey verify QStash request signatures
-	// across key rotation.
+	// across key rotation. Both are required.
 	CurrentSigningKey string
 	NextSigningKey    string
 }
@@ -76,7 +79,7 @@ func (w *World) publishQStash(ctx context.Context, messageID string, due time.Ti
 	return published.MessageID, nil
 }
 
-// cancelQStash deletes a pending QStash message; an unknown message is
+// cancelQStash deletes a pending QStash message. An unknown message is
 // already delivered or cancelled.
 func (w *World) cancelQStash(ctx context.Context, qstashID string) error {
 	config := w.config.QStash

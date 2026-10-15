@@ -11,7 +11,7 @@ import (
 // schemaLockKey serializes migrations across processes sharing a database.
 const schemaLockKey int64 = 0x676f5f776f726b66
 
-// migrations are applied in order; the index plus one is the recorded
+// migrations are applied in order, and the index plus one is the recorded
 // version. Never edit a released migration, append a new one instead.
 var migrations = []string{`
 CREATE TABLE go_workflow_runs (

@@ -14,8 +14,8 @@ type queuedMessage struct {
 	input worlds.QueueInput
 }
 
-// QueueMessage is an inspectable durable queue item for provider workers.
-// A successful worker must acknowledge it with QueueCancel.
+// QueueMessage is a delivery that has not been acknowledged. A test that
+// executes it acknowledges it by passing ID to QueueCancel.
 type QueueMessage struct {
 	ID    string
 	Input worlds.QueueInput
@@ -79,6 +79,8 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return result, nil
 }
 
+// Queued returns the inputs of the deliveries not yet acknowledged, in the
+// order they were queued.
 func (w *World) Queued() []worlds.QueueInput {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -89,8 +91,9 @@ func (w *World) Queued() []worlds.QueueInput {
 	return values
 }
 
-// QueuedMessages returns queue IDs and inputs so a test driving a NewManual
-// World can execute and acknowledge deliveries itself.
+// QueuedMessages returns the deliveries not yet acknowledged, in the order they
+// were queued, so a test using a NewManual World can execute and acknowledge
+// them itself.
 func (w *World) QueuedMessages() []QueueMessage {
 	w.mu.RLock()
 	defer w.mu.RUnlock()

@@ -4,7 +4,8 @@ import (
 	"github.com/eriicafes/go-dev"
 )
 
-// Web starts the Workflow SDK web UI for baseURL through npx.
+// Web returns a go-dev command that runs the Workflow SDK web UI through npx,
+// connected to the World served by worlds.HTTPHandler at baseURL.
 func Web(baseURL string) dev.Cmd {
 	return dev.Cmd{
 		Run:  dev.Binary("npx"),

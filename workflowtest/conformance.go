@@ -15,7 +15,7 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// Conformance runs the World contract against worlds created by newWorld. Each
+// Conformance runs the World contract against Worlds created by newWorld. Each
 // subtest receives a fresh World, so implementations backed by shared storage
 // must isolate state per call (for example with a unique table, prefix, or
 // directory).
@@ -54,8 +54,10 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 	}
 }
 
-// ConformanceShared runs the multi-instance contract. newPair returns two
-// Worlds backed by the same storage, as two processes would be.
+// ConformanceShared runs the parts of the World contract that involve several
+// instances, which are concurrent appends, hook claims, and stream writers.
+// newPair returns two Worlds backed by the same storage, as two processes
+// would be.
 func ConformanceShared(t *testing.T, newPair func(t *testing.T) (worlds.World, worlds.World)) {
 	t.Helper()
 	t.Run("ConcurrentAppends", func(t *testing.T) {
