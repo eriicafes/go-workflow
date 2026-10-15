@@ -33,9 +33,11 @@ func (GenerateReport) Workflow(GenerateReportResult) {}
 
 ## Local World
 
-`worlds/local` executes the same replay model in memory. It starts runs and
-durable operations automatically, so local development needs no worker, queue,
-or database. Its state is lost when the process exits.
+`worlds/local` executes the same replay model in a single process and stores
+runs, events, hooks, streams, and queued work as JSON files under a directory,
+so local development needs no worker, queue, or database and survives restarts.
+`Start` takes an exclusive lock on the directory, recovers interrupted writes,
+and begins delivering queued work in-process.
 
 ```go
 // import localworld "github.com/eriicafes/go-workflow/worlds/local"
@@ -43,7 +45,7 @@ runners := workflow.Runners(
 	workflow.Use(flows.GenerateReport),
 )
 
-world, err := localworld.Open(".workflow-data", runners)
+world, err := localworld.Open(localworld.Config{Dir: ".workflow-data"}, runners)
 if err != nil {
 	log.Fatal(err)
 }
@@ -266,7 +268,7 @@ runners := workflow.Runners(
 )
 
 go func() {
-	if err := postgresworld.Run(ctx, world, runners); err != nil {
+	if err := postgresworld.Start(ctx, world, runners); err != nil {
 		log.Printf("workflow worker stopped: %v", err)
 	}
 }()
@@ -286,9 +288,9 @@ checks run before the application and worker are built.
 World packages own deployment-specific entry points:
 
 ```go
-// Postgres: a long-running poller.
+// Postgres: a long-running worker woken by LISTEN/NOTIFY.
 go func() {
-	if err := postgresworld.Run(ctx, postgresWorld, runners); err != nil {
+	if err := postgresworld.Start(ctx, postgresWorld, runners); err != nil {
 		log.Printf("workflow worker stopped: %v", err)
 	}
 }()
@@ -306,10 +308,14 @@ lambda.Start(lambdaurl.Wrap(awsworld.HTTP(awsWorld)))
 if err := http.ListenAndServe(":8081", vercelworld.Queue(vercelWorld, runners)); err != nil {
 	log.Fatal(err)
 }
-if err := http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld, runners)); err != nil {
+if err := http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld)); err != nil {
 	log.Fatal(err)
 }
 ```
+
+`HTTP(world)` serves the RPC and webhook endpoints under `/v1/workflow`.
+`RPC(world)` and `Webhook(world)` serve each endpoint on its own, for
+deployments that expose only one of them.
 
 The examples are split accordingly:
 

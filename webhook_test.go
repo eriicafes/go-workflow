@@ -195,7 +195,7 @@ func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
 		return webhookSerializationOutput{Token: restored.Token(), URL: restored.URL()}, nil
 	})
 	world := &webhookWorld{
-		World:   testworld.NewWithSnapshotAndQueue(testworld.Snapshot{}, nil, runner),
+		World:   testworld.NewManual(runner),
 		baseURL: "https://webhooks.example.com/v1/workflow",
 	}
 	defer world.Close()

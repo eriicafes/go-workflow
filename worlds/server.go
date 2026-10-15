@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 )
@@ -26,18 +27,39 @@ func HTTPHandler(world World, runners RunnerSet, prefix string) http.Handler {
 	} else {
 		prefix = "/" + strings.Trim(prefix, "/")
 	}
-	mux.Handle(prefix+"/webhooks/{token}", webhookHandler(world))
-	mux.HandleFunc("POST "+prefix+"/rpc", func(w http.ResponseWriter, r *http.Request) {
-		handleRPC(w, r, world)
-	})
+	mux.Handle(prefix+"/webhooks/{token}", WebhookHandler(world))
+	mux.Handle("POST "+prefix+"/rpc", RPCHandler(world))
 	return mux
 }
 
-// webhookHandler persists a webhook request and queues the owning run for a
-// fresh replay.
-func webhookHandler(world World) http.Handler {
+// RPCHandler returns the CBOR RPC endpoint for a World without routing. Mount
+// it at <prefix>/rpc to match the path HTTP clients use.
+func RPCHandler(world World) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hook, err := world.HooksGetByToken(r.Context(), HooksGetByTokenInput{Token: r.PathValue("token")})
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		handleRPC(w, r, world)
+	})
+}
+
+// WebhookHandler persists a webhook request and queues the owning run for a
+// fresh replay. The token is read from a {token} path wildcard when the
+// handler is mounted with one, otherwise from the last path segment. Mount it
+// at <prefix>/webhooks/{token} to match the URLs hooks are created with.
+func WebhookHandler(world World) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.PathValue("token")
+		if token == "" {
+			token = path.Base(r.URL.Path)
+		}
+		if token == "" || token == "/" || token == "." {
+			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
+			return
+		}
+		hook, err := world.HooksGetByToken(r.Context(), HooksGetByTokenInput{Token: token})
 		if errors.Is(err, ErrHookNotFound) {
 			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
 			return

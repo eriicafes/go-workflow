@@ -37,16 +37,6 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	return m.eventResultLocked(event, before, true), nil
 }
 
-func resolveEventData(events []worlds.Event, resolveData worlds.EventsResolveData) []worlds.Event {
-	if resolveData != worlds.EventsResolveDataNone {
-		return events
-	}
-	for index := range events {
-		events[index].Data = nil
-	}
-	return events
-}
-
 func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
@@ -528,31 +518,6 @@ func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 	return page(filtered, input.Pagination), nil
 }
 
-func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[worlds.Event] {
-	start := 0
-	if pagination.Cursor != "" {
-		if slot, err := worlds.EventSlot(worlds.EventID(pagination.Cursor)); err == nil {
-			start = int(slot)
-		}
-	}
-	if start > len(values) {
-		start = len(values)
-	}
-	limit := pagination.Limit
-	if limit <= 0 {
-		limit = len(values) - start
-	}
-	end := start + limit
-	if end > len(values) {
-		end = len(values)
-	}
-	result := worlds.Page[worlds.Event]{Data: values[start:end], HasMore: end < len(values)}
-	if result.HasMore && end != 0 {
-		result.Cursor = string(values[end-1].EventID)
-	}
-	return result
-}
-
 func (m *World) analyticsRunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	run, err := m.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID})
 	if err != nil {
@@ -610,4 +575,39 @@ func (m *World) analyticsAttributesList(ctx context.Context, input worlds.Analyt
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i].Key < values[j].Key })
 	return page(values, input.Pagination), nil
+}
+
+func resolveEventData(events []worlds.Event, resolveData worlds.EventsResolveData) []worlds.Event {
+	if resolveData != worlds.EventsResolveDataNone {
+		return events
+	}
+	for index := range events {
+		events[index].Data = nil
+	}
+	return events
+}
+
+func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[worlds.Event] {
+	start := 0
+	if pagination.Cursor != "" {
+		if slot, err := worlds.EventSlot(worlds.EventID(pagination.Cursor)); err == nil {
+			start = int(slot)
+		}
+	}
+	if start > len(values) {
+		start = len(values)
+	}
+	limit := pagination.Limit
+	if limit <= 0 {
+		limit = len(values) - start
+	}
+	end := start + limit
+	if end > len(values) {
+		end = len(values)
+	}
+	result := worlds.Page[worlds.Event]{Data: values[start:end], HasMore: end < len(values)}
+	if result.HasMore && end != 0 {
+		result.Cursor = string(values[end-1].EventID)
+	}
+	return result
 }

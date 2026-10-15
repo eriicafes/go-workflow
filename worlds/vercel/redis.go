@@ -3,7 +3,9 @@ package vercelworld
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,210 +17,282 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type redisStore interface {
-	HDel(context.Context, string, ...string) error
-	HSet(context.Context, string, ...any) error
-	HGetAll(context.Context, string) (map[string]string, error)
-	SMembers(context.Context, string) ([]string, error)
-	Incr(context.Context, string) (int64, error)
-	Scan(context.Context, uint64, string, int64) ([]string, uint64, error)
-	ZRangeByScore(context.Context, string, string, string) ([]string, error)
-	Eval(context.Context, string, []string, ...any) (any, error)
+// restResponseMaxBytes caps one Redis REST response. Larger responses return
+// an error instead of being truncated.
+var restResponseMaxBytes = 64 << 20
+
+// redisScript is a Lua script addressed by its SHA1 digest.
+type redisScript struct {
+	src string
+	sha string
 }
 
-func newRedisStore(url, restURL, restToken string, client *http.Client) (redisStore, error) {
-	if url != "" {
-		options, err := redis.ParseURL(url)
-		if err != nil {
-			return nil, fmt.Errorf("workflow/vercel: parse Redis TCP URL: %w", err)
-		}
-		if options.TLSConfig == nil {
-			options.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-		}
-		return tcpRedis{client: redis.NewClient(options)}, nil
-	}
-	if restURL == "" || restToken == "" {
-		return nil, errors.New("workflow/vercel: Redis URL or Redis REST URL and token are required")
-	}
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return restRedis{
-		url:   strings.TrimRight(restURL, "/"),
-		token: restToken,
-		http:  client,
-	}, nil
+type redisZ struct {
+	Member string
+	Score  float64
+}
+
+// redisStore is the command surface the World uses over TCP and REST. Every
+// mutation is one Lua script; scripts receive no KEYS and derive keys from the
+// prefix in ARGV[1], so the database must not be a Redis Cluster.
+type redisStore interface {
+	// Run executes script with EVALSHA and falls back to EVAL on NOSCRIPT.
+	// Results are nil, int64, string, or []any of those.
+	Run(ctx context.Context, script *redisScript, args ...string) (any, error)
+	Get(ctx context.Context, key string) (string, bool, error)
+	// MGet and HMGet return "" for missing values.
+	MGet(ctx context.Context, keys ...string) ([]string, error)
+	HGet(ctx context.Context, key, field string) (string, bool, error)
+	HMGet(ctx context.Context, key string, fields ...string) ([]string, error)
+	LIndex(ctx context.Context, key string, index int64) (string, bool, error)
+	LRange(ctx context.Context, key string, start, stop int64) ([]string, error)
+	// ZRangeByScore returns members with scores in [min, max] (Redis score
+	// syntax), descending when rev is set. A negative count returns all.
+	ZRangeByScore(ctx context.Context, key, min, max string, rev bool, count int64) ([]redisZ, error)
+	SMembers(ctx context.Context, key string) ([]string, error)
+	Exists(ctx context.Context, key string) (bool, error)
+	Close() error
 }
 
 type tcpRedis struct {
 	client *redis.Client
 }
 
-func (store tcpRedis) HDel(ctx context.Context, key string, fields ...string) error {
-	return store.client.HDel(ctx, key, fields...).Err()
+func (store tcpRedis) Close() error { return store.client.Close() }
+
+func (store tcpRedis) Run(ctx context.Context, script *redisScript, args ...string) (any, error) {
+	values := make([]any, len(args))
+	for index, arg := range args {
+		values[index] = arg
+	}
+	result, err := store.client.EvalSha(ctx, script.sha, nil, values...).Result()
+	if err != nil && redis.HasErrorPrefix(err, "NOSCRIPT") {
+		result, err = store.client.Eval(ctx, script.src, nil, values...).Result()
+	}
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workflow/vercel: Redis script: %w", err)
+	}
+	return normalizeReply(result), nil
 }
 
-func (store tcpRedis) HSet(ctx context.Context, key string, values ...any) error {
-	return store.client.HSet(ctx, key, values...).Err()
+func (store tcpRedis) Get(ctx context.Context, key string) (string, bool, error) {
+	return optional(store.client.Get(ctx, key).Result())
 }
 
-func (store tcpRedis) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	return store.client.HGetAll(ctx, key).Result()
+func (store tcpRedis) MGet(ctx context.Context, keys ...string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	values, err := store.client.MGet(ctx, keys...).Result()
+	return sliceStrings(values), err
+}
+
+func (store tcpRedis) HGet(ctx context.Context, key, field string) (string, bool, error) {
+	return optional(store.client.HGet(ctx, key, field).Result())
+}
+
+func (store tcpRedis) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	values, err := store.client.HMGet(ctx, key, fields...).Result()
+	return sliceStrings(values), err
+}
+
+func (store tcpRedis) LIndex(ctx context.Context, key string, index int64) (string, bool, error) {
+	return optional(store.client.LIndex(ctx, key, index).Result())
+}
+
+func (store tcpRedis) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return store.client.LRange(ctx, key, start, stop).Result()
+}
+
+func (store tcpRedis) ZRangeByScore(ctx context.Context, key, min, max string, rev bool, count int64) ([]redisZ, error) {
+	by := &redis.ZRangeBy{Min: min, Max: max, Count: count}
+	var values []redis.Z
+	var err error
+	if rev {
+		values, err = store.client.ZRevRangeByScoreWithScores(ctx, key, by).Result()
+	} else {
+		values, err = store.client.ZRangeByScoreWithScores(ctx, key, by).Result()
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make([]redisZ, len(values))
+	for index, value := range values {
+		member, _ := value.Member.(string)
+		result[index] = redisZ{Member: member, Score: value.Score}
+	}
+	return result, nil
 }
 
 func (store tcpRedis) SMembers(ctx context.Context, key string) ([]string, error) {
 	return store.client.SMembers(ctx, key).Result()
 }
 
-func (store tcpRedis) Incr(ctx context.Context, key string) (int64, error) {
-	return store.client.Incr(ctx, key).Result()
+func (store tcpRedis) Exists(ctx context.Context, key string) (bool, error) {
+	count, err := store.client.Exists(ctx, key).Result()
+	return count > 0, err
 }
 
-func (store tcpRedis) Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error) {
-	return store.client.Scan(ctx, cursor, match, count).Result()
-}
-
-func (store tcpRedis) ZRangeByScore(ctx context.Context, key, min, max string) ([]string, error) {
-	return store.client.ZRangeByScore(ctx, key, &redis.ZRangeBy{Min: min, Max: max}).Result()
-}
-
-func (store tcpRedis) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
-	return store.client.Eval(ctx, script, keys, args...).Result()
-}
-
+// restRedis speaks the Upstash Redis REST protocol: each command is a JSON
+// array POSTed to the endpoint and answered with {"result"} or {"error"}.
 type restRedis struct {
 	url   string
 	token string
 	http  *http.Client
 }
 
-func (store restRedis) HDel(ctx context.Context, key string, fields ...string) error {
-	arguments := make([]any, 0, 1+len(fields))
-	arguments = append(arguments, key)
-	for _, field := range fields {
-		arguments = append(arguments, field)
+func (restRedis) Close() error { return nil }
+
+func (store restRedis) Run(ctx context.Context, script *redisScript, args ...string) (any, error) {
+	command := make([]any, 0, len(args)+3)
+	command = append(command, "EVALSHA", script.sha, "0")
+	for _, arg := range args {
+		command = append(command, arg)
 	}
-	_, err := store.command(ctx, "HDEL", arguments...)
-	return err
+	result, err := store.do(ctx, command)
+	var replyErr restError
+	if errors.As(err, &replyErr) && strings.HasPrefix(string(replyErr), "NOSCRIPT") {
+		command[0], command[1] = "EVAL", script.src
+		result, err = store.do(ctx, command)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workflow/vercel: Redis script: %w", err)
+	}
+	return decodeREST(result)
 }
 
-func (store restRedis) HSet(ctx context.Context, key string, values ...any) error {
-	_, err := store.command(ctx, "HSET", append([]any{key}, values...)...)
-	return err
+func (store restRedis) Get(ctx context.Context, key string) (string, bool, error) {
+	return store.optional(ctx, "GET", key)
 }
 
-func (store restRedis) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	result, err := store.command(ctx, "HGETALL", key)
+func (store restRedis) MGet(ctx context.Context, keys ...string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	return store.strings(ctx, append([]any{"MGET"}, anys(keys)...)...)
+}
+
+func (store restRedis) HGet(ctx context.Context, key, field string) (string, bool, error) {
+	return store.optional(ctx, "HGET", key, field)
+}
+
+func (store restRedis) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	return store.strings(ctx, append([]any{"HMGET", key}, anys(fields)...)...)
+}
+
+func (store restRedis) LIndex(ctx context.Context, key string, index int64) (string, bool, error) {
+	return store.optional(ctx, "LINDEX", key, strconv.FormatInt(index, 10))
+}
+
+func (store restRedis) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return store.strings(ctx, "LRANGE", key, strconv.FormatInt(start, 10), strconv.FormatInt(stop, 10))
+}
+
+func (store restRedis) ZRangeByScore(ctx context.Context, key, min, max string, rev bool, count int64) ([]redisZ, error) {
+	command := []any{"ZRANGEBYSCORE", key, min, max, "WITHSCORES"}
+	if rev {
+		command = []any{"ZREVRANGEBYSCORE", key, max, min, "WITHSCORES"}
+	}
+	if count >= 0 {
+		command = append(command, "LIMIT", "0", strconv.FormatInt(count, 10))
+	}
+	values, err := store.strings(ctx, command...)
 	if err != nil {
 		return nil, err
 	}
-	var fields map[string]string
-	if err := json.Unmarshal(result, &fields); err == nil {
-		return fields, nil
-	}
-	var values []string
-	if err := json.Unmarshal(result, &values); err != nil {
-		return nil, fmt.Errorf("workflow/vercel: decode Redis hash: %w", err)
-	}
 	if len(values)%2 != 0 {
-		return nil, errors.New("workflow/vercel: Redis hash has an odd field count")
+		return nil, errors.New("workflow/vercel: Redis sorted set reply has an odd length")
 	}
-	fields = make(map[string]string, len(values)/2)
+	result := make([]redisZ, 0, len(values)/2)
 	for index := 0; index < len(values); index += 2 {
-		fields[values[index]] = values[index+1]
+		score, err := strconv.ParseFloat(values[index+1], 64)
+		if err != nil {
+			return nil, fmt.Errorf("workflow/vercel: decode Redis score: %w", err)
+		}
+		result = append(result, redisZ{Member: values[index], Score: score})
 	}
-	return fields, nil
+	return result, nil
 }
 
 func (store restRedis) SMembers(ctx context.Context, key string) ([]string, error) {
-	result, err := store.command(ctx, "SMEMBERS", key)
+	return store.strings(ctx, "SMEMBERS", key)
+}
+
+func (store restRedis) Exists(ctx context.Context, key string) (bool, error) {
+	result, err := store.do(ctx, []any{"EXISTS", key})
+	if err != nil {
+		return false, err
+	}
+	value, err := decodeREST(result)
+	if err != nil {
+		return false, err
+	}
+	count, ok := value.(int64)
+	if !ok {
+		return false, fmt.Errorf("workflow/vercel: unexpected Redis EXISTS reply %T", value)
+	}
+	return count > 0, nil
+}
+
+func (store restRedis) optional(ctx context.Context, command ...any) (string, bool, error) {
+	result, err := store.do(ctx, command)
+	if err != nil {
+		return "", false, err
+	}
+	value, err := decodeREST(result)
+	if err != nil || value == nil {
+		return "", false, err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", false, fmt.Errorf("workflow/vercel: unexpected Redis %s reply %T", command[0], value)
+	}
+	return text, true, nil
+}
+
+func (store restRedis) strings(ctx context.Context, command ...any) ([]string, error) {
+	result, err := store.do(ctx, command)
 	if err != nil {
 		return nil, err
 	}
-	var members []string
-	if err := json.Unmarshal(result, &members); err != nil {
-		return nil, fmt.Errorf("workflow/vercel: decode Redis set: %w", err)
-	}
-	return members, nil
-}
-
-func (store restRedis) Incr(ctx context.Context, key string) (int64, error) {
-	result, err := store.command(ctx, "INCR", key)
-	if err != nil {
-		return 0, err
-	}
-	var value int64
-	if err := json.Unmarshal(result, &value); err != nil {
-		return 0, fmt.Errorf("workflow/vercel: decode Redis increment: %w", err)
-	}
-	return value, nil
-}
-
-func (store restRedis) Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error) {
-	result, err := store.command(ctx, "SCAN", strconv.FormatUint(cursor, 10), "MATCH", match, "COUNT", count)
-	if err != nil {
-		return nil, 0, err
-	}
-	var values []json.RawMessage
-	if err := json.Unmarshal(result, &values); err != nil || len(values) != 2 {
-		return nil, 0, errors.New("workflow/vercel: decode Redis scan result")
-	}
-	var next string
-	if err := json.Unmarshal(values[0], &next); err != nil {
-		return nil, 0, fmt.Errorf("workflow/vercel: decode Redis scan cursor: %w", err)
-	}
-	nextCursor, err := strconv.ParseUint(next, 10, 64)
-	if err != nil {
-		return nil, 0, fmt.Errorf("workflow/vercel: parse Redis scan cursor: %w", err)
-	}
-	var keys []string
-	if err := json.Unmarshal(values[1], &keys); err != nil {
-		return nil, 0, fmt.Errorf("workflow/vercel: decode Redis scan keys: %w", err)
-	}
-	return keys, nextCursor, nil
-}
-
-func (store restRedis) ZRangeByScore(ctx context.Context, key, min, max string) ([]string, error) {
-	result, err := store.command(ctx, "ZRANGEBYSCORE", key, min, max)
-	if err != nil {
+	value, err := decodeREST(result)
+	if err != nil || value == nil {
 		return nil, err
 	}
-	var values []string
-	if err := json.Unmarshal(result, &values); err != nil {
-		return nil, fmt.Errorf("workflow/vercel: decode Redis sorted set: %w", err)
+	values, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("workflow/vercel: unexpected Redis %s reply %T", command[0], value)
 	}
-	return values, nil
-}
-
-func (store restRedis) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
-	values := make([]any, 0, 2+len(keys)+len(args))
-	values = append(values, script, len(keys))
-	for _, key := range keys {
-		values = append(values, key)
-	}
-	values = append(values, args...)
-	result, err := store.command(ctx, "EVAL", values...)
-	if err != nil {
-		return nil, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(result))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("workflow/vercel: decode Redis Lua result: %w", err)
-	}
-	if number, ok := value.(json.Number); ok {
-		integer, err := number.Int64()
-		if err != nil {
-			return nil, fmt.Errorf("workflow/vercel: decode Redis Lua integer: %w", err)
+	strs := make([]string, len(values))
+	for index, item := range values {
+		switch item := item.(type) {
+		case nil:
+		case string:
+			strs[index] = item
+		case int64:
+			strs[index] = strconv.FormatInt(item, 10)
+		default:
+			return nil, fmt.Errorf("workflow/vercel: unexpected Redis %s item %T", command[0], item)
 		}
-		return integer, nil
 	}
-	return value, nil
+	return strs, nil
 }
 
-func (store restRedis) command(ctx context.Context, name string, arguments ...any) (json.RawMessage, error) {
-	command := append([]any{name}, arguments...)
+// restError is an error reply returned by Redis itself.
+type restError string
+
+func (err restError) Error() string { return string(err) }
+
+func (store restRedis) do(ctx context.Context, command []any) (json.RawMessage, error) {
 	body, err := json.Marshal(command)
 	if err != nil {
 		return nil, fmt.Errorf("workflow/vercel: encode Redis command: %w", err)
@@ -231,25 +305,135 @@ func (store restRedis) command(ctx context.Context, name string, arguments ...an
 	request.Header.Set("Content-Type", "application/json")
 	response, err := store.http.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("workflow/vercel: Redis REST %v: %w", command[0], err)
 	}
 	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(restResponseMaxBytes)+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("workflow/vercel: read Redis REST response: %w", err)
 	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("workflow/vercel: Redis REST command %s: %s: %s", name, response.Status, strings.TrimSpace(string(data)))
+	if len(data) > restResponseMaxBytes {
+		return nil, fmt.Errorf("workflow/vercel: Redis REST %v response exceeds %d bytes", command[0], restResponseMaxBytes)
 	}
-	var result struct {
+	var reply struct {
 		Result json.RawMessage `json:"result"`
-		Error  string          `json:"error"`
+		Error  *string         `json:"error"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := json.Unmarshal(data, &reply); err != nil {
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("workflow/vercel: Redis REST %v: %s: %s", command[0], response.Status, strings.TrimSpace(string(data)))
+		}
 		return nil, fmt.Errorf("workflow/vercel: decode Redis REST response: %w", err)
 	}
-	if result.Error != "" {
-		return nil, fmt.Errorf("workflow/vercel: Redis command %s: %s", name, result.Error)
+	if reply.Error != nil {
+		return nil, restError(*reply.Error)
 	}
-	return result.Result, nil
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("workflow/vercel: Redis REST %v: %s", command[0], response.Status)
+	}
+	return reply.Result, nil
+}
+
+func newRedisScript(src string) *redisScript {
+	sum := sha1.Sum([]byte(src))
+	return &redisScript{src: src, sha: hex.EncodeToString(sum[:])}
+}
+
+func newRedisStore(url, restURL, restToken string, client *http.Client) (redisStore, error) {
+	if url != "" {
+		options, err := redis.ParseURL(url)
+		if err != nil {
+			return nil, fmt.Errorf("workflow/vercel: parse Redis TCP URL: %w", err)
+		}
+		// redis.ParseURL enables TLS only for rediss:// URLs.
+		if options.TLSConfig != nil && options.TLSConfig.MinVersion == 0 {
+			options.TLSConfig.MinVersion = tls.VersionTLS12
+		}
+		return tcpRedis{client: redis.NewClient(options)}, nil
+	}
+	if restURL == "" || restToken == "" {
+		return nil, errors.New("workflow/vercel: Redis URL or Redis REST URL and token are required")
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return restRedis{url: strings.TrimRight(restURL, "/"), token: restToken, http: client}, nil
+}
+
+func normalizeReply(value any) any {
+	switch value := value.(type) {
+	case []any:
+		for index := range value {
+			value[index] = normalizeReply(value[index])
+		}
+		return value
+	case int:
+		return int64(value)
+	default:
+		return value
+	}
+}
+
+func optional(value string, err error) (string, bool, error) {
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+func sliceStrings(values []any) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index], _ = value.(string)
+	}
+	return result
+}
+
+// decodeREST converts a JSON reply to the shapes tcpRedis returns.
+func decodeREST(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("workflow/vercel: decode Redis REST result: %w", err)
+	}
+	return restValue(value)
+}
+
+func restValue(value any) (any, error) {
+	switch value := value.(type) {
+	case nil, string:
+		return value, nil
+	case json.Number:
+		integer, err := value.Int64()
+		if err != nil {
+			return nil, fmt.Errorf("workflow/vercel: decode Redis integer %q: %w", value, err)
+		}
+		return integer, nil
+	case []any:
+		for index, item := range value {
+			converted, err := restValue(item)
+			if err != nil {
+				return nil, err
+			}
+			value[index] = converted
+		}
+		return value, nil
+	default:
+		return nil, fmt.Errorf("workflow/vercel: unexpected Redis REST value %T", value)
+	}
+}
+
+func anys(values []string) []any {
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+	return result
 }

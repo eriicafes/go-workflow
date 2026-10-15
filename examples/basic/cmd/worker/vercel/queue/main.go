@@ -15,11 +15,13 @@ import (
 
 func main() {
 	world, err := vercelworld.New(vercelworld.Config{
-		BaseURL:   os.Getenv("WORKFLOW_BASE_URL"),
-		RedisURL:  os.Getenv("REDIS_URL"),
-		QueueURL:  os.Getenv("VERCEL_QUEUE_URL"),
-		OIDCToken: os.Getenv("VERCEL_OIDC_TOKEN"),
-		Topic:     os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+		BaseURL:        os.Getenv("WORKFLOW_BASE_URL"),
+		RedisURL:       os.Getenv("REDIS_URL"),
+		RedisRESTURL:   os.Getenv("UPSTASH_REDIS_REST_URL"),
+		RedisRESTToken: os.Getenv("UPSTASH_REDIS_REST_TOKEN"),
+		QueueURL:       os.Getenv("VERCEL_QUEUE_URL"),
+		Topic:          os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+		// The Vercel OIDC token is read per request (it rotates).
 	})
 	if err != nil {
 		log.Fatal(err)

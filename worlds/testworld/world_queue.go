@@ -89,8 +89,8 @@ func (w *World) Queued() []worlds.QueueInput {
 	return values
 }
 
-// QueuedMessages returns queue IDs and inputs so a provider worker can
-// acknowledge work after executing it.
+// QueuedMessages returns queue IDs and inputs so a test driving a NewManual
+// World can execute and acknowledge deliveries itself.
 func (w *World) QueuedMessages() []QueueMessage {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -99,19 +99,6 @@ func (w *World) QueuedMessages() []QueueMessage {
 		values[index] = QueueMessage{ID: message.id, Input: cloneQueueInput(message.input)}
 	}
 	return values
-}
-
-// DispatchQueued resumes queue deliveries restored from a snapshot. It is a
-// no-op for provider Worlds, which own delivery through their queue service.
-func (w *World) DispatchQueued(ctx context.Context) {
-	if err := ctx.Err(); err != nil {
-		return
-	}
-	for _, message := range w.QueuedMessages() {
-		go func(message QueueMessage) {
-			w.deliver(message.ID, message.Input)
-		}(message)
-	}
 }
 
 func cloneQueueInput(value worlds.QueueInput) worlds.QueueInput {

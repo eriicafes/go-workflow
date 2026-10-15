@@ -1,0 +1,124 @@
+package vercelworld
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
+)
+
+func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Hook{}, err
+	}
+	raw, ok, err := w.redis.Get(ctx, w.key("hook", string(input.HookID)))
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if !ok {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	return decodeHook(input.HookID, raw, input.ResolveData)
+}
+
+// HooksGetByToken treats a token whose retention has elapsed as released. The
+// stored token is removed lazily by the next claim of that token.
+func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Hook{}, err
+	}
+	if input.Token == "" {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	hookID, ok, err := w.redis.Get(ctx, w.key("token", input.Token))
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if !ok {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	hook, err := w.HooksGet(ctx, worlds.HooksGetInput{HookID: worlds.HookID(hookID), ResolveData: input.ResolveData})
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if hook.Token != input.Token || (hook.RetainUntil != nil && !hook.RetainUntil.After(time.Now())) {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	return hook, nil
+}
+
+// HooksList pages hooks in creation order, optionally for one run.
+func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	key := w.prefix + ":hooks"
+	if input.RunID != "" {
+		key = w.key("runhooks", string(input.RunID))
+	}
+	desc := input.Pagination.SortOrder == worlds.SortOrderDescending
+	min, max, err := scoreRange(input.Pagination.Cursor, desc)
+	if err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	members, err := w.redis.ZRangeByScore(ctx, key, min, max, desc, fetchCount(input.Pagination.Limit))
+	if err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	members, cursor, hasMore := trimPage(members, input.Pagination.Limit)
+	keys := make([]string, len(members))
+	for index, member := range members {
+		keys[index] = w.key("hook", member.Member)
+	}
+	raws, err := w.redis.MGet(ctx, keys...)
+	if err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	page := worlds.Page[worlds.Hook]{Data: make([]worlds.Hook, 0, len(raws)), Cursor: cursor, HasMore: hasMore}
+	for index, raw := range raws {
+		if raw == "" {
+			continue
+		}
+		hook, err := decodeHook(worlds.HookID(members[index].Member), raw, input.ResolveData)
+		if err != nil {
+			return worlds.Page[worlds.Hook]{}, err
+		}
+		page.Data = append(page.Data, hook)
+	}
+	return page, nil
+}
+
+// HooksClaim runs token expiry, the conflict check, the optional
+// hook_force_claimed append to the owner's run, and the claimant's
+// hook_created append in one script, so exactly one concurrent claimant wins.
+func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	if input.Event.EventType != worlds.EventTypeHookCreated {
+		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+	}
+	var created hookCreatedData
+	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
+		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+	}
+	now := time.Now().UTC()
+	desc, err := describeEvent(input.Event, now)
+	if err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	force := "0"
+	if input.Force {
+		force = "1"
+	}
+	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, desc))
+	if err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	result, forced, err := decodeAppendReply(input.RunID, input.Event.CorrelationID, values, input.Options.ResolveData)
+	if err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	return worlds.HooksClaimResult{EventResult: result, ForcedRunID: forced}, nil
+}

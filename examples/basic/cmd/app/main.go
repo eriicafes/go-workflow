@@ -59,7 +59,7 @@ func workflowClient() (workflow.Client, func() error, error) {
 		workflow.Use(flows.PublishReport),
 	)
 
-	world, err := localworld.Open(".workflows", runners)
+	world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 	if err != nil {
 		return nil, nil, err
 	}

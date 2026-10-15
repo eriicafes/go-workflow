@@ -33,7 +33,7 @@ func main() {
 		workflow.Use(flows.PublishReport),
 	)
 	go func() {
-		if err := postgresworld.Run(ctx, world, runners); err != nil {
+		if err := postgresworld.Start(ctx, world, runners); err != nil {
 			log.Printf("workflow worker stopped: %v", err)
 		}
 	}()
