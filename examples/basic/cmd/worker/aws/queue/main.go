@@ -14,7 +14,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/aws"
+	awsworld "github.com/eriicafes/go-workflow/worlds/aws"
 )
 
 func main() {

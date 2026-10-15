@@ -6,12 +6,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-lambda-go/lambdaurl"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/eriicafes/go-workflow/worlds/aws"
+	awsworld "github.com/eriicafes/go-workflow/worlds/aws"
 )
 
 func main() {
@@ -34,5 +33,5 @@ func main() {
 		log.Fatal(err)
 	}
 
-	lambda.Start(lambdaurl.Wrap(awsworld.HTTP(world)))
+	lambdaurl.Start(awsworld.HTTP(world))
 }

@@ -1,4 +1,4 @@
-package workflowdefs
+package workflows
 
 type GenerateReportResult struct {
 	Summary string

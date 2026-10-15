@@ -13,32 +13,27 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
-	"github.com/eriicafes/go-workflow/examples/basic/workflowdefs"
+	"github.com/eriicafes/go-workflow/examples/basic/workflows"
 	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
-type app struct {
-	workflows workflow.Client
-}
-
 func main() {
-	workflows, closeWorld, err := workflowClient()
+	client, closeWorld, err := workflowClient()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	server := app{workflows: workflows}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /reports", server.createReport)
-	mux.HandleFunc("POST /reports/publish", server.publishReport)
+	// Middleware puts the client in every request context, so handlers can
+	// call workflow.Start with r.Context().
+	handler := workflow.Middleware(routes(), client)
 
 	address := cmp.Or(
 		os.Getenv("ADDR"),
 		":"+cmp.Or(os.Getenv("PORT"), "8080"),
 	)
 	log.Printf("application listening on %s", address)
-	if err := http.ListenAndServe(address, mux); err != nil {
+	if err := http.ListenAndServe(address, handler); err != nil {
 		log.Print(err)
 	}
 	if err := closeWorld(); err != nil {
@@ -72,11 +67,16 @@ func workflowClient() (workflow.Client, func() error, error) {
 	return workflow.NewClient(world), world.Close, nil
 }
 
-func (a app) createReport(w http.ResponseWriter, r *http.Request) {
-	var input workflowdefs.GenerateReport
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
+func routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reports", createReport)
+	mux.HandleFunc("POST /reports/publish", publishReport)
+	return mux
+}
+
+func createReport(w http.ResponseWriter, r *http.Request) {
+	var input workflows.GenerateReport
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid report input: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -85,21 +85,20 @@ func (a app) createReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The client supplies the scheduling capability to this request context.
-	run, err := workflow.Start(workflow.NewContext(r.Context(), a.workflows), input)
+	run, err := workflow.Start(r.Context(), input)
 	if err != nil {
 		http.Error(w, "schedule workflow: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	writeRun(w, run.ID())
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"runId": run.ID()})
 }
 
-func (a app) publishReport(w http.ResponseWriter, r *http.Request) {
-	var input workflowdefs.PublishReport
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
+func publishReport(w http.ResponseWriter, r *http.Request) {
+	var input workflows.PublishReport
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid publish input: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -108,19 +107,13 @@ func (a app) publishReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := workflow.Start(workflow.NewContext(r.Context(), a.workflows), input)
+	run, err := workflow.Start(r.Context(), input)
 	if err != nil {
 		http.Error(w, "schedule publish workflow: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	writeRun(w, run.ID())
-}
-
-func writeRun(w http.ResponseWriter, id string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(struct {
-		RunID string `json:"runId"`
-	}{RunID: id})
+	_ = json.NewEncoder(w).Encode(map[string]string{"runId": run.ID()})
 }

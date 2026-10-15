@@ -11,7 +11,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
-	"github.com/eriicafes/go-workflow/examples/basic/workflowdefs"
+	"github.com/eriicafes/go-workflow/examples/basic/workflows"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -22,13 +22,13 @@ func TestReportWorkflows(t *testing.T) {
 	)
 	defer world.Close()
 
-	server := app{workflows: workflow.NewClient(world)}
+	handler := workflow.Middleware(routes(), workflow.NewClient(world))
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	reportID := startWorkflow(t, server.createReport, "/reports")
-	run, err := workflow.Get[workflowdefs.GenerateReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), reportID)
+	reportID := startWorkflow(t, handler, "/reports")
+	run, err := workflow.Get[workflows.GenerateReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), reportID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +40,8 @@ func TestReportWorkflows(t *testing.T) {
 		t.Fatalf("summary = %q", output.Summary)
 	}
 
-	publishID := startWorkflow(t, server.publishReport, "/reports/publish")
-	publish, err := workflow.Get[workflowdefs.PublishReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), publishID)
+	publishID := startWorkflow(t, handler, "/reports/publish")
+	publish, err := workflow.Get[workflows.PublishReportResult](workflow.NewContext(ctx, workflow.NewClient(world)), publishID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestReportWorkflows(t *testing.T) {
 
 func startWorkflow(
 	t *testing.T,
-	handler http.HandlerFunc,
+	handler http.Handler,
 	path string,
 ) string {
 	t.Helper()
@@ -69,7 +69,7 @@ func startWorkflow(
 		strings.NewReader(`{"topic":"durable workflows"}`),
 	)
 	recorder := httptest.NewRecorder()
-	handler(recorder, request)
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body)
 	}

@@ -12,13 +12,13 @@ func main() {
 	task := session.NewTask(dev.Cmd{
 		Dir:        dev.Dir("..", ".."),
 		Run:        dev.Package("./cmd/app"),
-		Watch:      dev.Values("cmd", "flows", "steps", "workflowdefs"),
+		Watch:      dev.Values("cmd", "flows", "workflows"),
 		ServerAddr: ":8080",
 		Commands: dev.Commands(
 			dev.Cmd{
 				Run:     dev.Package("./cmd/worker/pg"),
 				Prepare: dev.Hooks(workflowdev.Check("./...")),
-				Watch:   dev.Values("cmd", "flows", "steps", "workflowdefs"),
+				Watch:   dev.Values("cmd", "flows", "workflows"),
 				Phase:   dev.Before,
 			},
 			workflowdev.Web("http://localhost:8081/v1/workflow"),
