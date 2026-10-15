@@ -1,10 +1,10 @@
 output "table_name" {
   description = "DynamoDB table name, for awsworld.Config.TableName."
-  value       = aws_dynamodb_table.this.name
+  value       = aws_dynamodb_table.workflows.name
 }
 
 output "table_arn" {
-  value = aws_dynamodb_table.this.arn
+  value = aws_dynamodb_table.workflows.arn
 }
 
 output "queue_url" {
@@ -27,7 +27,7 @@ output "dead_letter_queue_arn" {
 
 output "scheduler_group_name" {
   description = "Schedule group, for awsworld.SchedulerConfig.Group."
-  value       = var.enable_scheduler ? aws_scheduler_schedule_group.this[0].name : null
+  value       = var.enable_scheduler ? aws_scheduler_schedule_group.workflows[0].name : null
 }
 
 output "scheduler_role_arn" {
@@ -49,12 +49,12 @@ output "environment" {
   description = "Environment variables read by the example worker and API entrypoints."
   value = merge(
     tomap({
-      WORKFLOW_TABLE     = aws_dynamodb_table.this.name
+      WORKFLOW_TABLE     = aws_dynamodb_table.workflows.name
       WORKFLOW_QUEUE_URL = aws_sqs_queue.tasks.id
     }),
     var.enable_scheduler ? tomap({
       WORKFLOW_QUEUE_ARN          = aws_sqs_queue.tasks.arn
-      WORKFLOW_SCHEDULER_GROUP    = aws_scheduler_schedule_group.this[0].name
+      WORKFLOW_SCHEDULER_GROUP    = aws_scheduler_schedule_group.workflows[0].name
       WORKFLOW_SCHEDULER_ROLE_ARN = aws_iam_role.scheduler[0].arn
     }) : tomap({})
   )

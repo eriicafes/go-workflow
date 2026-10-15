@@ -1,12 +1,9 @@
-data "aws_caller_identity" "current" {}
-
 locals {
-  table_resources = [aws_dynamodb_table.this.arn, "${aws_dynamodb_table.this.arn}/index/*"]
   # awsworld names one-time schedules go-workflow-<message ID>.
-  schedule_arn = var.enable_scheduler ? "${replace(aws_scheduler_schedule_group.this[0].arn, ":schedule-group/", ":schedule/")}/go-workflow-*" : null
+  schedule_arn = var.enable_scheduler ? "${replace(aws_scheduler_schedule_group.workflows[0].arn, ":schedule-group/", ":schedule/")}/go-workflow-*" : null
 }
 
-resource "aws_dynamodb_table" "this" {
+resource "aws_dynamodb_table" "workflows" {
   name                        = var.name
   billing_mode                = "PAY_PER_REQUEST"
   hash_key                    = "pk"
@@ -125,7 +122,7 @@ resource "aws_lambda_event_source_mapping" "worker" {
   }
 }
 
-resource "aws_scheduler_schedule_group" "this" {
+resource "aws_scheduler_schedule_group" "workflows" {
   count = var.enable_scheduler ? 1 : 0
 
   name = var.name
@@ -142,7 +139,7 @@ resource "aws_iam_role" "scheduler" {
       Effect    = "Allow"
       Principal = { Service = "scheduler.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
+      Condition = { ArnEquals = { "aws:SourceArn" = aws_scheduler_schedule_group.workflows[0].arn } }
     }]
   })
   tags = var.tags
@@ -167,7 +164,7 @@ data "aws_iam_policy_document" "worker" {
   statement {
     sid       = "Table"
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchGetItem"]
-    resources = local.table_resources
+    resources = [aws_dynamodb_table.workflows.arn, "${aws_dynamodb_table.workflows.arn}/index/*"]
   }
 
   statement {
@@ -204,7 +201,7 @@ data "aws_iam_policy_document" "api" {
   statement {
     sid       = "Table"
     actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchGetItem"]
-    resources = local.table_resources
+    resources = [aws_dynamodb_table.workflows.arn, "${aws_dynamodb_table.workflows.arn}/index/*"]
   }
 
   statement {
