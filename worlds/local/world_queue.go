@@ -31,8 +31,9 @@ type queueKeyRecord struct {
 	MessageID string `json:"messageId"`
 }
 
-// Queue persists the delivery and schedules it for NotBefore. A pending
-// delivery with the same run and IdempotencyKey is returned instead.
+// Queue deduplicates by IdempotencyKey. While a delivery with the same run and
+// key has not started, it returns that delivery's message ID instead of
+// queueing another.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
@@ -89,9 +90,9 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-// QueueCancel deletes the delivery record. A scheduled timer for it finds no
-// record and is skipped.
 func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
+	// Deleting the record is enough, because a scheduled timer for it finds no
+	// record and is skipped.
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-package workflow_test
+package worlds_test
 
 import (
 	"bytes"
@@ -45,7 +45,7 @@ func TestNewHTTPClientExecutesWorkflow(t *testing.T) {
 		return clientOutput{Value: input.Value}, nil
 	}))
 	defer world.Close()
-	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, nil, "")))
+	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, clientInput{Value: 7})
@@ -127,4 +127,45 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input clientInput) (clientOutput, error) {
+		return clientOutput{Value: input.Value}, nil
+	}))
+	defer world.Close()
+	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, clientInput{Value: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Await(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writer, release, err := run.Writer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("remote")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := run.Reader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "remote" {
+		t.Fatalf("stream = %q", data)
+	}
 }

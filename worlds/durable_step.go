@@ -8,8 +8,10 @@ import (
 )
 
 type (
-	// DurableStepOptions identifies one replay-local durable step. Fn is kept
-	// separate so the durable declaration remains visible at the call site.
+	// DurableStepOptions holds the arguments to DurableStep. A failed attempt
+	// is retried while the attempt number is at most MaxRetries and
+	// RetryAfter returns a non-nil time for the next attempt. Otherwise the
+	// step fails. Rollback marks a step that runs a compensation.
 	DurableStepOptions struct {
 		Execution  *Execution
 		Position   int
@@ -19,8 +21,9 @@ type (
 		Rollback   bool
 	}
 
-	// DurableStepResult is the typed replay state consumed by a workflow-level
-	// Promise handle.
+	// DurableStepResult is the state of a step at one replay. Done reports
+	// whether the step has settled. Data holds its output on success and Err
+	// holds its error.
 	DurableStepResult[T any] struct {
 		StepID StepID
 		Data   T
@@ -28,8 +31,7 @@ type (
 		Err    error
 	}
 
-	// DurableInlineStepOptions identifies a step that persists its result
-	// during root replay and never receives a targeted queue delivery.
+	// DurableInlineStepOptions holds the arguments to DurableInlineStep.
 	DurableInlineStepOptions struct {
 		Execution *Execution
 		Position  int
@@ -37,7 +39,12 @@ type (
 	}
 )
 
-// DurableStep replays or creates exactly one durable step.
+// DurableStep declares the step at options.Position. On first execution it
+// records step_created with input and queues a step delivery. On replay it
+// returns the recorded result. During the step delivery for this step it
+// calls fn with the recorded input, records the result in the Execution, and
+// ends the replay with a panic the Runtime recovers, so it does not return.
+// fn is executed at least once.
 func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {
@@ -98,7 +105,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	}
 	stepID := StepID(event.CorrelationID)
 
-	// A terminal event after the declaration is the durable result.
+	// A terminal event after the declaration records the step's result.
 	for _, event := range options.Execution.events[creationIndex+1:] {
 		if event.CorrelationID != string(stepID) {
 			continue
@@ -125,7 +132,8 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		}
 	}
 
-	// Root replays only declare pending steps; their targeted delivery invokes fn.
+	// Root replays only declare pending steps, and their targeted delivery
+	// invokes fn.
 	if target, ok := options.Execution.TargetStepID(); !ok || target != stepID {
 		return DurableStepResult[Out]{StepID: stepID}
 	}
@@ -138,7 +146,8 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
 	value, callErr := fn(ctx, input)
 
-	// Report the target result to the engine; it appends the lifecycle event.
+	// Report the target result to the engine, which appends the lifecycle
+	// event.
 	if callErr != nil {
 		result := stepResultData{Error: []byte(callErr.Error())}
 		if options.RetryAfter != nil && attempt <= options.MaxRetries {
@@ -157,25 +166,25 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	panic(errReplayComplete)
 }
 
-// DurableInlineStep replays or writes one immediately completed durable step.
-func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOptions, fn func(context.Context) (Out, error)) DurableStepResult[Out] {
+// DurableInlineStep records the result of fn as a step while a flow replays
+// the runner, without a step delivery. fn cannot fail, so it is for results
+// such as the current time or a generated ID. Work that can fail belongs in a
+// step executed by DurableStep. On first execution it appends step_created,
+// calls fn, and appends step_completed. A World error while appending ends the
+// replay, and the Runtime returns it from Execute so the delivery is retried.
+// A replay that finds step_created without step_completed calls fn again and
+// completes the step. Later replays return the recorded result without
+// calling fn.
+func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOptions, fn func(context.Context) Out) DurableStepResult[Out] {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {
-		// Record the replay position before invoking user code. Unlike a normal
-		// durable step, inline work is completed by this root replay.
+		// First execution persist the declaration, then call fn and record its result.
 		stepID := NewStepID()
-		created, err := json.Marshal(stepCreatedData{
-			Position: options.Position,
-			StepName: options.Name,
-		})
+		created, err := json.Marshal(stepCreatedData{Position: options.Position, StepName: options.Name})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: err}
 		}
-		createdEvent := EventsCreateEvent{
-			EventType:     EventTypeStepCreated,
-			CorrelationID: string(stepID),
-			Data:          created,
-		}
+		createdEvent := EventsCreateEvent{EventType: EventTypeStepCreated, CorrelationID: string(stepID), Data: created}
 		eventCount := len(options.Execution.events)
 		createdResult, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
 			RunID:   options.Execution.Run().RunID,
@@ -183,7 +192,7 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 			Options: EventsCreateOptions{EventCount: &eventCount},
 		})
 		if err != nil {
-			return DurableStepResult[Out]{StepID: stepID, Err: err}
+			panic(deliveryError{cause: err})
 		}
 		options.Execution.Merge(createdResult, Event{
 			RunID:         options.Execution.Run().RunID,
@@ -193,30 +202,16 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 			Data:          createdEvent.Data,
 		})
 
-		// Run the work once, then capture either its output or failure as the
-		// terminal event that every later replay returns.
-		value, callErr := fn(ctx)
-		result := stepResultData{}
-		eventType := EventTypeStepCompleted
-		if callErr != nil {
-			result.Error = []byte(callErr.Error())
-			eventType = EventTypeStepFailed
-		} else {
-			result.Output, err = json.Marshal(value)
-			if err != nil {
-				result.Error = []byte(err.Error())
-				eventType = EventTypeStepFailed
-			}
+		value := fn(ctx)
+		output, err := json.Marshal(value)
+		if err != nil {
+			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step output: %w", err)}
 		}
-		data, err := json.Marshal(result)
+		completed, err := json.Marshal(stepResultData{Output: output})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: err}
 		}
-		completedEvent := EventsCreateEvent{
-			EventType:     eventType,
-			CorrelationID: string(stepID),
-			Data:          data,
-		}
+		completedEvent := EventsCreateEvent{EventType: EventTypeStepCompleted, CorrelationID: string(stepID), Data: completed}
 		eventCount = len(options.Execution.events)
 		completedResult, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
 			RunID:   options.Execution.Run().RunID,
@@ -224,7 +219,7 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 			Options: EventsCreateOptions{EventCount: &eventCount},
 		})
 		if err != nil {
-			return DurableStepResult[Out]{StepID: stepID, Err: err}
+			panic(deliveryError{cause: err})
 		}
 		options.Execution.Merge(completedResult, Event{
 			RunID:         options.Execution.Run().RunID,
@@ -233,17 +228,11 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 			CorrelationID: completedEvent.CorrelationID,
 			Data:          completedEvent.Data,
 		})
-		if callErr != nil {
-			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: callErr}
-		}
-		if eventType == EventTypeStepFailed {
-			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: encode inline step output: %s", result.Error)}
-		}
 		return DurableStepResult[Out]{StepID: stepID, Data: value, Done: true}
 	}
 
 	// Replay validates the declaration at this position, then returns the
-	// previously persisted terminal result without calling fn again.
+	// recorded result without calling fn again.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: replay position %d is not a step", options.Position)}
@@ -257,28 +246,49 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 	}
 	stepID := StepID(event.CorrelationID)
 	for _, event := range options.Execution.events[creationIndex+1:] {
-		if event.CorrelationID != string(stepID) {
+		if event.EventType != EventTypeStepCompleted || event.CorrelationID != string(stepID) {
 			continue
 		}
 		var result stepResultData
-		switch event.EventType {
-		case EventTypeStepCompleted:
-			if err := json.Unmarshal(event.Data, &result); err != nil {
-				return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode inline step result: %w", err)}
-			}
-			var value Out
-			if err := json.Unmarshal(result.Output, &value); err != nil {
-				return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode inline step output: %w", err)}
-			}
-			return DurableStepResult[Out]{StepID: stepID, Data: value, Done: true}
-		case EventTypeStepFailed:
-			if err := json.Unmarshal(event.Data, &result); err != nil {
-				return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode inline step result: %w", err)}
-			}
-			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: inline step failed: %s", result.Error)}
+		var value Out
+		if err := json.Unmarshal(event.Data, &result); err != nil {
+			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode inline step result: %w", err)}
 		}
+		if err := json.Unmarshal(result.Output, &value); err != nil {
+			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode inline step output: %w", err)}
+		}
+		return DurableStepResult[Out]{StepID: stepID, Data: value, Done: true}
 	}
-	return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: inline step %s has no result", stepID)}
+
+	// The delivery that recorded step_created ended before recording the
+	// result, so complete the step now.
+	value := fn(ctx)
+	output, err := json.Marshal(value)
+	if err != nil {
+		return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step output: %w", err)}
+	}
+	completed, err := json.Marshal(stepResultData{Output: output})
+	if err != nil {
+		return DurableStepResult[Out]{StepID: stepID, Err: err}
+	}
+	completedEvent := EventsCreateEvent{EventType: EventTypeStepCompleted, CorrelationID: string(stepID), Data: completed}
+	eventCount := len(options.Execution.events)
+	completedResult, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
+		RunID:   options.Execution.Run().RunID,
+		Event:   completedEvent,
+		Options: EventsCreateOptions{EventCount: &eventCount},
+	})
+	if err != nil {
+		panic(deliveryError{cause: err})
+	}
+	options.Execution.Merge(completedResult, Event{
+		RunID:         options.Execution.Run().RunID,
+		EventID:       completedResult.EventID,
+		EventType:     completedEvent.EventType,
+		CorrelationID: completedEvent.CorrelationID,
+		Data:          completedEvent.Data,
+	})
+	return DurableStepResult[Out]{StepID: stepID, Data: value, Done: true}
 }
 
 type stepCreatedData struct {

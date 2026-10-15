@@ -52,8 +52,8 @@ func (s *streamWriteSession) close(ctx context.Context, closeStream bool) error 
 	return nil
 }
 
-// StreamsCreateWriteSession takes the session with one conditional upsert.
 func (w *World) StreamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
+	// One conditional upsert takes the session.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -180,9 +180,9 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 	})
 }
 
-// StreamsGetChunks reads the stream row before its chunks: chunk_count and
-// the chunks it covers commit together, so the page is consistent with Done.
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	// Read the stream row before its chunks. Since chunk_count and the chunks
+	// it covers commit together, the page is consistent with Done.
 	start := 0
 	if input.Cursor != "" {
 		value, err := strconv.Atoi(input.Cursor)

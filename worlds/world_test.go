@@ -259,7 +259,7 @@ func TestWebhookHandlerOnlyResumesPublicWebhooksWithTheConfiguredMethod(t *testi
 	}
 	createHook("wrun_static", "hook_static", "static", &worlds.Webhook{Method: http.MethodPost, Response: &worlds.WebhookResponse{Status: http.StatusCreated, Header: map[string][]string{"X-Webhook": {"static"}}, Body: []byte("ack")}})
 
-	handler := worlds.HTTPHandler(world, nil, "")
+	handler := worlds.HTTPHandler(world, "")
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/public", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -338,13 +338,13 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("request"))))
+	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("request"))))
 	if response.Code != http.StatusOK || response.Header().Get("X-Webhook") != "manual" || response.Body.String() != "done" {
 		t.Fatalf("manual webhook response = %d, header=%q, body=%q", response.Code, response.Header().Get("X-Webhook"), response.Body.String())
 	}
 
 	response = httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("late request"))))
+	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("late request"))))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("late manual webhook response = %d", response.Code)
 	}
@@ -352,7 +352,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 
 func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	world := testworld.New()
-	handler := worlds.HTTPHandler(world, nil, "")
+	handler := worlds.HTTPHandler(world, "")
 	input, err := cbor.Marshal(worlds.EventsCreateRunInput{RunID: "wrun_rpc", WorkflowName: "rpc"})
 	if err != nil {
 		t.Fatal(err)

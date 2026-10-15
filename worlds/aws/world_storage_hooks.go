@@ -26,9 +26,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	return stripHook(hook, input.ResolveData), nil
 }
 
-// HooksGetByToken treats a token whose retention has lapsed as unclaimed;
-// the item itself is replaced by the next claim.
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	// A token whose retention has lapsed is unclaimed. The item itself is
+	// replaced by the next claim.
 	if err := ctx.Err(); err != nil {
 		return worlds.Hook{}, err
 	}
@@ -46,8 +46,9 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: token.hookID, ResolveData: input.ResolveData})
 }
 
-// HooksList reads the HOOKS (list) or HOOKS#<runID> (list_group) index
-// partition in creation order.
+// HooksList reads a global secondary index, which is eventually consistent. A
+// hook created a moment ago may be missing from the result. The hooks it
+// returns are read consistently.
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Hook]{}, err

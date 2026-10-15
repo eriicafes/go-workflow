@@ -198,9 +198,9 @@ func (w *World) requireRun(ctx context.Context, runID worlds.RunID) error {
 	return nil
 }
 
-// EventsList pages the log by slot; the cursor is the last returned event ID
-// in either order.
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+	// Pages are by slot, and the cursor is the last returned event ID in
+	// either order.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
@@ -276,9 +276,9 @@ func (w *World) eventCount(ctx context.Context, runID worlds.RunID) (int64, erro
 	return strconv.ParseInt(value, 10, 64)
 }
 
-// EventsListByCorrelationID pages a correlation index; the cursor is the
-// last returned event ID.
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	// Pages come from a correlation index, and the cursor is the last
+	// returned event ID.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}

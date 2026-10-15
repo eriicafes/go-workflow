@@ -24,13 +24,19 @@ func conformSteps(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrStepNotStartable, "start missing step")
 
 	started := conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
-	replay, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"}})
-	if err != nil || replay.EventID != started.EventID || replay.AllocatedEventCount != 0 {
-		t.Fatalf("step_started replay = %#v err=%v", replay, err)
-	}
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 1 || step.StartedAt == nil {
 		t.Fatalf("running step = %#v err=%v", step, err)
+	}
+	// Starting a running step records a new attempt, so a delivery can take
+	// over a step whose previous attempt's delivery died.
+	restarted, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"}})
+	if err != nil || restarted.EventID == started.EventID || restarted.AllocatedEventCount != 1 {
+		t.Fatalf("restarted step = %#v err=%v", restarted, err)
+	}
+	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
+	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 2 {
+		t.Fatalf("restarted step = %#v err=%v", step, err)
 	}
 	retryAt := time.Now().Add(time.Minute).UTC().Truncate(time.Millisecond)
 	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_a", map[string]any{"error": []byte("transient"), "retryAfter": retryAt})
@@ -41,7 +47,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
 	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", map[string]any{"output": []byte("step-out")})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
-	if err != nil || step.Status != worlds.StatusCompleted || step.Attempt != 2 || string(step.Output) != "step-out" || step.CompletedAt == nil {
+	if err != nil || step.Status != worlds.StatusCompleted || step.Attempt != 3 || string(step.Output) != "step-out" || step.CompletedAt == nil {
 		t.Fatalf("completed step = %#v err=%v", step, err)
 	}
 	stripped, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a", ResolveData: worlds.ResolveDataNone})

@@ -284,14 +284,14 @@ func TestConcurrentForcedClaims(t *testing.T) {
 		}
 	}
 	var forced, holders int
-	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE type = $1`, worlds.EventTypeHookForceClaimed).Scan(&forced); err != nil {
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE type = $1`, worlds.EventTypeHookDisposed).Scan(&forced); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_hook_tokens WHERE token = 'forced'`).Scan(&holders); err != nil {
 		t.Fatal(err)
 	}
 	if forced != claimants-1 || holders != 1 {
-		t.Fatalf("hook_force_claimed events = %d, token holders = %d", forced, holders)
+		t.Fatalf("hook_disposed events = %d, token holders = %d", forced, holders)
 	}
 }
 

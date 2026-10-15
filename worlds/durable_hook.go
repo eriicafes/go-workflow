@@ -9,7 +9,9 @@ import (
 )
 
 type (
-	// DurableHookOptions identifies one replay-local hook declaration.
+	// DurableHookOptions holds the arguments to DurableHook. An empty Token is
+	// generated on first execution and recorded. Force takes the token from a
+	// hook that owns it instead of failing with ErrHookConflict.
 	DurableHookOptions struct {
 		Execution    *Execution
 		Position     int
@@ -19,7 +21,11 @@ type (
 		Force        bool
 	}
 
-	// DurableHookResult is the replay state consumed by a workflow hook.
+	// DurableHookResult is the state of a hook at one replay. Done reports
+	// whether the hook has settled. On success Data holds the payload and
+	// ReceivedEventID the hook_received event. Err is ErrHookConflict (with
+	// ConflictRunID naming the run that owns the token), ErrHookNotActive,
+	// ErrHookForceClaimed, or a storage or decoding error.
 	DurableHookResult[T any] struct {
 		HookID          HookID
 		Token           string
@@ -31,11 +37,18 @@ type (
 	}
 )
 
-// DurableHook replays or creates one regular hook.
+// DurableHook creates the hook declared at options.Position, claiming its
+// token, or on replay returns its recorded state. It does not block, so the
+// caller suspends while Done is false.
 func DurableHook[T any](ctx context.Context, options DurableHookOptions) DurableHookResult[T] {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {
-		// First execution: persist the token that will resume this replay.
+		// On first execution, persist the token that will resume this replay.
+		// An empty token is generated here once, and replay reads it from the
+		// recorded event.
+		if options.Token == "" {
+			options.Token = NewHookToken()
+		}
 		hookID := NewHookID()
 		data, err := json.Marshal(hookCreatedData{
 			Position:     options.Position,
@@ -52,7 +65,12 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 			Data:          data,
 		}
 		eventCount := len(options.Execution.events)
-		claim, err := options.Execution.World().HooksClaim(ctx, HooksClaimInput{RunID: options.Execution.Run().RunID, Event: event, Options: EventsCreateOptions{EventCount: &eventCount}, Force: options.Force})
+		claim, err := options.Execution.World().HooksClaim(ctx, HooksClaimInput{
+			RunID:   options.Execution.Run().RunID,
+			Event:   event,
+			Options: EventsCreateOptions{EventCount: &eventCount},
+			Force:   options.Force,
+		})
 		if err != nil {
 			if errors.Is(err, ErrHookConflict) {
 				return createHookConflict[T](ctx, options, hookID)
@@ -97,7 +115,7 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 	}
 	hookID := HookID(event.CorrelationID)
 
-	// A received event after the declaration supplies the durable value.
+	// A received event after the declaration supplies the payload.
 	for _, event := range options.Execution.events[creationIndex+1:] {
 		if event.CorrelationID != string(hookID) {
 			continue
@@ -110,9 +128,11 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 			}
 			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Data: data, Done: true, ReceivedEventID: event.EventID}
 		case EventTypeHookDisposed:
+			var disposed HookDisposedEventData
+			if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil && disposed.ForceClaimedBy != nil {
+				return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Done: true, Err: ErrHookForceClaimed}
+			}
 			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Done: true, Err: ErrHookNotActive}
-		case EventTypeHookForceClaimed:
-			return DurableHookResult[T]{HookID: hookID, Token: createdData.Token, Done: true, Err: ErrHookForceClaimed}
 		}
 	}
 	return DurableHookResult[T]{HookID: hookID, Token: createdData.Token}

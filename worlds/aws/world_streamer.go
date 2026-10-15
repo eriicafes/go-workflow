@@ -206,9 +206,9 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 	return w.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
 
-// StreamsWriteMulti appends without a session. Concurrent direct writers
-// race on count and retry.
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
+	// Append without a session. Concurrent direct writers race on count and
+	// retry.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -248,9 +248,9 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 	return err
 }
 
-// StreamsGetChunks polls the stream with backoff from 50ms to 500ms while
-// waiting for chunks past the cursor.
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	// Poll the stream with backoff from 50ms to 500ms while waiting for chunks
+	// past the cursor.
 	start := 0
 	if input.Cursor != "" {
 		value, err := strconv.Atoi(input.Cursor)

@@ -1,7 +1,7 @@
 package vercelworld
 
 // Every mutation is one Lua script, so it is atomic over TCP and REST. Scripts
-// receive no KEYS: ARGV[1] is the key prefix and keys are derived as in
+// receive no KEYS. ARGV[1] is the key prefix and keys are derived as in
 // world_storage.go. Binary payloads are base64 text built in Go, and Go passes
 // any field parsed from event data in a JSON descriptor, so Lua only decodes
 // JSON that Go produced. Timestamps are Unix microseconds passed from Go.
@@ -27,8 +27,8 @@ local function rpush(key, values)
 end
 `
 
-// scriptCreateRun: ARGV prefix, runID, now, workflowName, input, record,
-// attribute key/value pairs...
+// scriptCreateRun takes ARGV prefix, runID, now, workflowName, input, record,
+// and attribute key/value pairs...
 var scriptCreateRun = newRedisScript(luaPrelude + `
 local id, now, wf = ARGV[2], ARGV[3], ARGV[4]
 local key = k('run', id)
@@ -44,14 +44,16 @@ redis.call('ZADD', P .. ':runs:wfstatus:pending:' .. wf, score, id)
 return {'ok'}
 `)
 
-// scriptAppend admits and appends events. ARGV: prefix, runID, now, mode
-// (append|batch|claim), delta start index (-1 for none), force flag, then one
-// JSON descriptor per event (see eventDescriptor). Changes are staged in
+// scriptAppend admits and appends events. Its ARGV are prefix, runID, now,
+// mode (append|batch|claim), delta start index (-1 for none), force flag, then
+// one JSON descriptor per event (see eventDescriptor). In claim mode the last
+// ARGV is the base64 data of the hook_disposed a forced claim appends. Changes are staged in
 // memory and written only after every event is admitted, so a rejected batch
 // writes nothing.
 //
 // append and claim return {'ok', slot, type, allocated, step, forcedRunID,
-// deltaStart, deltaRecords...}; batch returns {'ok', n, slot, type, step, ...}.
+// deltaStart, deltaRecords...}, while batch returns {'ok', n, slot, type,
+// step, ...}.
 var scriptAppend = newRedisScript(luaPrelude + `
 local now, mode, force = ARGV[3], ARGV[4], ARGV[6] == '1'
 local nowN = tonumber(now)
@@ -132,8 +134,9 @@ local function admit(c, d)
     local s = step(c, corr)
     if not s then return {err = 'step_not_startable'} end
     if t == 'step_started' then
-      if s.status == 'running' then return {replay = last(c, lastField(t, corr)) or 0} end
-      if s.status ~= 'pending' then return {err = 'step_not_startable'} end
+      -- A running step may be started again: its previous attempt's delivery
+      -- may have died, and each start records a new attempt.
+      if s.status ~= 'pending' and s.status ~= 'running' then return {err = 'step_not_startable'} end
     else
       if s.status == 'cancelled' then return {replay = last(c, lastField(t, corr)) or 0} end
       if terminal(s.status) then return {err = 'step_not_startable'} end
@@ -222,7 +225,7 @@ local function materialize(c, d, slot)
       end
       if not h.webhook or (not h.manual and h.rid) then complete(h, corr) end
     end
-  elseif t == 'hook_disposed' or t == 'hook_force_claimed' then
+  elseif t == 'hook_disposed' then
     local h = hook(corr)
     if h then release(h.token, corr) end
   end
@@ -334,7 +337,7 @@ if mode == 'claim' then
     if not oc or terminal(oc.run.status) then
       setOwner(token, nil)
     else
-      append(oc, {t = 'hook_force_claimed', c = id, r = cjson.encode({t = 'hook_force_claimed', c = id, at = now})})
+      append(oc, {t = 'hook_disposed', c = id, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[8], at = now})})
       forced = oc.id
     end
   end
@@ -355,8 +358,8 @@ for _, record in ipairs(records) do table.insert(out, record) end
 return out
 `)
 
-// scriptLoadRuns: ARGV prefix, runIDs... Returns per run {hash, attrs} as
-// flat field/value arrays; a missing run has an empty hash.
+// scriptLoadRuns takes ARGV prefix, runIDs... It returns per run {hash, attrs}
+// as flat field/value arrays. A missing run has an empty hash.
 var scriptLoadRuns = newRedisScript(luaPrelude + `
 local out = {}
 for i = 2, #ARGV do
@@ -365,7 +368,7 @@ end
 return out
 `)
 
-// scriptEventsAt: ARGV prefix, runID, slots... Returns the records.
+// scriptEventsAt takes ARGV prefix, runID, slots... It returns the records.
 var scriptEventsAt = newRedisScript(luaPrelude + `
 local out = {}
 for i = 3, #ARGV do table.insert(out, redis.call('LINDEX', k('events', ARGV[2]), tonumber(ARGV[i]) - 1) or '') end
@@ -381,7 +384,7 @@ local closed = redis.call('HGET', meta, 'closed') == '1'
 local session = redis.call('HGET', meta, 'session') or ''
 `
 
-// scriptStreamCreateSession: ARGV prefix, runID, name, sessionID.
+// scriptStreamCreateSession takes ARGV prefix, runID, name, sessionID.
 var scriptStreamCreateSession = newRedisScript(luaPrelude + luaStream + `
 if closed then return {'err', 'run_terminal'} end
 if session ~= '' then return {'err', 'stream_locked'} end
@@ -389,8 +392,8 @@ redis.call('HSET', meta, 'session', ARGV[4], 'seq', '0')
 return {'ok'}
 `)
 
-// scriptStreamWriteSession: ARGV prefix, runID, name, sessionID, sequence,
-// chunks...
+// scriptStreamWriteSession takes ARGV prefix, runID, name, sessionID,
+// sequence, chunks...
 var scriptStreamWriteSession = newRedisScript(luaPrelude + luaStream + `
 if closed or ARGV[4] == '' or session ~= ARGV[4] then return {'err', 'stream_locked'} end
 if tonumber(redis.call('HGET', meta, 'seq') or '0') ~= tonumber(ARGV[5]) then return {'err', 'stream_locked'} end
@@ -401,7 +404,8 @@ redis.call('HINCRBY', meta, 'seq', 1)
 return {'ok'}
 `)
 
-// scriptStreamCloseSession: ARGV prefix, runID, name, sessionID, close flag.
+// scriptStreamCloseSession takes ARGV prefix, runID, name, sessionID, close
+// flag.
 var scriptStreamCloseSession = newRedisScript(luaPrelude + luaStream + `
 if ARGV[4] == '' or session ~= ARGV[4] then return {'err', 'stream_locked'} end
 redis.call('HDEL', meta, 'session')
@@ -410,7 +414,8 @@ if ARGV[5] == '1' then redis.call('HSET', meta, 'closed', '1') end
 return {'ok'}
 `)
 
-// scriptStreamWrite: ARGV prefix, runID, name, chunks... for direct writes.
+// scriptStreamWrite takes ARGV prefix, runID, name, chunks... for direct
+// writes.
 var scriptStreamWrite = newRedisScript(luaPrelude + luaStream + `
 if closed or session ~= '' then return {'err', 'stream_locked'} end
 local values = {}
@@ -419,14 +424,14 @@ rpush(chunks, values)
 return {'ok'}
 `)
 
-// scriptStreamClose: ARGV prefix, runID, name.
+// scriptStreamClose takes ARGV prefix, runID, name.
 var scriptStreamClose = newRedisScript(luaPrelude + luaStream + `
 if session ~= '' then return {'err', 'stream_locked'} end
 redis.call('HSET', meta, 'closed', '1')
 return {'ok'}
 `)
 
-// scriptStreamRead: ARGV prefix, runID, name, start, count. Returns
+// scriptStreamRead takes ARGV prefix, runID, name, start, count. It returns
 // {closed, length, chunks...} without creating the stream.
 var scriptStreamRead = newRedisScript(luaPrelude + `
 local meta = k('stream', ARGV[2] .. ':' .. hex(ARGV[3]))
@@ -441,13 +446,15 @@ end
 return out
 `)
 
-// scriptQueuePut: ARGV prefix, messageID, record, NX|XX. Returns 1 when set.
+// scriptQueuePut takes ARGV prefix, messageID, record, NX|XX. It returns 1
+// when set.
 var scriptQueuePut = newRedisScript(luaPrelude + `
 if redis.call('SET', k('queue', ARGV[2]), ARGV[3], ARGV[4]) then return 1 end
 return 0
 `)
 
-// scriptQueueTake: ARGV prefix, messageID. Deletes and returns the record.
+// scriptQueueTake takes ARGV prefix, messageID. It deletes and returns the
+// record.
 var scriptQueueTake = newRedisScript(luaPrelude + `
 local key = k('queue', ARGV[2])
 local record = redis.call('GET', key)

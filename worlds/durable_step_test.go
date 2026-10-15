@@ -157,3 +157,51 @@ func TestTargetedStepErrorPanicIsRecordedAsStepFailure(t *testing.T) {
 	}
 	t.Fatal("missing step_failed event")
 }
+
+type redeliveredStepInput struct{}
+type redeliveredStepOutput struct{}
+
+func (redeliveredStepInput) Workflow(redeliveredStepOutput) {}
+
+func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
+	var executions atomic.Int32
+	runner := workflow.Use(func(ctx context.Context, _ redeliveredStepInput) (redeliveredStepOutput, error) {
+		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+			executions.Add(1)
+			return struct{}{}, nil
+		}, struct{}{})
+		return redeliveredStepOutput{}, err
+	})
+	world := testworld.NewManual(runner)
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, redeliveredStepInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	if err := runtime.Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+		t.Fatal(err)
+	}
+	var delivery worlds.QueueInput
+	for _, message := range world.QueuedMessages() {
+		if message.Input.StepID != nil {
+			delivery = message.Input
+		}
+	}
+	if delivery.StepID == nil {
+		t.Fatal("no step delivery queued")
+	}
+	// A delivery started the step and ended before recording its result, so
+	// the queue redelivers the step's message.
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: worlds.RunID(run.ID()), Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(*delivery.StepID)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
+	if err != nil || executions.Load() != 1 || step.Status != worlds.StatusCompleted || step.Attempt != 2 {
+		t.Fatalf("step = %#v executions=%d err=%v", step, executions.Load(), err)
+	}
+}

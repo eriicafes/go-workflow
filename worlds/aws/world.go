@@ -1,14 +1,6 @@
-// Package awsworld provides a World backed by DynamoDB, SQS, and EventBridge
-// Scheduler.
-//
-// All state lives in one DynamoDB table. Each run partition (RUN#<id>) holds
-// the run view (META, which also stores the event count), its events
-// (EVENT#<slot>), steps (STEP#<id>), completed-wait markers (WAIT#<id>), and
-// streams (STREAM#<name> and CHUNK#<name>#<index>). Hooks (HOOK#<id>), hook
-// tokens (TOKEN#<token>), and queue records (QUEUE#<id>) have their own
-// partitions. Appends use optimistic concurrency: a TransactWriteItems that
-// requires the event count read beforehand, so any number of processes can
-// share one table.
+// Package awsworld implements a World on DynamoDB, SQS, and EventBridge
+// Scheduler, for deployments on AWS Lambda or other AWS compute where any
+// number of functions and processes share one table.
 package awsworld
 
 import (
@@ -24,33 +16,41 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// Config identifies the AWS resources used by the World.
+// Config configures the AWS World.
 type Config struct {
 	// BaseURL is the absolute public URL of HTTP(world), including
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	// It is required.
 	BaseURL string
-	// TableName is the DynamoDB table created as described by CreateTable.
+	// TableName is the DynamoDB table, laid out as CreateTable creates it. It
+	// is required.
 	TableName string
-	// QueueURL is the SQS queue that delivers queue messages.
+	// QueueURL is the URL of the SQS standard queue that carries deliveries. It
+	// is required.
 	QueueURL string
-	// Scheduler delivers messages due more than 15 minutes in the future,
-	// beyond SQS's delay limit. Without it such messages are rejected.
+	// Scheduler, when set, delivers work due more than 15 minutes ahead, beyond
+	// the SQS delay limit. Without it, queueing such a delivery returns an
+	// error.
 	Scheduler *SchedulerConfig
 }
 
-// SchedulerConfig configures EventBridge Scheduler for long delays.
+// SchedulerConfig configures EventBridge Scheduler to deliver work due more
+// than 15 minutes ahead. Each such delivery gets a one-time schedule that
+// sends it to the SQS queue when it is due.
 type SchedulerConfig struct {
-	// Client creates and deletes one-time schedules.
+	// Client creates and deletes schedules. It is required.
 	Client *scheduler.Client
-	// Group is the schedule group. An empty value uses "default".
+	// Group is the schedule group. Empty uses "default".
 	Group string
-	// TargetARN is the ARN of the SQS queue at QueueURL.
+	// TargetARN is the ARN of the SQS queue at Config.QueueURL. It is required.
 	TargetARN string
-	// RoleARN is the IAM role Scheduler assumes to send to TargetARN.
+	// RoleARN is the IAM role Scheduler assumes to send to TargetARN. It is
+	// required.
 	RoleARN string
 }
 
-// World is a multi-process World stored in DynamoDB.
+// World is the AWS World. It is safe for concurrent use, and any number of
+// Worlds in any number of processes may share one table.
 type World struct {
 	config    Config
 	dynamo    dynamoAPI
@@ -58,8 +58,10 @@ type World struct {
 	scheduler schedulerAPI
 }
 
-// New returns a World using the supplied clients, which carry the region,
-// credentials, retry policy, and endpoints.
+// New returns a World that uses the supplied clients, which carry the region,
+// credentials, retry policy, and endpoints. It does not contact AWS. It returns
+// an error when a client, BaseURL, TableName, or QueueURL is missing, or when
+// Scheduler lacks its client, target ARN, or role ARN.
 func New(config Config, dynamoClient *dynamodb.Client, sqsClient *sqs.Client) (*World, error) {
 	if dynamoClient == nil || sqsClient == nil {
 		return nil, errors.New("workflow/aws: DynamoDB and SQS clients are required")
@@ -69,35 +71,6 @@ func New(config Config, dynamoClient *dynamodb.Client, sqsClient *sqs.Client) (*
 		schedulerClient = config.Scheduler.Client
 	}
 	return newWorld(config, dynamoClient, sqsClient, schedulerClient)
-}
-
-// Close is a no-op; the World holds no resources beyond the supplied clients.
-func (*World) Close() {}
-
-func (w *World) BaseURL() string             { return w.config.BaseURL }
-func (*World) SpecVersion() int              { return worlds.SpecVersion }
-func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
-func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
-}
-
-// HTTP returns the RPC and webhook endpoints under /v1/workflow.
-func HTTP(world *World) http.Handler { return worlds.HTTPHandler(world, nil, "") }
-
-// RPC returns only the CBOR RPC endpoint.
-func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
-
-// Webhook returns only the token webhook endpoint.
-func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
-
-// Queue returns a Lambda handler for an SQS event source mapping configured
-// with ReportBatchItemFailures. Failed records are reported individually so
-// SQS redelivers only those.
-func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
-	runtime := worlds.NewRuntime(world, runners)
-	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
-		return world.consume(ctx, runtime, event), nil
-	}
 }
 
 func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, schedulerClient schedulerAPI) (*World, error) {
@@ -113,4 +86,36 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 		return nil, errors.New("workflow/aws: scheduler requires a client, target ARN, and role ARN")
 	}
 	return &World{config: config, dynamo: dynamoClient, sqs: sqsClient, scheduler: schedulerClient}, nil
+}
+
+// Close does nothing, because the World holds no resources beyond the
+// supplied clients, which the caller keeps owning.
+func (*World) Close()                        {}
+func (w *World) BaseURL() string             { return w.config.BaseURL }
+func (*World) SpecVersion() int              { return worlds.SpecVersion }
+func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
+func (*World) Capabilities() worlds.Capabilities {
+	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+}
+
+// HTTP returns a handler serving the RPC and webhook endpoints under
+// /v1/workflow. It does not authenticate requests.
+func HTTP(world *World) http.Handler { return worlds.HTTPHandler(world, "") }
+
+// RPC returns a handler serving only the RPC endpoint.
+func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
+
+// Webhook returns a handler serving only the webhook endpoint, authorized by
+// the hook token in its URL.
+func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
+
+// Queue returns the SQS Lambda handler, which executes deliveries for the
+// workflows of runners. Attach it through an SQS event source mapping with
+// ReportBatchItemFailures enabled. It reports each failed delivery
+// individually, so SQS redelivers only those.
+func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
+	runtime := worlds.NewRuntime(world, runners)
+	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
+		return world.consume(ctx, runtime, event), nil
+	}
 }

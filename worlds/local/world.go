@@ -1,6 +1,7 @@
-// Package localworld provides a durable, single-process World backed by JSON
-// files. Each run, event, step, hook, token, stream chunk, and queued delivery
-// is its own record, and runs/<id>.json is the commit point for every append.
+// Package localworld implements a World on JSON files in a local directory,
+// for development and single-process deployments. It delivers queued work
+// in-process and keeps every run across restarts. Only one process may use a
+// directory at a time.
 package localworld
 
 import (
@@ -17,22 +18,26 @@ import (
 const defaultBaseURL = "http://localhost:3000/v1/workflow"
 
 var (
+	// ErrNotStarted is returned by World methods called before Start, and by
+	// Clear on a World that is not started.
 	ErrNotStarted = errors.New("workflow/local: world is not started")
-	ErrClosed     = errors.New("workflow/local: world is closed")
+	// ErrClosed is returned by World methods called after Close or Clear.
+	ErrClosed = errors.New("workflow/local: world is closed")
 )
 
-// Config configures a local World.
+// Config configures the local World.
 type Config struct {
-	// Dir is the storage directory used by Open.
+	// Dir is the storage directory. It is required by Open and ignored by New.
 	Dir string
-	// BaseURL is the public URL where HTTP is mounted. It defaults to
-	// http://localhost:3000/v1/workflow.
+	// BaseURL is the absolute public URL of HTTP(world), including
+	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	// Empty uses http://localhost:3000/v1/workflow.
 	BaseURL string
 }
 
-// World stores workflow state as JSON records under one directory. Only one
-// started World may use a directory at a time. Open owns its root; New borrows
-// a root supplied by its caller.
+// World is the local World. It stores events, run, step, and hook views,
+// streams, and queued deliveries as JSON files under one directory, and only
+// one started World may use a directory at a time.
 type World struct {
 	// mu guards the files and lifecycle fields. Mutations hold it exclusively,
 	// so readers only ever observe committed state.
@@ -57,8 +62,10 @@ type World struct {
 	queueWake chan struct{}
 }
 
-// Open creates config.Dir with private permissions and returns a World that
-// owns it. Call Start before using the World.
+// Open creates config.Dir with private permissions if needed and returns a
+// World that executes deliveries for the workflows of runners. The World owns the
+// directory handle and closes it on Close. Open reads no state, so call Start
+// before using the World.
 func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 	if config.Dir == "" {
 		return nil, errors.New("workflow/local: storage directory is required")
@@ -82,8 +89,10 @@ func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 	return world, nil
 }
 
-// New creates a World which borrows root; the caller closes root after Close.
-// config.Dir is ignored. Call Start before using the World.
+// New returns a World stored in root that executes deliveries for the workflows
+// in runners. The caller keeps owning root and closes it after Close.
+// config.Dir is ignored. New reads no state, so call Start before using the
+// World.
 func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error) {
 	if root == nil {
 		return nil, errors.New("workflow/local: nil storage root")
@@ -101,10 +110,12 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 	return world, nil
 }
 
-// Start takes the exclusive storage lock, validates the storage version,
-// recovers interrupted writes, and begins delivering persisted queue items.
-// Cancelling ctx stops delivery. It returns ErrInUse when another World holds
-// the directory. Every other method requires a started World.
+// Start locks the directory, checks its storage version, recovers writes
+// interrupted by a crash, and begins delivering queued work in the background.
+// It returns once delivery has begun, and cancelling ctx stops delivery. Every
+// other World method returns ErrNotStarted until Start succeeds. Start returns
+// ErrInUse when another World, in this or another process, holds the
+// directory, ErrClosed after Close, and nil when the World is already started.
 func (w *World) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -144,8 +155,11 @@ func (w *World) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close stops delivery, waits for in-flight deliveries, releases the storage
-// lock, and closes a root opened by Open. Interrupted deliveries stay queued.
+// Close stops delivery, waits for in-flight deliveries to return, releases the
+// directory lock, and closes the directory handle when Open created it.
+// Interrupted deliveries stay queued and run again after the next Start.
+// Later calls to World methods return ErrClosed, and closing twice returns
+// nil.
 func (w *World) Close() error {
 	if !w.stop(false) {
 		return nil
@@ -153,9 +167,9 @@ func (w *World) Close() error {
 	return w.release()
 }
 
-// Clear stops delivery, removes all persisted state while holding the storage
-// lock, writes a fresh version record, and closes the World. Open a new World
-// before submitting further work.
+// Clear stops delivery, deletes every run, hook, stream, and queued delivery in
+// the directory, and closes the World. It returns ErrNotStarted unless the
+// World is started. Open a new World on the directory to continue.
 func (w *World) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -262,11 +276,13 @@ func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true}
 }
 
-// HTTP returns the RPC and webhook endpoints under /v1/workflow.
-func HTTP(world *World) http.Handler { return worlds.HTTPHandler(world, nil, "") }
+// HTTP returns a handler serving the RPC and webhook endpoints under
+// /v1/workflow. It does not authenticate requests.
+func HTTP(world *World) http.Handler { return worlds.HTTPHandler(world, "") }
 
-// RPC returns the CBOR RPC endpoint only.
+// RPC returns a handler serving only the RPC endpoint.
 func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 
-// Webhook returns the token webhook endpoint only.
+// Webhook returns a handler serving only the webhook endpoint, authorized by
+// the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }

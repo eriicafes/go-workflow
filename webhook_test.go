@@ -88,7 +88,7 @@ func TestWebhookUsesDurableHookAndPublicHandler(t *testing.T) {
 	}
 	hook := waitForWebhook(t, ctx, world)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString(`{"Value":42}`)))
+	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString(`{"Value":42}`)))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}
@@ -129,7 +129,7 @@ func TestManualWebhookRespondWithWritesTheDurableResponse(t *testing.T) {
 	}
 	hook := waitForWebhook(t, ctx, world)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString(`{"Value":42}`)))
+	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString(`{"Value":42}`)))
 	if response.Code != http.StatusCreated || response.Header().Get("X-Workflow") != "done" || response.Body.String() != "accepted" {
 		t.Fatalf("manual response = %d %q %q", response.Code, response.Header().Get("X-Workflow"), response.Body.String())
 	}
@@ -165,7 +165,7 @@ func TestWebhookRequestReconstructsMethodHeadersAndBody(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPatch, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString("request body"))
 	request.Header.Set("X-Request-ID", "request-1")
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, request)
+	worlds.HTTPHandler(world, "").ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}
@@ -277,7 +277,7 @@ func TestWebhookAwaitRejectsMalformedJSON(t *testing.T) {
 	}
 	hook := waitForWebhook(t, ctx, world)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(world, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString("not JSON")))
+	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString("not JSON")))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}

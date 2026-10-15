@@ -20,9 +20,9 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	return decodeStep(input.RunID, input.StepID, raw, input.ResolveData)
 }
 
-// StepsList pages steps in creation order; the cursor is the creation slot of
-// the last step returned.
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	// Pages are in creation order, and the cursor is the creation slot of the
+	// last step returned.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}

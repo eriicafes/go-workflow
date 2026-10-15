@@ -1,4 +1,33 @@
-// Package workflow makes ordinary named Go functions durable workflows.
+// Package workflow runs durable workflows whose runners are ordinary Go
+// functions.
+//
+// A workflow is a struct type whose Workflow(Out) method declares the
+// workflow's output. Its package path and type name are the workflow name,
+// and a value of it is the input of a run, so code can Start a workflow from
+// the type alone. A runner executes the workflow. It is a function
+// func(context.Context, In) (Out, error) registered with Use, and it calls
+// steps through Step, Background, Map, and All. Steps do the real work and
+// side effects.
+//
+// Start begins a run of a workflow and returns a Run handle. Every run is
+// recorded in a World, the backend that stores its history, queues its
+// deliveries, and holds its streams. A run executes in one of two contexts,
+// as in the Workflow SDK. In workflow context, the runner's own code executes
+// as a flow, which replays the runner from the beginning, records the
+// operations it starts (steps, timers, hooks, webhooks, and child runs),
+// queues the steps it needs, and records the run's result once the runner
+// returns. In step context, a step function executes as a step, which replays
+// the runner up to that step and calls the step function. Operations return
+// promises. Once an
+// operation is recorded, replay returns its recorded result instead of running
+// it again, and awaiting a promise that has not settled suspends the run until
+// it does. A runner must therefore be deterministic. It does side effects only
+// through steps and reads time only through Now. Steps may retry and are
+// executed at least once, so step functions should be idempotent. Package
+// check reports runners that break these rules.
+//
+// Code outside a run uses a Client, carried in a context by NewContext or
+// Middleware, to start, read, cancel, and resume runs.
 package workflow
 
 import (
@@ -7,127 +36,276 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"reflect"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type (
-	// World is the worker storage, queue, and stream protocol.
+	// World is the backend a run is recorded in. It provides storage, a
+	// delivery queue, and streams.
 	World = worlds.World
-	// Status identifies a materialized run or step state.
-	Status = worlds.Status
+	// Client is the API for starting, reading, cancelling, and resuming runs,
+	// and for reading and writing their streams, from outside a run.
+	Client = worlds.Client
 )
 
+// NewClient returns a Client that calls world directly, in the same process.
+func NewClient(world World) Client { return worlds.NewClient(world) }
+
+// NewHTTPClient returns a Client that calls a World served by
+// worlds.HTTPHandler at endpoint, an absolute HTTP URL. It panics when
+// endpoint is not one. Requests use the last of clients, or
+// http.DefaultClient when none is given.
+func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
+	return worlds.NewHTTPClient(endpoint, clients...)
+}
+
+// Status is the state of a run or step.
+type Status = worlds.Status
+
 const (
-	StatusPending   = worlds.StatusPending
-	StatusRunning   = worlds.StatusRunning
+	// StatusPending means the run or step is recorded but has not started.
+	StatusPending = worlds.StatusPending
+	// StatusRunning means the run or step has started and has not finished.
+	StatusRunning = worlds.StatusRunning
+	// StatusCompleted means the run or step finished with an output.
 	StatusCompleted = worlds.StatusCompleted
-	StatusFailed    = worlds.StatusFailed
+	// StatusFailed means the run or step finished with an error.
+	StatusFailed = worlds.StatusFailed
+	// StatusCancelled means the run or step was cancelled before it finished.
 	StatusCancelled = worlds.StatusCancelled
 )
 
-// workflow is a marker for a Go type that can start a workflow.
+// workflow is satisfied by a workflow, a struct type whose Workflow(Out)
+// method declares the workflow's output type.
 type workflow[Out any] interface{ Workflow(Out) }
 
-// Run names a root workflow execution.
+// Run is a handle to a run of a workflow whose output type is Out. Start and
+// Get return one. A Run started in workflow context is a child run. In
+// workflow context, every Run method reads or changes the run once in a step
+// and replay returns the recorded result, so a method does not wait for the run
+// to finish. Await returns ErrRunNotFinished for a run that had not finished
+// when it was called. To wait for a child run, create a hook and have the
+// child resume it. Run implements Promise.
 type Run[Out any] struct {
 	id     worlds.RunID
 	client Client
 }
 
+// ID returns the run ID.
 func (r *Run[Out]) ID() string { return string(r.id) }
 
+// Status returns the current status of the run. It returns
+// worlds.ErrRunNotFound when the run does not exist.
 func (r *Run[Out]) Status(ctx context.Context) (Status, error) {
-	run, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
+	var status Status
+	var err error
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		status, err = Step(ctx, runStatus, r.id)
+	} else {
+		status, err = runStatus(NewContext(ctx, r.client), r.id)
+	}
+	if err == nil && status == "" {
+		return "", worlds.ErrRunNotFound
+	}
+	return status, err
+}
+
+func runStatus(ctx context.Context, runID worlds.RunID) (Status, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return "", nil
+	}
 	return run.Status, err
 }
 
-// Exists reports whether this run is present in its World.
+// Exists reports whether the run is recorded in its World.
 func (r *Run[Out]) Exists(ctx context.Context) (bool, error) {
-	_, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		return Step(ctx, runExists, r.id)
+	}
+	return runExists(NewContext(ctx, r.client), r.id)
+}
+
+func runExists(ctx context.Context, runID worlds.RunID) (bool, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	_, err = client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// WorkflowName returns the workflow identity recorded when this run started.
+// WorkflowName returns the name of the workflow the run executes. It returns
+// worlds.ErrRunNotFound when the run does not exist.
 func (r *Run[Out]) WorkflowName(ctx context.Context) (string, error) {
-	run, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
+	var name string
+	var err error
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		name, err = Step(ctx, runWorkflowName, r.id)
+	} else {
+		name, err = runWorkflowName(NewContext(ctx, r.client), r.id)
+	}
+	if err == nil && name == "" {
+		return "", worlds.ErrRunNotFound
+	}
+	return name, err
+}
+
+func runWorkflowName(ctx context.Context, runID worlds.RunID) (string, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return "", nil
+	}
 	return run.WorkflowName, err
 }
 
-// WakeOptions narrows Wake to the durable waits identified by correlation ID.
-// With no IDs, Wake completes every pending wait in the run.
+// WakeOptions holds the options to WakeUp.
 type WakeOptions struct {
+	// CorrelationIDs limits WakeUp to the waits with these IDs. When empty,
+	// WakeUp settles every pending wait in the run.
 	CorrelationIDs []string
 }
 
-// Wake completes pending durable waits in this run. When CorrelationIDs are
-// supplied, it completes only those wait IDs.
+// WakeUp settles the run's pending timers early. It queues a delivery so the
+// run resumes, and returns the number of timers it settled. A settled Timeout
+// does not cancel the run.
 func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, error) {
 	option := WakeOptions{}
 	if len(options) != 0 {
 		option = options[len(options)-1]
 	}
-	return r.client.RunsWake(ctx, worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		return Step(ctx, runWakeUp, worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
+	}
+	return runWakeUp(NewContext(ctx, r.client), worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
 }
 
-func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
-	run, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
+func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, error) {
+	client, err := clientFromContext(ctx)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	if !run.Status.Terminal() {
-		return false, nil
-	}
-	if run.Status == worlds.StatusCompleted {
-		return true, nil
-	}
-	if len(run.Error) != 0 {
-		return true, fmt.Errorf("workflow: run failed: %s", run.Error)
-	}
-	return true, ErrRunCancelled
+	return client.RunsWake(ctx, input)
 }
 
+// Done reports whether the run has finished. It does not block. When the run
+// failed, Done returns true and the run's error. When it was cancelled, Done
+// returns true and ErrRunCancelled.
+func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
+	var run worlds.Run
+	var err error
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		run, err = Step(ctx, runDone, r.id)
+	} else {
+		run, err = runDone(NewContext(ctx, r.client), r.id)
+	}
+	switch {
+	case err != nil:
+		return false, err
+	case run.RunID == "":
+		return false, worlds.ErrRunNotFound
+	case !run.Status.Terminal():
+		return false, nil
+	case run.Status == worlds.StatusCompleted:
+		return true, nil
+	case len(run.Error) != 0:
+		return true, fmt.Errorf("workflow: run failed: %s", run.Error)
+	default:
+		return true, ErrRunCancelled
+	}
+}
+
+func runDone(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return worlds.Run{}, err
+	}
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return worlds.Run{}, nil
+	}
+	return run, err
+}
+
+// Await returns the output of the run once it has finished. In a run, in
+// workflow or step context, it reads the run once and returns ErrRunNotFinished
+// when the run had not finished. Outside a run, it blocks until the run
+// finishes or ctx is done. It returns the run's error when the run failed and
+// ErrRunCancelled when it was cancelled.
 func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 	var zero Out
-	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		wait := worlds.DurableRunWait(ctx, worlds.DurableRunWaitOptions{Execution: execution, Position: execution.NextPosition(), RunID: r.id})
-		if wait.Err != nil {
-			return zero, wait.Err
-		}
-		if !wait.Done {
-			execution.Suspend()
-		}
-		run, err := r.client.RunsGet(ctx, worlds.RunsGetInput{RunID: r.id})
-		if err != nil {
-			return zero, err
-		}
-		if run.Status == worlds.StatusCompleted {
-			if err := json.Unmarshal(run.Output, &zero); err != nil {
-				return zero, fmt.Errorf("workflow: decode run output: %w", err)
-			}
-			return zero, nil
-		}
-		if len(run.Error) != 0 {
-			return zero, fmt.Errorf("workflow: run failed: %s", run.Error)
-		}
+	var run worlds.Run
+	var err error
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		run, err = Step(ctx, runAwait, r.id)
+	} else {
+		run, err = runAwait(NewContext(ctx, r.client), r.id)
+	}
+	switch {
+	case err != nil:
+		return zero, err
+	case run.RunID == "":
+		return zero, worlds.ErrRunNotFound
+	case !run.Status.Terminal():
+		return zero, ErrRunNotFinished
+	case run.Status == worlds.StatusCompleted:
+	case len(run.Error) != 0:
+		return zero, fmt.Errorf("workflow: run failed: %s", run.Error)
+	default:
 		return zero, ErrRunCancelled
 	}
-	raw, err := r.blockingAwait(ctx)
-	if err != nil {
-		return zero, err
-	}
-	if err := json.Unmarshal(raw, &zero); err != nil {
+	if err := json.Unmarshal(run.Output, &zero); err != nil {
 		return zero, fmt.Errorf("workflow: decode run output: %w", err)
 	}
 	return zero, nil
 }
 
+func runAwait(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return worlds.Run{}, err
+	}
+	if _, ok := worlds.ExecutionFromContext(ctx); ok {
+		run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+		if errors.Is(err, worlds.ErrRunNotFound) {
+			return worlds.Run{}, nil
+		}
+		run.Input = nil
+		return run, err
+	}
+	for {
+		run, err := client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 100 * time.Millisecond})
+		if err != nil || run.Status.Terminal() {
+			return run, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return worlds.Run{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// Unwrap is like Await but panics if Await returns an error.
 func (r *Run[Out]) Unwrap(ctx context.Context) Out {
 	value, err := r.Await(ctx)
 	if err != nil {
@@ -136,68 +314,63 @@ func (r *Run[Out]) Unwrap(ctx context.Context) Out {
 	return value
 }
 
-func (r *Run[Out]) blockingAwait(ctx context.Context) ([]byte, error) {
-	var run worlds.Run
-	for !run.Status.Terminal() {
-		value, err := r.client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: r.id, Timeout: 100 * time.Millisecond})
-		if err != nil {
-			return nil, err
-		}
-		run = value
-		if run.Status.Terminal() {
-			break
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	if run.Status == worlds.StatusCompleted {
-		return run.Output, nil
-	}
-	if len(run.Error) != 0 {
-		return nil, fmt.Errorf("workflow: run failed: %s", run.Error)
-	}
-	return nil, ErrRunCancelled
-}
-
+// Cancel cancels the run. Cancelling a run that has already finished is a
+// no-op.
 func (r *Run[Out]) Cancel(ctx context.Context) error {
-	err := r.client.RunsCancel(ctx, worlds.ClientRunsCancelInput{RunID: r.id})
-	if errors.Is(err, worlds.ErrRunTerminal) {
-		return nil
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		_, err := Step(ctx, runCancel, r.id)
+		return err
 	}
+	_, err := runCancel(NewContext(ctx, r.client), r.id)
 	return err
 }
 
-// Reader opens this run's stream from application or durable-step code.
+func runCancel(ctx context.Context, runID worlds.RunID) (struct{}, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return struct{}{}, err
+	}
+	err = client.RunsCancel(ctx, worlds.ClientRunsCancelInput{RunID: runID})
+	if errors.Is(err, worlds.ErrRunTerminal) {
+		return struct{}{}, nil
+	}
+	return struct{}{}, err
+}
+
+// Reader returns a reader for the run's stream from its beginning. Reads block
+// until data is written and return io.EOF once the stream is closed. Reader is
+// for step context and for use outside a run. It returns ErrNotInStep in
+// workflow context.
 func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (io.Reader, error) {
 	return r.ReaderAt(ctx, 0, options...)
 }
 
-// ReaderAt opens this run's stream at a byte offset. Negative offsets are
+// ReaderAt is like Reader but starts at byte offset. A negative offset is
 // relative to the current end of the stream.
 func (r *Run[Out]) ReaderAt(ctx context.Context, offset int64, options ...ReaderOption) (io.Reader, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return nil, ErrNoWorkflow
+		return nil, ErrNotInStep
 	}
 	opts := readerOption(options)
 	return newStreamReader(ctx, r.client, r.id, opts.Name, offset), nil
 }
 
-// Writer obtains a writer for this run's stream from application code. Close
-// closes the stream; the returned release function only releases this writer.
+// Writer returns a writer for the run's stream, for step context and for use
+// outside a run. It waits until no other writer holds the stream name. Close
+// closes the stream for all writers, while the returned release function only
+// gives up this writer's hold so another writer can continue the stream.
+// Writer returns ErrNotInStep in workflow context.
 func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return nil, nil, ErrNoWorkflow
+		return nil, nil, ErrNotInStep
 	}
 	opts := writerOption(options)
 	return newStreamWriter(ctx, r.client, r.id, opts.Name, string(worlds.NewStreamID()))
 }
 
-// Get returns a handle for an existing workflow. The handle is bound to the
-// client in ctx.
+// Get returns a handle to the run with runID, using the Client in ctx. It does
+// not check that the run exists (see Run.Exists). It returns ErrNoClient when
+// ctx carries no Client and does not belong to a run.
 func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 	client, err := clientFromContext(ctx)
 	if err != nil {
@@ -206,7 +379,13 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 	return &Run[Out]{id: worlds.RunID(runID), client: client}, nil
 }
 
-// Start creates and queues a new root workflow.
+// Start starts a run of workflow In with input and returns a handle to the
+// run without waiting for it. It needs only the workflow type, not its runner.
+// Called in workflow context, it starts a child run in a step, as in the
+// Workflow SDK, so replay returns the same run. The child run carries
+// worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Called
+// elsewhere, it uses the Client in ctx and returns ErrNoClient when ctx
+// carries none.
 func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
 	name := typeIdentity[In]()
 	client, err := clientFromContext(ctx)
@@ -217,8 +396,8 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out],
 	if err != nil {
 		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
 	}
-	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := worlds.DurableRunStart(ctx, worlds.DurableRunStartOptions{Execution: execution, Position: execution.NextPosition(), WorkflowName: name, Input: raw})
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		id, err := Step(ctx, startChild, childStartInput{WorkflowName: name, Input: raw})
 		if err != nil {
 			return nil, err
 		}
@@ -231,7 +410,53 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out],
 	return &Run[Out]{id: id, client: client}, nil
 }
 
-// Use converts a typed workflow function into a runner.
+type childStartInput struct {
+	WorkflowName string
+	Input        json.RawMessage
+}
+
+// startChild is the step Start uses in workflow context. It creates the child
+// run and queues its first delivery. The child run ID is derived from the
+// step ID, so a retried step finds the run an earlier attempt created.
+func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error) {
+	execution, ok := worlds.ExecutionFromContext(ctx)
+	if !ok {
+		return "", ErrNoWorkflow
+	}
+	parent := execution.Run()
+	root := parent.Attributes[worlds.RootRunIDAttribute]
+	if root == "" {
+		root = string(parent.RunID)
+	}
+	id := worlds.RunID("wrun_" + strings.TrimPrefix(StepID(ctx), "step_"))
+	_, err := execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
+		RunID:        id,
+		WorkflowName: input.WorkflowName,
+		Input:        input.Input,
+		Attributes: map[string]string{
+			worlds.ParentRunIDAttribute: string(parent.RunID),
+			worlds.RootRunIDAttribute:   root,
+		},
+	})
+	if errors.Is(err, worlds.ErrRunAlreadyExists) {
+		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id})
+		if err != nil || run.Status != worlds.StatusPending {
+			return id, err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, IdempotencyKey: string(id)}); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// Use registers fn as the runner of workflow In. Pass the returned Runner to
+// worlds.Runners so the runtime can execute the workflow. The workflow name is
+// the package path and type name of In. fn replays on every delivery, so it
+// must be deterministic. It does side effects only through steps and reads
+// time only through Now.
 func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
 	name := typeIdentity[In]()
 	return worlds.NewRunner(name, func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
@@ -249,275 +474,6 @@ func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) w
 		}
 		return encoded, nil
 	})
-}
-
-func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error) {
-	return Background(ctx, fn, input, options...).Await(ctx)
-}
-
-func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) Promise[Out] {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return errorPromise[Out](ErrNoWorkflow)
-	}
-	option := stepOptions(options)
-	durable := worlds.DurableStep(ctx, worlds.DurableStepOptions{
-		Execution:  execution,
-		Position:   execution.NextPosition(),
-		Name:       functionIdentity(fn),
-		MaxRetries: option.MaxRetries,
-		RetryAfter: func(cause error, attempt int) *time.Time {
-			return stepRetryAfter(cause, option, attempt)
-		},
-	}, fn, input)
-	return &promise[Out]{
-		data:      durable.Data,
-		done:      durable.Done,
-		err:       durable.Err,
-		execution: execution,
-		stepID:    durable.StepID,
-	}
-}
-
-func Sleep(ctx context.Context, duration time.Duration) error {
-	_, err := Timer(ctx, duration).Await(ctx)
-	return err
-}
-
-// Timer returns a durable result that becomes ready after duration.
-func Timer(ctx context.Context, duration time.Duration) Promise[struct{}] {
-	return timer(ctx, duration, false)
-}
-
-// Timeout returns a durable timer that cancels its containing run when it
-// becomes ready.
-func Timeout(ctx context.Context, duration time.Duration) Promise[struct{}] {
-	return timer(ctx, duration, true)
-}
-
-func timer(ctx context.Context, duration time.Duration, cancel bool) Promise[struct{}] {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return errorPromise[struct{}](ErrNoWorkflow)
-	}
-	wait := worlds.DurableWait(ctx, worlds.DurableWaitOptions{
-		Execution: execution,
-		Position:  execution.NextPosition(),
-		DueAt:     time.Now().Add(duration),
-		Cancel:    cancel,
-	})
-	return &promise[struct{}]{
-		done:      wait.Done,
-		err:       wait.Err,
-		execution: execution,
-		waitID:    wait.WaitID,
-		messageID: wait.QueueMessageID,
-	}
-}
-
-// OnRollback queues fn as a compensation if this workflow later fails. Registered
-// compensations run in reverse registration order before the failure is final.
-func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions) error {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return ErrNoWorkflow
-	}
-	name := rollbackFunctionIdentity(fn)
-	option := stepOptions(options)
-	execution.AddRollback(func(ctx context.Context, execution *worlds.Execution) error {
-		position := execution.NextPosition()
-		result := worlds.DurableStep(ctx, worlds.DurableStepOptions{
-			Execution:  execution,
-			Position:   position,
-			Name:       name,
-			MaxRetries: option.MaxRetries,
-			RetryAfter: func(cause error, attempt int) *time.Time {
-				return stepRetryAfter(cause, option, attempt)
-			},
-			Rollback: true,
-		}, func(ctx context.Context, value In) (struct{}, error) {
-			return struct{}{}, fn(ctx, input)
-		}, input)
-		if result.Done {
-			return nil
-		}
-		if result.Err != nil {
-			return result.Err
-		}
-		execution.Suspend()
-		return nil
-	})
-	return nil
-}
-
-// Now returns the time captured by a completed inline durable step named now.
-func Now(ctx context.Context) (time.Time, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return time.Time{}, ErrNoWorkflow
-	}
-	result := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
-		Execution: execution,
-		Position:  execution.NextPosition(),
-		Name:      "now",
-	}, func(context.Context) (time.Time, error) {
-		return time.Now().UTC(), nil
-	})
-	return result.Data, result.Err
-}
-
-// Map starts one durable step for each input.
-func Map[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) []Promise[Out] {
-	results := make([]Promise[Out], len(inputs))
-	for index, input := range inputs {
-		results[index] = Background(ctx, step, input)
-	}
-	return results
-}
-
-// All waits for every mapped step and returns their outputs in input order.
-func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) ([]Out, error) {
-	return Join(ctx, Map(ctx, step, inputs)...)
-}
-
-// Join waits for every result in order. A result may be either a durable step
-// from this run or a Run handle for another workflow. Pending results suspend
-// the current replay; their terminal transitions must arrange a later queue
-// delivery for the waiting execution.
-func Join[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return nil, ErrNoWorkflow
-	}
-	values := make([]T, len(results))
-	for index, result := range results {
-		done, err := result.Done(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !done {
-			execution.Suspend()
-		}
-		value, err := result.Await(ctx)
-		if err != nil {
-			return nil, err
-		}
-		values[index] = value
-	}
-	return values, nil
-}
-
-// JoinSettled waits for every promise. Individual promise failures do not
-// cause the join to fail; callers can inspect each promise afterwards.
-func JoinSettled[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return nil, ErrNoWorkflow
-	}
-	values := make([]T, len(results))
-	for index, result := range results {
-		done, _ := result.Done(ctx)
-		if !done {
-			execution.Suspend()
-		}
-		value, _ := result.Await(ctx)
-		values[index] = value
-	}
-	return values, nil
-}
-
-// Cancel durably cancels every promise. Supplying no promises is
-// a successful no-op.
-func Cancel[T any](ctx context.Context, results ...Promise[T]) error {
-	for _, result := range results {
-		if err := result.Cancel(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Select waits for the first promise to settle, returning that exact promise.
-func Select[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
-	return selectPromise(ctx, false, results...)
-}
-
-// SelectOk waits for the first successfully completed promise. It ignores
-// failed promises while another promise can still succeed.
-func SelectOk[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
-	return selectPromise(ctx, true, results...)
-}
-
-// SelectWithCancel returns the first settled promise and cancels every other
-// supplied promise.
-func SelectWithCancel[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
-	return selectWithCancel(ctx, false, results...)
-}
-
-// SelectOkWithCancel returns the first successful promise and cancels every
-// other supplied promise.
-func SelectOkWithCancel[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
-	return selectWithCancel(ctx, true, results...)
-}
-
-func selectPromise[T any](ctx context.Context, successful bool, results ...Promise[T]) (Promise[T], error) {
-	index, err := selectPromiseIndex(ctx, successful, results...)
-	if index < 0 {
-		return nil, err
-	}
-	return results[index], err
-}
-
-func selectPromiseIndex[T any](ctx context.Context, successful bool, results ...Promise[T]) (int, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return -1, ErrNoWorkflow
-	}
-	var firstErr error
-	pending := false
-	for index, result := range results {
-		done, err := result.Done(ctx)
-		if !done {
-			pending = true
-			continue
-		}
-		if !successful || err == nil {
-			return index, err
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if pending {
-		execution.Suspend()
-	}
-	return -1, firstErr
-}
-
-func selectWithCancel[T any](ctx context.Context, successful bool, results ...Promise[T]) (Promise[T], error) {
-	index, err := selectPromiseIndex(ctx, successful, results...)
-	if index < 0 {
-		return nil, err
-	}
-	winner := results[index]
-	for resultIndex, result := range results {
-		if resultIndex == index {
-			continue
-		}
-		if cancelErr := Cancel(ctx, result); cancelErr != nil {
-			return winner, cancelErr
-		}
-	}
-	return winner, err
-}
-
-type StepOptions struct{ MaxRetries int }
-
-func stepOptions(values []StepOptions) StepOptions {
-	if len(values) == 0 {
-		return StepOptions{MaxRetries: 3}
-	}
-	return values[len(values)-1]
 }
 
 func stepRetryAfter(cause error, options StepOptions, attempt int) *time.Time {
@@ -546,5 +502,9 @@ func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) st
 }
 
 func rollbackFunctionIdentity[In any](fn func(context.Context, In) error) string {
+	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+}
+
+func inlineFunctionIdentity[Out any](fn func(context.Context) Out) string {
 	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }

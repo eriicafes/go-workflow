@@ -29,9 +29,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	return cloneHook(*hook, input.ResolveData), nil
 }
 
-// HooksGetByToken treats a token whose retention has passed as unclaimed.
-// The expired index record is replaced by the next claim.
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	// A token whose retention has passed is unclaimed. Its expired record is
+	// replaced by the next claim.
 	if err := ctx.Err(); err != nil {
 		return worlds.Hook{}, err
 	}
@@ -85,10 +85,10 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	return keyPage(hooks, pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
 }
 
-// HooksClaim appends the claimant's hook_created only when the token is free.
-// A forced claim over a live owner first commits hook_force_claimed to the
-// owner's run, which releases the token.
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	// The claimant's hook_created is appended only when the token is free. A
+	// forced claim over a live owner first commits hook_disposed, naming the
+	// claimant in ForceClaimedBy, to the owner's run, which releases the token.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
@@ -125,7 +125,7 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		if !input.Force {
 			return worlds.HooksClaimResult{}, worlds.ErrHookConflict
 		}
-		forcedRunID, err := w.forceRelease(claimant, owner.HookID, now)
+		forcedRunID, err := w.forceRelease(claimant, owner.HookID, worlds.HookID(input.Event.CorrelationID), now)
 		if err != nil {
 			return worlds.HooksClaimResult{}, err
 		}
@@ -143,15 +143,20 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	return result, nil
 }
 
-// forceRelease records hook_force_claimed in a live owner's run. A terminal or
-// missing owner is simply replaced by the claim. An owner in the claimant's
-// own run is recorded in the claimant's txn so both events commit together.
-func (w *World) forceRelease(claimant *txn, hookID worlds.HookID, now time.Time) (worlds.RunID, error) {
+// forceRelease records hook_disposed, naming claimantHook in ForceClaimedBy,
+// in a live owner's run. A terminal or missing owner is simply replaced by the
+// claim. An owner in the claimant's own run is recorded in the claimant's txn
+// so both events commit together.
+func (w *World) forceRelease(claimant *txn, hookID, claimantHook worlds.HookID, now time.Time) (worlds.RunID, error) {
 	hook, err := w.readHook(hookID)
 	if err != nil || hook == nil {
 		return "", err
 	}
-	event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookForceClaimed, CorrelationID: string(hookID)}
+	data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: claimant.run.RunID, HookID: claimantHook}})
+	if err != nil {
+		return "", err
+	}
+	event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID), Data: data}
 	if hook.RunID == claimant.run.RunID {
 		_, err := claimant.append(event, now)
 		return hook.RunID, err

@@ -2,6 +2,7 @@ package worlds_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -199,11 +200,12 @@ func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, event := range events.Data {
-		if event.EventType == worlds.EventTypeHookForceClaimed {
+		var disposed worlds.HookDisposedEventData
+		if event.EventType == worlds.EventTypeHookDisposed && json.Unmarshal(event.Data, &disposed) == nil && disposed.ForceClaimedBy != nil {
 			return
 		}
 	}
-	t.Fatal("missing hook_force_claimed event")
+	t.Fatal("missing forced hook_disposed event")
 }
 
 func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {

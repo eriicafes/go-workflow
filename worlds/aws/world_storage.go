@@ -61,12 +61,11 @@ type runView struct {
 // stepView is a STEP# item. The event IDs answer idempotent replays.
 type stepView struct {
 	worlds.Step
-	startedEventID   worlds.EventID
 	cancelledEventID worlds.EventID
 }
 
-// tokenView is a TOKEN# item: the hook owning a token and, once the hook
-// completed with retention, when ownership lapses.
+// tokenView is a TOKEN# item. It holds the hook owning a token and, once the
+// hook completed with retention, when ownership lapses.
 type tokenView struct {
 	hookID      worlds.HookID
 	runID       worlds.RunID
@@ -88,7 +87,7 @@ type indexQuery struct {
 
 // indexPage lists base items through an index. The indexes project only
 // keys and status, so matching keys are read back from the table with
-// consistent reads; status is checked again on the fresh item. Pages are
+// consistent reads, and status is checked again on the fresh item. Pages are
 // filled across DynamoDB pages until Limit matches are found.
 func (w *World) indexPage(ctx context.Context, query indexQuery, pagination worlds.Pagination, match func(map[string]ddb.AttributeValue) bool) ([]map[string]ddb.AttributeValue, string, bool, error) {
 	start, err := cursorKey(pagination.Cursor)
@@ -258,7 +257,6 @@ func stepItem(view stepView) map[string]ddb.AttributeValue {
 	setTime(item, "startedAt", step.StartedAt)
 	setTime(item, "completedAt", step.CompletedAt)
 	setTime(item, "retryAfter", step.RetryAfter)
-	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	return item
 }
@@ -280,7 +278,6 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			CompletedAt: readTimePtr(item, "completedAt"),
 			RetryAfter:  readTimePtr(item, "retryAfter"),
 		},
-		startedEventID:   worlds.EventID(read(item, "startedEventId")),
 		cancelledEventID: worlds.EventID(read(item, "cancelledEventId")),
 	}
 }

@@ -62,10 +62,12 @@ func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bo
 	return record, true, nil
 }
 
-// Queue stores the delivery record, then publishes its ID to Vercel Queues
-// (delays up to seven days) or QStash (longer delays). A failed publish
-// removes the record.
+// Queue returns an error for a delivery due more than seven days ahead unless
+// Config.QStash is set. It does not deduplicate by IdempotencyKey.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	// Store the delivery record, then publish its ID to Vercel Queues (delays
+	// up to seven days) or QStash (longer delays). A failed publish removes the
+	// record.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -144,9 +146,9 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-// QueueCancel removes the record so a later delivery is acknowledged without
-// running, and deletes a pending QStash timer.
 func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
+	// Removing the record makes a later delivery acknowledge without running.
+	// A pending QStash timer is deleted too.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -197,7 +199,8 @@ func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error) {
 	var message vqsMessage
 	if err := json.Unmarshal(delivery.Body, &message); err != nil || message.ID == "" {
-		// Not a message this World published; drop it rather than retry.
+		// This is not a message this World published, so drop it rather than
+		// retry.
 		return http.StatusOK, c.world.acknowledge(ctx, delivery)
 	}
 	record, ok, err := c.world.getQueueRecord(ctx, message.ID)
@@ -221,7 +224,7 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 	err = c.runtime.Execute(ctx, record.input())
 	stop()
 	if errors.Is(err, worlds.ErrRunNotFound) {
-		// Retrying cannot create the run; drop the delivery.
+		// Retrying cannot create the run, so drop the delivery.
 		log.Printf("workflow/vercel: queue message %s: %v", message.ID, err)
 		err = nil
 	}

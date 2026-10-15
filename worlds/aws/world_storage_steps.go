@@ -24,8 +24,8 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	return stripStep(stepFromItem(item).Step, input.ResolveData), nil
 }
 
-// StepsList reads the run's STEP# items and orders them by creation time.
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	// Read the run's STEP# items and order them by creation time.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}

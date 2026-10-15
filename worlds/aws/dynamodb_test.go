@@ -196,8 +196,8 @@ func TestViewItems(t *testing.T) {
 	if err != nil || back.Webhook == nil || !back.Webhook.Manual || back.MinRetention != time.Second || !back.RetainUntil.Equal(now) || string(back.Metadata) != "m" {
 		t.Fatalf("hook = %#v err=%v", back, err)
 	}
-	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}, startedEventID: "e"}
-	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || got.startedEventID != "e" || !got.RetryAfter.Equal(now) {
+	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}, cancelledEventID: "e"}
+	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || got.cancelledEventID != "e" || !got.RetryAfter.Equal(now) {
 		t.Fatalf("step = %#v", got)
 	}
 	event := worlds.Event{RunID: "wrun_1", EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: []byte("{}"), CreatedAt: now}

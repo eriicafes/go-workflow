@@ -47,8 +47,8 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	return keyPage(runs, input.Pagination, func(run worlds.Run) string { return sortKey(run.CreatedAt, string(run.RunID)) })
 }
 
-// RunsWaitForTerminalStatus sleeps on the change channel between reads.
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	// Sleep on the change channel between reads.
 	deadline := time.Now().Add(input.Timeout)
 	timer := time.NewTimer(input.Timeout)
 	defer timer.Stop()

@@ -74,7 +74,7 @@ func newWorlds(t *testing.T, config Config, count int) ([]*World, *fakeVQS) {
 	config.BaseURL = "http://localhost/v1/workflow"
 	config.QueueURL = server.URL + "/api/v3"
 	config.Topic = "workflow"
-	config.OIDCToken = "test-oidc"
+	config.OIDCToken = staticOIDCToken("test-oidc")
 	config.Prefix = "gwtest:" + ulid.Make().String()
 	result := make([]*World, count)
 	for index := range result {

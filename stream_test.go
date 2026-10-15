@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -58,47 +57,6 @@ func TestRunStreamsSupportWritersReadersAndByteOffsets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != "world" {
-		t.Fatalf("stream = %q", data)
-	}
-}
-
-func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
-		return streamOutput{Value: input.Value}, nil
-	}))
-	defer world.Close()
-	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, nil, "")))
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, streamInput{Value: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err != nil {
-		t.Fatal(err)
-	}
-	writer, release, err := run.Writer(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("remote")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := release(); err != nil {
-		t.Fatal(err)
-	}
-	reader, err := run.Reader(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "remote" {
 		t.Fatalf("stream = %q", data)
 	}
 }

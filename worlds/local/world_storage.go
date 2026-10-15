@@ -27,7 +27,6 @@ type runRecord struct {
 
 type stepRecord struct {
 	worlds.Step
-	StartedEventID   worlds.EventID `json:"startedEventId,omitempty"`
 	CancelledEventID worlds.EventID `json:"cancelledEventId,omitempty"`
 }
 

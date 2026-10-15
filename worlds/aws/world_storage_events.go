@@ -129,11 +129,12 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	return worlds.EventBatchResult{Events: results}, nil
 }
 
-// HooksClaim moves a token to the claimant in one transaction. A forced
-// claim from a live owner also appends hook_force_claimed to the owner's
-// run; the transaction requires both runs' event counts and the token item
-// to be unchanged, so exactly one concurrent claimant wins.
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	// The token moves to the claimant in one transaction. A forced claim from a
+	// live owner also appends hook_disposed, naming the claimant in
+	// ForceClaimedBy, to the owner's run. The
+	// transaction requires both runs' event counts and the token item to be
+	// unchanged, so exactly one concurrent claimant wins.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
@@ -177,7 +178,11 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 			if owner == nil || owner.view.Status.Terminal() {
 				token.cur = nil
 			} else {
-				if _, err := tx.append(ctx, owner, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookForceClaimed, CorrelationID: string(token.cur.hookID)}); err != nil {
+				data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+				if err != nil {
+					return err
+				}
+				if _, err := tx.append(ctx, owner, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(token.cur.hookID), Data: data}); err != nil {
 					return err
 				}
 				result.ForcedRunID = owner.view.RunID
@@ -354,6 +359,18 @@ type appendTx struct {
 	waits  map[string]*waitEntry
 }
 
+func newAppendTx(world *World) *appendTx {
+	return &appendTx{
+		world:  world,
+		now:    time.Now().UTC(),
+		runs:   map[worlds.RunID]*runEntry{},
+		steps:  map[string]*stepEntry{},
+		hooks:  map[worlds.HookID]*hookEntry{},
+		tokens: map[string]*tokenEntry{},
+		waits:  map[string]*waitEntry{},
+	}
+}
+
 type runEntry struct {
 	view       runView
 	seen       int
@@ -382,15 +399,15 @@ type waitEntry struct {
 	created       bool
 }
 
-// preload reads the run and every item the events may need with batched
-// consistent reads: steps, hooks, wait markers and tokens.
+// preload reads the run and every item the events may need, which are steps,
+// hooks, wait markers and tokens, with batched consistent reads.
 func (tx *appendTx) preload(ctx context.Context, runID worlds.RunID, events []worlds.EventsCreateEvent) error {
 	keys := []map[string]ddb.AttributeValue{runKey(string(runID))}
 	for _, event := range events {
 		switch event.EventType {
 		case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying, worlds.EventTypeStepCancelled:
 			keys = append(keys, stepKey(string(runID), event.CorrelationID))
-		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed, worlds.EventTypeHookForceClaimed:
+		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			keys = append(keys, hookKey(event.CorrelationID))
 		case worlds.EventTypeHookCreated:
 			var data hookCreatedData
@@ -574,10 +591,9 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		}
 		step := entry.view
 		if requested.EventType == worlds.EventTypeStepStarted {
-			if step.Status == worlds.StatusRunning {
-				return replay(step.startedEventID), nil
-			}
-			if step.Status != worlds.StatusPending {
+			// A running step may be started again, because its previous attempt's
+			// delivery may have died, and each start records a new attempt.
+			if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
 				return nil, worlds.ErrStepNotStartable
 			}
 		} else {
@@ -736,7 +752,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if hook.Webhook == nil || (!hook.Webhook.Manual && hook.ReceivedEventID != "") {
 			return tx.completeHook(ctx, hook, now)
 		}
-	case worlds.EventTypeHookDisposed, worlds.EventTypeHookForceClaimed:
+	case worlds.EventTypeHookDisposed:
 		entry, err := tx.hook(ctx, worlds.HookID(event.CorrelationID))
 		if err != nil || entry.hook == nil {
 			return err
@@ -785,7 +801,7 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 	switch status {
 	case worlds.StatusRunning:
 		step.Attempt++
-		step.StartedAt, step.startedEventID = &event.CreatedAt, event.EventID
+		step.StartedAt = &event.CreatedAt
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &event.CreatedAt
 	case worlds.StatusCancelled:
@@ -828,7 +844,7 @@ func (tx *appendTx) commit(ctx context.Context) error {
 		}
 		set, remove := runUpdate(run.view)
 		if run.view.Status == run.seenStatus {
-			// status is projected into the indexes; leaving it out keeps
+			// status is projected into the indexes, so leaving it out keeps
 			// ordinary appends from writing to them.
 			delete(set, "status")
 		}
@@ -887,18 +903,6 @@ func (tx *appendTx) commit(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-func newAppendTx(world *World) *appendTx {
-	return &appendTx{
-		world:  world,
-		now:    time.Now().UTC(),
-		runs:   map[worlds.RunID]*runEntry{},
-		steps:  map[string]*stepEntry{},
-		hooks:  map[worlds.HookID]*hookEntry{},
-		tokens: map[string]*tokenEntry{},
-		waits:  map[string]*waitEntry{},
-	}
 }
 
 func sameToken(a, b *tokenView) bool {

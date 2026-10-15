@@ -18,9 +18,11 @@ const (
 	webhookResponsePollInterval = 50 * time.Millisecond
 )
 
-// HTTPHandler returns the complete HTTP surface for a World. It registers no
-// well-known or per-operation REST paths; an empty prefix uses /v1/workflow.
-func HTTPHandler(world World, runners RunnerSet, prefix string) http.Handler {
+// HTTPHandler returns the HTTP handler that exposes world to clients and
+// webhook callers. It serves RPCHandler at POST <prefix>/rpc and
+// WebhookHandler at <prefix>/webhooks/{token}. An empty prefix uses
+// /v1/workflow. It does not execute deliveries.
+func HTTPHandler(world World, prefix string) http.Handler {
 	mux := http.NewServeMux()
 	if prefix == "" {
 		prefix = defaultHTTPPrefix
@@ -32,8 +34,9 @@ func HTTPHandler(world World, runners RunnerSet, prefix string) http.Handler {
 	return mux
 }
 
-// RPCHandler returns the CBOR RPC endpoint for a World without routing. Mount
-// it at <prefix>/rpc to match the path HTTP clients use.
+// RPCHandler returns the RPC endpoint for world. It accepts POST requests
+// with RPCContentType bodies holding an RPCRequest and does no path routing,
+// so mount it at <prefix>/rpc to match the path HTTP clients use.
 func RPCHandler(world World) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -45,10 +48,14 @@ func RPCHandler(world World) http.Handler {
 	})
 }
 
-// WebhookHandler persists a webhook request and queues the owning run for a
-// fresh replay. The token is read from a {token} path wildcard when the
-// handler is mounted with one, otherwise from the last path segment. Mount it
-// at <prefix>/webhooks/{token} to match the URLs hooks are created with.
+// WebhookHandler records a webhook request as a hook_received event and queues
+// a delivery for the run that owns the webhook. It responds 404 when no active
+// webhook owns the token, 405 for a method the webhook does not accept, 413
+// when the body exceeds 128 KiB, and otherwise the webhook's Response, the
+// response the runner records for a manual webhook, or 202 Accepted. The token
+// is read from a {token} path wildcard when the handler is mounted with one,
+// otherwise from the last path segment. Mount it at <prefix>/webhooks/{token}
+// to match the URLs webhooks are created with.
 func WebhookHandler(world World) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")

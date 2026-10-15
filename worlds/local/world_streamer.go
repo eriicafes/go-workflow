@@ -14,7 +14,7 @@ import (
 
 const streamRetryAfter = 50 * time.Millisecond
 
-// streamMeta is the commit point for a stream: chunk files at or past Count
+// streamMeta is the commit point for a stream. Chunk files at or past Count
 // are ignored and overwritten by the next write.
 type streamMeta struct {
 	Name     string          `json:"name"`
@@ -167,9 +167,9 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 	})
 }
 
-// StreamsGetChunks sleeps on the change channel until a chunk past the cursor
-// exists, the stream is done, or Wait elapses.
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	// Sleep on the change channel until a chunk past the cursor exists, the
+	// stream is done, or Wait elapses.
 	start := chunkCursor(input.Cursor)
 	limit := input.Limit
 	if limit <= 0 {

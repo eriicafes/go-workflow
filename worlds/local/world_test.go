@@ -297,7 +297,7 @@ func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
 		t.Fatalf("token owner after recovery = %#v err=%v", hook, err)
 	}
 	events, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_old"})
-	if err != nil || len(events.Data) != 3 || events.Data[2].EventType != worlds.EventTypeHookForceClaimed {
+	if err != nil || len(events.Data) != 3 || events.Data[2].EventType != worlds.EventTypeHookDisposed {
 		t.Fatalf("old run events = %#v err=%v", events, err)
 	}
 }

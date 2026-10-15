@@ -10,20 +10,32 @@ import (
 	"time"
 )
 
-// Runtime consumes workflow-only QueueInput deliveries. It uses event state as
-// the sole admission fence.
+// Runtime executes deliveries. It replays the runners in its RunnerSet
+// against a World as flows and steps and records their results as events.
+// Whether a delivery may run is decided by appending events, so duplicate and
+// stale deliveries are safe. A delivery that ends before recording its result
+// is redelivered by the queue, which re-runs the step as a new attempt.
 type Runtime struct {
 	world   World
 	runners RunnerSet
 }
 
+// NewRuntime returns a Runtime that executes deliveries for runs recorded in
+// world using runners. It copies runners.
 func NewRuntime(world World, runners RunnerSet) *Runtime {
 	return &Runtime{world: world, runners: maps.Clone(runners)}
 }
 
-// Execute handles either a flow or a targeted step when StepID is non-nil.
-// A duplicate, stale, or terminal delivery is inert.
+// Execute handles one delivery. With a nil StepID it executes a flow, which
+// replays the run's runner and, when the runner returns instead of suspending,
+// appends run_completed or run_failed. With StepID set it executes a step,
+// which replays the runner up to that step, executes the step function, and
+// records the step's result. A delivery for a terminal run or step returns nil
+// without running runner or step code. A non-nil error means the delivery
+// should be retried. Execute removes any Client NewClientContext put in ctx, so
+// a run never uses a Client it inherited from the context its delivery runs in.
 func (e *Runtime) Execute(ctx context.Context, input QueueInput) error {
+	ctx = context.WithValue(ctx, clientContextKey{}, nil)
 	if input.StepID != nil {
 		return e.executeStep(ctx, input)
 	}
@@ -34,7 +46,7 @@ func (e *Runtime) Execute(ctx context.Context, input QueueInput) error {
 // turns the runner's result into a terminal run event when it did not suspend.
 func (e *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// Load the materialized run and its complete replay prefix before any
-	// user workflow code is called.
+	// runner code is called.
 	run, events, err := e.loadRun(ctx, input.RunID)
 	if err != nil {
 		return err
@@ -89,6 +101,13 @@ func (e *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 		return context.Cause(ctx)
 	case errors.Is(err, errReplayComplete), errors.Is(err, errReplaySuspended):
 		return nil
+	case errors.As(err, &deliveryError{}):
+		// The World failed to record an event, so retry the delivery. A run
+		// that finished meanwhile needs nothing more.
+		if errors.Is(err, ErrRunTerminal) {
+			return nil
+		}
+		return errors.Unwrap(err)
 	case errors.Is(err, ErrRunCancelled), errors.Is(err, ErrStepCancelled):
 		return nil
 	case err != nil:
@@ -123,8 +142,9 @@ func (e *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	if err != nil {
 		return err
 	}
-	// Atomically admit the target. A terminal, running, or stale target is
-	// inert and never executes user code again.
+	// Atomically admit the target. A terminal or stale target is inert and
+	// never executes user code again. Starting a running step records a new
+	// attempt, which is how a redelivery re-runs a step whose delivery died.
 	eventsCount := len(events)
 	startedEvent := EventsCreateEvent{
 		EventType:     EventTypeStepStarted,
@@ -176,6 +196,11 @@ func (e *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 		return e.finishStep(ctx, execution, *input.StepID, result)
 	case errors.Is(err, errReplaySuspended):
 		return nil
+	case errors.As(err, &deliveryError{}):
+		if errors.Is(err, ErrRunTerminal) {
+			return nil
+		}
+		return errors.Unwrap(err)
 	case err != nil:
 		return e.failStep(ctx, execution, *input.StepID, err)
 	default:
@@ -234,14 +259,11 @@ func (e *Runtime) completeRun(ctx context.Context, runID RunID, eventCount int, 
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	return e.wakeRunDependents(ctx, runID)
+	return err
 }
 
 // failRun executes registered compensations before recording the terminal root
-// failure. A compensation records its own failed step result; only
+// failure. A compensation records its own failed step result, so only
 // infrastructure failures prevent the terminal root event from being appended.
 func (e *Runtime) failRun(ctx context.Context, execution *Execution, failure error) (err error) {
 	defer func() {
@@ -270,82 +292,7 @@ func (e *Runtime) failRun(ctx context.Context, execution *Execution, failure err
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	return e.wakeRunDependents(ctx, execution.run.RunID)
-}
-
-// wakeRunDependents completes every parent wait that names a terminal child.
-// Providers may add an index later; this protocol-level fallback keeps the
-// event format correct for every current World implementation.
-func (e *Runtime) wakeRunDependents(ctx context.Context, childID RunID) error {
-	page, err := e.world.RunsList(ctx, RunsListInput{})
-	if err != nil {
-		return err
-	}
-	for {
-		for _, parent := range page.Data {
-			if parent.RunID == childID || parent.Status.Terminal() {
-				continue
-			}
-			events, err := e.eventsFor(ctx, parent.RunID)
-			if err != nil {
-				return err
-			}
-			completed := make(map[string]struct{})
-			for _, event := range events {
-				if event.EventType == EventTypeWaitCompleted {
-					completed[event.CorrelationID] = struct{}{}
-				}
-			}
-			for _, event := range events {
-				if event.EventType != EventTypeWaitCreated {
-					continue
-				}
-				var wait runWaitData
-				if json.Unmarshal(event.Data, &wait) != nil || wait.RunID != childID {
-					continue
-				}
-				if _, done := completed[event.CorrelationID]; done {
-					continue
-				}
-				result, err := e.world.EventsCreate(ctx, EventsCreateInput{RunID: parent.RunID, Event: EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: event.CorrelationID}})
-				if errors.Is(err, ErrRunTerminal) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				if _, err := e.world.Queue(ctx, QueueInput{RunID: parent.RunID, IdempotencyKey: "run-wait:" + string(result.EventID)}); err != nil {
-					return err
-				}
-			}
-		}
-		if !page.HasMore {
-			return nil
-		}
-		page, err = e.world.RunsList(ctx, RunsListInput{Pagination: Pagination{Cursor: page.Cursor}})
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func (e *Runtime) eventsFor(ctx context.Context, runID RunID) ([]Event, error) {
-	page, err := e.world.EventsList(ctx, EventsListInput{RunID: runID})
-	if err != nil {
-		return nil, err
-	}
-	values := page.Data
-	for page.HasMore {
-		page, err = e.world.EventsList(ctx, EventsListInput{RunID: runID, Pagination: Pagination{Cursor: page.Cursor}})
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, page.Data...)
-	}
-	return values, nil
+	return err
 }
 
 // finishStep records a targeted step result and queues either its retry or a

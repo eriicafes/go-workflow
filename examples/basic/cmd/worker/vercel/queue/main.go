@@ -10,7 +10,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/vercel"
+	vercelworld "github.com/eriicafes/go-workflow/worlds/vercel"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 		RedisRESTToken: os.Getenv("UPSTASH_REDIS_REST_TOKEN"),
 		QueueURL:       os.Getenv("VERCEL_QUEUE_URL"),
 		Topic:          os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
-		// The Vercel OIDC token is read per request (it rotates).
+		OIDCToken:      vercelworld.OIDCTokenFromEnv(vercelworld.DefaultOIDCTokenEnv),
 	})
 	if err != nil {
 		log.Fatal(err)

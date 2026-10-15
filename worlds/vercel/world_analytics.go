@@ -22,9 +22,9 @@ func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInp
 	return analyticsRun(run), nil
 }
 
-// RunsList scans the run index in creation order and filters runs by time
-// window and attributes. The cursor is the creation score of the last run.
 func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
+	// Scan the run index in creation order and filter runs by time window and
+	// attributes. The cursor is the creation score of the last run.
 	const batch = 200
 	page := worlds.Page[worlds.AnalyticsRun]{Data: []worlds.AnalyticsRun{}}
 	cursor := input.Pagination.Cursor
@@ -103,9 +103,8 @@ func (a analytics) WaitsGet(ctx context.Context, input worlds.AnalyticsWaitsGetI
 	return worlds.AnalyticsWait{}, worlds.ErrEventNotFound
 }
 
-// WaitsList derives waits from the run's wait_created and wait_completed
-// events.
 func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsListInput) (worlds.Page[worlds.AnalyticsWait], error) {
+	// Waits are derived from the run's wait_created and wait_completed events.
 	waits := map[worlds.WaitID]*worlds.AnalyticsWait{}
 	var order []worlds.WaitID
 	cursor := ""

@@ -7,13 +7,25 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// Promise is a typed workflow-local dependency. Durable steps, hooks, and
-// workflow runs satisfy it, allowing Join and Select-style primitives to
-// suspend until a value becomes available.
+// Promise is the pending result of an operation started in workflow context,
+// such as a step, timer, hook, or webhook. Awaiting a promise that has not
+// settled suspends the run until it does. Join, Select, and related functions
+// wait on several promises at once. Promise methods return ErrNoWorkflow
+// outside workflow context. Run implements Promise, and its methods also work
+// in step context and outside a run. In workflow context, awaiting a Run that
+// has not finished returns ErrRunNotFinished instead of suspending.
 type Promise[T any] interface {
+	// Done reports whether the promise has settled and, if it failed, its
+	// error. It never suspends the run.
 	Done(context.Context) (bool, error)
+	// Await returns the promise's value, or the error it failed with. When
+	// the promise has not settled, Await suspends the run.
 	Await(context.Context) (T, error)
+	// Unwrap is like Await but panics if Await returns an error.
 	Unwrap(context.Context) T
+	// Cancel cancels the promise. A step is cancelled, a timer settles
+	// immediately, a hook stops accepting payloads, and a child run is
+	// cancelled. Cancelling a settled promise is a no-op.
 	Cancel(context.Context) error
 }
 

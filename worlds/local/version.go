@@ -8,7 +8,7 @@ import (
 )
 
 // storeVersion 2 is the per-entity event layout. Version 1 was the
-// command/task store; unversioned directories held a single world.json
+// command/task store, and unversioned directories held a single world.json
 // snapshot.
 const storeVersion = 2
 
@@ -34,7 +34,7 @@ func validateVersion(root *os.Root) error {
 		}
 		for _, name := range append(entries, files...) {
 			if name != "locks" {
-				return fmt.Errorf("workflow/local: storage has no %s but contains %q; use an empty directory", versionName, name)
+				return fmt.Errorf("workflow/local: storage has no %s but contains %q, use an empty directory instead", versionName, name)
 			}
 		}
 		return writeJSON(root, versionName, versionRecord{Version: storeVersion})
@@ -43,7 +43,7 @@ func validateVersion(root *os.Root) error {
 		return err
 	}
 	if version.Version != storeVersion {
-		return fmt.Errorf("workflow/local: incompatible storage version %d, want %d; remove the directory to start over", version.Version, storeVersion)
+		return fmt.Errorf("workflow/local: incompatible storage version %d (want %d), remove the directory to start over", version.Version, storeVersion)
 	}
 	return nil
 }

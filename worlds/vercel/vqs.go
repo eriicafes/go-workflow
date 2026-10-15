@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
+
 const (
 	// vqsMaxDelay is the longest Vqs-Delay-Seconds and Vqs-Retention-Seconds.
 	vqsMaxDelay = 7 * 24 * time.Hour
@@ -28,14 +30,14 @@ const (
 	vqsPayloadMaxSize = 1 << 20
 )
 
-// vqsMessage is the Vercel Queue payload; the delivery itself is the Redis
+// vqsMessage is the Vercel Queue payload. The delivery itself is the Redis
 // queue record it names.
 type vqsMessage struct {
 	ID string `json:"id"`
 }
 
 func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte, header http.Header) (*http.Response, error) {
-	token, err := w.oidcToken(ctx)
+	token, err := w.config.OIDCToken(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -61,8 +63,8 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 }
 
 // publishVQS sends messageID to the topic. The message ID doubles as the
-// idempotency key so only a retried publish of the same delivery is dropped;
-// runtime idempotency keys are reused across distinct deliveries and Vercel
+// idempotency key so only a retried publish of the same delivery is dropped.
+// Runtime idempotency keys are reused across distinct deliveries and Vercel
 // would silently drop those for up to 24 hours.
 func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Duration) error {
 	body, err := json.Marshal(vqsMessage{ID: messageID})
@@ -100,11 +102,9 @@ type vqsDelivery struct {
 	Body               []byte
 }
 
-var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
-
 // parseDelivery reads a push delivery. Binary-mode deliveries
 // (ce-type com.vercel.queue.v2beta) carry the payload and lease in the
-// request; deliveries without a receipt handle and structured v1beta
+// request. Deliveries without a receipt handle and structured v1beta
 // CloudEvents are claimed with ReceiveMessageById.
 func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	body, err := io.ReadAll(io.LimitReader(request.Body, vqsPayloadMaxSize+1))

@@ -1,6 +1,8 @@
-// Package worlds defines the durable storage, queue, and stream protocol used
-// by go-workflow. State is represented by an append-only event log; the run,
-// step, and hook records returned by Storage are materialized views.
+// Package worlds defines the World contract that go-workflow records runs in,
+// the runtime that executes deliveries against it, and the HTTP server that
+// exposes a World to clients. Each run is an append-only event log, and the
+// runs, steps, and hooks returned by Storage are views derived from those
+// events.
 package worlds
 
 import (
@@ -13,9 +15,13 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+// SpecVersion is the RPC protocol version implemented by this package. A
+// World returns it from its SpecVersion method.
 const SpecVersion = 1
 
-// World bundles the durable services used by the runtime.
+// World is the backend a run is recorded in. It provides event storage, a
+// delivery queue, and streams. The runtime, the client, and HTTPHandler all
+// operate on a World.
 type World interface {
 	Storage
 	Queue
@@ -33,7 +39,7 @@ type World interface {
 }
 
 // Capabilities reports optional World behavior. A capability being false does
-// not remove a method from World: unsupported attribute writes are successful
+// not remove a method from World. Unsupported attribute writes are successful
 // no-ops, while Analytics returns nil.
 type Capabilities struct {
 	Analytics     bool `cbor:"analytics"`
@@ -50,58 +56,107 @@ func NormalizeBaseURL(value string) (string, error) {
 	return strings.TrimRight(value, "/"), nil
 }
 
+// Status is the lifecycle state of a run or step.
 type Status string
 
 const (
-	StatusPending   Status = "pending"
-	StatusRunning   Status = "running"
+	// StatusPending means the run or step has been created but not started.
+	StatusPending Status = "pending"
+	// StatusRunning means a delivery has started the run or step.
+	StatusRunning Status = "running"
+	// StatusCompleted means the run or step finished with an output.
 	StatusCompleted Status = "completed"
-	StatusFailed    Status = "failed"
+	// StatusFailed means the run or step finished with an error.
+	StatusFailed Status = "failed"
+	// StatusCancelled means the run or step was cancelled.
 	StatusCancelled Status = "cancelled"
 )
 
+// Terminal reports whether s is completed, failed, or cancelled. A run or
+// step in a terminal status accepts no further lifecycle events.
 func (s Status) Terminal() bool {
 	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
 }
 
+// ResolveData selects whether Storage returns the payloads of runs, steps,
+// and hooks, which are run and step Input and Output, and hook Metadata. The
+// zero value behaves like ResolveDataAll.
 type ResolveData string
 
 const (
-	ResolveDataAll  ResolveData = "all"
+	// ResolveDataAll returns payloads.
+	ResolveDataAll ResolveData = "all"
+	// ResolveDataNone omits payloads.
 	ResolveDataNone ResolveData = "none"
 )
 
+// EventsResolveData selects which event payloads Storage returns. The zero
+// value behaves like EventsResolveDataAll.
 type EventsResolveData string
 
 const (
-	EventsResolveDataAll            EventsResolveData = "all"
-	EventsResolveDataNone           EventsResolveData = "none"
+	// EventsResolveDataAll returns every event's Data.
+	EventsResolveDataAll EventsResolveData = "all"
+	// EventsResolveDataNone omits every event's Data.
+	EventsResolveDataNone EventsResolveData = "none"
+	// EventsResolveDataSkipStepInputs requests event Data without the step
+	// input recorded in step_created events. A World may treat it like
+	// EventsResolveDataAll.
 	EventsResolveDataSkipStepInputs EventsResolveData = "skip-step-inputs"
 )
 
+// SortOrder is the order in which a list returns its items. The zero value
+// behaves like SortOrderAscending.
 type SortOrder string
 
 const (
-	SortOrderAscending  SortOrder = "asc"
+	// SortOrderAscending returns the oldest items first.
+	SortOrderAscending SortOrder = "asc"
+	// SortOrderDescending returns the newest items first.
 	SortOrderDescending SortOrder = "desc"
 )
 
+// RunID identifies a run. Generated run IDs have the prefix "wrun_".
 type RunID string
+
+// StepID identifies a step within its run. Generated step IDs have the
+// prefix "step_".
 type StepID string
+
+// HookID identifies a hook. Generated hook IDs have the prefix "hook_".
 type HookID string
+
+// WaitID identifies a wait, the record of a timer. Generated wait IDs have
+// the prefix "wait_".
 type WaitID string
+
+// StreamID identifies a stream writer session. Generated stream IDs have the
+// prefix "strm_".
 type StreamID string
+
+// EventID identifies an event within its run's event log. It encodes the
+// event's position in the log (see EventIDForSlot and EventSlot).
 type EventID string
 
-func NewRunID() RunID       { return RunID("wrun_" + ulid.Make().String()) }
-func NewStepID() StepID     { return StepID("step_" + ulid.Make().String()) }
-func NewHookID() HookID     { return HookID("hook_" + ulid.Make().String()) }
-func NewWaitID() WaitID     { return WaitID("wait_" + ulid.Make().String()) }
+// NewRunID returns a new unique run ID.
+func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
+
+// NewStepID returns a new unique step ID.
+func NewStepID() StepID { return StepID("step_" + ulid.Make().String()) }
+
+// NewHookID returns a new unique hook ID.
+func NewHookID() HookID { return HookID("hook_" + ulid.Make().String()) }
+
+// NewWaitID returns a new unique wait ID.
+func NewWaitID() WaitID { return WaitID("wait_" + ulid.Make().String()) }
+
+// NewStreamID returns a new unique stream writer session ID.
 func NewStreamID() StreamID { return StreamID("strm_" + ulid.Make().String()) }
 
 const hookTokenAlphabet = "useandom-26T19834_0v5b7qw9zxcgfkrljAIJPVYKhpGUCXW"
 
-// NewHookToken returns a 21-character Nano ID.
+// NewHookToken returns a new random hook token, which is a 21-character Nano
+// ID.
 func NewHookToken() string {
 	bytes := make([]byte, 21)
 	limit := 256 - 256%len(hookTokenAlphabet)
@@ -120,20 +175,32 @@ func NewHookToken() string {
 }
 
 type (
+	// Pagination selects one page of a list.
 	Pagination struct {
-		Cursor    string
+		// Cursor is the Cursor of the previous Page. Empty starts at the
+		// first item.
+		Cursor string
+		// Limit is the maximum number of items to return. Zero or less
+		// requests every remaining item, though a World may still return
+		// fewer and set HasMore.
 		Limit     int
 		SortOrder SortOrder
 	}
+	// Page is one page of a list.
 	Page[T any] struct {
-		Data    []T
-		Cursor  string
+		Data []T
+		// Cursor continues the list after this page when passed back in
+		// Pagination.
+		Cursor string
+		// HasMore reports whether items remain after this page.
 		HasMore bool
 	}
 )
 
-// WakeRun completes the selected pending waits and queues one root replay.
-// An empty correlation ID list selects every pending wait.
+// WakeRun completes the selected pending waits of a run and queues a
+// delivery that replays it. correlationIDs holds wait IDs, and an empty list
+// selects every pending wait. It returns the number of waits it completed and
+// queues nothing when that number is zero.
 func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []string) (int, error) {
 	created := make(map[string]struct{})
 	completed := make(map[string]struct{})

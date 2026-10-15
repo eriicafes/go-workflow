@@ -54,6 +54,14 @@ type txn struct {
 	dirty  map[any]bool
 }
 
+func newTxn(w *World, run runRecord, replay bool) *txn {
+	run.Attributes = maps.Clone(run.Attributes)
+	if run.Attributes == nil {
+		run.Attributes = map[string]string{}
+	}
+	return &txn{w: w, run: run, replay: replay, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*worlds.Hook{}, tokens: map[string]*tokenRecord{}, dirty: map[any]bool{}}
+}
+
 type (
 	stepKey  worlds.StepID
 	hookKey  worlds.HookID
@@ -146,10 +154,9 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			return "", worlds.ErrStepNotStartable
 		}
 		if event.EventType == worlds.EventTypeStepStarted {
-			if step.Status == worlds.StatusRunning {
-				return step.StartedEventID, nil
-			}
-			if step.Status != worlds.StatusPending {
+			// A running step may be started again, because its previous attempt's
+			// delivery may have died, and each start records a new attempt.
+			if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
 				return "", worlds.ErrStepNotStartable
 			}
 		} else {
@@ -303,7 +310,7 @@ func (t *txn) materialize(event worlds.Event) error {
 			}
 		}
 		t.setHook(&hook)
-	case worlds.EventTypeHookDisposed, worlds.EventTypeHookForceClaimed:
+	case worlds.EventTypeHookDisposed:
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil || hook == nil {
 			return err
@@ -340,7 +347,7 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 	switch status {
 	case worlds.StatusRunning:
 		step.Attempt++
-		step.StartedAt, step.StartedEventID = &at, event.EventID
+		step.StartedAt = &at
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &at
 	case worlds.StatusCancelled:
@@ -355,7 +362,7 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 }
 
 // commit writes event files, then dirty views, then the run record. The run
-// record is the commit point: recovery discards events beyond its EventCount
+// record is the commit point. Recovery discards events beyond its EventCount
 // and rebuilds the run's views from the committed prefix.
 func (t *txn) commit() error {
 	if len(t.appended) == 0 {
@@ -364,7 +371,7 @@ func (t *txn) commit() error {
 	err := t.write()
 	if err != nil {
 		if repairErr := t.w.rebuildRun(t.run.RunID); repairErr != nil {
-			t.w.broken = errors.Join(errors.New("workflow/local: storage needs recovery; restart the world"), err, repairErr)
+			t.w.broken = errors.Join(errors.New("workflow/local: storage needs recovery, restart the world"), err, repairErr)
 			return t.w.broken
 		}
 	}
@@ -592,9 +599,9 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	return resolveEvents(events, input.ResolveData)[0], nil
 }
 
-// EventsList pages by slot. The cursor is the last returned event ID, in
-// either order.
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+	// Pages are by slot. The cursor is the last returned event ID, in either
+	// order.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
@@ -681,14 +688,6 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 		matched, hasMore = matched[:input.Pagination.Limit], true
 	}
 	return eventsPage(resolveEvents(matched, input.ResolveData), hasMore), nil
-}
-
-func newTxn(w *World, run runRecord, replay bool) *txn {
-	run.Attributes = maps.Clone(run.Attributes)
-	if run.Attributes == nil {
-		run.Attributes = map[string]string{}
-	}
-	return &txn{w: w, run: run, replay: replay, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*worlds.Hook{}, tokens: map[string]*tokenRecord{}, dirty: map[any]bool{}}
 }
 
 func validAppend(eventType worlds.EventType) bool {

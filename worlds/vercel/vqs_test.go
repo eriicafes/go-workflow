@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +16,8 @@ import (
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
+
+var errUnsupported = errors.New("memStore: unsupported command")
 
 type recorded struct {
 	Method string
@@ -32,6 +32,27 @@ type recorder struct {
 	requests []recorded
 	respond  func(recorded) (int, string)
 	server   *httptest.Server
+}
+
+func newRecorder(t *testing.T, respond func(recorded) (int, string)) *recorder {
+	t.Helper()
+	r := &recorder{respond: respond}
+	r.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body := new(strings.Builder)
+		_, _ = fmt.Fprint(body, readAll(request))
+		entry := recorded{Method: request.Method, Path: request.URL.EscapedPath(), Header: request.Header.Clone(), Body: body.String()}
+		r.mu.Lock()
+		r.requests = append(r.requests, entry)
+		r.mu.Unlock()
+		status, response := http.StatusCreated, `{"messageId":"msg_1"}`
+		if r.respond != nil {
+			status, response = r.respond(entry)
+		}
+		writer.WriteHeader(status)
+		_, _ = writer.Write([]byte(response))
+	}))
+	t.Cleanup(r.server.Close)
+	return r
 }
 
 func (r *recorder) all() []recorded {
@@ -96,8 +117,6 @@ func (s *memStore) record(t *testing.T, id string) (queueRecord, bool) {
 	return record, ok
 }
 
-var errUnsupported = errors.New("memStore: unsupported command")
-
 func (*memStore) MGet(context.Context, ...string) ([]string, error) { return nil, errUnsupported }
 func (*memStore) HGet(context.Context, string, string) (string, bool, error) {
 	return "", false, errUnsupported
@@ -121,7 +140,7 @@ func (*memStore) ZRangeByScore(context.Context, string, string, string, bool, in
 func TestPublishVQS(t *testing.T) {
 	server := newRecorder(t, nil)
 	world, _ := newQueueWorld(t, server, false)
-	world.config.OIDCTokenSource = func(context.Context) (string, error) { return "rotated-token", nil }
+	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
 	t.Setenv("VERCEL_DEPLOYMENT_ID", "dpl_1")
 	if err := world.publishVQS(context.Background(), "01ID", 90*time.Second+time.Millisecond); err != nil {
 		t.Fatal(err)
@@ -151,44 +170,29 @@ func TestPublishVQS(t *testing.T) {
 	}
 }
 
-func TestOIDCTokenSources(t *testing.T) {
-	world := &World{config: Config{OIDCToken: "static"}}
-	t.Setenv("VERCEL_OIDC_TOKEN", "")
-	t.Setenv("VERCEL_OIDC_TOKEN_FILE", "")
+func TestOIDCTokenFromEnv(t *testing.T) {
 	ctx := context.Background()
-	if token, err := world.oidcToken(ctx); err != nil || token != "static" {
-		t.Fatalf("static token = %q %v", token, err)
+	token := OIDCTokenFromEnv("WORKFLOW_TEST_OIDC_TOKEN")
+	t.Setenv("WORKFLOW_TEST_OIDC_TOKEN", "")
+	if _, err := token(ctx); err == nil {
+		t.Fatal("empty variable accepted")
 	}
-	t.Setenv("VERCEL_OIDC_TOKEN", "env")
-	if token, _ := world.oidcToken(ctx); token != "env" {
-		t.Fatalf("env token = %q", token)
+	t.Setenv("WORKFLOW_TEST_OIDC_TOKEN", "first")
+	if value, err := token(ctx); err != nil || value != "first" {
+		t.Fatalf("token = %q %v", value, err)
 	}
-	file := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(file, []byte("file\n"), 0o600); err != nil {
+	t.Setenv("WORKFLOW_TEST_OIDC_TOKEN", "rotated")
+	if value, _ := token(ctx); value != "rotated" {
+		t.Fatalf("rotated token = %q", value)
+	}
+	world, err := New(Config{BaseURL: "https://app.example.com/v1/workflow", RedisURL: "redis://localhost:6379", QueueURL: "https://iad1.vercel-queue.com/api/v3", Topic: "workflow"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("VERCEL_OIDC_TOKEN_FILE", file)
-	if token, _ := world.oidcToken(ctx); token != "file" {
-		t.Fatalf("file token = %q", token)
-	}
-	var fromRequest string
-	request := httptest.NewRequest(http.MethodPost, "/", nil)
-	request.Header.Set("X-Vercel-Oidc-Token", "header")
-	withRequestToken(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		fromRequest, _ = world.oidcToken(request.Context())
-	})).ServeHTTP(httptest.NewRecorder(), request)
-	if fromRequest != "header" {
-		t.Fatalf("request token = %q", fromRequest)
-	}
-	world.config.OIDCTokenSource = func(context.Context) (string, error) { return "source", nil }
-	if token, _ := world.oidcToken(ctx); token != "source" {
-		t.Fatalf("source token = %q", token)
-	}
-	empty := &World{}
-	t.Setenv("VERCEL_OIDC_TOKEN_FILE", "")
-	t.Setenv("VERCEL_OIDC_TOKEN", "")
-	if _, err := empty.oidcToken(ctx); err == nil {
-		t.Fatal("missing token accepted")
+	t.Cleanup(func() { _ = world.Close() })
+	t.Setenv(DefaultOIDCTokenEnv, "default")
+	if value, _ := world.config.OIDCToken(ctx); value != "default" {
+		t.Fatalf("default token = %q", value)
 	}
 }
 
@@ -468,27 +472,6 @@ func TestQueueConsumerExecutes(t *testing.T) {
 	}
 }
 
-func newRecorder(t *testing.T, respond func(recorded) (int, string)) *recorder {
-	t.Helper()
-	r := &recorder{respond: respond}
-	r.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body := new(strings.Builder)
-		_, _ = fmt.Fprint(body, readAll(request))
-		entry := recorded{Method: request.Method, Path: request.URL.EscapedPath(), Header: request.Header.Clone(), Body: body.String()}
-		r.mu.Lock()
-		r.requests = append(r.requests, entry)
-		r.mu.Unlock()
-		status, response := http.StatusCreated, `{"messageId":"msg_1"}`
-		if r.respond != nil {
-			status, response = r.respond(entry)
-		}
-		writer.WriteHeader(status)
-		_, _ = writer.Write([]byte(response))
-	}))
-	t.Cleanup(r.server.Close)
-	return r
-}
-
 func readAll(request *http.Request) string {
 	data := new(strings.Builder)
 	buffer := make([]byte, 4096)
@@ -505,7 +488,7 @@ func readAll(request *http.Request) string {
 // endpoints are the recorder.
 func newQueueWorld(t *testing.T, server *recorder, qstash bool) (*World, *memStore) {
 	t.Helper()
-	config := Config{BaseURL: "https://app.example.com/v1/workflow", RedisURL: "redis://localhost:6379", QueueURL: server.server.URL + "/api/v3", Topic: "workflow", Prefix: "p", OIDCToken: "static-token"}
+	config := Config{BaseURL: "https://app.example.com/v1/workflow", RedisURL: "redis://localhost:6379", QueueURL: server.server.URL + "/api/v3", Topic: "workflow", Prefix: "p", OIDCToken: staticOIDCToken("static-token")}
 	if qstash {
 		config.QStash = &QStashConfig{BaseURL: server.server.URL + "/qstash", Token: "qstash-token", CurrentSigningKey: "current", NextSigningKey: "next"}
 	}
@@ -529,4 +512,8 @@ func deliveryRequest(messageID, body string) *http.Request {
 	request.Header.Set("Ce-Vqsdeliverycount", "2")
 	request.Header.Set("Content-Type", "application/json")
 	return request
+}
+
+func staticOIDCToken(token string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) { return token, nil }
 }

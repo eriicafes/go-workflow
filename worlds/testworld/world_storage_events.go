@@ -127,9 +127,9 @@ func (m *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	return worlds.Event{}, worlds.ErrEventNotFound
 }
 
-// HooksClaim serializes token ownership and records a forced takeover in the
-// previous owner's run before making the token visible to the claimant.
 func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	// Serialize token ownership and record a forced takeover in the previous
+	// owner's run before making the token visible to the claimant.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
@@ -160,7 +160,11 @@ func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		if m.runs[owner.RunID].Status.Terminal() {
 			delete(m.tokens, created.Token)
 		} else {
-			forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookForceClaimed, CorrelationID: string(ownerID), CreatedAt: time.Now().UTC()}
+			data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+			if err != nil {
+				return worlds.HooksClaimResult{}, err
+			}
+			forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookDisposed, CorrelationID: string(ownerID), Data: data, CreatedAt: time.Now().UTC()}
 			m.events[owner.RunID] = append(m.events[owner.RunID], forced)
 			m.materializeLocked(forced)
 			result.ForcedRunID = owner.RunID
@@ -227,10 +231,9 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		if step.StepID == "" {
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
-		if step.Status == worlds.StatusRunning {
-			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
-		}
-		if step.Status != worlds.StatusPending {
+		// A running step may be started again, because its previous attempt's
+		// delivery may have died, and each start records a new attempt.
+		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	}
@@ -416,10 +419,6 @@ func (m *World) materializeLocked(event worlds.Event) {
 		}
 		m.hooks[id] = hook
 	case worlds.EventTypeHookDisposed:
-		id := worlds.HookID(event.CorrelationID)
-		hook := m.hooks[id]
-		delete(m.tokens, hook.Token)
-	case worlds.EventTypeHookForceClaimed:
 		id := worlds.HookID(event.CorrelationID)
 		hook := m.hooks[id]
 		if m.tokens[hook.Token] == id {

@@ -109,9 +109,9 @@ func (m *World) StreamsWriteSession(ctx context.Context, input worlds.StreamsWri
 	return nil
 }
 
-// StreamsCloseWriteSession releases a writer lease. Close controls whether the
-// logical stream is also made terminal.
 func (m *World) StreamsCloseWriteSession(ctx context.Context, input worlds.StreamsCloseWriteSessionInput) error {
+	// Release the writer lease. Close controls whether the stream is also
+	// closed.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -128,9 +128,9 @@ func (m *World) StreamsCloseWriteSession(ctx context.Context, input worlds.Strea
 	return nil
 }
 
-// Direct writes are retained for the application client surface. Workflow
-// writers always use a session, which is the exclusive path.
 func (m *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
+	// Direct writes serve the client. Workflow writers always use a session,
+	// which is the exclusive path.
 	return m.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
 

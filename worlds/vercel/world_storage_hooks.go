@@ -2,6 +2,7 @@ package vercelworld
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"time"
 
@@ -22,9 +23,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	return decodeHook(input.HookID, raw, input.ResolveData)
 }
 
-// HooksGetByToken treats a token whose retention has elapsed as released. The
-// stored token is removed lazily by the next claim of that token.
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	// A token whose retention has elapsed is released. The stored token is
+	// removed lazily by the next claim of that token.
 	if err := ctx.Err(); err != nil {
 		return worlds.Hook{}, err
 	}
@@ -48,8 +49,8 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	return hook, nil
 }
 
-// HooksList pages hooks in creation order, optionally for one run.
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	// Pages are in creation order, optionally for one run.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
@@ -89,10 +90,10 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	return page, nil
 }
 
-// HooksClaim runs token expiry, the conflict check, the optional
-// hook_force_claimed append to the owner's run, and the claimant's
-// hook_created append in one script, so exactly one concurrent claimant wins.
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	// Token expiry, the conflict check, the optional hook_disposed append to
+	// the owner's run, and the claimant's hook_created append run in one
+	// script, so exactly one concurrent claimant wins.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
@@ -112,7 +113,13 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	if input.Force {
 		force = "1"
 	}
-	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, desc))
+	// The script cannot encode event data, so the hook_disposed data that names
+	// this claimant is encoded here.
+	disposed, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+	if err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
+	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, desc, base64.StdEncoding.EncodeToString(disposed)))
 	if err != nil {
 		return worlds.HooksClaimResult{}, err
 	}

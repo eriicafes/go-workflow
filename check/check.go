@@ -1,4 +1,7 @@
-// Package check contains the static analyzer used by go-dev before rebuilds.
+// Package check provides Analyzer, a static analyzer that reports runners
+// that cannot replay deterministically and calls that misuse the workflow API.
+// The workflowcheck command runs it with go vet, and workflowdev runs it before
+// every go-dev start or reload.
 package check
 
 import (
@@ -11,8 +14,12 @@ import (
 
 const workflowPackage = "github.com/eriicafes/go-workflow"
 
-// Analyzer validates plain functions converted by workflow.Use and reports
-// non-deterministic operations in their replayed workflow bodies.
+// Analyzer checks that every function passed to workflow.Use is a named
+// runner whose input type is a workflow. In runners, it reports operations
+// that break replay (goroutines, select, ranging over maps, time.Now, and I/O
+// or randomness outside steps), stream access outside steps, and steps that
+// are not named functions or that capture variables instead of taking them as
+// input.
 var Analyzer = &analysis.Analyzer{Name: "workflowcheck", Doc: "reports invalid or non-deterministic workflows", Run: run}
 
 func run(pass *analysis.Pass) (any, error) {
@@ -133,7 +140,7 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 			// allowed to perform step-only operations.
 			return false
 		case *ast.GoStmt:
-			pass.Reportf(node.Pos(), "workflow body must not start a goroutine; use workflow.Background")
+			pass.Reportf(node.Pos(), "workflow body must not start a goroutine, use workflow.Background instead")
 		case *ast.SelectStmt:
 			pass.Reportf(node.Pos(), "workflow body must not select on channels")
 		case *ast.RangeStmt:
@@ -149,14 +156,11 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 				isSDKMethod(pass, node, "ReaderAt") {
 				pass.Reportf(node.Pos(), "workflow streams can only be read or written inside a durable step")
 			}
-			if isSDKMethod(pass, node, "ReplyWebhook") {
-				pass.Reportf(node.Pos(), "Webhook.ReplyWebhook can only be called inside a durable step")
-			}
 			if banned, ok := bannedCall(pass, node); ok {
 				if banned == "time.Now" {
-					pass.Reportf(node.Pos(), "workflow body calls time.Now; use workflow.Now")
+					pass.Reportf(node.Pos(), "workflow body calls time.Now, use workflow.Now instead")
 				} else {
-					pass.Reportf(node.Pos(), "workflow body calls %s; use workflow.Step or workflow.Background", banned)
+					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Step or workflow.Background instead", banned)
 				}
 			}
 			if isDurableOperation(pass, node) {
@@ -211,7 +215,7 @@ func validateClosure(pass *analysis.Pass, closure *ast.FuncLit) {
 		if !ok || parameters[variable] || variable.Pos() >= closure.Body.Pos() {
 			return true
 		}
-		pass.Reportf(identifier.Pos(), "durable closure captures %s; pass workflow-relevant state through its explicit input", identifier.Name)
+		pass.Reportf(identifier.Pos(), "durable closure captures %s, pass workflow-relevant state through its explicit input instead", identifier.Name)
 		return true
 	})
 }

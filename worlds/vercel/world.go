@@ -1,6 +1,6 @@
-// Package vercelworld provides a World backed by Redis (TCP or the Upstash
-// REST API), Vercel Queues for delivery, and optionally QStash for timers
-// longer than Vercel Queues' seven-day delay limit.
+// Package vercelworld implements a World on Redis (over TCP or the Upstash REST
+// API) and Vercel Queues, for deployments on Vercel Functions. QStash can
+// optionally deliver work due more than seven days ahead.
 package vercelworld
 
 import (
@@ -19,39 +19,40 @@ const (
 	qstashRoutePath = "/v1/workflow/qstash"
 )
 
+// Config configures the Vercel World.
 type Config struct {
 	// BaseURL is the absolute public URL of HTTP(world), including
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
+	// It is required.
 	BaseURL string
-	// RedisURL selects the TCP transport (redis:// or rediss:// for TLS). When
-	// empty, RedisRESTURL and RedisRESTToken select the Upstash REST transport.
+	// RedisURL selects the TCP transport with redis://, or rediss:// for TLS.
+	// When it is empty, RedisRESTURL and RedisRESTToken select the Upstash
+	// REST transport. One of the two transports is required.
 	RedisURL       string
 	RedisRESTURL   string
 	RedisRESTToken string
 	// QueueURL is the regional Vercel Queues API root including /api/v3, for
-	// example https://iad1.vercel-queue.com/api/v3.
+	// example https://iad1.vercel-queue.com/api/v3. It is required.
 	QueueURL string
-	// OIDCTokenSource returns the Vercel OIDC token for each Queues request.
-	// When nil, the token comes from the x-vercel-oidc-token header of the
-	// request being served by a handler of this package, then the file named
-	// by VERCEL_OIDC_TOKEN_FILE, then VERCEL_OIDC_TOKEN, then OIDCToken.
-	OIDCTokenSource func(context.Context) (string, error)
-	// OIDCToken is a static fallback token.
-	OIDCToken string
-	// Topic is the Vercel Queue topic consumed by Queue(world, runners).
+	// OIDCToken returns the Vercel OIDC token. It is called for every Vercel
+	// Queues request because Vercel rotates the token. Nil uses
+	// OIDCTokenFromEnv(DefaultOIDCTokenEnv).
+	OIDCToken func(context.Context) (string, error)
+	// Topic is the Vercel Queues topic that deliveries are published to and
+	// that Queue(world, runners) consumes. It is required.
 	Topic string
 	// Prefix namespaces Redis keys. Empty uses go-workflow.
 	Prefix string
-	// QStash delivers timers longer than seven days. Without it such timers
-	// are rejected.
+	// QStash, when set, delivers work due more than seven days ahead. Without
+	// it, queueing such a delivery returns an error.
 	QStash *QStashConfig
 	// HTTPClient sends Redis REST, Vercel Queues, and QStash requests. Nil uses
 	// http.DefaultClient.
 	HTTPClient *http.Client
 }
 
-// World stores the event log and its views in Redis. All mutations are
-// single Lua scripts, so any number of instances may share one database.
+// World is the Vercel World. It is safe for concurrent use, and any number of
+// instances may share one Redis database.
 type World struct {
 	config Config
 	http   *http.Client
@@ -61,6 +62,9 @@ type World struct {
 	qstashURL string
 }
 
+// New returns a World for config without contacting Redis or Vercel. It returns
+// an error when BaseURL, QueueURL, Topic, or a Redis transport is missing, or
+// when QStash lacks its token, its signing keys, or an HTTPS callback URL.
 func New(config Config) (*World, error) {
 	if config.BaseURL == "" || config.QueueURL == "" || config.Topic == "" {
 		return nil, errors.New("workflow/vercel: base URL, queue URL, and topic are required")
@@ -76,6 +80,9 @@ func New(config Config) (*World, error) {
 	}
 	if config.Prefix == "" {
 		config.Prefix = defaultPrefix
+	}
+	if config.OIDCToken == nil {
+		config.OIDCToken = OIDCTokenFromEnv(DefaultOIDCTokenEnv)
 	}
 	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix}
 	if config.QStash != nil {
@@ -100,7 +107,8 @@ func New(config Config) (*World, error) {
 	return world, nil
 }
 
-// Close releases the Redis connection pool.
+// Close closes the Redis TCP connection pool. With the REST transport it does
+// nothing.
 func (w *World) Close() error { return w.redis.Close() }
 
 func (w *World) BaseURL() string             { return w.config.BaseURL }
@@ -110,70 +118,47 @@ func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true}
 }
 
-type oidcTokenKey struct{}
+// DefaultOIDCTokenEnv is the environment variable Vercel sets to the
+// deployment's OIDC token.
+const DefaultOIDCTokenEnv = "VERCEL_OIDC_TOKEN"
 
-// oidcToken resolves the Vercel OIDC token at request time because Vercel
-// rotates it.
-func (w *World) oidcToken(ctx context.Context) (string, error) {
-	if w.config.OIDCTokenSource != nil {
-		return w.config.OIDCTokenSource(ctx)
-	}
-	if token, _ := ctx.Value(oidcTokenKey{}).(string); token != "" {
-		return token, nil
-	}
-	if path := os.Getenv("VERCEL_OIDC_TOKEN_FILE"); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("workflow/vercel: read OIDC token file: %w", err)
-		}
-		if token := strings.TrimSpace(string(data)); token != "" {
+// OIDCTokenFromEnv returns a Config.OIDCToken that reads the environment
+// variable name on every call, so it picks up a rotated token. The returned
+// function fails when the variable is unset or empty.
+func OIDCTokenFromEnv(name string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) {
+		if token := os.Getenv(name); token != "" {
 			return token, nil
 		}
-		return "", errors.New("workflow/vercel: OIDC token file is empty")
+		return "", fmt.Errorf("workflow/vercel: %s is not set", name)
 	}
-	if token := os.Getenv("VERCEL_OIDC_TOKEN"); token != "" {
-		return token, nil
-	}
-	if w.config.OIDCToken != "" {
-		return w.config.OIDCToken, nil
-	}
-	return "", errors.New("workflow/vercel: no Vercel OIDC token available")
 }
 
-// HTTP returns the RPC and webhook endpoints under /v1/workflow. When QStash
-// is configured it also mounts the signed long-timer route at
-// /v1/workflow/qstash.
+// HTTP returns a handler serving the RPC and webhook endpoints under
+// /v1/workflow. It does not authenticate requests. When Config.QStash is set,
+// it also serves the QStash callback at /v1/workflow/qstash, which accepts only
+// requests signed by QStash.
 func HTTP(world *World) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/", worlds.HTTPHandler(world, nil, ""))
+	mux.Handle("/", worlds.HTTPHandler(world, ""))
 	if world.config.QStash != nil {
 		mux.Handle("POST "+qstashRoutePath, qstashHandler(world))
 	}
-	return withRequestToken(mux)
+	return mux
 }
 
-// RPC returns only the CBOR RPC endpoint.
-func RPC(world *World) http.Handler { return withRequestToken(worlds.RPCHandler(world)) }
+// RPC returns a handler serving only the RPC endpoint.
+func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 
-// Webhook returns only the token webhook endpoint.
-func Webhook(world *World) http.Handler { return withRequestToken(worlds.WebhookHandler(world)) }
+// Webhook returns a handler serving only the webhook endpoint, authorized by
+// the hook token in its URL.
+func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
-// Queue returns the Vercel Queues push consumer. Deploy it as a function with
-// a queue/v2beta trigger for Config.Topic; Vercel does not expose such
-// functions publicly, so deliveries are not authenticated here. The handler
-// executes the stored queue record, acknowledges the message on success, and
-// answers 500 on failure so Vercel redelivers it.
+// Queue returns the Vercel Queues push consumer, which executes deliveries for
+// the workflows of runners. Deploy it only as a function with a queue/v2beta
+// trigger for Config.Topic. Vercel does not expose such functions publicly, so
+// the handler does not authenticate requests. It acknowledges a delivery that
+// succeeds and answers 500 to one that fails, so Vercel redelivers it.
 func Queue(world *World, runners worlds.RunnerSet) http.Handler {
-	return withRequestToken(&consumer{world: world, runtime: worlds.NewRuntime(world, runners)})
-}
-
-// withRequestToken carries a request's x-vercel-oidc-token header to the
-// default token source.
-func withRequestToken(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if token := request.Header.Get("X-Vercel-Oidc-Token"); token != "" {
-			request = request.WithContext(context.WithValue(request.Context(), oidcTokenKey{}, token))
-		}
-		next.ServeHTTP(writer, request)
-	})
+	return &consumer{world: world, runtime: worlds.NewRuntime(world, runners)}
 }

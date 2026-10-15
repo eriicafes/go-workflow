@@ -20,12 +20,13 @@ type queueRecord struct {
 	schedule  string
 }
 
-// Queue stores a QUEUE# record and publishes its ID: through SQS with a
-// delay of up to 15 minutes, otherwise through a one-time Scheduler schedule
-// whose name is kept on the record. When publishing fails the record is
-// removed. SQS standard queues do not deduplicate, so IdempotencyKey is not
-// used.
+// Queue returns an error for a delivery due more than 15 minutes ahead unless
+// Config.Scheduler is set. It does not deduplicate by IdempotencyKey, because
+// SQS standard queues do not deduplicate.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	// Store a QUEUE# record and publish its ID through SQS with a delay of up
+	// to 15 minutes, or otherwise through a one-time Scheduler schedule whose
+	// name is kept on the record. When publishing fails the record is removed.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -90,9 +91,9 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-// QueueCancel deletes the record, so a delivery already in flight is
-// acknowledged without running, and deletes any schedule.
 func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
+	// Deleting the record makes a delivery already in flight acknowledge
+	// without running. Any schedule is deleted too.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -108,7 +109,7 @@ func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) 
 	if err != nil {
 		return err
 	}
-	// A World without Scheduler cannot delete the schedule; when it fires,
+	// A World without Scheduler cannot delete the schedule. When it fires,
 	// the consumer finds no record and acknowledges it.
 	if schedule := read(result.Attributes, "schedule"); schedule != "" && w.scheduler != nil {
 		return w.deleteSchedule(ctx, schedule)

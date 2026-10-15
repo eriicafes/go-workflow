@@ -43,9 +43,9 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 	return keysetPage(runs, input.Pagination.Limit, func(run worlds.AnalyticsRun) (time.Time, string) { return run.CreatedAt, string(run.RunID) }), nil
 }
 
-// AttributesList groups matching runs by attribute key. The cursor is the
-// last returned key.
 func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAttributesListInput) (worlds.Page[worlds.AnalyticsAttribute], error) {
+	// Matching runs are grouped by attribute key. The cursor is the last
+	// returned key.
 	var q query
 	if err := runFilter(&q, input.WorkflowName, nil, input.StartTime, input.EndTime, nil); err != nil {
 		return worlds.Page[worlds.AnalyticsAttribute]{}, err
@@ -169,7 +169,7 @@ func scanAnalyticsRun(row pgx.Row) (worlds.AnalyticsRun, error) {
 	return run, nil
 }
 
-// runFilter adds the shared analytics filters; StartTime and EndTime are
+// runFilter adds the shared analytics filters. StartTime and EndTime are
 // inclusive bounds on CreatedAt.
 func runFilter(q *query, workflowName string, status []worlds.Status, start, end *time.Time, attributes map[string]string) error {
 	if workflowName != "" {

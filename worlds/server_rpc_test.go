@@ -15,7 +15,7 @@ import (
 )
 
 func TestRPCRejectsUnsupportedContentAndReportsEnvelopeErrors(t *testing.T) {
-	handler := worlds.HTTPHandler(testworld.New(), nil, "")
+	handler := worlds.HTTPHandler(testworld.New(), "")
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewBufferString("not cbor"))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -52,7 +52,7 @@ func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(testworld.New(), nil, "").ServeHTTP(response, request)
+	worlds.HTTPHandler(testworld.New(), "").ServeHTTP(response, request)
 	assertRPCError(t, response, "not_found")
 }
 
@@ -65,7 +65,7 @@ func TestRPCRejectsMismatchedSpecVersion(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(testworld.New(), nil, "").ServeHTTP(response, request)
+	worlds.HTTPHandler(testworld.New(), "").ServeHTTP(response, request)
 	assertRPCError(t, response, "invalid_argument")
 }
 
@@ -85,7 +85,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := worlds.HTTPHandler(world, nil, "")
+	handler := worlds.HTTPHandler(world, "")
 
 	call := func(method string, input any, output any) {
 		t.Helper()

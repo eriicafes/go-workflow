@@ -27,8 +27,9 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	return stripRun(runFromItem(item).Run, input.ResolveData), nil
 }
 
-// RunsList reads the RUNS (list) or RUNS#<workflow> (list_group) index
-// partition in creation order and filters status on the index.
+// RunsList reads a global secondary index, which is eventually consistent. A
+// run created a moment ago may be missing from the result. The runs it returns
+// are read consistently.
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Run]{}, err
@@ -44,8 +45,8 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	return worlds.Page[worlds.Run]{Data: runs, Cursor: cursor, HasMore: more}, nil
 }
 
-// RunsWaitForTerminalStatus polls the run with backoff from 50ms to 500ms.
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	// Poll the run with backoff from 50ms to 500ms.
 	deadline := time.Now().Add(input.Timeout)
 	delay := terminalPollMin
 	for {

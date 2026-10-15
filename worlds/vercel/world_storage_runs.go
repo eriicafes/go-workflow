@@ -132,9 +132,9 @@ func (w *World) runIndexPage(ctx context.Context, workflowName string, statuses 
 	return members, cursor, hasMore, nil
 }
 
-// RunsWaitForTerminalStatus polls with a backoff from 50ms to 500ms because
-// neither Redis transport offers a blocking read that fits every deployment.
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	// Poll with a backoff from 50ms to 500ms because neither Redis transport
+	// offers a blocking read that fits every deployment.
 	deadline := time.Now().Add(input.Timeout)
 	delay := 50 * time.Millisecond
 	for {

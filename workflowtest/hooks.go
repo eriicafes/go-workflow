@@ -2,6 +2,7 @@ package workflowtest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -101,7 +102,9 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	}
 	events := conformAllEvents(t, world, owner)
 	last := events[len(events)-1]
-	if last.EventType != worlds.EventTypeHookForceClaimed || last.CorrelationID != "hook_owner" {
+	var disposed worlds.HookDisposedEventData
+	if last.EventType != worlds.EventTypeHookDisposed || last.CorrelationID != "hook_owner" || json.Unmarshal(last.Data, &disposed) != nil ||
+		disposed.ForceClaimedBy == nil || disposed.ForceClaimedBy.RunID != claimant || disposed.ForceClaimedBy.HookID != "hook_claimant" {
 		t.Fatalf("owner events = %#v", events)
 	}
 	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
@@ -116,8 +119,8 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 		t.Fatalf("force over terminal owner = %#v err=%v", takeover, err)
 	}
 	for _, event := range conformAllEvents(t, world, claimant) {
-		if event.EventType == worlds.EventTypeHookForceClaimed {
-			t.Fatal("terminal owner received hook_force_claimed")
+		if event.EventType == worlds.EventTypeHookDisposed {
+			t.Fatal("terminal owner received hook_disposed")
 		}
 	}
 }

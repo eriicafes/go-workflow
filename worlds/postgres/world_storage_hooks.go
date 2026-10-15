@@ -30,9 +30,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	return hook, err
 }
 
-// HooksGetByToken treats an expired retention as released without writing;
-// the row itself is removed by the next claim of the token.
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	// An expired retention counts as released without writing. The row itself
+	// is removed by the next claim of the token.
 	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns("h.", input.ResolveData)+` FROM go_workflow_hook_tokens t
 		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1 AND (h.retain_until IS NULL OR h.retain_until > $2)`, input.Token, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -60,11 +60,12 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	return keysetPage(hooks, input.Pagination.Limit, func(hook worlds.Hook) (time.Time, string) { return hook.CreatedAt, string(hook.HookID) }), nil
 }
 
-// HooksClaim locks the claimant run (and, for a forced claim, the current
-// owner's run, in run ID order to avoid deadlocks), then the token row, and
-// appends hook_force_claimed to a live owner before the claimant's
-// hook_created, all in one transaction.
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+	// Lock the claimant run (and, for a forced claim, the current owner's run,
+	// in run ID order to avoid deadlocks), then the token row, and append
+	// hook_disposed, naming the claimant in ForceClaimedBy, to a live owner
+	// before the claimant's hook_created,
+	// all in one transaction.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
@@ -135,7 +136,11 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 					return err
 				}
 			} else {
-				if _, err := owner.append(ctx, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookForceClaimed, CorrelationID: string(holder.hookID)}); err != nil {
+				data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+				if err != nil {
+					return err
+				}
+				if _, err := owner.append(ctx, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(holder.hookID), Data: data}); err != nil {
 					return err
 				}
 				result.ForcedRunID = holder.runID
@@ -212,8 +217,8 @@ func tokenOwner(ctx context.Context, tx pgx.Tx, token string) (worlds.HookID, er
 }
 
 // lockToken locks the token row, releases it when its retention expired at
-// at, and returns the remaining holder. A missing row is not locked; the
-// later insert in createHook detects a concurrent claimant instead.
+// at, and returns the remaining holder. A missing row is not locked, because
+// the later insert in createHook detects a concurrent claimant instead.
 func lockToken(ctx context.Context, tx pgx.Tx, token string, at time.Time) (tokenHolder, error) {
 	var holder tokenHolder
 	var retainUntil *time.Time

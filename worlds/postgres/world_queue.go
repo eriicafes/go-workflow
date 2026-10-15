@@ -17,11 +17,12 @@ const (
 	backoffMax  = 5 * time.Minute
 )
 
-// Queue inserts a delivery row and notifies workers on commit. A non-empty
-// IdempotencyKey deduplicates against an unclaimed row of the same run; once
-// a worker claims a row its key is cleared, so a later Queue is never lost
-// to a delivery that may already have read older state.
+// Queue deduplicates by IdempotencyKey. While a delivery with the same run and
+// key has not started, it returns that delivery's message ID instead of
+// queueing another.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	// A worker clears the key when it claims a row, so a later Queue is never
+	// lost to a delivery that may already have read older state.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -63,7 +64,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			return worlds.QueueResult{}, err
 		}
 		// No row means the conflicting row was committed or claimed after this
-		// statement's snapshot; try again.
+		// statement's snapshot, so try again.
 		if id != "" {
 			return worlds.QueueResult{MessageID: id}, nil
 		}
@@ -134,8 +135,8 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 	})
 }
 
-// work is the Start loop: claim as many due rows as there are free slots,
-// execute each in its own goroutine, and sleep until a notification, a free
+// work is the Start loop. It claims as many due rows as there are free slots,
+// executes each in its own goroutine, and sleeps until a notification, a free
 // slot, or PollInterval.
 func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
 	var group sync.WaitGroup
@@ -193,8 +194,8 @@ func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
 }
 
 // deliver executes one claimed row, renewing its lease meanwhile. Success
-// deletes the row; failure schedules a retry with capped exponential
-// backoff; a shutdown releases the lease so another worker takes it now.
+// deletes the row. Failure schedules a retry with capped exponential
+// backoff. A shutdown releases the lease so another worker takes it now.
 func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item delivery) {
 	renewCtx, stopRenew := context.WithCancel(ctx)
 	renewed := make(chan struct{})
@@ -237,8 +238,8 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 	}
 }
 
-// backoff returns the retry delay after the given number of attempts:
-// 1s, 2s, 4s, ... capped at 5 minutes.
+// backoff returns the retry delay after the given number of attempts, which
+// is 1s, 2s, 4s, ... capped at 5 minutes.
 func backoff(attempts int) time.Duration {
 	if attempts < 1 {
 		attempts = 1

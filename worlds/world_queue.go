@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+// Queue stores deliveries for the runtime. Each delivery makes the runtime
+// execute a flow or a step of a run through Runtime.Execute.
 type Queue interface {
 	// Queue stores the delivery described by QueueInput and returns its message
 	// ID. It does not deliver an item before NotBefore. QueueName lets an
@@ -21,19 +23,31 @@ type Queue interface {
 }
 
 type (
+	// QueueInput holds the arguments to Queue and describes one delivery.
 	QueueInput struct {
-		QueueName      string
-		RunID          RunID
-		StepID         *StepID
-		NotBefore      *time.Time
+		// QueueName selects a queue in implementations that have more than
+		// one. Empty selects the default queue.
+		QueueName string
+		RunID     RunID
+		// StepID selects the step a step delivery executes. Nil makes the
+		// delivery a flow.
+		StepID *StepID
+		// NotBefore is the earliest time the delivery may be made. Nil
+		// allows immediate delivery.
+		NotBefore *time.Time
+		// IdempotencyKey identifies retries of the same delivery to
+		// implementations that deduplicate publishing.
 		IdempotencyKey string
 	}
+	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {
 		Items []QueueInput
 	}
+	// QueueCancelInput holds the arguments to QueueCancel.
 	QueueCancelInput struct {
 		MessageID string
 	}
+	// QueueResult is the result of Queue for one delivery.
 	QueueResult struct {
 		MessageID string
 	}

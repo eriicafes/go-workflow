@@ -274,10 +274,9 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return nil, err
 		}
 		if event.EventType == worlds.EventTypeStepStarted {
-			if status == worlds.StatusRunning {
-				return a.replay(ctx, event.EventType, event.CorrelationID, true)
-			}
-			if status != worlds.StatusPending {
+			// A running step may be started again, because its previous attempt's
+			// delivery may have died, and each start records a new attempt.
+			if status != worlds.StatusPending && status != worlds.StatusRunning {
 				return nil, worlds.ErrStepNotStartable
 			}
 		} else {
@@ -432,7 +431,7 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 		return a.createHook(ctx, event)
 	case worlds.EventTypeHookReceived:
 		return a.receiveHook(ctx, event)
-	case worlds.EventTypeHookDisposed, worlds.EventTypeHookForceClaimed:
+	case worlds.EventTypeHookDisposed:
 		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
 		if err != nil || !found {
 			return err

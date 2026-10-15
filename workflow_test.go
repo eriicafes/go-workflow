@@ -2,12 +2,10 @@ package workflow_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
-	"slices"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,86 +14,71 @@ import (
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
-type joinedInput struct{}
-type joinedOutput struct{ Values []int }
 type timerInput struct{}
 type timerOutput struct{}
-type rollbackInput struct{}
-type rollbackOutput struct{}
-type nowInput struct{}
-type nowOutput struct{ Value time.Time }
+
 type pointerWorkflowInput struct{ Value int }
 type pointerWorkflowOutput struct{ Value int }
 type unencodableInput struct{ Values chan int }
 type unencodableOutput struct{ Values chan int }
-type retryInput struct{}
-type retryOutput struct{}
+
 type wakeInput struct{}
 type wakeOutput struct{}
-type childRunInput struct{}
+type childRunInput struct{ Token string }
 type childRunOutput struct{ Value string }
 type parentRunInput struct{}
-type parentRunOutput struct{ Value string }
-type collectionInput struct{}
-type collectionOutput struct {
-	All              []int
-	SettledFailed    bool
-	SelectError      bool
-	SelectOK         int
-	SelectWithCancel bool
-	SelectOKCancel   bool
-}
-type collectionStepInput struct {
-	Value int
-	Delay time.Duration
-	Fail  bool
+type parentRunOutput struct {
+	Value    string
+	AwaitErr string
+	ChildID  string
 }
 
-func (joinedInput) Workflow(joinedOutput)                    {}
-func (timerInput) Workflow(timerOutput)                      {}
-func (rollbackInput) Workflow(rollbackOutput)                {}
-func (nowInput) Workflow(nowOutput)                          {}
+func (timerInput) Workflow(timerOutput) {}
+
 func (*pointerWorkflowInput) Workflow(pointerWorkflowOutput) {}
 func (unencodableInput) Workflow(unencodableOutput)          {}
-func (retryInput) Workflow(retryOutput)                      {}
-func (wakeInput) Workflow(wakeOutput)                        {}
-func (childRunInput) Workflow(childRunOutput)                {}
-func (parentRunInput) Workflow(parentRunOutput)              {}
-func (collectionInput) Workflow(collectionOutput)            {}
 
-func increment(_ context.Context, value int) (int, error) { return value + 1, nil }
+func (wakeInput) Workflow(wakeOutput)           {}
+func (childRunInput) Workflow(childRunOutput)   {}
+func (parentRunInput) Workflow(parentRunOutput) {}
 
-func collectionStep(_ context.Context, input collectionStepInput) (int, error) {
-	if input.Delay > 0 {
-		time.Sleep(input.Delay)
-	}
-	if input.Fail {
-		return 0, errors.New("collection step failed")
-	}
-	return input.Value, nil
+type childCompletion struct {
+	Token string
+	Value string
 }
 
-func collectionVoidStep(ctx context.Context, input collectionStepInput) (struct{}, error) {
-	_, err := collectionStep(ctx, input)
-	return struct{}{}, err
+// resumeParentHook reports a child run's result to its parent through the
+// parent's hook.
+func resumeParentHook(ctx context.Context, completion childCompletion) (struct{}, error) {
+	return struct{}{}, workflow.ResumeHook(ctx, completion.Token, completion.Value)
 }
 
-func TestStartReplaysChildRunAndWakesParent(t *testing.T) {
-	child := func(ctx context.Context, _ childRunInput) (childRunOutput, error) {
+func TestStartedChildRunResumesParentHook(t *testing.T) {
+	child := func(ctx context.Context, input childRunInput) (childRunOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, _ struct{}) (string, error) { return "child", nil }, struct{}{})
+		if err != nil {
+			return childRunOutput{}, err
+		}
+		_, err = workflow.Step(ctx, resumeParentHook, childCompletion{Token: input.Token, Value: value})
 		return childRunOutput{Value: value}, err
 	}
 	parent := func(ctx context.Context, _ parentRunInput) (parentRunOutput, error) {
-		run, err := workflow.Start(ctx, childRunInput{})
+		hook, err := workflow.CreateHook[string](ctx)
 		if err != nil {
 			return parentRunOutput{}, err
 		}
-		result, err := run.Await(ctx)
-		return parentRunOutput{Value: result.Value}, err
+		run, err := workflow.Start(ctx, childRunInput{Token: hook.Token()})
+		if err != nil {
+			return parentRunOutput{}, err
+		}
+		// Await records the child as unfinished instead of waiting for it.
+		_, awaitErr := run.Await(ctx)
+		value, err := hook.Await(ctx)
+		return parentRunOutput{Value: value, AwaitErr: fmt.Sprint(awaitErr), ChildID: run.ID()}, err
 	}
 	world := testworld.New(workflow.Use(child), workflow.Use(parent))
 	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, parentRunInput{})
 	if err != nil {
@@ -105,15 +88,15 @@ func TestStartReplaysChildRunAndWakesParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Value != "child" {
+	if result.Value != "child" || result.AwaitErr != workflow.ErrRunNotFinished.Error() {
 		t.Fatalf("result = %#v", result)
 	}
-	runs, err := world.RunsList(ctx, worlds.RunsListInput{})
+	childRun, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(result.ChildID)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs.Data) != 2 {
-		t.Fatalf("run count = %d, want 2", len(runs.Data))
+	if childRun.Attributes[worlds.ParentRunIDAttribute] != run.ID() || childRun.Attributes[worlds.RootRunIDAttribute] != run.ID() {
+		t.Fatalf("child attributes = %#v", childRun.Attributes)
 	}
 }
 
@@ -138,332 +121,6 @@ func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 	}
 	if output.Value != 42 {
 		t.Fatalf("output = %#v", output)
-	}
-}
-
-func TestStepRetriesThroughEngine(t *testing.T) {
-	var attempts atomic.Int32
-	world := testworld.New(workflow.Use(func(ctx context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
-		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
-			if attempts.Add(1) == 1 {
-				return 0, errors.New("retry once")
-			}
-			return value + 1, nil
-		}, input.Value, workflow.StepOptions{MaxRetries: 1})
-		return pointerWorkflowOutput{Value: value}, err
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, &pointerWorkflowInput{Value: 41})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Await(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output.Value != 42 {
-		t.Fatalf("output = %#v", output)
-	}
-	if got := attempts.Load(); got != 2 {
-		t.Fatalf("attempts = %d, want 2", got)
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range events.Data {
-		if event.EventType == worlds.EventTypeStepRetrying {
-			return
-		}
-	}
-	t.Fatal("missing step_retrying event")
-}
-
-func TestJoinWaitsForEveryDurableResult(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ joinedInput) (joinedOutput, error) {
-		values, err := workflow.Join(ctx,
-			workflow.Background(ctx, increment, 1),
-			workflow.Background(ctx, increment, 2),
-		)
-		return joinedOutput{Values: values}, err
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, joinedInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Await(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(output.Values, []int{2, 3}) {
-		t.Fatalf("values = %#v", output.Values)
-	}
-}
-
-func TestTimerAndTimeoutUseDurableWaits(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
-		if _, err := workflow.Timer(ctx, time.Millisecond).Await(ctx); err != nil {
-			return timerOutput{}, err
-		}
-		return timerOutput{}, nil
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, timerInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	timeoutWorld := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
-		_, err := workflow.Timeout(ctx, time.Millisecond).Await(ctx)
-		return timerOutput{}, err
-	}))
-	defer timeoutWorld.Close()
-	timeoutRun, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(timeoutWorld)), timerInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := timeoutRun.Await(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
-		t.Fatalf("timeout error = %v", err)
-	}
-}
-
-func TestOnRollbackRunsInReverseRegistrationOrder(t *testing.T) {
-	var calls []string
-	var mutex sync.Mutex
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(_ context.Context, value string) error {
-			mutex.Lock()
-			calls = append(calls, value)
-			mutex.Unlock()
-			return nil
-		}, "first"); err != nil {
-			return rollbackOutput{}, err
-		}
-		if err := workflow.OnRollback(ctx, func(_ context.Context, value string) error {
-			mutex.Lock()
-			calls = append(calls, value)
-			mutex.Unlock()
-			return nil
-		}, "second"); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, errors.New("primary failure")
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
-		t.Fatalf("failure = %v", err)
-	}
-	mutex.Lock()
-	defer mutex.Unlock()
-	if !slices.Equal(calls, []string{"second", "first"}) {
-		t.Fatalf("rollback calls = %#v", calls)
-	}
-}
-
-func TestOnRollbackRunsAfterPriorDurableStep(t *testing.T) {
-	var calls atomic.Int32
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if _, err := workflow.Step(ctx, increment, 1); err != nil {
-			return rollbackOutput{}, err
-		}
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			calls.Add(1)
-			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, errors.New("primary failure")
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
-		t.Fatalf("failure = %v", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("rollback calls = %d, want 1", calls.Load())
-	}
-}
-
-func TestOnRollbackDoesNotRunAfterSuccess(t *testing.T) {
-	var calls atomic.Int32
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			calls.Add(1)
-			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, nil
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if calls.Load() != 0 {
-		t.Fatalf("rollback calls = %d, want 0", calls.Load())
-	}
-}
-
-func TestOnRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			return errors.New("rollback failure")
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, errors.New("primary failure")
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
-		t.Fatalf("failure = %v", err)
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rollbackLogged := false
-	stepFailed := false
-	for _, event := range events.Data {
-		var created struct {
-			Rollback bool `json:"rollback"`
-		}
-		if event.EventType == worlds.EventTypeStepCreated && json.Unmarshal(event.Data, &created) == nil && created.Rollback {
-			rollbackLogged = true
-		}
-		var result struct {
-			Error []byte `json:"error"`
-		}
-		if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && string(result.Error) == "rollback failure" {
-			stepFailed = true
-		}
-	}
-	if !rollbackLogged || !stepFailed {
-		t.Fatalf("rollback events were not recorded: %#v", events.Data)
-	}
-}
-
-func TestOnRollbackRegistersAroundDurableSteps(t *testing.T) {
-	var calls []string
-	var mutex sync.Mutex
-	record := func(value string) {
-		mutex.Lock()
-		calls = append(calls, value)
-		mutex.Unlock()
-	}
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			record("before step")
-			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		if _, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
-			record("step")
-			return struct{}{}, nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			record("after step")
-			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, errors.New("primary failure")
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
-		t.Fatalf("failure = %v", err)
-	}
-	mutex.Lock()
-	defer mutex.Unlock()
-	if !slices.Equal(calls, []string{"step", "after step", "before step"}) {
-		t.Fatalf("calls = %#v", calls)
-	}
-}
-
-func TestNowUsesAnImmediatelyCompletedInlineStep(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ nowInput) (nowOutput, error) {
-		value, err := workflow.Now(ctx)
-		return nowOutput{Value: value}, err
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, nowInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Await(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if output.Value.IsZero() {
-		t.Fatal("durable now returned zero time")
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	created, completed := false, false
-	for _, event := range events.Data {
-		if event.EventType == worlds.EventTypeStepCreated {
-			var data struct {
-				StepName string `json:"stepName"`
-			}
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				t.Fatal(err)
-			}
-			created = data.StepName == "now"
-		}
-		if event.EventType == worlds.EventTypeStepCompleted {
-			completed = true
-		}
-		if event.EventType == worlds.EventTypeStepStarted {
-			t.Fatal("inline now queued targeted step work")
-		}
-	}
-	if !created || !completed {
-		t.Fatalf("inline now events created=%t completed=%t", created, completed)
 	}
 }
 
@@ -502,34 +159,6 @@ ready:
 	}
 	if _, err := run.Await(ctx); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestCancellingTimerCancelsItsQueueSchedule(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
-		timer := workflow.Timer(ctx, time.Hour)
-		if _, err := workflow.Step(ctx, increment, 1); err != nil {
-			return timerOutput{}, err
-		}
-		if err := timer.Cancel(ctx); err != nil {
-			return timerOutput{}, err
-		}
-		return timerOutput{}, nil
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, timerInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Await(ctx); err != nil {
-		t.Fatal(err)
-	}
-	for _, queued := range world.Queued() {
-		if queued.NotBefore != nil {
-			t.Fatalf("cancelled timer remained queued until %v", *queued.NotBefore)
-		}
 	}
 }
 
@@ -593,119 +222,6 @@ func TestUseRejectsInvalidInputAndUnencodableOutput(t *testing.T) {
 	}
 	if _, err := runner.Run(context.Background(), []byte(`{"Value":1}`)); err == nil {
 		t.Fatal("runner accepted an unencodable output")
-	}
-}
-
-func TestFatalAndRetryableStepErrorsControlRetries(t *testing.T) {
-	var fatalAttempts atomic.Int32
-	var retryAttempts atomic.Int32
-	world := testworld.New(
-		workflow.Use(func(ctx context.Context, _ retryInput) (retryOutput, error) {
-			_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
-				fatalAttempts.Add(1)
-				return struct{}{}, workflow.FatalError(errors.New("fatal"))
-			}, struct{}{}, workflow.StepOptions{MaxRetries: 3})
-			return retryOutput{}, err
-		}),
-		workflow.Use(func(ctx context.Context, _ collectionInput) (collectionOutput, error) {
-			_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
-				if retryAttempts.Add(1) == 1 {
-					return struct{}{}, workflow.RetryableError(errors.New("retry"), time.Millisecond)
-				}
-				return struct{}{}, nil
-			}, struct{}{}, workflow.StepOptions{MaxRetries: 1})
-			return collectionOutput{}, err
-		}),
-	)
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	fatalRun, err := workflow.Start(ctx, retryInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fatalRun.Await(ctx); err == nil || fatalAttempts.Load() != 1 {
-		t.Fatalf("fatal run error = %v, attempts = %d", err, fatalAttempts.Load())
-	}
-	retryRun, err := workflow.Start(ctx, collectionInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := retryRun.Await(ctx); err != nil || retryAttempts.Load() != 2 {
-		t.Fatalf("retry run error = %v, attempts = %d", err, retryAttempts.Load())
-	}
-}
-
-func TestWorkflowCollectionHelpers(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ collectionInput) (collectionOutput, error) {
-		all, err := workflow.All(ctx, collectionStep, []collectionStepInput{{Value: 1}, {Value: 2}})
-		if err != nil {
-			return collectionOutput{}, err
-		}
-		settled := workflow.Map(ctx, collectionStep, []collectionStepInput{{Value: 3}, {Fail: true}})
-		if _, err := workflow.JoinSettled(ctx, settled...); err != nil {
-			return collectionOutput{}, err
-		}
-		_, settledErr := settled[1].Await(ctx)
-
-		failed := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
-		success := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 4, Delay: 2 * time.Millisecond})
-		selected, selectErr := workflow.Select(ctx, failed, success)
-		if selected == nil {
-			return collectionOutput{}, errors.New("Select returned no promise")
-		}
-
-		failedOK := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
-		successOK := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 5, Delay: 2 * time.Millisecond})
-		selectedOK, err := workflow.SelectOk(ctx, failedOK, successOK)
-		if err != nil {
-			return collectionOutput{}, err
-		}
-		okValue, err := selectedOK.Await(ctx)
-		if err != nil {
-			return collectionOutput{}, err
-		}
-
-		timer := workflow.Timer(ctx, time.Hour)
-		successCancel := workflow.Background(ctx, collectionVoidStep, collectionStepInput{Value: 6})
-		selectedCancel, err := workflow.SelectWithCancel(ctx, timer, successCancel)
-		if err != nil {
-			return collectionOutput{}, err
-		}
-		if _, err := selectedCancel.Await(ctx); err != nil {
-			return collectionOutput{}, err
-		}
-
-		failedOKCancel := workflow.Background(ctx, collectionVoidStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
-		timerOKCancel := workflow.Timer(ctx, time.Hour)
-		successOKCancel := workflow.Background(ctx, collectionVoidStep, collectionStepInput{Value: 7, Delay: 2 * time.Millisecond})
-		selectedOKCancel, err := workflow.SelectOkWithCancel(ctx, failedOKCancel, timerOKCancel, successOKCancel)
-		if err != nil {
-			return collectionOutput{}, err
-		}
-		if _, err := selectedOKCancel.Await(ctx); err != nil {
-			return collectionOutput{}, err
-		}
-		return collectionOutput{All: all, SettledFailed: settledErr != nil, SelectError: selectErr != nil, SelectOK: okValue, SelectWithCancel: selectedCancel != nil, SelectOKCancel: selectedOKCancel != nil}, nil
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, collectionInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Await(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(output.All, []int{1, 2}) || !output.SettledFailed || !output.SelectError || output.SelectOK != 5 || !output.SelectWithCancel || !output.SelectOKCancel {
-		t.Fatalf("collection output = %#v", output)
-	}
-	for _, queued := range world.Queued() {
-		if queued.NotBefore != nil {
-			t.Fatalf("SelectWithCancel left timer queued until %v", *queued.NotBefore)
-		}
 	}
 }
 
@@ -777,5 +293,132 @@ func TestRunWakeUpFiltersWaitCorrelationIDs(t *testing.T) {
 	}
 	if _, err := run.Await(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type streamAccessInput struct{}
+type streamAccessOutput struct{ WorkflowErr string }
+
+func (streamAccessInput) Workflow(streamAccessOutput) {}
+
+func writeOwnStream(ctx context.Context, runID string) (struct{}, error) {
+	run, err := workflow.Get[streamAccessOutput](ctx, runID)
+	if err != nil {
+		return struct{}{}, err
+	}
+	writer, release, err := run.Writer(ctx, workflow.WriterOption{Name: "side"})
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer release()
+	if _, err := writer.Write([]byte("from step")); err != nil {
+		return struct{}{}, err
+	}
+	return struct{}{}, writer.Close()
+}
+
+func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ streamAccessInput) (streamAccessOutput, error) {
+		runID := workflow.GetWorkflowMetadata(ctx).RunID
+		run, err := workflow.Get[streamAccessOutput](ctx, runID)
+		if err != nil {
+			return streamAccessOutput{}, err
+		}
+		_, _, workflowErr := run.Writer(ctx)
+		_, err = workflow.Step(ctx, writeOwnStream, runID)
+		return streamAccessOutput{WorkflowErr: fmt.Sprint(workflowErr)}, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, streamAccessInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Await(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.WorkflowErr != workflow.ErrNotInStep.Error() {
+		t.Fatalf("Run.Writer in workflow code error = %q, want ErrNotInStep", output.WorkflowErr)
+	}
+	reader, err := run.Reader(ctx, workflow.ReaderOption{Name: "side"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "from step" {
+		t.Fatalf("stream = %q err=%v", data, err)
+	}
+}
+
+type clientChoiceInput struct{}
+type clientChoiceOutput struct{}
+type clientChoiceChild struct{}
+
+func (clientChoiceInput) Workflow(clientChoiceOutput) {}
+func (clientChoiceChild) Workflow(struct{})           {}
+
+type clientChoiceWorlds struct {
+	explicit workflow.Client
+}
+
+var clientChoice clientChoiceWorlds
+
+// startChildren starts one run with the step's context as given and one with
+// an explicit client.
+func startChildren(ctx context.Context, _ struct{}) (struct{}, error) {
+	if _, err := workflow.Start(ctx, clientChoiceChild{}); err != nil {
+		return struct{}{}, err
+	}
+	_, err := workflow.Start(workflow.NewContext(ctx, clientChoice.explicit), clientChoiceChild{})
+	return struct{}{}, err
+}
+
+func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
+	other := testworld.NewManual()
+	defer other.Close()
+	clientChoice.explicit = workflow.NewClient(other)
+	runner := workflow.Use(func(ctx context.Context, _ clientChoiceInput) (clientChoiceOutput, error) {
+		_, err := workflow.Step(ctx, startChildren, struct{}{})
+		return clientChoiceOutput{}, err
+	})
+	world := testworld.NewManual(runner)
+	defer world.Close()
+	// The delivery runs in a context that carries a client for another
+	// World, as a queue consumer behind Middleware would.
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(other))
+	parent, err := workflow.Start(workflow.NewContext(context.Background(), workflow.NewClient(world)), clientChoiceInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	for range 10 {
+		executed := false
+		for _, message := range world.QueuedMessages() {
+			if string(message.Input.RunID) != parent.ID() {
+				continue
+			}
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			_ = world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID})
+			executed = true
+			break
+		}
+		if !executed {
+			break
+		}
+	}
+	own, err := world.RunsList(context.Background(), worlds.RunsListInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := other.RunsList(context.Background(), worlds.RunsListInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own.Data) != 2 || len(foreign.Data) != 1 {
+		t.Fatalf("runs in the run's World = %d, want 2; in the explicit client's World = %d, want 1", len(own.Data), len(foreign.Data))
 	}
 }

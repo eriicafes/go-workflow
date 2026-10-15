@@ -42,9 +42,9 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	return keysetPage(runs, input.Pagination.Limit, func(run worlds.Run) (time.Time, string) { return run.CreatedAt, string(run.RunID) }), nil
 }
 
-// RunsWaitForTerminalStatus re-reads the run on every go_workflow_runs
-// notification for it and at least every PollInterval.
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	// Re-read the run on every go_workflow_runs notification for it and at
+	// least every PollInterval.
 	deadline := time.Now().Add(input.Timeout)
 	for {
 		wake, release := w.notifier.wait(channelRuns, string(input.RunID))

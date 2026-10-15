@@ -17,9 +17,13 @@ const RPCContentType = "application/cbor"
 
 // RPCRequest is the CBOR envelope sent to an HTTPHandler RPC endpoint.
 type RPCRequest struct {
-	Method      string          `cbor:"method"`
-	Input       cbor.RawMessage `cbor:"input"`
-	SpecVersion *int            `cbor:"specVersion,omitempty"`
+	// Method names the operation, such as "runs.get".
+	Method string `cbor:"method"`
+	// Input is the CBOR-encoded input of the operation.
+	Input cbor.RawMessage `cbor:"input"`
+	// SpecVersion is the client's RPC protocol version. When set and
+	// different from the World's, the request fails with invalid_argument.
+	SpecVersion *int `cbor:"specVersion,omitempty"`
 }
 
 // RPCResponse is the CBOR envelope returned by an HTTPHandler RPC endpoint.
@@ -30,12 +34,14 @@ type RPCResponse struct {
 
 // RPCError describes a failed RPC request.
 type RPCError struct {
+	// Code classifies the error as not_found, invalid_argument, conflict,
+	// cancelled, deadline_exceeded, or internal.
 	Code    string `cbor:"code"`
 	Message string `cbor:"message"`
 }
 
 // specVersionMismatchError is private because a client can only act on the
-// invalid_argument RPC response; it is not a storage or runtime condition.
+// invalid_argument RPC response, and it is not a storage or runtime condition.
 type specVersionMismatchError struct {
 	client int
 	server int
@@ -595,12 +601,22 @@ type (
 		RunID    RunID
 		EventIDs []EventID
 	}
+	// ClientRunsCreateInput holds the arguments to the client.runs.create RPC
+	// method, which creates a run and queues its first delivery. An empty
+	// RunID is replaced with a new one.
 	ClientRunsCreateInput = EventsCreateRunInput
+	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
+	// method, which cancels the run.
 	ClientRunsCancelInput struct{ RunID RunID }
-	ClientRunsWakeInput   struct {
+	// ClientRunsWakeInput holds the arguments to the client.runs.wake RPC
+	// method, which calls WakeRun.
+	ClientRunsWakeInput struct {
 		RunID          RunID
 		CorrelationIDs []string
 	}
+	// ClientHooksResumeInput holds the arguments to the client.hooks.resume
+	// RPC method, which resolves the hook that owns Token with Data and queues
+	// a delivery for its run.
 	ClientHooksResumeInput struct {
 		Token string
 		Data  []byte
