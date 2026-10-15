@@ -24,10 +24,10 @@ type Config struct {
 	// URL is the PostgreSQL connection string. It is required by Open and
 	// ignored by New.
 	URL string
-	// PollInterval bounds how long Start workers and waiting reads sleep when
+	// PollInterval bounds how long Worker loops and waiting reads sleep when
 	// no notification arrives. Zero uses 250ms.
 	PollInterval time.Duration
-	// Concurrency is the most deliveries one Start call executes at once. Zero
+	// Concurrency is the most deliveries one Worker call executes at once. Zero
 	// uses 10.
 	Concurrency int
 	// LeaseDuration is how long a claimed delivery stays hidden from other
@@ -103,7 +103,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 }
 
 // Close releases the World's notification connection and closes the
-// connection pool when Open created it. Stop Start workers first by
+// connection pool when Open created it. Stop Worker loops first by
 // cancelling their context.
 func (w *World) Close() {
 	w.notifier.close()
@@ -130,10 +130,10 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
-// Start runs a worker that executes deliveries for the workflows of runners. It
-// blocks until ctx is cancelled, waits for in-flight deliveries to return, and
-// returns ctx.Err(). Any number of workers in any number of processes may
+// Worker runs the loop that executes deliveries for the workflows of runners.
+// It blocks until ctx is cancelled, waits for in-flight deliveries to return,
+// and returns ctx.Err(). Any number of workers in any number of processes may
 // share one database, and each delivery runs on one worker at a time.
-func Start(ctx context.Context, world *World, runners worlds.RunnerSet) error {
+func Worker(ctx context.Context, world *World, runners worlds.RunnerSet) error {
 	return world.work(ctx, worlds.NewRuntime(world, runners))
 }

@@ -58,7 +58,7 @@ func workflowClient() (workflow.Client, func() error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := world.Start(context.Background()); err != nil {
+	if err := world.Prepare(context.Background()); err != nil {
 		_ = world.Close()
 		return nil, nil, err
 	}

@@ -6,7 +6,7 @@ import (
 	"syscall"
 )
 
-// ErrInUse is returned by Start when another World, in this or another
+// ErrInUse is returned by Prepare when another World, in this or another
 // process, holds the storage directory.
 var ErrInUse = errors.New("workflow/local: storage is already in use")
 

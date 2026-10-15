@@ -57,24 +57,24 @@ func TestBaseURL(t *testing.T) {
 	}
 }
 
-func TestRequiresStart(t *testing.T) {
+func TestRequiresPrepare(t *testing.T) {
 	t.Parallel()
 	world, err := localworld.Open(localworld.Config{Dir: t.TempDir()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_a"}); !errors.Is(err, localworld.ErrNotStarted) {
-		t.Fatalf("read before Start = %v", err)
+	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_a"}); !errors.Is(err, localworld.ErrNotPrepared) {
+		t.Fatalf("read before Prepare = %v", err)
 	}
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); !errors.Is(err, localworld.ErrNotStarted) {
-		t.Fatalf("queue before Start = %v", err)
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); !errors.Is(err, localworld.ErrNotPrepared) {
+		t.Fatalf("queue before Prepare = %v", err)
 	}
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.Start(ctx); !errors.Is(err, localworld.ErrClosed) {
-		t.Fatalf("Start after Close = %v", err)
+	if err := world.Prepare(ctx); !errors.Is(err, localworld.ErrClosed) {
+		t.Fatalf("Prepare after Close = %v", err)
 	}
 	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_a"}); !errors.Is(err, localworld.ErrClosed) {
 		t.Fatalf("read after Close = %v", err)
@@ -136,7 +136,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if err != nil || len(names) != 2 || names[0] != "held" || names[1] != "out/1" {
 		t.Fatalf("stream names = %v err=%v", names, err)
 	}
-	// Sessions belong to the process that opened them and are released at Start.
+	// Sessions belong to the process that opened them and are released at Prepare.
 	if _, err := reopened.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: "held"}); err != nil {
 		t.Fatalf("session after restart: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestSecondStartIsInUse(t *testing.T) {
+func TestSecondPrepareIsInUse(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	first := startWorld(t, dir, nil)
@@ -155,14 +155,14 @@ func TestSecondStartIsInUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if err := second.Start(context.Background()); !errors.Is(err, localworld.ErrInUse) {
-		t.Fatalf("second Start = %v, want ErrInUse", err)
+	if err := second.Prepare(context.Background()); !errors.Is(err, localworld.ErrInUse) {
+		t.Fatalf("second Prepare = %v, want ErrInUse", err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Start(context.Background()); err != nil {
-		t.Fatalf("Start after release: %v", err)
+	if err := second.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare after release: %v", err)
 	}
 }
 
@@ -186,17 +186,17 @@ func TestRejectsIncompatibleStorage(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer world.Close()
-			if err := world.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "workflow/local") {
-				t.Fatalf("Start = %v, want storage error", err)
+			if err := world.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "workflow/local") {
+				t.Fatalf("Prepare = %v, want storage error", err)
 			}
-			// A rejected Start releases the lock.
+			// A rejected Prepare releases the lock.
 			again, err := localworld.Open(localworld.Config{Dir: dir}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer again.Close()
-			if err := again.Start(context.Background()); errors.Is(err, localworld.ErrInUse) {
-				t.Fatal("rejected Start kept the lock")
+			if err := again.Prepare(context.Background()); errors.Is(err, localworld.ErrInUse) {
+				t.Fatal("rejected Prepare kept the lock")
 			}
 		})
 	}
@@ -423,7 +423,7 @@ func TestClear(t *testing.T) {
 	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_clear"}); !errors.Is(err, localworld.ErrClosed) {
 		t.Fatalf("read after Clear = %v", err)
 	}
-	if err := world.Clear(ctx); !errors.Is(err, localworld.ErrNotStarted) {
+	if err := world.Clear(ctx); !errors.Is(err, localworld.ErrNotPrepared) {
 		t.Fatalf("second Clear = %v", err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -440,13 +440,13 @@ func TestClear(t *testing.T) {
 		t.Fatalf("run after Clear = %v", err)
 	}
 
-	unstarted, err := localworld.Open(localworld.Config{Dir: t.TempDir()}, nil)
+	unprepared, err := localworld.Open(localworld.Config{Dir: t.TempDir()}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unstarted.Close()
-	if err := unstarted.Clear(ctx); !errors.Is(err, localworld.ErrNotStarted) {
-		t.Fatalf("Clear before Start = %v", err)
+	defer unprepared.Close()
+	if err := unprepared.Clear(ctx); !errors.Is(err, localworld.ErrNotPrepared) {
+		t.Fatalf("Clear before Prepare = %v", err)
 	}
 }
 
@@ -461,7 +461,7 @@ func TestNewBorrowsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.Start(context.Background()); err != nil {
+	if err := world.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.Close(); err != nil {
@@ -478,7 +478,7 @@ func startWorld(t *testing.T, dir string, runners worlds.RunnerSet) *localworld.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.Start(context.Background()); err != nil {
+	if err := world.Prepare(context.Background()); err != nil {
 		_ = world.Close()
 		t.Fatal(err)
 	}

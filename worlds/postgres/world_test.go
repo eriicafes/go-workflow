@@ -81,7 +81,7 @@ func TestStartWorkersExecuteOnce(t *testing.T) {
 	workerCtx, stop := context.WithCancel(context.Background())
 	stopped := make(chan error, 2)
 	for _, world := range []*World{a, b} {
-		go func() { stopped <- Start(workerCtx, world, runners) }()
+		go func() { stopped <- Worker(workerCtx, world, runners) }()
 	}
 
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(a)), 30*time.Second)
@@ -142,7 +142,7 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 	}
 	workerCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- Start(workerCtx, world, worlds.Runners()) }()
+	go func() { done <- Worker(workerCtx, world, worlds.Runners()) }()
 	deadline := time.Now().Add(10 * time.Second)
 	var attempts int
 	var notBefore time.Time

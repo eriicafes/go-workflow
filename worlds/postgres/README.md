@@ -17,7 +17,7 @@ defer world.Close()
 
 runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 go func() {
-    if err := postgresworld.Start(ctx, world, runners); err != nil && !errors.Is(err, context.Canceled) {
+    if err := postgresworld.Worker(ctx, world, runners); err != nil && !errors.Is(err, context.Canceled) {
         log.Printf("workflow worker stopped: %v", err)
     }
 }()
@@ -32,14 +32,14 @@ pool and leaves it open on `Close`.
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. Webhook URLs are built from it. |
 | `URL` | required by `Open` | Connection string. |
 | `PollInterval` | 250ms | Longest sleep of workers and waiters when no notification arrives. |
-| `Concurrency` | 10 | Deliveries one `Start` call executes at once. |
+| `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1m | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
 
 Entry points:
 
 - `HTTP(world)`: RPC and webhook endpoints under `/v1/workflow`.
 - `RPC(world)` and `Webhook(world)`: each endpoint alone, to mount yourself.
-- `Start(ctx, world, runners)`: the queue worker. It returns `ctx.Err()` after
+- `Worker(ctx, world, runners)`: the queue worker. It returns `ctx.Err()` after
   in-flight deliveries finish.
 
 When the application and worker share a process, pass the world directly to
@@ -95,7 +95,7 @@ transaction. An `IdempotencyKey` deduplicates against a pending row of the
 same run; once a worker claims the row the key is released, so a message
 queued during execution is never dropped.
 
-`Start` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until` and
+`Worker` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until` and
 increments `attempts`, then executes each with the runtime:
 
 - success deletes the row;
@@ -121,14 +121,14 @@ LISTEN; point the World at Postgres directly or use session pooling.
 
 ## Scaling
 
-Run as many `Start` workers, in as many processes, as you like; `SKIP LOCKED`
+Run as many `Worker` loops, in as many processes, as you like; `SKIP LOCKED`
 gives each row to one worker at a time. Size `Concurrency` to the work your
 runners do, and the pool to roughly `Concurrency` plus your API traffic. Each
 World uses one extra connection for LISTEN.
 
 ## Security
 
-`Start` is a database worker, not an HTTP endpoint. Give the database role
+`Worker` is a database worker, not an HTTP endpoint. Give the database role
 only the permissions it needs on the `go_workflow_` tables (plus `CREATE` on
 the schema for migrations, or run migrations with a separate role), require
 TLS for database connections, and keep the database reachable only from the

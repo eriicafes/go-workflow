@@ -1,26 +1,21 @@
 # go-workflow
 
-`go-workflow` is a replay-based workflow runtime for Go. A workflow is a
-struct type whose `Workflow` method declares its output, and its package path
-and type name are the workflow name. A runner, an ordinary Go function using
-`context.Context`, executes the workflow and calls steps. There are no
-generated registries, workflow interfaces, or SDK-specific context type.
+go-workflow is a durable workflow library for Go, inspired by the
+[Workflow SDK](https://workflow-sdk.dev). Workflows are Go functions whose
+progress is persisted step by step. A run can suspend on a timer or a hook
+without holding a process and resumes when it can continue. Runs can be
+inspected with the Workflow SDK web UI.
 
-Every run is recorded as an append-only event log in a World, which can be
-files on disk, Postgres, Redis with Vercel Queues, or DynamoDB with SQS.
-A run executes in one of two contexts. In workflow context, the runner's own
-code executes as a flow, which replays the runner from the beginning, records
-the operations it starts, and queues the steps it needs. In step context, a
-step function executes as a step, which replays the runner up to that step
-and runs the step function. Operations that are already recorded return their
-recorded results, so a completed step does not run again and the run resumes
-where it left off. Code outside a run starts and reads runs through a Client,
-either in the same process as the World or over its HTTP endpoint.
+```sh
+go get github.com/eriicafes/go-workflow
+```
 
 ## Workflows
 
-Workflows are plain struct types in their own package, so request handlers can
-import them without importing their runners.
+A workflow is a struct type whose `Workflow` method declares its output. Its
+package path and type name are the workflow name, and a value of it is the
+input of a run. Keep workflows in their own package so request handlers can
+start them without importing their runners.
 
 ```go
 package workflows
@@ -36,72 +31,212 @@ type GenerateReportResult struct {
 func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
 
-## Local World
+## Runners and steps
 
-`worlds/local` executes the same replay model in a single process and stores
-runs, events, hooks, streams, and queued work as JSON files under a directory,
-so local development needs no worker, queue, or database and survives restarts.
-`Start` takes an exclusive lock on the directory, recovers interrupted writes,
-and begins delivering queued work in-process.
+A runner executes a workflow. It is a plain function that takes the workflow as
+input and calls steps, which do the real work and side effects. Keep each runner
+in a file with the steps it calls.
 
 ```go
-// import localworld "github.com/eriicafes/go-workflow/worlds/local"
-runners := workflow.Runners(
+package flows
+
+func GenerateReport(ctx context.Context, input workflows.GenerateReport) (workflows.GenerateReportResult, error) {
+	sources, err := workflow.Step(ctx, findSources, input.Topic)
+	if err != nil {
+		return workflows.GenerateReportResult{}, err
+	}
+	return workflows.GenerateReportResult{Summary: strings.Join(sources, ", ")}, nil
+}
+
+func findSources(ctx context.Context, topic string) ([]string, error) {
+	return search(ctx, topic)
+}
+```
+
+Register runners with `workflow.Use` and collect them with `worlds.Runners`.
+
+```go
+runners := worlds.Runners(
 	workflow.Use(flows.GenerateReport),
 )
+```
 
-world, err := localworld.Open(localworld.Config{Dir: ".workflow-data"}, runners)
+Each step's result is persisted once it completes, so a run continues from its
+last completed step and never repeats finished work. Waiting on a step, a
+timer, or a hook suspends the run without consuming any resources until it can
+continue. For this to work, a runner does side effects only through steps and
+reads time only through `workflow.Now`, and the [analyzer](#development) checks
+these rules.
+
+Steps run at least once and retry on error, three times by default. Set
+`workflow.StepOptions{MaxRetries: n}` to change that, return
+`workflow.FatalError(err)` to fail without retrying, or return
+`workflow.RetryableError(err, after)` to retry after a delay. Step functions
+should be idempotent, and `workflow.StepID(ctx)` is a stable idempotency key.
+
+`workflow.InlineStep(ctx, fn)` records the result of a function that cannot
+fail, such as a generated ID, without a separate step delivery.
+
+## Running workflows
+
+Every run is recorded in a World. The local World stores runs as JSON files and
+delivers work in-process, so it needs no database or worker.
+
+```go
+world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
 	log.Fatal(err)
 }
 defer world.Close()
-if err := world.Start(context.Background()); err != nil {
+if err := world.Prepare(ctx); err != nil {
 	log.Fatal(err)
 }
 
-run, err := workflow.Start(
-	workflow.NewContext(context.Background(), world),
-	workflows.GenerateReport{
-		Topic: "workflows",
-	},
-)
+ctx = workflow.NewContext(ctx, workflow.NewClient(world))
+run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"})
 if err != nil {
 	log.Fatal(err)
 }
-result, err := run.Value(context.Background())
-if err != nil {
-	log.Fatal(err)
-}
-log.Printf("report summary: %s", result.Summary)
+result, err := run.Await(ctx)
 ```
 
-## Runners and steps
+`workflow.Start` needs only the workflow type and a Client in ctx. A `Run`
+handle reads and controls the run with `Await`, `Done`, `Status`, `Cancel`, and
+`WakeUp`, and `workflow.Get` returns the handle of an existing run by ID.
 
-Runners and steps are ordinary functions. Keep each runner in a file with the
-steps it calls. `Step` and `Background` accept either named functions or
-inline closures. The analyzer requires a
-closure to receive workflow-relevant values through its explicit input.
-Calling a step function directly is normal Go and repeats during replay.
+## Worlds
 
-Steps run at least once. A step whose delivery ends before recording its
-result is redelivered by the World's queue and runs again as a new attempt, so
-step functions should be idempotent. Keep the queue's visibility timeout or
-lease longer than your longest step, or a redelivery can run the step while
-the first delivery is still executing it.
+| Package | Storage and delivery | Entry points |
+| --- | --- | --- |
+| [`worlds/local`](worlds/local) | JSON files, in-process delivery | `World.Prepare` |
+| [`worlds/postgres`](worlds/postgres) | PostgreSQL, LISTEN/NOTIFY workers | `postgresworld.Worker` |
+| [`worlds/vercel`](worlds/vercel) | Redis, Vercel Queues, optional QStash | `vercelworld.Queue` |
+| [`worlds/aws`](worlds/aws) | DynamoDB, SQS, optional EventBridge Scheduler | `awsworld.Queue` |
 
-`workflow.InlineStep(ctx, fn)` records the result of a function that cannot
-fail, such as a generated ID, without a step delivery. When its result cannot
-be recorded, the delivery is retried and calls the function again. Work that
-can fail belongs in `Step`.
+Every World package also exports `HTTP(world)`, which serves the RPC endpoint
+that clients and the web UI use and the webhook endpoint under `/v1/workflow`.
+`RPC(world)` and `Webhook(world)` serve each endpoint on its own. Set
+`Config.BaseURL` to the public URL of that handler, since webhook URLs are built
+from it.
+
+### Postgres
+
+Any number of application and worker processes share one database. `Worker`
+runs the loop that executes deliveries.
+
+```go
+world, err := postgresworld.Open(ctx, postgresworld.Config{BaseURL: os.Getenv("WORKFLOW_BASE_URL"), URL: os.Getenv("DATABASE_URL")})
+if err != nil {
+	log.Fatal(err)
+}
+defer world.Close()
+
+go func() {
+	if err := postgresworld.Worker(ctx, world, runners); err != nil {
+		log.Printf("workflow worker stopped: %v", err)
+	}
+}()
+log.Fatal(http.ListenAndServe(":8081", postgresworld.HTTP(world)))
+```
+
+### Vercel
+
+Deploy `Queue` as a function with a Vercel Queues trigger for `Config.Topic`,
+and `HTTP` as a separate function for clients. Redis is reached over TCP with
+`RedisURL` or over the Upstash REST API with `RedisRESTURL` and
+`RedisRESTToken`. `OIDCToken` defaults to reading `VERCEL_OIDC_TOKEN` on every
+request.
+
+```go
+world, err := vercelworld.New(vercelworld.Config{
+	BaseURL:  os.Getenv("WORKFLOW_BASE_URL"),
+	RedisURL: os.Getenv("REDIS_URL"),
+	QueueURL: os.Getenv("VERCEL_QUEUE_URL"),
+	Topic:    os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+// The queue consumer function.
+log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
+
+// The client-facing function.
+log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
+```
+
+Vercel Queues delays deliveries by at most seven days. Set `Config.QStash` to
+deliver work due later.
+
+### AWS
+
+Install `Queue` as the SQS handler of one Lambda function and `HTTP` behind a
+Function URL of another. The [Terraform module](worlds/aws/terraform) creates
+the table, queues, scheduler group, and IAM policies, and
+`awsworld.CreateTable` creates the table for tests and DynamoDB Local.
+
+```go
+world, err := awsworld.New(awsworld.Config{BaseURL: os.Getenv("WORKFLOW_BASE_URL"), TableName: os.Getenv("WORKFLOW_TABLE"), QueueURL: os.Getenv("WORKFLOW_QUEUE_URL")}, dynamodb.NewFromConfig(cfg), sqs.NewFromConfig(cfg))
+if err != nil {
+	log.Fatal(err)
+}
+
+// The queue consumer function.
+lambda.Start(awsworld.Queue(world, runners))
+
+// The client-facing function.
+lambdaurl.Start(awsworld.HTTP(world))
+```
+
+SQS delays deliveries by at most 15 minutes. Set `Config.Scheduler` to deliver
+work due later through EventBridge Scheduler.
+
+## Application and worker
+
+An application that only starts and reads runs needs the workflow types and a
+Client, not the runners. `NewHTTPClient` talks to a World served by `HTTP`, and
+`Middleware` puts the client in every request context.
+
+```go
+client := workflow.NewHTTPClient("http://workflow-worker:8081")
+
+mux := http.NewServeMux()
+mux.HandleFunc("POST /reports", func(w http.ResponseWriter, r *http.Request) {
+	run, err := workflow.Start(r.Context(), workflows.GenerateReport{Topic: r.FormValue("topic")})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte(run.ID()))
+})
+log.Fatal(http.ListenAndServe(":8080", workflow.Middleware(mux, client)))
+```
+
+[`examples/basic`](examples/basic) has the full application with a worker for
+each World.
+
+## Concurrency and time
+
+`workflow.Background` starts a step without waiting and returns a `Promise`.
+`Map` starts one step per input, `All` waits for all of them, and `Join`,
+`JoinSettled`, and the `Select` functions wait on several promises at once.
+
+```go
+promises := workflow.Map(ctx, findSources, []string{"go", "rust"})
+results, err := workflow.Join(ctx, promises...)
+```
+
+`workflow.Sleep` suspends the run for a duration, `Timer` returns a promise that
+settles after one, and `Timeout` returns a timer that cancels the run when it
+fires. A sleeping run consumes no resources, so it can sleep for days or months.
 
 ## Errors
 
-A step's error is recorded and read back on replay as a `*workflow.Error`,
-and so is a failed run's error returned by `Run.Await`. A `Error` keeps the
-message, type, and JSON encoding of every error in the original chain, so
-`errors.Is` matches sentinel errors and `errors.As` decodes error types in the
-workflow and in the parent of a child run. `errors.As` restores exported
-fields only.
+A failed step's error is persisted with the step and comes back as a
+`*workflow.Error`, and so does a failed run's error from `Run.Await`. It keeps
+the message, type, and exported fields of every error in the original chain, so
+`errors.Is` and `errors.As` work on it in the runner and across child runs.
 
 ```go
 var ErrCardDeclined = errors.New("card declined")
@@ -110,7 +245,7 @@ type LimitError struct{ Limit int }
 
 func (e *LimitError) Error() string { return fmt.Sprintf("over limit %d", e.Limit) }
 
-_, err := workflow.Step(ctx, Charge, order)
+_, err := workflow.Step(ctx, charge, order)
 var limit *LimitError
 switch {
 case errors.Is(err, ErrCardDeclined):
@@ -122,9 +257,8 @@ case errors.As(err, &limit):
 
 ## Rollbacks
 
-Register a compensation after the work it reverses. If the workflow later
-fails, registered compensations run as durable steps in reverse registration
-order. Successful workflows never execute them.
+Register a compensation after the work it reverses. If the run later fails, the
+registered compensations run as steps in reverse registration order.
 
 ```go
 invoice, err := workflow.Step(ctx, createInvoice, input)
@@ -136,285 +270,79 @@ if err := workflow.OnRollback(ctx, voidInvoice, invoice.ID); err != nil {
 }
 ```
 
-`OnRollback` compensations return only `error`. They use the same retry and
-step metadata behavior as ordinary durable steps.
-
-```go
-package flows
-
-func GenerateReport(
-	ctx context.Context,
-	input workflows.GenerateReport,
-) (workflows.GenerateReportResult, error) {
-	sources, err := workflow.Step(
-		ctx,
-		findSources,
-		input.Topic,
-	)
-	if err != nil {
-		return workflows.GenerateReportResult{}, err
-	}
-
-	if _, err := workflow.Step(
-		ctx,
-		writeReportProgress,
-		len(sources),
-	); err != nil {
-		return workflows.GenerateReportResult{}, err
-	}
-
-	return workflows.GenerateReportResult{
-		Summary: strings.Join(sources, ", "),
-	}, nil
-}
-
-func findSources(ctx context.Context, topic string) ([]string, error) {
-	// I/O belongs in a durable operation.
-	// workflow.StepID(ctx) is stable for this operation sequence.
-	return query(ctx, topic)
-}
-
-func writeReportProgress(ctx context.Context, count int) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx)
-	if err != nil {
-		return struct{}{}, err
-	}
-	defer release()
-
-	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
-	return struct{}{}, err
-}
-```
-
 ## Streams
 
-Streams are run-owned byte streams backed by the selected world rather than by
-the event log. Only steps can acquire a writer or reader. A stream has one
-active writer at a time. Another writer waits until the current writer releases
-its lock or closes the stream. Closing is visible to every reader. Runs close
-any remaining streams when they reach a terminal state.
+Steps write run-owned byte streams that readers consume while the run is still
+going. A stream has one writer at a time, and another writer waits until the
+current one releases or closes it.
 
 ```go
-func writeReportProgress(ctx context.Context, count int) (struct{}, error) {
-	writer, release, err := workflow.Writer(
-		ctx,
-		workflow.WriterOption{Name: "progress"},
-	)
+func writeProgress(ctx context.Context, count int) (struct{}, error) {
+	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: "progress"})
 	if err != nil {
 		return struct{}{}, err
 	}
 	defer release()
-
 	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
 	return struct{}{}, err
 }
-
-reader, err := run.ReaderAt(
-	ctx,
-	-128,
-	workflow.ReaderOption{Name: "progress"},
-)
-if err != nil {
-	return err
-}
-// io.ReadAll(reader) waits for new data until the stream closes.
 ```
 
-`workflow.Writer` and `workflow.Reader` are step-only. `run.Writer` and
-`run.Reader` are for step context and code outside a run. In workflow context
-they return `ErrNotInStep`. `ReaderAt` accepts negative offsets relative to
-the stream's end. `Release` completes the writer's step-local lifetime without
-closing. `Close` closes the stream for every reader. Use `bufio.Writer` when
-writes need application-side buffering.
+Outside a run, `run.Reader` reads a stream from the start and `run.ReaderAt`
+from an offset, where a negative offset counts from the end. Reads wait for new
+data until the stream closes.
+
+```go
+reader, err := run.ReaderAt(ctx, -128, workflow.ReaderOption{Name: "progress"})
+```
 
 ## Hooks and webhooks
 
-`NewHook` records or derives a replay-stable token but does not claim it until
-`Value` or `GetConflict` is reached during workflow replay. `ResumeHook` delivers
-a typed payload, and `ResumeHookWithRetries` handles a resume racing a newly
-started run. Pass an explicit token when an external caller must know the URL
-before the workflow reaches the hook.
+A hook suspends a run until something outside resumes it with a typed payload.
+Pass a token when the caller must know it in advance.
 
 ```go
-hook := workflow.NewHook[string](workflow.HookOption{
-	Token: input.Token,
-})
-value, err := hook.Value(ctx)
-```
-
-`CreateWebhook[T]` receives and decodes a JSON request body as `T`. Call
-`webhook.Request(ctx)` when the workflow needs the reconstructed
-`*http.Request` instead. Its URL is the World-configured absolute public base
-URL followed by `/webhooks/:token`, served by `worlds.HTTPHandler`. The token is the route's only authorization, so
-verify provider signatures before trusting the request payload.
-
-`WebhookOption` can require one HTTP method, return a static
-`*http.Response`, or set `Manual: true`. A manual webhook waits until a
-runner calls `webhook.RespondWith(ctx, response)`.
-
-## Application and worker
-
-The application schedules by importing only workflow types and an
-HTTP client. The worker is a separate entry point that imports the
-implementation package, owns the world, and exposes the workflow HTTP API.
-
-```go
-// cmd/app/main.go
-client := workflow.NewHTTPClient("http://workflow-worker:8081")
-
-func createReport(w http.ResponseWriter, r *http.Request) {
-	var input workflows.GenerateReport
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, "invalid report input", http.StatusBadRequest)
-		return
-	}
-
-	// Middleware put the client in r.Context().
-	run, err := workflow.Start(r.Context(), input)
-	if err != nil {
-		http.Error(w, "start report workflow", http.StatusInternalServerError)
-		return
-	}
-
-	// Reply 202 with run.ID(). The request does not execute workflow code.
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(run.ID()))
-}
-
-mux := http.NewServeMux()
-mux.HandleFunc("POST /reports", createReport)
-if err := http.ListenAndServe(":8080", workflow.Middleware(mux, client)); err != nil {
-	log.Fatal(err)
-}
-```
-
-```go
-// cmd/worker/main.go
-world, err := postgresworld.Open(ctx, postgresworld.Config{
-	BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // e.g. https://workflows.example.com/v1/workflow
-	URL:     os.Getenv("DATABASE_URL"),
-})
+hook, err := workflow.CreateHook[Approval](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
 if err != nil {
-	log.Fatal(err)
+	return Result{}, err
 }
-defer world.Close()
-
-runners := workflow.Runners(
-	workflow.Use(flows.GenerateReport),
-)
-
-go func() {
-	if err := postgresworld.Start(ctx, world, runners); err != nil {
-		log.Printf("workflow worker stopped: %v", err)
-	}
-}()
-if err := http.ListenAndServe(":8081", postgresworld.HTTP(world)); err != nil {
-	log.Fatal(err)
-}
+approval, err := hook.Await(ctx)
 ```
-
-Run these independently with `go run ./examples/basic/cmd/app` and `go run
-./examples/basic/cmd/worker/pg`. Only the worker needs `DATABASE_URL`. Point the
-application's `WORKFLOW_URL` at the worker HTTP endpoint. The complete Postgres
-example can also run through `go run ./examples/basic/cmd/dev`; its workflow
-checks run before the application and worker are built.
-
-## World runtime entry points
-
-World packages own deployment-specific entry points:
 
 ```go
-// Postgres: a long-running worker woken by LISTEN/NOTIFY.
-go func() {
-	if err := postgresworld.Start(ctx, postgresWorld, runners); err != nil {
-		log.Printf("workflow worker stopped: %v", err)
-	}
-}()
-if err := http.ListenAndServe(":8081", postgresworld.HTTP(postgresWorld)); err != nil {
-	log.Fatal(err)
-}
-
-// AWS: install this as the Lambda SQS handler.
-lambda.Start(awsworld.Queue(awsWorld, runners))
-
-// AWS: a separate Lambda Function URL provides the app-facing API.
-lambda.Start(lambdaurl.Wrap(awsworld.HTTP(awsWorld)))
-
-// Vercel: deploy separate Queue-consumer and app-facing API functions.
-if err := http.ListenAndServe(":8081", vercelworld.Queue(vercelWorld, runners)); err != nil {
-	log.Fatal(err)
-}
-if err := http.ListenAndServe(":8082", vercelworld.HTTP(vercelWorld)); err != nil {
-	log.Fatal(err)
-}
+err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
 ```
 
-`HTTP(world)` serves the RPC and webhook endpoints under `/v1/workflow`.
-`RPC(world)` and `Webhook(world)` serve each endpoint on its own, for
-deployments that expose only one of them.
-
-The examples are split accordingly:
-
-- `cmd/worker/aws/queue` and `cmd/worker/aws/api`
-- `cmd/worker/vercel/queue` and `cmd/worker/vercel/api`
-
-The Vercel HTTP entrypoint also receives the runners so it can serve an
-optional signed QStash timer route.
-
-The AWS and Vercel queues publish a `workflow.Task` after each root-run or
-command task is persisted. Claiming is lease-fenced, so a duplicate queue
-delivery is a successful no-op.
-
-`Run[T]` and `Result[T]` both implement `Wait`, `Value`, and `Unwrap`.
-`Background` creates a durable operation. `Map`, `All`, `Join`, `JoinSettled`,
-`Race`, `Timeout`, and `Sleep` compose them. Each operation is written as attempted
-before user code runs and receives an idempotency key. Command input, function
-identity, and callsite fingerprint must match during replay. Completion writes
-are fenced by task lease tokens, and task leases heartbeat while code runs.
-
-`Map` records one background-step command per input. `Join` records one
-fail-fast barrier, `JoinSettled` records one wait-all barrier, and `Race`
-records one winner-selection command. `All` is `Map` followed by `Join`: on a
-failure it returns the result slice and the first completion failure without
-waiting for unfinished mapped work.
-
-Application handlers use run handles for lifecycle queries; workflow bodies
-coordinate only through durable operations, while steps perform I/O:
+A webhook is a hook resumed by an HTTP request to its URL, with the JSON body
+decoded as the payload. `WebhookOption` can require a method, set a static
+response, or hold the request until the runner calls `RespondWith`. The token
+in the URL is its only authorization, so verify provider signatures before
+trusting the payload.
 
 ```go
-metadata := workflow.GetWorkflowMetadata(ctx) // Current workflow or step.
-run, err := workflow.Get[Report](ctx, id)     // Handler context.
+webhook, err := workflow.CreateWebhook[Payment](ctx)
 if err != nil {
-	return err
+	return Result{}, err
 }
-
-status, err := run.Status()
-if err != nil {
-	return err
+if _, err := workflow.Step(ctx, registerCallback, webhook.URL()); err != nil {
+	return Result{}, err
 }
-if status == workflow.StatusWaiting {
-	if _, err := run.Wake(); err != nil {
-		return err
-	}
-}
-_ = metadata.RunID
+payment, err := webhook.Await(ctx)
 ```
-
-The Go package deliberately serves no Dev UI. Streams and the
-Postgres operation tables are the contract for `go-dev` or a production proxy.
 
 ## Composing workflows
 
 A runner can compose another workflow in two ways, as in the Workflow SDK.
-Calling the other workflow's runner directly runs its steps in the current run,
-which then waits for its result like any other code.
+Calling the other workflow's runner directly runs its steps in the current run.
 
-`workflow.Start` in workflow context starts a child run as a step and returns
-at once, and replay returns the same child `Run`. Every `Run` method in
-workflow context reads the run once as a step, so `Await` returns
-`workflow.ErrRunNotFinished` for a child that had not finished. To wait for a
-child run, create a hook, pass its token to the child, and have the child
-resume the hook when it finishes.
+```go
+report, err := GenerateReport(ctx, workflows.GenerateReport{Topic: input.Topic})
+```
+
+`workflow.Start` in workflow context starts a child run, which carries the
+`$parentRunId` and `$rootRunId` attributes. In workflow context `Run.Await`
+returns `workflow.ErrRunNotFinished` instead of waiting, so to wait for a child,
+pass it a hook token and have it resume the hook when it finishes.
 
 ```go
 func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
@@ -443,23 +371,40 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 }
 ```
 
-A child run carries the `$parentRunId` and `$rootRunId` attributes.
+## Development
 
-## go-dev static checks
+The analyzer checks that every runner passed to `Use` is a named function whose
+input is a workflow, and reports goroutines, `select`, map iteration,
+`time.Now`, I/O outside steps, and steps that capture variables instead of
+taking them as input. Run it as a vet tool.
 
-Use `github.com/eriicafes/go-workflow/workflowdev` to run the analyzer before
-every `go-dev` rebuild:
+```sh
+go install github.com/eriicafes/go-workflow/cmd/workflowcheck@latest
+go vet -vettool=$(which workflowcheck) ./...
+```
+
+The [`workflowdev`](workflowdev) package integrates with
+[go-dev](https://github.com/eriicafes/go-dev). `workflowdev.Check` runs the
+analyzer before every start or reload, and `workflowdev.Web` runs the Workflow
+SDK web UI against a World served by `HTTP`. The web UI needs the Workflow SDK
+CLI and this repository's World adapter for it, installed in the directory
+go-dev runs from.
+
+```sh
+npm install --save-dev workflow @eriicafes/go-workflow
+```
 
 ```go
 session := dev.New()
-session.Catch(session.Run(dev.Cmd{
-	Run:     dev.Package("./cmd/api"),
-	Prepare: dev.Hooks(workflowdev.Check()),
-	Watch:   dev.Values("."),
-}))
+task := session.NewTask(dev.Cmd{
+	Run:        dev.Package("./cmd/app"),
+	Watch:      dev.Values("cmd", "flows", "workflows"),
+	ServerAddr: ":8080",
+	Commands: dev.Commands(
+		dev.Cmd{Run: dev.Package("./cmd/worker/pg"), Prepare: dev.Hooks(workflowdev.Check("./...")), Watch: dev.Values("cmd", "flows", "workflows"), Phase: dev.Before},
+		workflowdev.Web("http://localhost:8081/v1/workflow"),
+	),
+})
+session.Catch(task.Run())
 session.Catch(session.Wait())
 ```
-
-It validates `Use` bindings and reports direct I/O, clocks, random values,
-goroutines, channel selects, map iteration, and closure/wrapper steps in
-workflow bodies. Deterministic slice loops are allowed.

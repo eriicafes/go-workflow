@@ -14,7 +14,7 @@ if err != nil {
 }
 defer world.Close()
 
-if err := world.Start(ctx); err != nil {
+if err := world.Prepare(ctx); err != nil {
 	return err
 }
 
@@ -31,17 +31,17 @@ endpoint on its own.
 - `Open(config, runners)` creates `Dir` with `0700` permissions and owns the
   directory handle. `New(root, config, runners)` borrows a caller-owned
   `*os.Root`, which the caller closes after `Close`. Neither reads any state.
-- `Start(ctx)` takes an exclusive `flock` on `locks/world.lock`, validates
+- `Prepare(ctx)` takes an exclusive `flock` on `locks/world.lock`, validates
   `version.json`, recovers interrupted writes, releases stream write sessions
   left by the previous process, and begins delivering every persisted queue
   item. It returns `ErrInUse` when another World (in this or another process)
   holds the directory. Cancelling `ctx` stops delivery.
-- **Every other method requires a started World** and returns `ErrNotStarted`
-  before `Start` and `ErrClosed` after `Close`.
+- **Every other method requires a prepared World** and returns `ErrNotPrepared`
+  before `Prepare` and `ErrClosed` after `Close`.
 - `Close()` stops delivery, waits for in-flight deliveries, releases the lock,
   and closes a directory opened by `Open`. Interrupted deliveries stay queued
-  and run again after the next `Start`.
-- `Clear(ctx)` requires a started World. It stops delivery, removes all
+  and run again after the next `Prepare`.
+- `Clear(ctx)` requires a prepared World. It stops delivery, removes all
   persisted state while holding the lock, writes a fresh `version.json`, and
   closes the World. Open a new World to continue.
 
@@ -82,7 +82,7 @@ with the new `eventCount`. That run file is the commit point: readers only
 read slots up to `eventCount`, and readers never observe a mutation in
 progress.
 
-When `Start` finds an event file past a run's `eventCount`, it rebuilds that
+When `Prepare` finds an event file past a run's `eventCount`, it rebuilds that
 run's steps, hooks, and token claims by replaying the committed events, then
 deletes the uncommitted event files. A token now owned by another run's hook
 is left alone. Event directories without a run file (an interrupted create)
@@ -110,7 +110,7 @@ change notification instead of polling.
 
 ## Storage versions
 
-The current format is version 2. `Start` rejects directories written by older
+The current format is version 2. `Prepare` rejects directories written by older
 versions (the version 1 command store, or the unversioned `world.json`
 snapshot) and any non-empty directory without `version.json`. Remove the
 directory to start over.

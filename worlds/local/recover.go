@@ -49,7 +49,7 @@ func (w *World) recoverLocked() error {
 // rebuildRun discards event files past the committed EventCount and rewrites
 // the run's steps, hooks, and token claims by replaying the committed events.
 // Discarded files are removed last, highest slot first, so an interrupted
-// rebuild is detected and repeated by the next Start.
+// rebuild is detected and repeated by the next Prepare.
 func (w *World) rebuildRun(runID worlds.RunID) error {
 	run, err := w.readRun(runID)
 	if err != nil {

@@ -18,9 +18,9 @@ import (
 const defaultBaseURL = "http://localhost:3000/v1/workflow"
 
 var (
-	// ErrNotStarted is returned by World methods called before Start, and by
-	// Clear on a World that is not started.
-	ErrNotStarted = errors.New("workflow/local: world is not started")
+	// ErrNotPrepared is returned by World methods called before Prepare, and by
+	// Clear on a World that is not prepared.
+	ErrNotPrepared = errors.New("workflow/local: world is not prepared")
 	// ErrClosed is returned by World methods called after Close or Clear.
 	ErrClosed = errors.New("workflow/local: world is closed")
 )
@@ -37,7 +37,7 @@ type Config struct {
 
 // World is the local World. It stores events, run, step, and hook views,
 // streams, and queued deliveries as JSON files under one directory, and only
-// one started World may use a directory at a time.
+// one prepared World may use a directory at a time.
 type World struct {
 	// mu guards the files and lifecycle fields. Mutations hold it exclusively,
 	// so readers only ever observe committed state.
@@ -46,7 +46,7 @@ type World struct {
 	ownedRoot bool
 	baseURL   string
 	lock      *os.File
-	started   bool
+	prepared  bool
 	closed    bool
 	broken    error
 	ctx       context.Context
@@ -64,7 +64,7 @@ type World struct {
 
 // Open creates config.Dir with private permissions if needed and returns a
 // World that executes deliveries for the workflows of runners. The World owns the
-// directory handle and closes it on Close. Open reads no state, so call Start
+// directory handle and closes it on Close. Open reads no state, so call Prepare
 // before using the World.
 func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 	if config.Dir == "" {
@@ -91,7 +91,7 @@ func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 
 // New returns a World stored in root that executes deliveries for the workflows
 // in runners. The caller keeps owning root and closes it after Close.
-// config.Dir is ignored. New reads no state, so call Start before using the
+// config.Dir is ignored. New reads no state, so call Prepare before using the
 // World.
 func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error) {
 	if root == nil {
@@ -110,14 +110,14 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 	return world, nil
 }
 
-// Start locks the directory, checks its storage version, recovers writes
+// Prepare locks the directory, checks its storage version, recovers writes
 // interrupted by a crash, and begins delivering queued work in the background.
 // It returns once delivery has begun, and cancelling ctx stops delivery.
 //
-// Every other World method returns ErrNotStarted until Start succeeds. Start
+// Every other World method returns ErrNotPrepared until Prepare succeeds. Prepare
 // returns ErrInUse when another World, in this or another process, holds the
-// directory, ErrClosed after Close, and nil when the World is already started.
-func (w *World) Start(ctx context.Context) error {
+// directory, ErrClosed after Close, and nil when the World is already prepared.
+func (w *World) Prepare(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (w *World) Start(ctx context.Context) error {
 	if w.closed {
 		return ErrClosed
 	}
-	if w.started {
+	if w.prepared {
 		return nil
 	}
 	lock, err := acquireLock(w.root)
@@ -146,7 +146,7 @@ func (w *World) Start(ctx context.Context) error {
 		releaseLock(lock)
 		return err
 	}
-	w.lock, w.started = lock, true
+	w.lock, w.prepared = lock, true
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	for _, delivery := range deliveries {
 		w.schedule(delivery)
@@ -158,7 +158,7 @@ func (w *World) Start(ctx context.Context) error {
 
 // Close stops delivery, waits for in-flight deliveries to return, releases the
 // directory lock, and closes the directory handle when Open created it.
-// Interrupted deliveries stay queued and run again after the next Start.
+// Interrupted deliveries stay queued and run again after the next Prepare.
 // Later calls to World methods return ErrClosed, and closing twice returns
 // nil.
 func (w *World) Close() error {
@@ -169,14 +169,14 @@ func (w *World) Close() error {
 }
 
 // Clear stops delivery, deletes every run, hook, stream, and queued delivery in
-// the directory, and closes the World. It returns ErrNotStarted unless the
-// World is started. Open a new World on the directory to continue.
+// the directory, and closes the World. It returns ErrNotPrepared unless the
+// World is prepared. Open a new World on the directory to continue.
 func (w *World) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if !w.stop(true) {
-		return ErrNotStarted
+		return ErrNotPrepared
 	}
 	w.mu.Lock()
 	var err error
@@ -196,7 +196,7 @@ func (w *World) Clear(ctx context.Context) error {
 // false when the World was already closed, or not started when requireStarted.
 func (w *World) stop(requireStarted bool) bool {
 	w.mu.Lock()
-	if w.closed || requireStarted && !w.started {
+	if w.closed || requireStarted && !w.prepared {
 		w.mu.Unlock()
 		return false
 	}
@@ -214,7 +214,7 @@ func (w *World) stop(requireStarted bool) bool {
 func (w *World) release() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.started = false
+	w.prepared = false
 	releaseLock(w.lock)
 	w.lock = nil
 	if w.ownedRoot {
@@ -223,7 +223,7 @@ func (w *World) release() error {
 	return nil
 }
 
-// readLock holds the shared lock for a started World.
+// readLock holds the shared lock for a prepared World.
 func (w *World) readLock() (func(), error) {
 	w.mu.RLock()
 	if err := w.usableLocked(); err != nil {
@@ -233,7 +233,7 @@ func (w *World) readLock() (func(), error) {
 	return w.mu.RUnlock, nil
 }
 
-// writeLock holds the exclusive lock for a started World.
+// writeLock holds the exclusive lock for a prepared World.
 func (w *World) writeLock() (func(), error) {
 	w.mu.Lock()
 	if err := w.usableLocked(); err != nil {
@@ -247,8 +247,8 @@ func (w *World) usableLocked() error {
 	switch {
 	case w.closed:
 		return ErrClosed
-	case !w.started:
-		return ErrNotStarted
+	case !w.prepared:
+		return ErrNotPrepared
 	case w.broken != nil:
 		return w.broken
 	}
