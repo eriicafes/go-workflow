@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	dev "github.com/eriicafes/go-dev"
+	"github.com/eriicafes/go-dev"
 	"github.com/eriicafes/go-workflow/workflowdev"
 )
 
