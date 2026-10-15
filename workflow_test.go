@@ -7,6 +7,7 @@ import (
 	"io"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
@@ -424,4 +425,93 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 	if len(own.Data) != 2 || len(foreign.Data) != 1 {
 		t.Fatalf("runs in the run's World = %d, want 2; in the explicit client's World = %d, want 1", len(own.Data), len(foreign.Data))
 	}
+}
+
+type monthlyInput struct{}
+type monthlyOutput struct{ Elapsed time.Duration }
+
+func (monthlyInput) Workflow(monthlyOutput) {}
+
+type progress struct {
+	Message string
+	Close   bool
+}
+
+// writeProgress writes message to the run's default stream and returns when
+// it ran, so the test can measure the time that passed between steps.
+func writeProgress(ctx context.Context, p progress) (time.Time, error) {
+	writer, release, err := workflow.Writer(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer release()
+
+	if _, err := io.WriteString(writer, p.Message); err != nil {
+		return time.Time{}, err
+	}
+
+	if p.Close {
+		if err := writer.Close(); err != nil {
+			return time.Time{}, err
+		}
+	}
+	return time.Now(), nil
+}
+
+func monthly(ctx context.Context, _ monthlyInput) (monthlyOutput, error) {
+	start, err := workflow.Step(ctx, writeProgress, progress{Message: "waiting;"})
+	if err != nil {
+		return monthlyOutput{}, err
+	}
+
+	if err := workflow.Sleep(ctx, 30*24*time.Hour); err != nil {
+		return monthlyOutput{}, err
+	}
+
+	end, err := workflow.Step(ctx, writeProgress, progress{Message: "done", Close: true})
+	if err != nil {
+		return monthlyOutput{}, err
+	}
+
+	return monthlyOutput{Elapsed: end.Sub(start)}, nil
+}
+
+// TestSleepUnderSynctest checks that the in-memory World blocks instead of
+// polling, so testing/synctest advances its fake clock straight to a timer's
+// due time. A poll in Run.Await, stream readers, or the World would step the
+// clock in small increments and time out on a 30-day sleep.
+func TestSleepUnderSynctest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		world := testworld.New(workflow.Use(monthly))
+		defer world.Close()
+
+		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
+		run, err := workflow.Start(ctx, monthlyInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		reader, err := run.Reader(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		streamed, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if string(streamed) != "waiting;done" {
+			t.Fatalf("stream = %q", streamed)
+		}
+
+		output, err := run.Await(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if output.Elapsed < 30*24*time.Hour {
+			t.Fatalf("elapsed = %v, want at least 30 days", output.Elapsed)
+		}
+	})
 }

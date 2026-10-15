@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -197,6 +198,12 @@ func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
 
 func (c worldClient) Capabilities() Capabilities { return c.world.Capabilities() }
 
+// maxHTTPWait caps how long one RPC request may block in
+// runs.waitForTerminalStatus or streams.getChunks, so a long wait never holds a
+// request open past common proxy and server timeouts. Callers loop until they
+// have what they wait for.
+const maxHTTPWait = 10 * time.Second
+
 // NewHTTPClient returns a Client that calls a World served by HTTPHandler.
 // endpoint is the absolute URL of the server followed by the handler's
 // prefix, such as http://worker:8081/v1/workflow, and requests go to
@@ -280,6 +287,7 @@ func (c *httpClient) RunsList(ctx context.Context, input RunsListInput) (Page[Ru
 }
 
 func (c *httpClient) RunsWaitForTerminalStatus(ctx context.Context, input RunsWaitForTerminalStatusInput) (Run, error) {
+	input.Timeout = min(input.Timeout, maxHTTPWait)
 	var output Run
 	err := c.call(ctx, "runs.waitForTerminalStatus", input, &output)
 	return output, err
@@ -312,6 +320,7 @@ func (c *httpClient) StepsList(ctx context.Context, input StepsListInput) (Page[
 }
 
 func (c *httpClient) StreamsGetChunks(ctx context.Context, input StreamsGetChunksInput) (StreamChunksResult, error) {
+	input.Wait = min(input.Wait, maxHTTPWait)
 	var output StreamChunksResult
 	err := c.call(ctx, "streams.getChunks", input, &output)
 	return output, err

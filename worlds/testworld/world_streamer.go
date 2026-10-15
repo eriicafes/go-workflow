@@ -165,7 +165,10 @@ func (m *World) StreamsClose(_ context.Context, input worlds.StreamsCloseInput) 
 
 func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	deadline := time.Now().Add(input.Wait)
+	timer := time.NewTimer(input.Wait)
+	defer timer.Stop()
 	for {
+		changed := m.changed()
 		m.mu.RLock()
 		stream := m.streams[input.RunID][input.Name]
 		var chunks [][]byte
@@ -191,12 +194,11 @@ func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 			}
 			return result, nil
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return worlds.StreamChunksResult{}, ctx.Err()
 		case <-timer.C:
+		case <-changed:
 		}
 	}
 }

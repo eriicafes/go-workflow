@@ -94,6 +94,12 @@ const (
 	StatusCancelled = worlds.StatusCancelled
 )
 
+// clientWait bounds each blocking client call that Run.Await and stream
+// readers make. It is long so that waiting is one blocking call rather than a
+// series of short polls, which also lets testing/synctest advance its fake
+// clock to the next timer. The HTTP client caps it per request.
+const clientWait = time.Hour
+
 // workflow is satisfied by a workflow, a struct type whose Workflow(Out)
 // method declares the workflow's output type.
 type workflow[Out any] interface{ Workflow(Out) }
@@ -301,7 +307,7 @@ func runAwait(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 		return run, err
 	}
 	for {
-		run, err := client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 100 * time.Millisecond})
+		run, err := client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: clientWait})
 		if err != nil || run.Status.Terminal() {
 			return run, err
 		}

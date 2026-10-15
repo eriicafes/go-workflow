@@ -178,7 +178,7 @@ func (r *streamReader) Read(data []byte) (int, error) {
 		if r.closed {
 			return 0, io.EOF
 		}
-		chunks, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: r.cursor, Wait: 100 * time.Millisecond})
+		chunks, err := r.client.StreamsGetChunks(r.ctx, worlds.StreamsGetChunksInput{RunID: r.runID, Name: r.name, Cursor: r.cursor, Wait: clientWait})
 		if err != nil {
 			return 0, err
 		}

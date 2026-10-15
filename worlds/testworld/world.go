@@ -26,6 +26,9 @@ type World struct {
 	streams map[worlds.RunID]map[string]*memoryStream
 	queued  []queuedMessage
 	autoRun bool
+
+	changesMu sync.Mutex
+	changes   chan struct{}
 }
 
 // Close stops delivering queued work, and deliveries already running see
@@ -53,10 +56,25 @@ func NewManual(runners ...worlds.Runner) *World {
 
 func newWorld(autoRun bool, runners ...worlds.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun}
+	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, changes: make(chan struct{})}
 	w.runtime = worlds.NewRuntime(w, worlds.Runners(runners...))
 	return w
 }
 
-// notify marks state mutations. The in-memory World has nothing to persist.
-func (w *World) notify() {}
+// notify wakes every waiter after a state mutation.
+func (w *World) notify() {
+	w.changesMu.Lock()
+	close(w.changes)
+	w.changes = make(chan struct{})
+	w.changesMu.Unlock()
+}
+
+// changed returns a channel closed by the next state mutation. Waiters take it
+// before reading so a concurrent mutation is never missed. Waiting on it
+// instead of polling also lets testing/synctest advance its fake clock while a
+// run sleeps.
+func (w *World) changed() <-chan struct{} {
+	w.changesMu.Lock()
+	defer w.changesMu.Unlock()
+	return w.changes
+}
