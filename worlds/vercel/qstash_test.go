@@ -74,6 +74,22 @@ func TestHTTPMountsQStashHandlerOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestHTTPPrefixMountsQStashHandlerUnderPrefix(t *testing.T) {
+	server := newRecorder(t, nil)
+	world, _ := newQueueWorld(t, server, true)
+	handler := HTTPPrefix(world, "/internal/workflow/")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/internal/workflow/qstash", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, qstashRoutePath, nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("default route status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
 func qstashTestSignature(t *testing.T, body []byte, destination, key string) string {
 	return qstashTestSignatureAt(t, body, destination, key, time.Now())
 }

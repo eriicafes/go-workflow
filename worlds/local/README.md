@@ -23,8 +23,8 @@ client := workflow.NewClient(world)
 
 `Config.BaseURL` is the public URL where `localworld.HTTP(world)` is mounted;
 it defaults to `http://localhost:3000/v1/workflow`. `HTTP` serves the RPC and
-webhook endpoints under `/v1/workflow`; `RPC` and `Webhook` return each
-endpoint on its own.
+webhook endpoints under `/v1/workflow`, `HTTPPrefix(world, prefix)` serves them
+under `prefix`, and `RPC` and `Webhook` return each endpoint on its own.
 
 ## Lifecycle
 

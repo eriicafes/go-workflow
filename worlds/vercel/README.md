@@ -19,6 +19,9 @@ All are in `world.go`:
 - `vercelworld.HTTP(world)`: the RPC endpoint (`/v1/workflow/rpc`), token
   webhooks (`/v1/workflow/webhooks/{token}`), and, when QStash is configured,
   the signed timer route `/v1/workflow/qstash`.
+- `vercelworld.HTTPPrefix(world, prefix)`: the same routes under `prefix`.
+  `QStash.WebhookEndpoint` assumes `/v1/workflow`, so leave it empty with a
+  custom prefix.
 - `vercelworld.RPC(world)` and `vercelworld.Webhook(world)`: the RPC or webhook
   endpoint alone, for callers that mount their own routes.
 

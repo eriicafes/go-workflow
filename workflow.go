@@ -70,8 +70,9 @@ type (
 func NewClient(world World) Client { return worlds.NewClient(world) }
 
 // NewHTTPClient returns a Client that calls a World served by
-// worlds.HTTPHandler at endpoint, an absolute HTTP URL. It panics when
-// endpoint is not one. Requests use the last of clients, or
+// worlds.HTTPHandler. endpoint is the absolute URL of the server followed by
+// the handler's prefix, such as http://worker:8081/v1/workflow. It panics when
+// endpoint is not an absolute HTTP URL. Requests use the last of clients, or
 // http.DefaultClient when none is given.
 func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
 	return worlds.NewHTTPClient(endpoint, clients...)

@@ -33,6 +33,7 @@ Entrypoints:
 |---|---|
 | `awsworld.Queue(world, runners)` | SQS Lambda handler that executes workflows |
 | `awsworld.HTTP(world)` | RPC and webhook endpoints under `/v1/workflow` |
+| `awsworld.HTTPPrefix(world, prefix)` | RPC and webhook endpoints under `prefix` |
 | `awsworld.RPC(world)` | the CBOR RPC endpoint only |
 | `awsworld.Webhook(world)` | the token webhook endpoint only |
 

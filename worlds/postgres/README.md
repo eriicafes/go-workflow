@@ -38,6 +38,7 @@ pool and leaves it open on `Close`.
 Entry points:
 
 - `HTTP(world)`: RPC and webhook endpoints under `/v1/workflow`.
+- `HTTPPrefix(world, prefix)`: the same endpoints under `prefix`.
 - `RPC(world)` and `Webhook(world)`: each endpoint alone, to mount yourself.
 - `Worker(ctx, world, runners)`: the queue worker. It returns `ctx.Err()` after
   in-flight deliveries finish.

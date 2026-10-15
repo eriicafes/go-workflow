@@ -44,7 +44,7 @@ func main() {
 func workflowClient() (workflow.Client, func() error, error) {
 	if os.Getenv("WORKFLOWS_LOCAL") != "true" {
 		client := workflow.NewHTTPClient(
-			cmp.Or(os.Getenv("WORKFLOW_URL"), "http://localhost:8081"),
+			cmp.Or(os.Getenv("WORKFLOW_URL"), "http://localhost:8081/v1/workflow"),
 		)
 		return client, func() error { return nil }, nil
 	}

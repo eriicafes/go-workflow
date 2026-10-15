@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	defaultPrefix   = "go-workflow"
-	qstashRoutePath = "/v1/workflow/qstash"
+	defaultPrefix     = "go-workflow"
+	defaultHTTPPrefix = "/v1/workflow"
+	qstashRouteSuffix = "/qstash"
+	qstashRoutePath   = defaultHTTPPrefix + qstashRouteSuffix
 )
 
 // Config configures the Vercel World.
@@ -138,11 +140,22 @@ func OIDCTokenFromEnv(name string) func(context.Context) (string, error) {
 // /v1/workflow. It does not authenticate requests. When Config.QStash is set,
 // it also serves the QStash callback at /v1/workflow/qstash, which accepts only
 // requests signed by QStash.
-func HTTP(world *World) http.Handler {
+func HTTP(world *World) http.Handler { return HTTPPrefix(world, "") }
+
+// HTTPPrefix is like HTTP but serves the endpoints, and the QStash callback,
+// under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
+// Config.BaseURL must end with the same prefix, and QStashConfig.WebhookEndpoint
+// must be empty, since it assumes /v1/workflow.
+func HTTPPrefix(world *World, prefix string) http.Handler {
+	if prefix == "" {
+		prefix = defaultHTTPPrefix
+	} else {
+		prefix = "/" + strings.Trim(prefix, "/")
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/", worlds.HTTPHandler(world, ""))
+	mux.Handle("/", worlds.HTTPHandler(world, prefix))
 	if world.config.QStash != nil {
-		mux.Handle("POST "+qstashRoutePath, qstashHandler(world))
+		mux.Handle("POST "+prefix+qstashRouteSuffix, qstashHandler(world))
 	}
 	return mux
 }

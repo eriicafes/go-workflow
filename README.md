@@ -115,9 +115,9 @@ handle reads and controls the run with `Await`, `Done`, `Status`, `Cancel`, and
 
 Every World package also exports `HTTP(world)`, which serves the RPC endpoint
 that clients and the web UI use and the webhook endpoint under `/v1/workflow`.
-`RPC(world)` and `Webhook(world)` serve each endpoint on its own. Set
-`Config.BaseURL` to the public URL of that handler, since webhook URLs are built
-from it.
+`HTTPPrefix(world, prefix)` serves them under another prefix, and `RPC(world)`
+and `Webhook(world)` serve each endpoint on its own. Set `Config.BaseURL` to
+the public URL of that prefix, since webhook URLs are built from it.
 
 ### Postgres
 
@@ -194,11 +194,12 @@ work due later through EventBridge Scheduler.
 ## Application and worker
 
 An application that only starts and reads runs needs the workflow types and a
-Client, not the runners. `NewHTTPClient` talks to a World served by `HTTP`, and
-`Middleware` puts the client in every request context.
+Client, not the runners. `NewHTTPClient` talks to a World served by `HTTP`, at
+the server's URL followed by the handler's prefix, and `Middleware` puts the
+client in every request context.
 
 ```go
-client := workflow.NewHTTPClient("http://workflow-worker:8081")
+client := workflow.NewHTTPClient("http://workflow-worker:8081/v1/workflow")
 
 mux := http.NewServeMux()
 mux.HandleFunc("POST /reports", func(w http.ResponseWriter, r *http.Request) {

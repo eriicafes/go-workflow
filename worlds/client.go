@@ -197,9 +197,11 @@ func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
 
 func (c worldClient) Capabilities() Capabilities { return c.world.Capabilities() }
 
-// NewHTTPClient returns a Client that calls a World served by HTTPHandler at
-// endpoint, an absolute HTTP URL. It panics when endpoint is not one. Requests
-// use the last of clients, or http.DefaultClient when none is given.
+// NewHTTPClient returns a Client that calls a World served by HTTPHandler.
+// endpoint is the absolute URL of the server followed by the handler's
+// prefix, such as http://worker:8081/v1/workflow, and requests go to
+// <endpoint>/rpc. It panics when endpoint is not an absolute HTTP URL.
+// Requests use the last of clients, or http.DefaultClient when none is given.
 func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
 	parsed, err := url.ParseRequestURI(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
