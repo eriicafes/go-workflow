@@ -6,14 +6,15 @@ import (
 	"reflect"
 )
 
-// Error is the error a failed step or run returns after it is recorded
-// and read back. Its message is the original error's message, and it keeps
-// the type and JSON encoding of every error in the original error's chain,
-// so errors.Is and errors.As keep working across replay. errors.Is matches a
-// target with the same type and message as an error in the chain, which is
-// how sentinel errors such as one made by errors.New are matched. errors.As
-// matches a target whose type is the type of an error in the chain, and
-// decodes that error's exported fields from JSON into it.
+// Error is the error a failed step or run returns after it is recorded and read
+// back. Its message is the original error's message, and it keeps the type and
+// JSON encoding of every error in the original error's chain, so errors.Is and
+// errors.As keep working across replay.
+//
+// errors.Is matches a target with the same type and message as an error in the
+// chain, which is how sentinel errors such as one made by errors.New are
+// matched. errors.As matches a target whose type is the type of an error in the
+// chain, and decodes that error's exported fields from JSON into it.
 type Error struct {
 	message string
 	chain   []errorCause
@@ -25,9 +26,8 @@ type errorCause struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-// NewError returns an Error that records err and its chain. An
-// Error in the chain contributes the chain it recorded. It returns nil
-// when err is nil.
+// NewError returns an Error that records err and its chain. An Error in the
+// chain contributes the chain it recorded. It returns nil when err is nil.
 func NewError(err error) *Error {
 	if err == nil {
 		return nil

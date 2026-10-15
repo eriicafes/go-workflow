@@ -24,11 +24,12 @@ func writerOption(values []WriterOption) WriterOption {
 
 // Writer returns a writer for a stream of the run ctx belongs to. It must be
 // called in step context. It returns ErrNotInStep in workflow context and
-// ErrNoWorkflow outside a run. The writer holds
-// the stream name, so Writer waits while another writer holds it. Close
-// closes the stream for all writers, while the returned release function only
-// gives up this writer's hold so a retry or another step can continue the
-// stream.
+// ErrNoWorkflow outside a run.
+//
+// The writer holds the stream name, so Writer waits while another writer holds
+// it. Close closes the stream for all writers, while the returned release
+// function only gives up this writer's hold so a retry or another step can
+// continue the stream.
 func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
 	execution, ok := stepExecutionFromContext(ctx)
 	if !ok {

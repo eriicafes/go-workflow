@@ -32,9 +32,8 @@ type WebhookOption struct {
 
 // CreateWebhook creates a webhook in the run ctx belongs to. A webhook is a
 // hook resumed once by an HTTP request to its URL. On replay it returns the
-// same webhook.
-// The last of options applies. It returns ErrNoWorkflow when ctx does not
-// belong to a run.
+// same webhook. The last of options applies. It returns ErrNoWorkflow when ctx
+// does not belong to a run.
 func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webhook[T], error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -62,8 +61,8 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 	return &Webhook[T]{hook: hook, baseURL: execution.World().BaseURL()}, nil
 }
 
-// Webhook is a hook resumed by an HTTP request to its URL, whose
-// JSON request body is decoded as T.
+// Webhook is a hook resumed by an HTTP request to its URL, whose JSON request
+// body is decoded as T.
 type Webhook[T any] struct {
 	hook    *Hook[webhookPayload]
 	baseURL string

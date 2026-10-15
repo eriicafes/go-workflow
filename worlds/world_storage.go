@@ -53,18 +53,21 @@ type StorageEvents interface {
 	// event. It does not deduplicate calls. It returns ErrRunAlreadyExists when
 	// the run already exists. Its result has AllocatedEventCount set to one.
 	EventsCreateRun(context.Context, EventsCreateRunInput) (EventResult, error)
-	// EventsCreate appends a lifecycle event to a run. It enforces the
-	// transition rules, so it returns ErrEventInvalid for a malformed event,
-	// ErrRunTerminal when the run is terminal, ErrStepNotStartable or
-	// ErrHookNotActive when the target step or hook does not allow the event,
-	// and ErrHookConflict when a hook_created token is taken. An event that
-	// repeats an admitted transition, such as a second run_started, returns the
-	// earlier event with AllocatedEventCount zero instead of appending. A
-	// step_started for a running step is not a repeat. It appends a new attempt,
-	// so a delivery can take over a step whose previous delivery died. Events
-	// in the result are selected by EventsCreateOptions. For a step_created
-	// event, Step holds the step and StepCreated reports whether this call
-	// created it.
+	// EventsCreate appends a lifecycle event to a run. Events in the result are
+	// selected by EventsCreateOptions. For a step_created event, Step holds the
+	// step and StepCreated reports whether this call created it.
+	//
+	// It enforces the transition rules, so it returns ErrEventInvalid for a
+	// malformed event, ErrRunTerminal when the run is terminal,
+	// ErrStepNotStartable or ErrHookNotActive when the target step or hook does
+	// not allow the event, and ErrHookConflict when a hook_created token is
+	// taken.
+	//
+	// An event that repeats an admitted transition, such as a second
+	// run_started, returns the earlier event with AllocatedEventCount zero
+	// instead of appending. A step_started for a running step is not a repeat.
+	// It appends a new attempt, so a delivery can take over a step whose
+	// previous delivery died.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	// EventsCreateBatch appends Events to a run in order, atomically. It appends
 	// none of them when any event is invalid or cannot be admitted.
@@ -88,8 +91,7 @@ type StorageHooks interface {
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
 	// HooksGetByToken returns the hook that owns Token. It returns
 	// ErrHookNotFound when no hook owns the token, including after its
-	// retention has ended. It applies
-	// ResolveData to the returned hook.
+	// retention has ended. It applies ResolveData to the returned hook.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 	// HooksList returns hooks that match the input filters. It applies Pagination
 	// and ResolveData to the result.

@@ -166,15 +166,16 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	panic(errReplayComplete)
 }
 
-// DurableInlineStep records the result of fn as a step while a flow replays
-// the runner, without a step delivery. fn cannot fail, so it is for results
-// such as the current time or a generated ID. Work that can fail belongs in a
-// step executed by DurableStep. On first execution it appends step_created,
-// calls fn, and appends step_completed. A World error while appending ends the
-// replay, and the Runtime returns it from Execute so the delivery is retried.
-// A replay that finds step_created without step_completed calls fn again and
-// completes the step. Later replays return the recorded result without
-// calling fn.
+// DurableInlineStep records the result of fn as a step while a flow replays the
+// runner, without a step delivery. fn cannot fail, so it is for results such as
+// the current time or a generated ID. Work that can fail belongs in a step
+// executed by DurableStep.
+//
+// On first execution it appends step_created, calls fn, and appends
+// step_completed. A World error while appending ends the replay, and the
+// Runtime returns it from Execute so the delivery is retried. A replay that
+// finds step_created without step_completed calls fn again and completes the
+// step. Later replays return the recorded result without calling fn.
 func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOptions, fn func(context.Context) Out) DurableStepResult[Out] {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {

@@ -43,13 +43,15 @@ const (
 	maxTransactItems = 100
 )
 
-// CreateTable creates the DynamoDB table name in the layout World expects,
-// with on-demand billing, and waits until it is active. The table has string
-// keys pk and sk and two global secondary indexes, list (list_pk, list_sk) and
+// CreateTable creates the DynamoDB table name in the layout World expects, with
+// on-demand billing, and waits until it is active. The table has string keys pk
+// and sk and two global secondary indexes, list (list_pk, list_sk) and
 // list_group (list_group_pk, list_group_sk), which project only their keys and
-// status. CreateTable suits tests and DynamoDB Local, while production
-// deployments usually declare the same table with infrastructure as code, such
-// as the module in worlds/aws/terraform.
+// status.
+//
+// CreateTable suits tests and DynamoDB Local. Production deployments usually
+// declare the same table with infrastructure as code, such as the module in
+// worlds/aws/terraform.
 func CreateTable(ctx context.Context, client *dynamodb.Client, name string) error {
 	index := func(name string) ddb.GlobalSecondaryIndex {
 		return ddb.GlobalSecondaryIndex{

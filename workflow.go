@@ -1,30 +1,42 @@
 // Package workflow runs durable workflows whose runners are ordinary Go
 // functions.
 //
+// # Workflows and runners
+//
 // A workflow is a struct type whose Workflow(Out) method declares the
-// workflow's output. Its package path and type name are the workflow name,
-// and a value of it is the input of a run, so code can Start a workflow from
-// the type alone. A runner executes the workflow. It is a function
-// func(context.Context, In) (Out, error) registered with Use, and it calls
-// steps through Step, Background, Map, and All. Steps do the real work and
-// side effects.
+// workflow's output. Its package path and type name are the workflow name, and
+// a value of it is the input of a run, so code can Start a workflow from the
+// type alone.
+//
+// A runner executes the workflow. It is a function func(context.Context, In)
+// (Out, error) registered with Use, and it calls steps through Step,
+// Background, Map, and All. Steps do the real work and side effects.
+//
+// # Runs
 //
 // Start begins a run of a workflow and returns a Run handle. Every run is
 // recorded in a World, the backend that stores its history, queues its
-// deliveries, and holds its streams. A run executes in one of two contexts,
-// as in the Workflow SDK. In workflow context, the runner's own code executes
-// as a flow, which replays the runner from the beginning, records the
-// operations it starts (steps, timers, hooks, webhooks, and child runs),
-// queues the steps it needs, and records the run's result once the runner
-// returns. In step context, a step function executes as a step, which replays
-// the runner up to that step and calls the step function. Operations return
-// promises. Once an
-// operation is recorded, replay returns its recorded result instead of running
-// it again, and awaiting a promise that has not settled suspends the run until
-// it does. A runner must therefore be deterministic. It does side effects only
-// through steps and reads time only through Now. Steps may retry and are
-// executed at least once, so step functions should be idempotent. Package
-// check reports runners that break these rules.
+// deliveries, and holds its streams.
+//
+// A run executes in one of two contexts, as in the Workflow SDK. In workflow
+// context, the runner's own code executes as a flow, which replays the runner
+// from the beginning, records the operations it starts (steps, timers, hooks,
+// webhooks, and child runs), queues the steps it needs, and records the run's
+// result once the runner returns. In step context, a step function executes as
+// a step, which replays the runner up to that step and calls the step function.
+//
+// # Replay
+//
+// Operations return promises. Once an operation is recorded, replay returns its
+// recorded result instead of running it again, and awaiting a promise that has
+// not settled suspends the run until it does.
+//
+// A runner must therefore be deterministic. It does side effects only through
+// steps and reads time only through Now. Steps may retry and are executed at
+// least once, so step functions should be idempotent. Package check reports
+// runners that break these rules.
+//
+// # Clients
 //
 // Code outside a run uses a Client, carried in a context by NewContext or
 // Middleware, to start, read, cancel, and resume runs.
@@ -86,12 +98,13 @@ const (
 type workflow[Out any] interface{ Workflow(Out) }
 
 // Run is a handle to a run of a workflow whose output type is Out. Start and
-// Get return one. A Run started in workflow context is a child run. In
-// workflow context, every Run method reads or changes the run once in a step
-// and replay returns the recorded result, so a method does not wait for the run
-// to finish. Await returns ErrRunNotFinished for a run that had not finished
-// when it was called. To wait for a child run, create a hook and have the
-// child resume it. Run implements Promise.
+// Get return one. Run implements Promise.
+//
+// A Run started in workflow context is a child run. In workflow context, every
+// Run method reads or changes the run once in a step and replay returns the
+// recorded result, so a method does not wait for the run to finish. Await
+// returns ErrRunNotFinished for a run that had not finished when it was called.
+// To wait for a child run, create a hook and have the child resume it.
 type Run[Out any] struct {
 	id     worlds.RunID
 	client Client
@@ -244,11 +257,13 @@ func runDone(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 	return run, err
 }
 
-// Await returns the output of the run once it has finished. In a run, in
-// workflow or step context, it reads the run once and returns ErrRunNotFinished
-// when the run had not finished. Outside a run, it blocks until the run
-// finishes or ctx is done. It returns the run's error as an *Error when
-// the run failed and ErrRunCancelled when it was cancelled.
+// Await returns the output of the run once it has finished. It returns the
+// run's error as an *Error when the run failed and ErrRunCancelled when it was
+// cancelled.
+//
+// In a run, in workflow or step context, Await reads the run once and returns
+// ErrRunNotFinished when the run had not finished. Outside a run, it blocks
+// until the run finishes or ctx is done.
 func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 	var zero Out
 	var run worlds.Run
@@ -379,13 +394,13 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 	return &Run[Out]{id: worlds.RunID(runID), client: client}, nil
 }
 
-// Start starts a run of workflow In with input and returns a handle to the
-// run without waiting for it. It needs only the workflow type, not its runner.
-// Called in workflow context, it starts a child run in a step, as in the
+// Start starts a run of workflow In with input and returns a handle to the run
+// without waiting for it. It needs only the workflow type, not its runner.
+//
+// Called in workflow context, Start starts a child run in a step, as in the
 // Workflow SDK, so replay returns the same run. The child run carries
-// worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Called
-// elsewhere, it uses the Client in ctx and returns ErrNoClient when ctx
-// carries none.
+// worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Called elsewhere,
+// it uses the Client in ctx and returns ErrNoClient when ctx carries none.
 func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
 	name := typeIdentity[In]()
 	client, err := clientFromContext(ctx)

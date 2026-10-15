@@ -23,21 +23,23 @@ func stepOptions(values []StepOptions) StepOptions {
 }
 
 // Step calls the step fn with input from a workflow and returns its result,
-// suspending the run until the step has settled. Step is Background followed
-// by Await. When the step fails, it returns the step's error as an *Error,
-// which errors.Is and errors.As match against the error the step returned. It
-// returns ErrNoWorkflow when ctx does not belong to a run.
+// suspending the run until the step has settled. Step is Background followed by
+// Await. It returns ErrNoWorkflow when ctx does not belong to a run.
+//
+// When the step fails, Step returns the step's error as an *Error, which
+// errors.Is and errors.As match against the error the step returned.
 func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error) {
 	return Background(ctx, fn, input, options...).Await(ctx)
 }
 
 // Background starts the step fn with input from a workflow and returns a
-// promise for its result without waiting for it. The step is identified by
-// fn's function name and its position in the runner, and is retried on error
-// according to options. The last option applies, and the default allows 3
-// retries.
-// fn is executed at least once and should be idempotent. Outside workflow
-// context, the promise fails with ErrNoWorkflow.
+// promise for its result without waiting for it. Outside workflow context, the
+// promise fails with ErrNoWorkflow.
+//
+// The step is identified by fn's function name and its position in the runner.
+// It is retried on error according to options, where the last option applies
+// and the default allows 3 retries. fn is executed at least once and should be
+// idempotent.
 func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) Promise[Out] {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -62,14 +64,17 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 	}
 }
 
-// InlineStep calls fn once in workflow context and records its result as a step,
-// so replay returns the recorded result instead of calling fn again. Unlike
-// Step, it runs in the flow without a step delivery, and fn cannot fail. Use
-// it for results such as a generated ID or a random choice, and use Step for
-// work that can fail. When the result cannot be recorded, the delivery is
-// retried and calls fn again. The step is identified by fn's function name
-// and its position in the runner. In step context, InlineStep calls fn
-// without recording it. It returns ErrNoWorkflow outside a run.
+// InlineStep calls fn once in workflow context and records its result as a
+// step, so replay returns the recorded result instead of calling fn again. The
+// step is identified by fn's function name and its position in the runner. It
+// returns ErrNoWorkflow outside a run.
+//
+// Unlike Step, InlineStep runs in the flow without a step delivery, and fn
+// cannot fail. Use it for results such as a generated ID or a random choice,
+// and use Step for work that can fail. When the result cannot be recorded, the
+// delivery is retried and calls fn again.
+//
+// In step context, InlineStep calls fn without recording it.
 func InlineStep[Out any](ctx context.Context, fn func(context.Context) Out) (Out, error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -229,8 +234,7 @@ func Join[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
 // JoinSettled waits for every promise to settle and returns their values in
 // argument order, with the zero value for each promise that failed. Failed
 // promises do not make JoinSettled fail, so inspect each one with Done or
-// Await.
-// It returns an error only when ctx does not belong to a run (ErrNoWorkflow).
+// Await. It returns ErrNoWorkflow when ctx does not belong to a run.
 func JoinSettled[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {

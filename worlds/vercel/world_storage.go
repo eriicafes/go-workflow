@@ -186,8 +186,8 @@ func decodeHook(hookID worlds.HookID, raw string, resolve worlds.ResolveData) (w
 	return hook, nil
 }
 
-// scriptReply splits a script result into its values, mapping an
-// {"err", code} reply to the World error for code.
+// scriptReply splits a script result into its values, mapping an {"err", code}
+// reply to the World error for code.
 func scriptReply(result any, err error) ([]any, error) {
 	if err != nil {
 		return nil, err

@@ -26,8 +26,7 @@ type AnalyticsRuns interface {
 // AnalyticsAttributes aggregates run attributes.
 type AnalyticsAttributes interface {
 	// AttributesList returns one aggregate per attribute key across the runs
-	// that match the input filters.
-	// It applies Pagination to the result.
+	// that match the input filters. It applies Pagination to the result.
 	AttributesList(context.Context, AnalyticsAttributesListInput) (Page[AnalyticsAttribute], error)
 }
 

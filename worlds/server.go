@@ -52,10 +52,11 @@ func RPCHandler(world World) http.Handler {
 // a delivery for the run that owns the webhook. It responds 404 when no active
 // webhook owns the token, 405 for a method the webhook does not accept, 413
 // when the body exceeds 128 KiB, and otherwise the webhook's Response, the
-// response the runner records for a manual webhook, or 202 Accepted. The token
-// is read from a {token} path wildcard when the handler is mounted with one,
-// otherwise from the last path segment. Mount it at <prefix>/webhooks/{token}
-// to match the URLs webhooks are created with.
+// response the runner records for a manual webhook, or 202 Accepted.
+//
+// The token is read from a {token} path wildcard when the handler is mounted
+// with one, otherwise from the last path segment. Mount it at
+// <prefix>/webhooks/{token} to match the URLs webhooks are created with.
 func WebhookHandler(world World) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")

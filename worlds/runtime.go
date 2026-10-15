@@ -30,10 +30,13 @@ func NewRuntime(world World, runners RunnerSet) *Runtime {
 // replays the run's runner and, when the runner returns instead of suspending,
 // appends run_completed or run_failed. With StepID set it executes a step,
 // which replays the runner up to that step, executes the step function, and
-// records the step's result. A delivery for a terminal run or step returns nil
-// without running runner or step code. A non-nil error means the delivery
-// should be retried. Execute removes any Client NewClientContext put in ctx, so
-// a run never uses a Client it inherited from the context its delivery runs in.
+// records the step's result.
+//
+// A delivery for a terminal run or step returns nil without running runner or
+// step code. A non-nil error means the delivery should be retried.
+//
+// Execute removes any Client NewClientContext put in ctx, so a run never uses a
+// Client it inherited from the context its delivery runs in.
 func (e *Runtime) Execute(ctx context.Context, input QueueInput) error {
 	ctx = context.WithValue(ctx, clientContextKey{}, nil)
 	if input.StepID != nil {

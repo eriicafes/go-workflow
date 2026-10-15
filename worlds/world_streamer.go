@@ -7,9 +7,8 @@ import (
 
 // Streamer stores streams, which are named, ordered sequences of chunks that a
 // run writes and readers consume. A stream is identified by its run ID and
-// name.
-// Writes go either through one exclusive writer session or directly when no
-// session owns the stream.
+// name. Writes go either through one exclusive writer session or directly when
+// no session owns the stream.
 type Streamer interface {
 	// StreamsCreateWriteSession creates an exclusive writer session for the
 	// stream named Name in run RunID. It returns ErrStreamLocked when another

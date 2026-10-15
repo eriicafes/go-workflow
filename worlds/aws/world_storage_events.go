@@ -132,9 +132,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
 	// The token moves to the claimant in one transaction. A forced claim from a
 	// live owner also appends hook_disposed, naming the claimant in
-	// ForceClaimedBy, to the owner's run. The
-	// transaction requires both runs' event counts and the token item to be
-	// unchanged, so exactly one concurrent claimant wins.
+	// ForceClaimedBy, to the owner's run. The transaction requires both runs'
+	// event counts and the token item to be unchanged, so exactly one
+	// concurrent claimant wins.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}

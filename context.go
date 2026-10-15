@@ -79,9 +79,10 @@ func StepID(ctx context.Context) string { return GetStepMetadata(ctx).ID }
 // clientFromContext returns the Client that operations started from ctx use,
 // which is the Client NewContext or Middleware put in ctx. In a run without
 // one, it is a Client for the World that records the run. It returns
-// ErrNoClient outside a run when ctx carries none. The runtime removes the
-// Client from a delivery's context, so in a run a Client in ctx is always one
-// the run's own code set.
+// ErrNoClient outside a run when ctx carries none.
+//
+// The runtime removes the Client from a delivery's context, so in a run a
+// Client in ctx is always one the run's own code set.
 func clientFromContext(ctx context.Context) (Client, error) {
 	if client, ok := worlds.ClientFromContext(ctx); ok {
 		return client, nil

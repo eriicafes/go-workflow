@@ -44,16 +44,16 @@ redis.call('ZADD', P .. ':runs:wfstatus:pending:' .. wf, score, id)
 return {'ok'}
 `)
 
-// scriptAppend admits and appends events. Its ARGV are prefix, runID, now,
-// mode (append|batch|claim), delta start index (-1 for none), force flag, then
-// one JSON descriptor per event (see eventDescriptor). In claim mode the last
-// ARGV is the base64 data of the hook_disposed a forced claim appends. Changes are staged in
-// memory and written only after every event is admitted, so a rejected batch
-// writes nothing.
+// scriptAppend admits and appends events. Its ARGV are prefix, runID, now, mode
+// (append|batch|claim), delta start index (-1 for none), force flag, then one
+// JSON descriptor per event (see eventDescriptor). In claim mode the last ARGV
+// is the base64 data of the hook_disposed a forced claim appends. Changes are
+// staged in memory and written only after every event is admitted, so a
+// rejected batch writes nothing.
 //
 // append and claim return {'ok', slot, type, allocated, step, forcedRunID,
-// deltaStart, deltaRecords...}, while batch returns {'ok', n, slot, type,
-// step, ...}.
+// deltaStart, deltaRecords...}, while batch returns {'ok', n, slot, type, step,
+// ...}.
 var scriptAppend = newRedisScript(luaPrelude + `
 local now, mode, force = ARGV[3], ARGV[4], ARGV[6] == '1'
 local nowN = tonumber(now)

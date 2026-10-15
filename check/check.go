@@ -14,12 +14,13 @@ import (
 
 const workflowPackage = "github.com/eriicafes/go-workflow"
 
-// Analyzer checks that every function passed to workflow.Use is a named
-// runner whose input type is a workflow. In runners, it reports operations
-// that break replay (goroutines, select, ranging over maps, time.Now, and I/O
-// or randomness outside steps), stream access outside steps, and steps that
-// are not named functions or that capture variables instead of taking them as
-// input.
+// Analyzer checks that every function passed to workflow.Use is a named runner
+// whose input type is a workflow.
+//
+// In runners, it reports operations that break replay, such as goroutines,
+// select, ranging over maps, time.Now, and I/O or randomness outside steps. It
+// also reports stream access outside steps, and steps that are not named
+// functions or that capture variables instead of taking them as input.
 var Analyzer = &analysis.Analyzer{Name: "workflowcheck", Doc: "reports invalid or non-deterministic workflows", Run: run}
 
 func run(pass *analysis.Pass) (any, error) {

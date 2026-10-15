@@ -64,8 +64,7 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	// Lock the claimant run (and, for a forced claim, the current owner's run,
 	// in run ID order to avoid deadlocks), then the token row, and append
 	// hook_disposed, naming the claimant in ForceClaimedBy, to a live owner
-	// before the claimant's hook_created,
-	// all in one transaction.
+	// before the claimant's hook_created, all in one transaction.
 	if err := ctx.Err(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}

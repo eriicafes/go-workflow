@@ -101,10 +101,9 @@ func (e *Execution) GetTargetResult() (stepResultData, bool) {
 	return result, true
 }
 
-// NextPosition returns the position of the next operation the runner
-// declares and advances the counter. Positions are recorded in event data so
-// each replay matches an operation to its recorded events. This is why a
-// runner must
+// NextPosition returns the position of the next operation the runner declares
+// and advances the counter. Positions are recorded in event data so each replay
+// matches an operation to its recorded events. This is why a runner must
 // declare its operations in the same order on every replay.
 func (e *Execution) NextPosition() int {
 	position := e.next

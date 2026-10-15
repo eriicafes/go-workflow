@@ -11,9 +11,11 @@ import (
 // such as a step, timer, hook, or webhook. Awaiting a promise that has not
 // settled suspends the run until it does. Join, Select, and related functions
 // wait on several promises at once. Promise methods return ErrNoWorkflow
-// outside workflow context. Run implements Promise, and its methods also work
-// in step context and outside a run. In workflow context, awaiting a Run that
-// has not finished returns ErrRunNotFinished instead of suspending.
+// outside workflow context.
+//
+// Run implements Promise, and its methods also work in step context and outside
+// a run. In workflow context, awaiting a Run that has not finished returns
+// ErrRunNotFinished instead of suspending.
 type Promise[T any] interface {
 	// Done reports whether the promise has settled and, if it failed, its
 	// error. It never suspends the run.

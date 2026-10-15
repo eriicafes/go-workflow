@@ -35,8 +35,8 @@ type Client interface {
 	// delivery. It generates a run ID when input.RunID is empty and returns
 	// the run ID.
 	RunsCreate(context.Context, ClientRunsCreateInput) (RunID, error)
-	// RunsGet returns a run. It returns ErrRunNotFound when the run
-	// does not exist.
+	// RunsGet returns a run. It returns ErrRunNotFound when the run does not
+	// exist.
 	RunsGet(context.Context, RunsGetInput) (Run, error)
 	// RunsList returns one page of the runs that match the input filters.
 	RunsList(context.Context, RunsListInput) (Page[Run], error)
@@ -68,8 +68,8 @@ type Client interface {
 	// StreamsList returns the names of a run's streams.
 	StreamsList(context.Context, StreamsListInput) ([]string, error)
 	// StreamsCreateWriteSession creates an exclusive writer session for a
-	// stream. It returns ErrStreamLocked while another session holds
-	// the stream.
+	// stream. It returns ErrStreamLocked while another session holds the
+	// stream.
 	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
 	// StreamsWrite appends a chunk to a stream. It returns
 	// ErrStreamLocked while a writer holds the stream.
@@ -197,10 +197,9 @@ func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
 
 func (c worldClient) Capabilities() Capabilities { return c.world.Capabilities() }
 
-// NewHTTPClient returns a Client that calls a World served by
-// HTTPHandler at endpoint, an absolute HTTP URL. It panics when
-// endpoint is not one. Requests use the last of clients, or
-// http.DefaultClient when none is given.
+// NewHTTPClient returns a Client that calls a World served by HTTPHandler at
+// endpoint, an absolute HTTP URL. It panics when endpoint is not one. Requests
+// use the last of clients, or http.DefaultClient when none is given.
 func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
 	parsed, err := url.ParseRequestURI(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

@@ -112,9 +112,10 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 
 // Start locks the directory, checks its storage version, recovers writes
 // interrupted by a crash, and begins delivering queued work in the background.
-// It returns once delivery has begun, and cancelling ctx stops delivery. Every
-// other World method returns ErrNotStarted until Start succeeds. Start returns
-// ErrInUse when another World, in this or another process, holds the
+// It returns once delivery has begun, and cancelling ctx stops delivery.
+//
+// Every other World method returns ErrNotStarted until Start succeeds. Start
+// returns ErrInUse when another World, in this or another process, holds the
 // directory, ErrClosed after Close, and nil when the World is already started.
 func (w *World) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

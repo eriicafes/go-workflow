@@ -1,8 +1,9 @@
 // Package worlds defines the World contract that go-workflow records runs in,
 // the runtime that executes deliveries against it, and the HTTP server that
-// exposes a World to clients. Each run is an append-only event log, and the
-// runs, steps, and hooks returned by Storage are views derived from those
-// events.
+// exposes a World to clients.
+//
+// Each run is an append-only event log, and the runs, steps, and hooks returned
+// by Storage are views derived from those events.
 package worlds
 
 import (

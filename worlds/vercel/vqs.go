@@ -102,10 +102,10 @@ type vqsDelivery struct {
 	Body               []byte
 }
 
-// parseDelivery reads a push delivery. Binary-mode deliveries
-// (ce-type com.vercel.queue.v2beta) carry the payload and lease in the
-// request. Deliveries without a receipt handle and structured v1beta
-// CloudEvents are claimed with ReceiveMessageById.
+// parseDelivery reads a push delivery. Binary-mode deliveries (ce-type
+// com.vercel.queue.v2beta) carry the payload and lease in the request.
+// Deliveries without a receipt handle and structured v1beta CloudEvents are
+// claimed with ReceiveMessageById.
 func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	body, err := io.ReadAll(io.LimitReader(request.Body, vqsPayloadMaxSize+1))
 	if err != nil {

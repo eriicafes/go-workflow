@@ -155,10 +155,12 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
 // Queue returns the Vercel Queues push consumer, which executes deliveries for
-// the workflows of runners. Deploy it only as a function with a queue/v2beta
-// trigger for Config.Topic. Vercel does not expose such functions publicly, so
-// the handler does not authenticate requests. It acknowledges a delivery that
-// succeeds and answers 500 to one that fails, so Vercel redelivers it.
+// the workflows of runners. It acknowledges a delivery that succeeds and
+// answers 500 to one that fails, so Vercel redelivers it.
+//
+// Deploy it only as a function with a queue/v2beta trigger for Config.Topic.
+// Vercel does not expose such functions publicly, so the handler does not
+// authenticate requests.
 func Queue(world *World, runners worlds.RunnerSet) http.Handler {
 	return &consumer{world: world, runtime: worlds.NewRuntime(world, runners)}
 }
