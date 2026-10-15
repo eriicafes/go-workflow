@@ -233,8 +233,8 @@ func Join[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
 
 // JoinSettled waits for every promise to settle and returns their values in
 // argument order, with the zero value for each promise that failed. Failed
-// promises do not make JoinSettled fail, so inspect each one with Done or
-// Await. It returns ErrNoWorkflow when ctx does not belong to a run.
+// promises do not make JoinSettled fail, so inspect each one with Await.
+// It returns ErrNoWorkflow when ctx does not belong to a run.
 func JoinSettled[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -307,10 +307,14 @@ func selectPromiseIndex[T any](ctx context.Context, successful bool, results ...
 	pending := false
 	for index, result := range results {
 		done, err := result.Done(ctx)
+		if err != nil {
+			return -1, err
+		}
 		if !done {
 			pending = true
 			continue
 		}
+		_, err = result.Await(ctx)
 		if !successful || err == nil {
 			return index, err
 		}

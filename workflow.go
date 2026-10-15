@@ -218,9 +218,9 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 	return client.RunsWake(ctx, input)
 }
 
-// Done reports whether the run has finished. It does not block. When the run
-// failed, Done returns true and the run's error as an *Error. When it was
-// cancelled, Done returns true and ErrRunCancelled.
+// Done reports whether the run has finished, whether it completed, failed, or
+// was cancelled. It does not block and does not return the run's error, which
+// Await returns.
 func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 	var run worlds.Run
 	var err error
@@ -234,14 +234,8 @@ func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 		return false, err
 	case run.RunID == "":
 		return false, worlds.ErrRunNotFound
-	case !run.Status.Terminal():
-		return false, nil
-	case run.Status == worlds.StatusCompleted:
-		return true, nil
-	case len(run.Error) != 0:
-		return true, worlds.DecodeError(run.Error)
 	default:
-		return true, ErrRunCancelled
+		return run.Status.Terminal(), nil
 	}
 }
 

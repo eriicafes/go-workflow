@@ -249,6 +249,9 @@ func TestRunCancelMakesPendingRunsTerminalAndIsIdempotent(t *testing.T) {
 	if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {
 		t.Fatalf("cancelled status = %q, %v", status, err)
 	}
+	if done, err := run.Done(ctx); err != nil || !done {
+		t.Fatalf("cancelled run done = %t, %v", done, err)
+	}
 }
 
 func TestRunWakeUpFiltersWaitCorrelationIDs(t *testing.T) {

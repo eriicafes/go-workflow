@@ -17,8 +17,10 @@ import (
 // a run. In workflow context, awaiting a Run that has not finished returns
 // ErrRunNotFinished instead of suspending.
 type Promise[T any] interface {
-	// Done reports whether the promise has settled and, if it failed, its
-	// error. It never suspends the run.
+	// Done reports whether the promise has settled, whether it succeeded or
+	// failed. It never suspends the run, and it does not return the error the
+	// promise failed with, which Await returns. Its error reports only that
+	// settlement could not be determined, such as ErrNoWorkflow.
 	Done(context.Context) (bool, error)
 	// Await returns the promise's value, or the error it failed with. When
 	// the promise has not settled, Await suspends the run.
@@ -49,7 +51,7 @@ func (p *promise[T]) Done(ctx context.Context) (bool, error) {
 	if _, ok := workflowExecutionFromContext(ctx); !ok {
 		return false, ErrNoWorkflow
 	}
-	return p.done, p.err
+	return p.done, nil
 }
 
 func (p *promise[T]) Await(ctx context.Context) (T, error) {

@@ -77,13 +77,14 @@ func (h *Hook[T]) ID() string { return string(h.id) }
 func (h *Hook[T]) Token() string { return h.token }
 
 // Done reports whether the hook has settled, which means it received a
-// payload, was cancelled, or failed to be created. It never suspends the run.
+// payload, was cancelled, or failed to be created. It never suspends the run
+// and does not return the hook's error, which Await returns.
 func (h *Hook[T]) Done(ctx context.Context) (bool, error) {
 	result, _, err := h.result(ctx)
 	if err != nil {
 		return false, err
 	}
-	return result.Done, result.Err
+	return result.Done, nil
 }
 
 // Await returns the hook's payload, suspending the run until the hook is
