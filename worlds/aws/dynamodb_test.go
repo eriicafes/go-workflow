@@ -178,7 +178,7 @@ func TestViewItems(t *testing.T) {
 	if _, ok := set["input"]; ok {
 		t.Fatal("update rewrites input")
 	}
-	if _, ok := set["gsi1pk"]; ok {
+	if _, ok := set["list_pk"]; ok {
 		t.Fatal("update rewrites index keys")
 	}
 	if strings.Join(remove, ",") != "error,startedAt,cancelledEventId" {
@@ -189,7 +189,7 @@ func TestViewItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read(item, "gsi2pk") != "HOOKS#wrun_1" || read(item, "gsi1pk") != "HOOKS" {
+	if read(item, "list_group_pk") != "HOOKS#wrun_1" || read(item, "list_pk") != "HOOKS" {
 		t.Fatalf("hook index keys = %v", item)
 	}
 	back, err := hookFromItem(item)

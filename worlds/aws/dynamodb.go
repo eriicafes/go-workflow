@@ -27,11 +27,11 @@ type dynamoAPI interface {
 }
 
 const (
-	// GSI1 lists every run (RUNS) and every hook (HOOKS) by creation time.
-	gsi1 = "gsi1"
-	// GSI2 lists runs of one workflow (RUNS#<workflow>) and hooks of one run
-	// (HOOKS#<runID>) by creation time.
-	gsi2 = "gsi2"
+	// listIndex lists every run (RUNS) and every hook (HOOKS) by creation time.
+	listIndex = "list"
+	// listGroupIndex lists runs of one workflow (RUNS#<workflow>) and hooks
+	// of one run (HOOKS#<runID>) by creation time.
+	listGroupIndex = "list_group"
 
 	// maxItemBytes is DynamoDB's item size limit.
 	maxItemBytes = 400 << 10
@@ -40,8 +40,9 @@ const (
 )
 
 // CreateTable creates the single table used by World: string keys pk and sk,
-// plus the gsi1 (gsi1pk, gsi1sk) and gsi2 (gsi2pk, gsi2sk) global secondary
-// indexes, which project only their keys and status. It uses on-demand
+// plus the list (list_pk, list_sk) and list_group (list_group_pk,
+// list_group_sk) global secondary indexes, which project only their keys and
+// status. It uses on-demand
 // billing and waits until the table is active. Production deployments
 // usually declare the same table with infrastructure as code instead.
 func CreateTable(ctx context.Context, client *dynamodb.Client, name string) error {
@@ -49,14 +50,14 @@ func CreateTable(ctx context.Context, client *dynamodb.Client, name string) erro
 		return ddb.GlobalSecondaryIndex{
 			IndexName: awsv2.String(name),
 			KeySchema: []ddb.KeySchemaElement{
-				{AttributeName: awsv2.String(name + "pk"), KeyType: ddb.KeyTypeHash},
-				{AttributeName: awsv2.String(name + "sk"), KeyType: ddb.KeyTypeRange},
+				{AttributeName: awsv2.String(name + "_pk"), KeyType: ddb.KeyTypeHash},
+				{AttributeName: awsv2.String(name + "_sk"), KeyType: ddb.KeyTypeRange},
 			},
 			Projection: &ddb.Projection{ProjectionType: ddb.ProjectionTypeInclude, NonKeyAttributes: []string{"status"}},
 		}
 	}
 	attributes := make([]ddb.AttributeDefinition, 0, 6)
-	for _, attribute := range []string{"pk", "sk", "gsi1pk", "gsi1sk", "gsi2pk", "gsi2sk"} {
+	for _, attribute := range []string{"pk", "sk", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		attributes = append(attributes, ddb.AttributeDefinition{AttributeName: awsv2.String(attribute), AttributeType: ddb.ScalarAttributeTypeS})
 	}
 	_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
@@ -67,7 +68,7 @@ func CreateTable(ctx context.Context, client *dynamodb.Client, name string) erro
 			{AttributeName: awsv2.String("pk"), KeyType: ddb.KeyTypeHash},
 			{AttributeName: awsv2.String("sk"), KeyType: ddb.KeyTypeRange},
 		},
-		GlobalSecondaryIndexes: []ddb.GlobalSecondaryIndex{index(gsi1), index(gsi2)},
+		GlobalSecondaryIndexes: []ddb.GlobalSecondaryIndex{index(listIndex), index(listGroupIndex)},
 	})
 	if err != nil {
 		return fmt.Errorf("workflow/aws: create table: %w", err)

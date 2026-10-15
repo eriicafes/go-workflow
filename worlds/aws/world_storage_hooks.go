@@ -46,15 +46,15 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: token.hookID, ResolveData: input.ResolveData})
 }
 
-// HooksList reads the HOOKS (gsi1) or HOOKS#<runID> (gsi2) index partition
-// in creation order.
+// HooksList reads the HOOKS (list) or HOOKS#<runID> (list_group) index
+// partition in creation order.
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	query := indexQuery{index: gsi1, partition: "HOOKS"}
+	query := indexQuery{index: listIndex, partition: "HOOKS"}
 	if input.RunID != "" {
-		query = indexQuery{index: gsi2, partition: "HOOKS#" + string(input.RunID)}
+		query = indexQuery{index: listGroupIndex, partition: "HOOKS#" + string(input.RunID)}
 	}
 	pagination := worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit}
 	items, cursor, more, err := w.indexPage(ctx, query, pagination, nil)

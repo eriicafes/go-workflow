@@ -77,8 +77,8 @@ func (t *tokenView) expired(now time.Time) bool {
 	return t != nil && t.retainUntil != nil && !t.retainUntil.After(now)
 }
 
-// indexQuery selects one partition of gsi1 or gsi2, optionally bounded by
-// creation time.
+// indexQuery selects one partition of the list or list_group index,
+// optionally bounded by creation time.
 type indexQuery struct {
 	index     string
 	partition string
@@ -95,7 +95,7 @@ func (w *World) indexPage(ctx context.Context, query indexQuery, pagination worl
 	if err != nil {
 		return nil, "", false, err
 	}
-	pk, sk := query.index+"pk", query.index+"sk"
+	pk, sk := query.index+"_pk", query.index+"_sk"
 	names := map[string]string{"#pk": pk}
 	values := map[string]ddb.AttributeValue{":pk": avs(query.partition)}
 	condition := "#pk = :pk"
@@ -176,17 +176,17 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 		attributes[name] = avs(value)
 	}
 	item := merge(runKey(string(run.RunID)), map[string]ddb.AttributeValue{
-		"runId":        avs(string(run.RunID)),
-		"workflowName": avs(run.WorkflowName),
-		"status":       avs(string(run.Status)),
-		"attributes":   &ddb.AttributeValueMemberM{Value: attributes},
-		"createdAt":    avs(stamp(run.CreatedAt)),
-		"updatedAt":    avs(stamp(run.UpdatedAt)),
-		"eventCount":   avn(int64(view.eventCount)),
-		"gsi1pk":       avs("RUNS"),
-		"gsi1sk":       avs(indexSortKey(run.CreatedAt, string(run.RunID))),
-		"gsi2pk":       avs("RUNS#" + run.WorkflowName),
-		"gsi2sk":       avs(indexSortKey(run.CreatedAt, string(run.RunID))),
+		"runId":         avs(string(run.RunID)),
+		"workflowName":  avs(run.WorkflowName),
+		"status":        avs(string(run.Status)),
+		"attributes":    &ddb.AttributeValueMemberM{Value: attributes},
+		"createdAt":     avs(stamp(run.CreatedAt)),
+		"updatedAt":     avs(stamp(run.UpdatedAt)),
+		"eventCount":    avn(int64(view.eventCount)),
+		"list_pk":       avs("RUNS"),
+		"list_sk":       avs(indexSortKey(run.CreatedAt, string(run.RunID))),
+		"list_group_pk": avs("RUNS#" + run.WorkflowName),
+		"list_group_sk": avs(indexSortKey(run.CreatedAt, string(run.RunID))),
 	})
 	setBytes(item, "input", run.Input)
 	setBytes(item, "output", run.Output)
@@ -230,7 +230,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // update leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "createdAt", "gsi1pk", "gsi1sk", "gsi2pk", "gsi2sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
 	for _, name := range []string{"output", "error", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
@@ -287,15 +287,15 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 
 func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	item := merge(hookKey(string(hook.HookID)), map[string]ddb.AttributeValue{
-		"runId":     avs(string(hook.RunID)),
-		"hookId":    avs(string(hook.HookID)),
-		"token":     avs(hook.Token),
-		"createdAt": avs(stamp(hook.CreatedAt)),
-		"updatedAt": avs(stamp(hook.UpdatedAt)),
-		"gsi1pk":    avs("HOOKS"),
-		"gsi1sk":    avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
-		"gsi2pk":    avs("HOOKS#" + string(hook.RunID)),
-		"gsi2sk":    avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
+		"runId":         avs(string(hook.RunID)),
+		"hookId":        avs(string(hook.HookID)),
+		"token":         avs(hook.Token),
+		"createdAt":     avs(stamp(hook.CreatedAt)),
+		"updatedAt":     avs(stamp(hook.UpdatedAt)),
+		"list_pk":       avs("HOOKS"),
+		"list_sk":       avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
+		"list_group_pk": avs("HOOKS#" + string(hook.RunID)),
+		"list_group_sk": avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
 	})
 	if hook.Webhook != nil {
 		webhook, err := json.Marshal(hook.Webhook)

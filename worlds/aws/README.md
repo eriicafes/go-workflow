@@ -96,10 +96,10 @@ that project only keys and `status`:
 
 | Index | Partition key values | Sort key |
 |---|---|---|
-| `gsi1` (`gsi1pk`, `gsi1sk`) | `RUNS`, `HOOKS` | `<createdAt>#<id>` |
-| `gsi2` (`gsi2pk`, `gsi2sk`) | `RUNS#<workflow>`, `HOOKS#<runID>` | `<createdAt>#<id>` |
+| `list` (`list_pk`, `list_sk`) | `RUNS`, `HOOKS` | `<createdAt>#<id>` |
+| `list_group` (`list_group_pk`, `list_group_sk`) | `RUNS#<workflow>`, `HOOKS#<runID>` | `<createdAt>#<id>` |
 
-`RunsList` and analytics read `gsi1` (all runs) or `gsi2` (one workflow),
+`RunsList` and analytics read `list` (all runs) or `list_group` (one workflow),
 bounded by creation time, with status filtered on the index. `HooksList`
 reads `HOOKS` or `HOOKS#<runID>`. Matching keys are then read from the table
 with consistent `BatchGetItem` calls, so returned items are current; index
@@ -109,102 +109,33 @@ do not write to the indexes. All other reads are consistent reads of the base
 table. Stream names are base64url-encoded in keys so names containing `#` do
 not overlap.
 
-Create the table with infrastructure as code:
-
-```hcl
-resource "aws_dynamodb_table" "workflows" {
-  name         = "workflows"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "pk"
-  range_key    = "sk"
-
-  attribute { name = "pk"     type = "S" }
-  attribute { name = "sk"     type = "S" }
-  attribute { name = "gsi1pk" type = "S" }
-  attribute { name = "gsi1sk" type = "S" }
-  attribute { name = "gsi2pk" type = "S" }
-  attribute { name = "gsi2sk" type = "S" }
-
-  global_secondary_index {
-    name               = "gsi1"
-    hash_key           = "gsi1pk"
-    range_key          = "gsi1sk"
-    projection_type    = "INCLUDE"
-    non_key_attributes = ["status"]
-  }
-
-  global_secondary_index {
-    name               = "gsi2"
-    hash_key           = "gsi2pk"
-    range_key          = "gsi2sk"
-    projection_type    = "INCLUDE"
-    non_key_attributes = ["status"]
-  }
-
-  point_in_time_recovery { enabled = true }
-}
-```
-
-or with `awsworld.CreateTable(ctx, dynamoClient, name)`, which creates the
-same table on demand and waits until it is active (handy for DynamoDB Local
+Create the table with the [Terraform module](#infrastructure), or with
+`awsworld.CreateTable(ctx, dynamoClient, name)`, which creates the same table
+on demand and waits until it is active (handy for DynamoDB Local
 and tests).
 
-## Queue and Scheduler
+## Infrastructure
+
+[`terraform/`](terraform) is a Terraform module that provisions the table,
+the task queue with a dead-letter queue, the worker's SQS event source
+mapping, the Scheduler group and role, and least-privilege IAM policies for
+the worker and API roles. Its `environment` output holds the variables the
+example entrypoints read.
 
 ```hcl
-resource "aws_sqs_queue" "workflow_dlq" {
-  name = "workflow-tasks-dlq"
-}
+module "workflow" {
+  source = "github.com/eriicafes/go-workflow//worlds/aws/terraform"
 
-resource "aws_sqs_queue" "workflow_tasks" {
-  name                       = "workflow-tasks"
-  visibility_timeout_seconds = 360 # above the worker Lambda timeout
-  redrive_policy = jsonencode({
-    deadLetterTargetArn = aws_sqs_queue.workflow_dlq.arn
-    maxReceiveCount     = 10
-  })
-}
-
-resource "aws_lambda_event_source_mapping" "workflow_tasks" {
-  event_source_arn        = aws_sqs_queue.workflow_tasks.arn
-  function_name           = aws_lambda_function.workflow_worker.arn
-  batch_size              = 10
-  function_response_types = ["ReportBatchItemFailures"]
-}
-
-resource "aws_scheduler_schedule_group" "workflow" {
-  name = "workflow"
-}
-
-resource "aws_iam_role" "workflow_scheduler" {
-  name = "workflow-scheduler"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "scheduler.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "workflow_scheduler" {
-  role = aws_iam_role.workflow_scheduler.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "sqs:SendMessage"
-      Resource = aws_sqs_queue.workflow_tasks.arn
-    }]
-  })
+  worker_function_name = aws_lambda_function.worker.function_name
+  worker_role_name     = aws_iam_role.worker.name
+  api_role_name        = aws_iam_role.api.name
 }
 ```
 
-`ReportBatchItemFailures` is required: without it a single failed record makes
-Lambda retry the whole batch. Pass the queue ARN as `SchedulerConfig.TargetARN`
-and the role ARN as `SchedulerConfig.RoleARN`.
+The event source mapping must use `ReportBatchItemFailures`, as the module's
+does: without it a single failed record makes Lambda retry the whole batch.
+The `queue_arn` and `scheduler_role_arn` outputs are
+`SchedulerConfig.TargetARN` and `SchedulerConfig.RoleARN`.
 
 `Scheduler` can be omitted when the world is only used for `HTTP`, `RPC` or
 `Webhook`, or when no workflow sleeps, times out or retries more than 15

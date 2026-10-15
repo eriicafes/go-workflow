@@ -27,8 +27,8 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	return stripRun(runFromItem(item).Run, input.ResolveData), nil
 }
 
-// RunsList reads the RUNS (gsi1) or RUNS#<workflow> (gsi2) index partition
-// in creation order and filters status on the index.
+// RunsList reads the RUNS (list) or RUNS#<workflow> (list_group) index
+// partition in creation order and filters status on the index.
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Run]{}, err
@@ -75,7 +75,7 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 
 func runsIndex(workflowName string, status []worlds.Status) indexQuery {
 	if workflowName != "" {
-		return indexQuery{index: gsi2, partition: "RUNS#" + workflowName, status: status}
+		return indexQuery{index: listGroupIndex, partition: "RUNS#" + workflowName, status: status}
 	}
-	return indexQuery{index: gsi1, partition: "RUNS", status: status}
+	return indexQuery{index: listIndex, partition: "RUNS", status: status}
 }
