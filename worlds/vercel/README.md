@@ -44,20 +44,15 @@ world, err := vercelworld.New(vercelworld.Config{
 | `RedisRESTURL`, `RedisRESTToken` | Upstash REST transport, used when `RedisURL` is empty. |
 | `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
 | `Topic` | Required. Topic the consumer is subscribed to. |
-| `OIDCTokenSource` | Returns the Vercel OIDC token for each Queues request. |
-| `OIDCToken` | Static fallback token. |
+| `OIDCToken` | Function returning the Vercel OIDC token, called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `Prefix` | Redis key prefix, default `go-workflow`. |
 | `QStash` | Optional long-timer configuration (below). |
 | `HTTPClient` | Client for Redis REST, Vercel Queues and QStash. Default `http.DefaultClient`. |
 
-Vercel rotates OIDC tokens, so the token is resolved per request. Without
-`OIDCTokenSource` the World checks, in order:
-
-1. the `x-vercel-oidc-token` header of the request being served by `Queue`,
-   `HTTP`, `RPC` or `Webhook`;
-2. the file named by `VERCEL_OIDC_TOKEN_FILE`;
-3. `VERCEL_OIDC_TOKEN`;
-4. `Config.OIDCToken`.
+Vercel rotates OIDC tokens, so `OIDCToken` is called for every Queues request.
+`vercelworld.OIDCTokenFromEnv(name)` returns a function that reads the
+environment variable `name` on each call; the default reads
+`VERCEL_OIDC_TOKEN`. Pass your own function to read the token elsewhere.
 
 When `VERCEL_DEPLOYMENT_ID` is set, Queues requests send it as
 `Vqs-Deployment-Id`, so push deliveries return to the deployment that

@@ -1,24 +1,29 @@
 # go-workflow
 
-`go-workflow` is a replay-based workflow runtime. Workflows and steps are
-ordinary named Go functions using `context.Context`. There are no generated
-registries, workflow interfaces, or SDK-specific context type.
+`go-workflow` is a replay-based workflow runtime for Go. A workflow is a
+struct type whose `Workflow` method declares its output, and its package path
+and type name are the workflow name. A runner, an ordinary Go function using
+`context.Context`, executes the workflow and calls steps. There are no
+generated registries, workflow interfaces, or SDK-specific context type.
 
-`workflow.NewContext` is the boundary between application code and scheduling.
-Clients communicate only with a worker HTTP endpoint. They never receive an
-a World or database handle. The Postgres worker inserts root runs and sends
-`pg_notify` in the same transaction. Durable primitives create immutable
-ordered commands and queued tasks. A worker leases one task, then replays the
-parent function privately until it reaches that exact command. This is also
-the external Dev UI/proxy contract.
+Every run is recorded as an append-only event log in a World, which can be
+files on disk, Postgres, Redis with Vercel Queues, or DynamoDB with SQS.
+A run executes in one of two contexts. In workflow context, the runner's own
+code executes as a flow, which replays the runner from the beginning, records
+the operations it starts, and queues the steps it needs. In step context, a
+step function executes as a step, which replays the runner up to that step
+and runs the step function. Operations that are already recorded return their
+recorded results, so a completed step does not run again and the run resumes
+where it left off. Code outside a run starts and reads runs through a Client,
+either in the same process as the World or over its HTTP endpoint.
 
-## Definitions
+## Workflows
 
-Definitions are pure types, so request handlers can import them without
-importing workflow implementations.
+Workflows are plain struct types in their own package, so request handlers can
+import them without importing their runners.
 
 ```go
-package workflowdefs
+package workflows
 
 type GenerateReport struct {
 	Topic string
@@ -56,7 +61,7 @@ if err := world.Start(context.Background()); err != nil {
 
 run, err := workflow.Start(
 	workflow.NewContext(context.Background(), world),
-	workflowdefs.GenerateReport{
+	workflows.GenerateReport{
 		Topic: "workflows",
 	},
 )
@@ -70,12 +75,24 @@ if err != nil {
 log.Printf("report summary: %s", result.Summary)
 ```
 
-## Implementations and steps
+## Runners and steps
 
-Workflow functions and steps are ordinary functions. `Step` and `Background`
-accept either named functions or inline closures. The analyzer requires a
+Runners and steps are ordinary functions. Keep each runner in a file with the
+steps it calls. `Step` and `Background` accept either named functions or
+inline closures. The analyzer requires a
 closure to receive workflow-relevant values through its explicit input.
 Calling a step function directly is normal Go and repeats during replay.
+
+Steps run at least once. A step whose delivery ends before recording its
+result is redelivered by the World's queue and runs again as a new attempt, so
+step functions should be idempotent. Keep the queue's visibility timeout or
+lease longer than your longest step, or a redelivery can run the step while
+the first delivery is still executing it.
+
+`workflow.InlineStep(ctx, fn)` records the result of a function that cannot
+fail, such as a generated ID, without a step delivery. When its result cannot
+be recorded, the delivery is retried and calls the function again. Work that
+can fail belongs in `Step`.
 
 ## Rollbacks
 
@@ -84,11 +101,11 @@ fails, registered compensations run as durable steps in reverse registration
 order. Successful workflows never execute them.
 
 ```go
-invoice, err := workflow.Step(ctx, steps.CreateInvoice, input)
+invoice, err := workflow.Step(ctx, createInvoice, input)
 if err != nil {
 	return Report{}, err
 }
-if err := workflow.OnRollback(ctx, steps.VoidInvoice, invoice.ID); err != nil {
+if err := workflow.OnRollback(ctx, voidInvoice, invoice.ID); err != nil {
 	return Report{}, err
 }
 ```
@@ -101,39 +118,37 @@ package flows
 
 func GenerateReport(
 	ctx context.Context,
-	input workflowdefs.GenerateReport,
-) (workflowdefs.GenerateReportResult, error) {
+	input workflows.GenerateReport,
+) (workflows.GenerateReportResult, error) {
 	sources, err := workflow.Step(
 		ctx,
-		steps.FindSources,
+		findSources,
 		input.Topic,
 	)
 	if err != nil {
-		return workflowdefs.GenerateReportResult{}, err
+		return workflows.GenerateReportResult{}, err
 	}
 
 	if _, err := workflow.Step(
 		ctx,
-		steps.WriteReportProgress,
+		writeReportProgress,
 		len(sources),
 	); err != nil {
-		return workflowdefs.GenerateReportResult{}, err
+		return workflows.GenerateReportResult{}, err
 	}
 
-	return workflowdefs.GenerateReportResult{
+	return workflows.GenerateReportResult{
 		Summary: strings.Join(sources, ", "),
 	}, nil
 }
 
-package steps
-
-func FindSources(ctx context.Context, topic string) ([]string, error) {
+func findSources(ctx context.Context, topic string) ([]string, error) {
 	// I/O belongs in a durable operation.
 	// workflow.StepID(ctx) is stable for this operation sequence.
 	return query(ctx, topic)
 }
 
-func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
+func writeReportProgress(ctx context.Context, count int) (struct{}, error) {
 	writer, release, err := workflow.Writer(ctx)
 	if err != nil {
 		return struct{}{}, err
@@ -154,7 +169,7 @@ its lock or closes the stream. Closing is visible to every reader. Runs close
 any remaining streams when they reach a terminal state.
 
 ```go
-func WriteReportProgress(ctx context.Context, count int) (struct{}, error) {
+func writeReportProgress(ctx context.Context, count int) (struct{}, error) {
 	writer, release, err := workflow.Writer(
 		ctx,
 		workflow.WriterOption{Name: "progress"},
@@ -180,8 +195,8 @@ if err != nil {
 ```
 
 `workflow.Writer` and `workflow.Reader` are step-only. `run.Writer` and
-`run.Reader` are for application handlers or durable steps; a root workflow
-body receives `ErrNoWorkflow`. `ReaderAt` accepts negative offsets relative to
+`run.Reader` are for step context and code outside a run. In workflow context
+they return `ErrNotInStep`. `ReaderAt` accepts negative offsets relative to
 the stream's end. `Release` completes the writer's step-local lifetime without
 closing. `Close` closes the stream for every reader. Use `bufio.Writer` when
 writes need application-side buffering.
@@ -209,11 +224,11 @@ verify provider signatures before trusting the request payload.
 
 `WebhookOption` can require one HTTP method, return a static
 `*http.Response`, or set `Manual: true`. A manual webhook waits until a
-durable step calls `webhook.RespondWith(ctx, response)`.
+runner calls `webhook.RespondWith(ctx, response)`.
 
 ## Application and worker
 
-The application schedules by importing only workflow definition types and an
+The application schedules by importing only workflow types and an
 HTTP client. The worker is a separate entry point that imports the
 implementation package, owns the world, and exposes the workflow HTTP API.
 
@@ -221,21 +236,15 @@ implementation package, owns the world, and exposes the workflow HTTP API.
 // cmd/app/main.go
 client := workflow.NewHTTPClient("http://workflow-worker:8081")
 
-type app struct {
-	workflows workflow.Client
-}
-
-func (a app) createReport(w http.ResponseWriter, r *http.Request) {
-	var input workflowdefs.GenerateReport
+func createReport(w http.ResponseWriter, r *http.Request) {
+	var input workflows.GenerateReport
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid report input", http.StatusBadRequest)
 		return
 	}
 
-	run, err := workflow.Start(
-		workflow.NewContext(r.Context(), a.workflows),
-		input,
-	)
+	// Middleware put the client in r.Context().
+	run, err := workflow.Start(r.Context(), input)
 	if err != nil {
 		http.Error(w, "start report workflow", http.StatusInternalServerError)
 		return
@@ -246,8 +255,9 @@ func (a app) createReport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(run.ID()))
 }
 
-server := app{workflows: client}
-if err := http.ListenAndServe(":8080", http.HandlerFunc(server.createReport)); err != nil {
+mux := http.NewServeMux()
+mux.HandleFunc("POST /reports", createReport)
+if err := http.ListenAndServe(":8080", workflow.Middleware(mux, client)); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -367,8 +377,47 @@ _ = metadata.RunID
 The Go package deliberately serves no Dev UI. Streams and the
 Postgres operation tables are the contract for `go-dev` or a production proxy.
 
-`workflow.Start` is also valid inside workflows and steps. It records a nested
-run command and returns the same child `Run` ID on replay.
+## Composing workflows
+
+A runner can compose another workflow in two ways, as in the Workflow SDK.
+Calling the other workflow's runner directly runs its steps in the current run,
+which then waits for its result like any other code.
+
+`workflow.Start` in workflow context starts a child run as a step and returns
+at once, and replay returns the same child `Run`. Every `Run` method in
+workflow context reads the run once as a step, so `Await` returns
+`workflow.ErrRunNotFinished` for a child that had not finished. To wait for a
+child run, create a hook, pass its token to the child, and have the child
+resume the hook when it finishes.
+
+```go
+func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
+	hook, err := workflow.CreateHook[string](ctx)
+	if err != nil {
+		return workflows.ParentResult{}, err
+	}
+	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
+		return workflows.ParentResult{}, err
+	}
+	value, err := hook.Await(ctx)
+	return workflows.ParentResult{Value: value}, err
+}
+
+func Child(ctx context.Context, input workflows.Child) (workflows.ChildResult, error) {
+	value, err := workflow.Step(ctx, work, input)
+	if err != nil {
+		return workflows.ChildResult{}, err
+	}
+	_, err = workflow.Step(ctx, resumeParent, completion{Token: input.Token, Value: value})
+	return workflows.ChildResult{Value: value}, err
+}
+
+func resumeParent(ctx context.Context, c completion) (struct{}, error) {
+	return struct{}{}, workflow.ResumeHook(ctx, c.Token, c.Value)
+}
+```
+
+A child run carries the `$parentRunId` and `$rootRunId` attributes.
 
 ## go-dev static checks
 
