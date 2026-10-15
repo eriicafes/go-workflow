@@ -12,6 +12,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
+var errCorrupt = errors.New("workflow/vercel: corrupt Redis data")
+
 // Redis keys (p is Config.Prefix). Kinds are distinct namespaces, and keys
 // with two user-supplied parts hex-encode the last one so they cannot collide.
 //
@@ -42,7 +44,7 @@ func (w *World) corrKey(runID worlds.RunID, correlationID string) string {
 	return w.key("corr", string(runID)+":"+hex.EncodeToString([]byte(correlationID)))
 }
 
-// eventRecord is the JSON stored per event; its slot is its list position.
+// eventRecord is the JSON stored per event, and its slot is its list position.
 type eventRecord struct {
 	Type          worlds.EventType `json:"t"`
 	CorrelationID string           `json:"c,omitempty"`
@@ -79,8 +81,6 @@ type hookView struct {
 	ReceivedAt   string       `json:"receivedAt,omitempty"`
 	RetainUntil  string       `json:"retainUntil,omitempty"`
 }
-
-var errCorrupt = errors.New("workflow/vercel: corrupt Redis data")
 
 func micros(t time.Time) string { return strconv.FormatInt(t.UnixMicro(), 10) }
 

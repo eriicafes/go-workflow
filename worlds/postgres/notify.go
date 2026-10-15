@@ -18,8 +18,9 @@ const (
 var listenChannels = []string{channelQueue, channelRuns, channelStreams}
 
 // notifier owns one LISTEN connection per World and fans notifications out
-// to waiters keyed by channel and payload. Notifications are only wake-ups:
-// waiters always re-read state and also poll, so a missed one is not fatal.
+// to waiters keyed by channel and payload. Notifications are only wake-ups,
+// because waiters always re-read state and also poll, so a missed one is not
+// fatal.
 type notifier struct {
 	pool    *pgxpool.Pool
 	ctx     context.Context
@@ -28,6 +29,11 @@ type notifier struct {
 	started bool
 	done    chan struct{}
 	waiters map[string]*waiter
+}
+
+func newNotifier(pool *pgxpool.Pool) *notifier {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &notifier{pool: pool, ctx: ctx, cancel: cancel, done: make(chan struct{}), waiters: make(map[string]*waiter)}
 }
 
 type waiter struct {
@@ -138,11 +144,6 @@ func (n *notifier) listen() error {
 		}
 		n.signal(notifyKey(notification.Channel, notification.Payload))
 	}
-}
-
-func newNotifier(pool *pgxpool.Pool) *notifier {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &notifier{pool: pool, ctx: ctx, cancel: cancel, done: make(chan struct{}), waiters: make(map[string]*waiter)}
 }
 
 func notifyKey(channel, payload string) string { return channel + ":" + payload }

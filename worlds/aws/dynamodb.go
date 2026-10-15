@@ -15,6 +15,10 @@ import (
 	ddb "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// errWriteTooLarge marks writes that exceed DynamoDB's item or transaction
+// limits and can never succeed as issued.
+var errWriteTooLarge = errors.New("workflow/aws: write exceeds DynamoDB limits")
+
 // dynamoAPI is the subset of the DynamoDB client used by World.
 type dynamoAPI interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
@@ -39,12 +43,13 @@ const (
 	maxTransactItems = 100
 )
 
-// CreateTable creates the single table used by World: string keys pk and sk,
-// plus the list (list_pk, list_sk) and list_group (list_group_pk,
-// list_group_sk) global secondary indexes, which project only their keys and
-// status. It uses on-demand
-// billing and waits until the table is active. Production deployments
-// usually declare the same table with infrastructure as code instead.
+// CreateTable creates the DynamoDB table name in the layout World expects,
+// with on-demand billing, and waits until it is active. The table has string
+// keys pk and sk and two global secondary indexes, list (list_pk, list_sk) and
+// list_group (list_group_pk, list_group_sk), which project only their keys and
+// status. CreateTable suits tests and DynamoDB Local, while production
+// deployments usually declare the same table with infrastructure as code, such
+// as the module in worlds/aws/terraform.
 func CreateTable(ctx context.Context, client *dynamodb.Client, name string) error {
 	index := func(name string) ddb.GlobalSecondaryIndex {
 		return ddb.GlobalSecondaryIndex{
@@ -75,10 +80,6 @@ func CreateTable(ctx context.Context, client *dynamodb.Client, name string) erro
 	}
 	return dynamodb.NewTableExistsWaiter(client).Wait(ctx, &dynamodb.DescribeTableInput{TableName: awsv2.String(name)}, 5*time.Minute)
 }
-
-// errWriteTooLarge marks writes that exceed DynamoDB's item or transaction
-// limits and can never succeed as issued.
-var errWriteTooLarge = errors.New("workflow/aws: write exceeds DynamoDB limits")
 
 func (w *World) item(ctx context.Context, key map[string]ddb.AttributeValue) (map[string]ddb.AttributeValue, bool, error) {
 	result, err := w.dynamo.GetItem(ctx, &dynamodb.GetItemInput{
@@ -346,7 +347,7 @@ func cancelledBy(err error, code string) bool {
 	return false
 }
 
-// itemSize estimates DynamoDB's item size: attribute names plus values.
+// itemSize estimates DynamoDB's item size as attribute names plus values.
 func itemSize(item map[string]ddb.AttributeValue) int {
 	size := 0
 	for name, value := range item {
@@ -384,7 +385,7 @@ func checkItemSize(item map[string]ddb.AttributeValue) error {
 }
 
 // usedOnly returns the expression names and values referenced by
-// expressions; DynamoDB rejects unused ones.
+// expressions, because DynamoDB rejects unused ones.
 func usedOnly(names map[string]string, values map[string]ddb.AttributeValue, expressions ...string) (map[string]string, map[string]ddb.AttributeValue) {
 	usedNames, usedValues := map[string]string{}, map[string]ddb.AttributeValue{}
 	for _, expression := range expressions {

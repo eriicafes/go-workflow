@@ -22,6 +22,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
+var errUnsupported = errors.New("fake: unsupported operation")
+
 const (
 	testBaseURL  = "https://workflows.example.com/v1/workflow"
 	testQueueURL = "https://sqs.us-east-1.amazonaws.com/000000000000/workflow"
@@ -195,7 +197,9 @@ type fakeDynamo struct {
 	getErr      error
 }
 
-var errUnsupported = errors.New("fake: unsupported operation")
+func newFakeDynamo() *fakeDynamo {
+	return &fakeDynamo{items: map[string]map[string]ddb.AttributeValue{}}
+}
 
 func (f *fakeDynamo) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
 	f.mu.Lock()
@@ -317,6 +321,10 @@ type fakeScheduler struct {
 	err       error
 }
 
+func newFakeScheduler() *fakeScheduler {
+	return &fakeScheduler{schedules: map[string]*scheduler.CreateScheduleInput{}}
+}
+
 func (f *fakeScheduler) CreateSchedule(_ context.Context, input *scheduler.CreateScheduleInput, _ ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -435,12 +443,4 @@ func testLimits(t *testing.T, world *World) {
 	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_limits", Name: "s", Chunks: chunks}); err == nil {
 		t.Fatal("oversized stream write succeeded")
 	}
-}
-
-func newFakeDynamo() *fakeDynamo {
-	return &fakeDynamo{items: map[string]map[string]ddb.AttributeValue{}}
-}
-
-func newFakeScheduler() *fakeScheduler {
-	return &fakeScheduler{schedules: map[string]*scheduler.CreateScheduleInput{}}
 }

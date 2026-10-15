@@ -27,13 +27,18 @@ type redisScript struct {
 	sha string
 }
 
+func newRedisScript(src string) *redisScript {
+	sum := sha1.Sum([]byte(src))
+	return &redisScript{src: src, sha: hex.EncodeToString(sum[:])}
+}
+
 type redisZ struct {
 	Member string
 	Score  float64
 }
 
 // redisStore is the command surface the World uses over TCP and REST. Every
-// mutation is one Lua script; scripts receive no KEYS and derive keys from the
+// mutation is one Lua script. Scripts receive no KEYS and derive keys from the
 // prefix in ARGV[1], so the database must not be a Redis Cluster.
 type redisStore interface {
 	// Run executes script with EVALSHA and falls back to EVAL on NOSCRIPT.
@@ -52,6 +57,27 @@ type redisStore interface {
 	SMembers(ctx context.Context, key string) ([]string, error)
 	Exists(ctx context.Context, key string) (bool, error)
 	Close() error
+}
+
+func newRedisStore(url, restURL, restToken string, client *http.Client) (redisStore, error) {
+	if url != "" {
+		options, err := redis.ParseURL(url)
+		if err != nil {
+			return nil, fmt.Errorf("workflow/vercel: parse Redis TCP URL: %w", err)
+		}
+		// redis.ParseURL enables TLS only for rediss:// URLs.
+		if options.TLSConfig != nil && options.TLSConfig.MinVersion == 0 {
+			options.TLSConfig.MinVersion = tls.VersionTLS12
+		}
+		return tcpRedis{client: redis.NewClient(options)}, nil
+	}
+	if restURL == "" || restToken == "" {
+		return nil, errors.New("workflow/vercel: Redis URL or Redis REST URL and token are required")
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return restRedis{url: strings.TrimRight(restURL, "/"), token: restToken, http: client}, nil
 }
 
 type tcpRedis struct {
@@ -139,8 +165,8 @@ func (store tcpRedis) Exists(ctx context.Context, key string) (bool, error) {
 	return count > 0, err
 }
 
-// restRedis speaks the Upstash Redis REST protocol: each command is a JSON
-// array POSTed to the endpoint and answered with {"result"} or {"error"}.
+// restRedis speaks the Upstash Redis REST protocol, where each command is a
+// JSON array POSTed to the endpoint and answered with {"result"} or {"error"}.
 type restRedis struct {
 	url   string
 	token string
@@ -332,32 +358,6 @@ func (store restRedis) do(ctx context.Context, command []any) (json.RawMessage, 
 		return nil, fmt.Errorf("workflow/vercel: Redis REST %v: %s", command[0], response.Status)
 	}
 	return reply.Result, nil
-}
-
-func newRedisScript(src string) *redisScript {
-	sum := sha1.Sum([]byte(src))
-	return &redisScript{src: src, sha: hex.EncodeToString(sum[:])}
-}
-
-func newRedisStore(url, restURL, restToken string, client *http.Client) (redisStore, error) {
-	if url != "" {
-		options, err := redis.ParseURL(url)
-		if err != nil {
-			return nil, fmt.Errorf("workflow/vercel: parse Redis TCP URL: %w", err)
-		}
-		// redis.ParseURL enables TLS only for rediss:// URLs.
-		if options.TLSConfig != nil && options.TLSConfig.MinVersion == 0 {
-			options.TLSConfig.MinVersion = tls.VersionTLS12
-		}
-		return tcpRedis{client: redis.NewClient(options)}, nil
-	}
-	if restURL == "" || restToken == "" {
-		return nil, errors.New("workflow/vercel: Redis URL or Redis REST URL and token are required")
-	}
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return restRedis{url: strings.TrimRight(restURL, "/"), token: restToken, http: client}, nil
 }
 
 func normalizeReply(value any) any {

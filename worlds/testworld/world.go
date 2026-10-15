@@ -1,4 +1,5 @@
-// Package testworld provides the in-memory reference World used by tests.
+// Package testworld implements a World in memory, for tests. It keeps nothing
+// across processes and is not meant for production use.
 package testworld
 
 import (
@@ -10,8 +11,8 @@ import (
 
 const baseURL = "http://localhost/v1/workflow"
 
-// World is the in-memory reference World. Production Worlds use durable
-// provider storage; this implementation is reserved for tests.
+// World is the in-memory World. It is safe for concurrent use, and its base
+// URL is http://localhost/v1/workflow.
 type World struct {
 	mu      sync.RWMutex
 	ctx     context.Context
@@ -27,6 +28,8 @@ type World struct {
 	autoRun bool
 }
 
+// Close stops delivering queued work, and deliveries already running see
+// their context cancelled. State stays readable.
 func (w *World) Close()                      { w.cancel() }
 func (*World) BaseURL() string               { return baseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
@@ -35,19 +38,18 @@ func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true}
 }
 
-// New returns a World that delivers queued work in-process.
+// New returns a World that executes deliveries for the workflows of runners
+// in-process, each in its own goroutine once it is due.
 func New(runners ...worlds.Runner) *World {
 	return newWorld(true, runners...)
 }
 
-// NewManual returns a World whose Queue only records deliveries. Tests drive
-// delivery themselves through QueuedMessages.
+// NewManual returns a World that records deliveries without executing them.
+// Tests execute them through QueuedMessages and acknowledge each with
+// QueueCancel.
 func NewManual(runners ...worlds.Runner) *World {
 	return newWorld(false, runners...)
 }
-
-// notify marks state mutations. The in-memory World has nothing to persist.
-func (w *World) notify() {}
 
 func newWorld(autoRun bool, runners ...worlds.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,3 +57,6 @@ func newWorld(autoRun bool, runners ...worlds.Runner) *World {
 	w.runtime = worlds.NewRuntime(w, worlds.Runners(runners...))
 	return w
 }
+
+// notify marks state mutations. The in-memory World has nothing to persist.
+func (w *World) notify() {}
