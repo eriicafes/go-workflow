@@ -15,6 +15,7 @@ type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 
 type attrSetData struct {
@@ -462,7 +463,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 		return worlds.EventResult{}, err
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -471,7 +472,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
+	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
 	if err := w.createRun(run, event); err != nil {
 		return worlds.EventResult{}, err

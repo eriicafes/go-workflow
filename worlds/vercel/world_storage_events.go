@@ -61,6 +61,7 @@ type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 
 type stepCreatedData struct {
@@ -88,13 +89,13 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
 	now := time.Now().UTC()
 	record := newEventRecord(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated, Data: payload}, now)
-	args := []string{w.prefix, string(input.RunID), micros(now), input.WorkflowName, encodeBytes(input.Input), record}
+	args := []string{w.prefix, string(input.RunID), micros(now), input.WorkflowName, encodeBytes(input.Input), record, input.DeploymentID}
 	keys := make([]string, 0, len(input.Attributes))
 	for key := range input.Attributes {
 		keys = append(keys, key)

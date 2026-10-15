@@ -111,6 +111,19 @@ func (e *Execution) NextPosition() int {
 	return position
 }
 
+// unreachedPosition reports the lowest position of a recorded operation that the
+// replay has not reached. A runner that returns with such an operation left
+// over has diverged from its event log.
+func (e *Execution) unreachedPosition() (int, bool) {
+	lowest, found := 0, false
+	for position := range e.index {
+		if position >= e.next && (!found || position < lowest) {
+			lowest, found = position, true
+		}
+	}
+	return lowest, found
+}
+
 // AddRollback registers fn to run when this delivery fails the run, or fails
 // the step it executes. Registered functions run in reverse order. They are
 // not recorded, so the runner registers them again on each replay.

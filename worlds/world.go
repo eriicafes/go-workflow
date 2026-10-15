@@ -37,14 +37,26 @@ type World interface {
 	Capabilities() Capabilities
 	// SpecVersion returns the RPC protocol version implemented by this World.
 	SpecVersion() int
+	// DeploymentID returns the deployment whose code this World's deliveries
+	// execute, or "" when the World has no deployments. Runs created through
+	// the World's Client record it, and the Runtime enforces it only when
+	// Capabilities reports DeploymentAffinity.
+	DeploymentID() string
 }
 
 // Capabilities reports optional World behavior. A capability being false does
 // not remove a method from World. Unsupported attribute writes are successful
 // no-ops, while Analytics returns nil.
+//
+// DeploymentAffinity reports that the World's deployments are atomic and its
+// queue can address a delivery to one, as Vercel's can. Runs created through
+// the World's Client are then pinned to World.DeploymentID, and the Runtime
+// replays a run only on the deployment it is pinned to, re-routing other
+// deliveries there.
 type Capabilities struct {
-	Analytics     bool `cbor:"analytics"`
-	SetAttributes bool `cbor:"setAttributes"`
+	Analytics          bool `cbor:"analytics"`
+	SetAttributes      bool `cbor:"setAttributes"`
+	DeploymentAffinity bool `cbor:"deploymentAffinity"`
 }
 
 // NormalizeBaseURL validates an HTTP handler's public URL and removes its
@@ -257,6 +269,21 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	if count == 0 {
 		return 0, nil
 	}
-	_, err = world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: "wake:" + string(runID)})
+	deploymentID, err := RunDeployment(ctx, world, runID)
+	if err != nil {
+		return count, err
+	}
+	_, err = world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: "wake:" + string(runID), DeploymentID: deploymentID})
 	return count, err
+}
+
+// RunDeployment returns the deployment run runID is pinned to, so a delivery
+// queued from outside the run can be addressed to it. It returns "" without
+// reading the run when world does not report DeploymentAffinity.
+func RunDeployment(ctx context.Context, world World, runID RunID) (string, error) {
+	if !world.Capabilities().DeploymentAffinity {
+		return "", nil
+	}
+	run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone})
+	return run.DeploymentID, err
 }

@@ -20,6 +20,7 @@ type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 
 type attrSetData struct {
@@ -192,6 +193,7 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	setBytes(item, "error", run.Error)
 	setTime(item, "startedAt", run.StartedAt)
 	setTime(item, "completedAt", run.CompletedAt)
+	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	return item
@@ -213,6 +215,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			Output:       readBytes(item, "output"),
 			Error:        readBytes(item, "error"),
 			Attributes:   attributes,
+			DeploymentID: read(item, "deploymentId"),
 			CreatedAt:    readTime(item, "createdAt"),
 			UpdatedAt:    readTime(item, "updatedAt"),
 			StartedAt:    readTimePtr(item, "startedAt"),
@@ -229,7 +232,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // update leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
 	for _, name := range []string{"output", "error", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {

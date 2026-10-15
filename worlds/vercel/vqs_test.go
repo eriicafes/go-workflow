@@ -141,11 +141,11 @@ func TestPublishVQS(t *testing.T) {
 	server := newRecorder(t, nil)
 	world, _ := newQueueWorld(t, server, false)
 	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
-	t.Setenv("VERCEL_DEPLOYMENT_ID", "dpl_1")
-	if err := world.publishVQS(context.Background(), "01ID", 90*time.Second+time.Millisecond); err != nil {
+	world.config.DeploymentID = "dpl_1"
+	if err := world.publishVQS(context.Background(), "01ID", 90*time.Second+time.Millisecond, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.publishVQS(context.Background(), "02ID", 0); err != nil {
+	if err := world.publishVQS(context.Background(), "02ID", 0, "dpl_run"); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.all()
@@ -167,6 +167,25 @@ func TestPublishVQS(t *testing.T) {
 	}
 	if got := requests[1].Header.Get("Vqs-Delay-Seconds"); got != "" {
 		t.Fatalf("immediate publish has delay %q", got)
+	}
+	if got := requests[1].Header.Get("Vqs-Deployment-Id"); got != "dpl_run" {
+		t.Fatalf("addressed publish deployment = %q, want dpl_run", got)
+	}
+}
+
+func TestPublishVQSReportsUnavailableDeployment(t *testing.T) {
+	server := newRecorder(t, nil)
+	world, _ := newQueueWorld(t, server, false)
+	unavailable := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Vqs-Error-Code", "consumer_discovery_failed")
+		writer.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(unavailable.Close)
+	world.config.QueueURL = unavailable.URL + "/api/v3"
+
+	err := world.publishVQS(context.Background(), "01ID", 0, "dpl_gone")
+	if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
+		t.Fatalf("publish error = %v, want ErrDeploymentUnavailable", err)
 	}
 }
 

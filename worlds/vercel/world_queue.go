@@ -23,10 +23,15 @@ type queueRecord struct {
 	NotBefore       *time.Time     `json:"notBefore,omitempty"`
 	IdempotencyKey  string         `json:"idempotencyKey,omitempty"`
 	QStashMessageID string         `json:"qstashMessageId,omitempty"`
+	// DeploymentID is the deployment the message is published to, kept so a
+	// QStash timer is handed back to the same deployment.
+	DeploymentID                 string `json:"deploymentId,omitempty"`
+	DeploymentMismatchRetryCount int    `json:"deploymentMismatchRetryCount,omitempty"`
+	ReplayDivergenceCount        int    `json:"replayDivergenceCount,omitempty"`
 }
 
 func (record queueRecord) input() worlds.QueueInput {
-	return worlds.QueueInput{QueueName: record.QueueName, RunID: record.RunID, StepID: record.StepID, NotBefore: record.NotBefore, IdempotencyKey: record.IdempotencyKey}
+	return worlds.QueueInput{QueueName: record.QueueName, RunID: record.RunID, StepID: record.StepID, NotBefore: record.NotBefore, IdempotencyKey: record.IdempotencyKey, DeploymentID: record.DeploymentID, DeploymentMismatchRetryCount: record.DeploymentMismatchRetryCount, ReplayDivergenceCount: record.ReplayDivergenceCount}
 }
 
 func (w *World) putQueueRecord(ctx context.Context, id string, record queueRecord, mode string) (bool, error) {
@@ -63,7 +68,10 @@ func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bo
 }
 
 // Queue returns an error for a delivery due more than seven days ahead unless
-// Config.QStash is set. It does not deduplicate by IdempotencyKey.
+// Config.QStash is set. It does not deduplicate by IdempotencyKey. It
+// publishes to input.DeploymentID, or to Config.DeploymentID when that is
+// empty, and returns an error wrapping worlds.ErrDeploymentUnavailable when
+// Vercel cannot find that deployment's consumer.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	// Store the delivery record, then publish its ID to Vercel Queues (delays
 	// up to seven days) or QStash (longer delays). A failed publish removes the
@@ -80,7 +88,11 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		return worlds.QueueResult{}, errors.New("workflow/vercel: delays over seven days require QStash configuration")
 	}
 	id := ulid.Make().String()
-	record := queueRecord{QueueName: input.QueueName, RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey}
+	deploymentID := input.DeploymentID
+	if deploymentID == "" {
+		deploymentID = w.config.DeploymentID
+	}
+	record := queueRecord{QueueName: input.QueueName, RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
 	if _, err := w.putQueueRecord(ctx, id, record, "NX"); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -95,7 +107,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 
 func (w *World) schedule(ctx context.Context, id string, record queueRecord, delay time.Duration, long bool) error {
 	if !long {
-		return w.publishVQS(ctx, id, delay)
+		return w.publishVQS(ctx, id, delay, record.DeploymentID)
 	}
 	qstashID, err := w.publishQStash(ctx, id, *record.NotBefore)
 	if err != nil {
@@ -126,7 +138,7 @@ func (w *World) releaseTimer(ctx context.Context, id string) error {
 	if delaySeconds(delay) > int64(vqsMaxDelay/time.Second) {
 		return w.schedule(ctx, id, record, delay, true)
 	}
-	if err := w.publishVQS(ctx, id, delay); err != nil {
+	if err := w.publishVQS(ctx, id, delay, record.DeploymentID); err != nil {
 		return err
 	}
 	record.QStashMessageID = ""

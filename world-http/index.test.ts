@@ -42,7 +42,6 @@ test("creates a world from capabilities and maps Go CBOR fields", async () => {
 		hookRetention: { active: true },
 		hookForceClaim: true,
 	});
-	await expect(world.getDeploymentId()).resolves.toBe("");
 
 	const run = await world.runs.get("wrun_01");
 	expect(run.runId).toBe("wrun_01");
@@ -51,6 +50,42 @@ test("creates a world from capabilities and maps Go CBOR fields", async () => {
 	expect(requests[1]?.envelope.specVersion).toBe(1);
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
+});
+
+test("passes deployment IDs through to the Go world", async () => {
+	const calls: { method: unknown; input: unknown }[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			const input = envelope.input ? decode(envelope.input as Uint8Array) : undefined;
+			calls.push({ method: envelope.method, input });
+			switch (envelope.method) {
+				case "world.capabilities":
+					return rpcResponse({ Analytics: false, SetAttributes: false, DeploymentAffinity: true });
+				case "world.deploymentId":
+					return rpcResponse("dpl_go");
+				case "events.createRun":
+					return rpcResponse({ EventID: "evnt_01", EventType: "run_created" });
+				default:
+					return rpcResponse({ MessageID: "msg_01" });
+			}
+		},
+	});
+
+	expect(world.capabilities).toMatchObject({ deploymentAffinity: true });
+	await expect(world.getDeploymentId()).resolves.toBe("dpl_go");
+	await expect(world.getDeploymentId()).resolves.toBe("dpl_go");
+	expect(calls.filter((call) => call.method === "world.deploymentId")).toHaveLength(1);
+
+	await world.events.create("wrun_01", {
+		eventType: "run_created",
+		eventData: { workflowName: "report", input: new Uint8Array(), deploymentId: "dpl_go" },
+	} as never);
+	await world.queue("__wkf_workflow_report" as never, { runId: "wrun_01" } as never, { deploymentId: "dpl_go" });
+
+	expect(calls.find((call) => call.method === "events.createRun")?.input).toMatchObject({ RunID: "wrun_01", DeploymentID: "dpl_go" });
+	expect(calls.find((call) => call.method === "queue.queue")?.input).toMatchObject({ RunID: "wrun_01", DeploymentID: "dpl_go" });
 });
 
 test("uses WORKFLOW_HTTP_BASE_URL when no base URL is passed", async () => {

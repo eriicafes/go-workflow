@@ -125,8 +125,13 @@ func WebhookHandler(world World) http.Handler {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		deploymentID, err := RunDeployment(r.Context(), world, hook.RunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if hook.Webhook.Manual {
-			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)}); err != nil {
+			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -146,14 +151,14 @@ func WebhookHandler(world World) http.Handler {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
-			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)}); err != nil {
+			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			writeWebhookResponse(w, *hook.Webhook.Response)
 			return
 		}
-		if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)}); err != nil {
+		if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

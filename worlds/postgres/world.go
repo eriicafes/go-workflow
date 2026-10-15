@@ -114,6 +114,7 @@ func (w *World) Close() {
 
 func (w *World) BaseURL() string             { return w.baseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
+func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true}

@@ -30,6 +30,7 @@ export namespace RPC {
 		output: Uint8Array;
 		error: Uint8Array;
 		attributes: Record<string, string>;
+		deploymentId: string;
 		createdAt: Date;
 		updatedAt: Date;
 		startedAt: Date | null;
@@ -89,7 +90,7 @@ export namespace RPC {
 	};
 	export type QueueResult = { messageId: string };
 	export type StreamInfo = { tailIndex: number; done: boolean };
-	export type AnalyticsRun = Omit<Run, "input" | "output" | "error">;
+	export type AnalyticsRun = Omit<Run, "input" | "output" | "error" | "deploymentId">;
 	export type AnalyticsAttribute = {
 		key: string;
 		runCount: number;

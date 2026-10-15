@@ -163,12 +163,15 @@ type Run struct {
 	Output []byte
 	// Error is the JSON-encoded Error of a failed run. DecodeError
 	// decodes it.
-	Error       []byte
-	Attributes  map[string]string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
+	Error      []byte
+	Attributes map[string]string
+	// DeploymentID is the deployment the run is pinned to, recorded when the
+	// run is created. Empty means the run is not pinned.
+	DeploymentID string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	StartedAt    *time.Time
+	CompletedAt  *time.Time
 }
 
 type (
@@ -396,6 +399,9 @@ type (
 		// Input is the JSON-encoded workflow input.
 		Input      []byte
 		Attributes map[string]string
+		// DeploymentID pins the run to a deployment. Empty leaves the run
+		// unpinned. The World records it in run_created and on the Run.
+		DeploymentID string
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {

@@ -14,6 +14,7 @@ type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
@@ -41,7 +42,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -55,9 +56,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, input, attributes, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 1, $6, $6) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, input.Input, encodedAttributes, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, input, attributes, deployment_id, event_count, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, input.Input, encodedAttributes, input.DeploymentID, at)
 		if err != nil {
 			return err
 		}

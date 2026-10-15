@@ -44,7 +44,9 @@ type (
 // returns the recorded result. During the step delivery for this step it
 // calls fn with the recorded input, records the result in the Execution, and
 // ends the replay with a panic the Runtime recovers, so it does not return.
-// fn is executed at least once.
+// fn is executed at least once. When the operation recorded at the position is
+// not a step with options.Name, it ends the replay with a panic carrying a
+// *replayDivergenceError.
 func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {
@@ -85,7 +87,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 			CorrelationID: event.CorrelationID,
 			Data:          event.Data,
 		})
-		if _, err := options.Execution.World().Queue(ctx, QueueInput{RunID: options.Execution.Run().RunID, StepID: &stepID, IdempotencyKey: string(stepID)}); err != nil {
+		if _, err := options.Execution.World().Queue(ctx, QueueInput{RunID: options.Execution.Run().RunID, StepID: &stepID, IdempotencyKey: string(stepID), DeploymentID: options.Execution.Run().DeploymentID}); err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: err}
 		}
 		return DurableStepResult[Out]{StepID: stepID}
@@ -94,14 +96,14 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: replay position %d is not a step", options.Position)}
+		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)})
 	}
 	var createdData stepCreatedData
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode step: %w", err)}
 	}
 	if createdData.StepName != options.Name {
-		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: replay step %d is %q, expected %q", options.Position, createdData.StepName, options.Name)}
+		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)})
 	}
 	stepID := StepID(event.CorrelationID)
 
@@ -236,14 +238,14 @@ func DurableInlineStep[Out any](ctx context.Context, options DurableInlineStepOp
 	// recorded result without calling fn again.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: replay position %d is not a step", options.Position)}
+		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)})
 	}
 	var created stepCreatedData
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode inline step: %w", err)}
 	}
 	if created.StepName != options.Name {
-		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: replay step %d is %q, expected %q", options.Position, created.StepName, options.Name)}
+		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", created.StepName, options.Name)})
 	}
 	stepID := StepID(event.CorrelationID)
 	for _, event := range options.Execution.events[creationIndex+1:] {

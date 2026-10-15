@@ -96,6 +96,8 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 	switch request.Method {
 	case "world.capabilities":
 		return encodeRPC(world.Capabilities())
+	case "world.deploymentId":
+		return encodeRPC(world.DeploymentID())
 	case "runs.get":
 		input, err := decodeRPC[RunsGetInput](request.Input)
 		if err != nil {
@@ -521,10 +523,13 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if input.RunID == "" {
 			input.RunID = NewRunID()
 		}
+		if input.DeploymentID == "" {
+			input.DeploymentID = world.DeploymentID()
+		}
 		if _, err := world.EventsCreateRun(ctx, input); err != nil {
 			return nil, err
 		}
-		if _, err := world.Queue(ctx, QueueInput{RunID: input.RunID, IdempotencyKey: string(input.RunID)}); err != nil {
+		if _, err := world.Queue(ctx, QueueInput{RunID: input.RunID, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); err != nil {
 			return nil, err
 		}
 		return encodeRPC(input.RunID)
@@ -587,7 +592,11 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		if _, err := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)}); err != nil {
+		deploymentID, err := RunDeployment(ctx, world, hook.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})

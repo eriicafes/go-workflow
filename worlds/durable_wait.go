@@ -31,7 +31,9 @@ type (
 // queues a delivery for DueAt and records wait_created. On replay it reports
 // Done once the timer has fired, appending wait_completed when the due
 // delivery arrives. A timer with Cancel instead cancels the run when it fires
-// and returns ErrRunCancelled.
+// and returns ErrRunCancelled. When the operation recorded at the position is
+// not a timer, it ends the replay with a panic carrying a
+// *replayDivergenceError.
 func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitResult {
 	creationIndex, exists := options.Execution.index[options.Position]
 	if !exists {
@@ -44,6 +46,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 			RunID:          options.Execution.Run().RunID,
 			NotBefore:      &data.DueAt,
 			IdempotencyKey: string(waitID),
+			DeploymentID:   options.Execution.Run().DeploymentID,
 		})
 		if err != nil {
 			return DurableWaitResult{WaitID: waitID, Err: err}
@@ -82,7 +85,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeWaitCreated {
-		return DurableWaitResult{Err: fmt.Errorf("workflow: replay position %d is not a wait", options.Position)}
+		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)})
 	}
 	var data waitCreatedData
 	if err := json.Unmarshal(event.Data, &data); err != nil {

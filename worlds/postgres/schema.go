@@ -26,7 +26,8 @@ CREATE TABLE go_workflow_runs (
 	created_at timestamptz NOT NULL,
 	updated_at timestamptz NOT NULL,
 	started_at timestamptz,
-	completed_at timestamptz
+	completed_at timestamptz,
+	deployment_id text NOT NULL DEFAULT ''
 );
 CREATE INDEX go_workflow_runs_created_idx ON go_workflow_runs (created_at, run_id);
 CREATE INDEX go_workflow_runs_workflow_idx ON go_workflow_runs (workflow_name, created_at, run_id);
@@ -92,6 +93,7 @@ CREATE TABLE go_workflow_queue (
 	not_before timestamptz NOT NULL,
 	attempts integer NOT NULL DEFAULT 0,
 	lease_until timestamptz,
+	replay_divergence_count integer NOT NULL DEFAULT 0,
 	created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX go_workflow_queue_claim_idx ON go_workflow_queue (not_before, id);

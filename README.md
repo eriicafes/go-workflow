@@ -68,6 +68,12 @@ continue. For this to work, a runner does side effects only through steps and
 reads time only through `workflow.Now`, and the [analyzer](#development) checks
 these rules.
 
+If a deployed change makes a runner replay differently from what its run
+recorded, the runtime detects the divergence and fails the run with a
+`worlds.ErrCorruptedEventLog` instead of matching results to the wrong calls.
+Runs can also be pinned to the deployment that started them using DeploymentID,
+so in-flight runs keep replaying the code that recorded them.
+
 Steps run at least once and retry on error, three times by default. Set
 `workflow.StepOptions{MaxRetries: n}` to change that, return
 `workflow.FatalError(err)` to fail without retrying, or return

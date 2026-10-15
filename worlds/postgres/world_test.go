@@ -204,6 +204,21 @@ func TestQueueIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestQueueKeepsReplayDivergenceCount(t *testing.T) {
+	t.Parallel()
+	world := newTestWorld(t)
+	ctx := context.Background()
+	stepID := worlds.StepID("step_a")
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID, ReplayDivergenceCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := world.claim(ctx, 10)
+	if err != nil || len(claimed) != 1 || claimed[0].input.ReplayDivergenceCount != 2 || *claimed[0].input.StepID != stepID {
+		t.Fatalf("claimed = %#v err=%v", claimed, err)
+	}
+}
+
 func TestRunsWaitUsesNotifications(t *testing.T) {
 	t.Parallel()
 	url, schema := testSchema(t)

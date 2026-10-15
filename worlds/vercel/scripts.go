@@ -28,15 +28,16 @@ end
 `
 
 // scriptCreateRun takes ARGV prefix, runID, now, workflowName, input, record,
-// and attribute key/value pairs...
+// deploymentID, and attribute key/value pairs...
 var scriptCreateRun = newRedisScript(luaPrelude + `
 local id, now, wf = ARGV[2], ARGV[3], ARGV[4]
 local key = k('run', id)
 if redis.call('EXISTS', key) == 1 then return {'err', 'run_exists'} end
 local score = fmt(nextScore(tonumber(now)))
 redis.call('HSET', key, 'wf', wf, 'status', 'pending', 'input', ARGV[5], 'createdAt', now, 'updatedAt', now, 'count', '1', 'score', score)
+if ARGV[7] ~= '' then redis.call('HSET', key, 'deployment', ARGV[7]) end
 redis.call('RPUSH', k('events', id), ARGV[6])
-if #ARGV > 6 then redis.call('HSET', k('attrs', id), unpack(ARGV, 7)) end
+if #ARGV > 7 then redis.call('HSET', k('attrs', id), unpack(ARGV, 8)) end
 redis.call('ZADD', P .. ':runs', score, id)
 redis.call('ZADD', P .. ':runs:wf:' .. wf, score, id)
 redis.call('ZADD', P .. ':runs:status:pending', score, id)

@@ -55,11 +55,11 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: bytes.Clone(input.Input), Attributes: maps.Clone(input.Attributes), CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: bytes.Clone(input.Input), Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
@@ -72,6 +72,7 @@ type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 
 func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {

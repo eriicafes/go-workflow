@@ -36,6 +36,7 @@ export type { RPC } from "./rpc.js";
 export interface Capabilities {
 	analytics: boolean;
 	setAttributes: boolean;
+	deploymentAffinity?: boolean;
 }
 
 export interface HTTPWorldOptions {
@@ -84,10 +85,11 @@ export class HTTPWorld implements World {
 	readonly streams: World["streams"];
 	readonly analytics?: World["analytics"];
 	/**
-	 * HTTP worlds are SDK clients for an RPC server, never a deployed JavaScript
-	 * backend. They therefore have no deployment identity of their own.
+	 * The deployment of the Go World behind the RPC server, which runs started
+	 * through this World are pinned to. Read once and cached, since a World's
+	 * deployment does not change while it runs.
 	 */
-	readonly getDeploymentId: World["getDeploymentId"] = async () => "";
+	readonly getDeploymentId: World["getDeploymentId"];
 	/**
 	 * HTTP worlds cannot receive queue deliveries in JavaScript: queue handling
 	 * belongs to the RPC server, not the client-side SDK adapter.
@@ -99,7 +101,15 @@ export class HTTPWorld implements World {
 	constructor(client: RPCClient, capabilities: Capabilities) {
 		client.specVersion = this._specVersion;
 		this._capabilities = capabilities;
-		this.capabilities = HTTPWorld.createCapabilities();
+		this.capabilities = HTTPWorld.createCapabilities(this._capabilities);
+		let deploymentId: Promise<string> | undefined;
+		this.getDeploymentId = () => {
+			deploymentId ??= client.call<string>("world.deploymentId", {}).catch((error: unknown) => {
+				deploymentId = undefined;
+				throw error;
+			});
+			return deploymentId;
+		};
 		this.runs = HTTPWorld.createRuns(client, this._capabilities);
 		this.steps = HTTPWorld.createSteps(client);
 		this.events = HTTPWorld.createEvents(client);
@@ -109,10 +119,11 @@ export class HTTPWorld implements World {
 		this.analytics = HTTPWorld.createAnalytics(client, this._capabilities);
 	}
 
-	private static createCapabilities(): World["capabilities"] {
+	private static createCapabilities(capabilities: Capabilities): World["capabilities"] {
 		return {
 			hookRetention: { active: true },
 			hookForceClaim: true,
+			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
 		};
 	}
 
@@ -195,6 +206,7 @@ export class HTTPWorld implements World {
 						workflowName: event.eventData.workflowName,
 						input: encoded(event.eventData.input),
 						...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
+						...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
 					});
 				}
 				return client.call<EventResult>("events.create", {
@@ -241,6 +253,7 @@ export class HTTPWorld implements World {
 				runId: message.runId,
 				...("stepId" in message && message.stepId ? { stepId: message.stepId } : {}),
 				...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+				...(options?.deploymentId ? { deploymentId: options.deploymentId } : {}),
 				...(options?.delaySeconds ? { notBefore: new Date(Date.now() + options.delaySeconds * 1_000) } : {}),
 			});
 		};

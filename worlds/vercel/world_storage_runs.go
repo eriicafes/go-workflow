@@ -167,7 +167,7 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 }
 
 func decodeRun(runID worlds.RunID, fields, attrs map[string]string, resolve worlds.ResolveData) (worlds.Run, error) {
-	run := worlds.Run{RunID: runID, WorkflowName: fields["wf"], Status: worlds.Status(fields["status"]), Attributes: attrs, CreatedAt: parseMicros(fields["createdAt"]), UpdatedAt: parseMicros(fields["updatedAt"]), StartedAt: optionalMicros(fields["startedAt"]), CompletedAt: optionalMicros(fields["completedAt"])}
+	run := worlds.Run{RunID: runID, WorkflowName: fields["wf"], Status: worlds.Status(fields["status"]), Attributes: attrs, DeploymentID: fields["deployment"], CreatedAt: parseMicros(fields["createdAt"]), UpdatedAt: parseMicros(fields["updatedAt"]), StartedAt: optionalMicros(fields["startedAt"]), CompletedAt: optionalMicros(fields["completedAt"])}
 	var err error
 	if run.Error, err = decodeBytes(fields["error"]); err != nil {
 		return worlds.Run{}, err

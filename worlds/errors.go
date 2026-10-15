@@ -1,6 +1,9 @@
 package worlds
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrWorkflowNotFound is returned when a run names a workflow that is not
@@ -60,6 +63,18 @@ var (
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
 	ErrWebhookRequestTooLarge = errors.New("workflow: webhook request is too large")
+	// ErrDeploymentUnavailable is returned by Queue when the deployment a
+	// delivery is addressed to no longer exists or cannot receive deliveries.
+	ErrDeploymentUnavailable = errors.New("workflow: deployment is unavailable")
+	// ErrDeploymentMismatch is the error a run fails with when its deliveries
+	// keep arriving at a deployment other than the one it is pinned to, or
+	// when that deployment is unavailable.
+	ErrDeploymentMismatch = errors.New("workflow: deployment mismatch")
+	// ErrCorruptedEventLog is the error a run fails with when its replay keeps
+	// diverging from its event log, usually because the runner's code changed
+	// while the run was in flight. The run fails without running its
+	// compensations, since they would replay against the same log.
+	ErrCorruptedEventLog = errors.New("workflow: corrupted event log")
 
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")
@@ -72,3 +87,57 @@ type deliveryError struct{ cause error }
 
 func (e deliveryError) Error() string { return e.cause.Error() }
 func (e deliveryError) Unwrap() error { return e.cause }
+
+// replayDivergenceError reports that a runner, replaying its run, did not reach
+// the operations recorded in the run's event log: the operation at Position is
+// of another kind, calls another step function, or uses another hook token, or
+// the runner returned without reaching a recorded operation. It usually means
+// the runner's code changed while the run was in flight.
+//
+// The Runtime never returns it to runner code. It ends the delivery and queues
+// a recovery delivery that replays the run again from a fresh read of its
+// event log, up to three times, and then fails the run with a
+// corruptedEventLogError.
+type replayDivergenceError struct {
+	Position int
+	Reason   string
+}
+
+func (e *replayDivergenceError) Error() string {
+	return fmt.Sprintf("workflow: replay diverged at position %d: %s", e.Position, e.Reason)
+}
+
+// corruptedEventLogError is the error a run fails with when its replay keeps
+// diverging from its event log. Position and Reason describe the last
+// replayDivergenceError, and RecoveryReplays counts the recovery deliveries
+// that diverged before it. It wraps ErrCorruptedEventLog, which errors.Is
+// matches on the run's recorded error.
+type corruptedEventLogError struct {
+	Position        int
+	Reason          string
+	RecoveryReplays int
+}
+
+func (e *corruptedEventLogError) Error() string {
+	return fmt.Sprintf("%s at position %d after %d recovery replays: %s", ErrCorruptedEventLog, e.Position, e.RecoveryReplays, e.Reason)
+}
+
+func (e *corruptedEventLogError) Unwrap() error { return ErrCorruptedEventLog }
+
+// deploymentMismatchError is the error a run fails with when its deliveries
+// keep arriving at a deployment other than RunDeploymentID, the one it is
+// pinned to, or when that deployment is unavailable. DeploymentID is the
+// deployment that received the last delivery, and RecoveryAttempts is how many
+// times the delivery was re-routed first. It wraps ErrDeploymentMismatch, which
+// errors.Is matches after the error is recorded.
+type deploymentMismatchError struct {
+	RunDeploymentID  string
+	DeploymentID     string
+	RecoveryAttempts int
+}
+
+func (e *deploymentMismatchError) Error() string {
+	return fmt.Sprintf("%s: run is pinned to deployment %q but was delivered to %q after %d re-routes", ErrDeploymentMismatch, e.RunDeploymentID, e.DeploymentID, e.RecoveryAttempts)
+}
+
+func (e *deploymentMismatchError) Unwrap() error { return ErrDeploymentMismatch }

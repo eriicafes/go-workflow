@@ -48,6 +48,7 @@ world, err := vercelworld.New(vercelworld.Config{
 | `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
 | `Topic` | Required. Topic the consumer is subscribed to. |
 | `OIDCToken` | Function returning the Vercel OIDC token, called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
+| `DeploymentID` | Deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them, and every delivery is published to the run's deployment. |
 | `Prefix` | Redis key prefix, default `go-workflow`. |
 | `QStash` | Optional long-timer configuration (below). |
 | `HTTPClient` | Client for Redis REST, Vercel Queues and QStash. Default `http.DefaultClient`. |
@@ -57,9 +58,13 @@ Vercel rotates OIDC tokens, so `OIDCToken` is called for every Queues request.
 environment variable `name` on each call; the default reads
 `VERCEL_OIDC_TOKEN`. Pass your own function to read the token elsewhere.
 
-When `VERCEL_DEPLOYMENT_ID` is set, Queues requests send it as
-`Vqs-Deployment-Id`, so push deliveries return to the deployment that
-published them.
+Each publish sends `Vqs-Deployment-Id` set to the deployment of the delivery's
+run, so a webhook or hook resume handled by a newer deployment still returns
+to the run's own. QStash timers keep that deployment in their queue record. A
+delivery that reaches another deployment anyway is re-routed up to three times,
+and the run fails with `worlds.ErrDeploymentMismatch` after that, or as soon as
+Vercel answers `502` with `Vqs-Error-Code: consumer_discovery_failed` for a
+deleted deployment.
 
 Deploy the consumer with a `queue/v2beta` trigger for the topic:
 

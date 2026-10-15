@@ -52,6 +52,36 @@ func conformEventDeltas(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunNotFound, "missing run")
 }
 
+// conformRunDeployment checks that a run keeps the deployment it was created
+// with, which the Runtime uses to pin the run to a deployment.
+func conformRunDeployment(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := worlds.RunID("wrun_conformance_deployment")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), DeploymentID: "dpl_conformance"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, resolve := range []worlds.ResolveData{worlds.ResolveDataAll, worlds.ResolveDataNone} {
+		run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: resolve})
+		if err != nil || run.DeploymentID != "dpl_conformance" {
+			t.Fatalf("run deployment with ResolveData %q = %q err=%v", resolve, run.DeploymentID, err)
+		}
+	}
+	page, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: "conformance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range page.Data {
+		if run.RunID == runID && run.DeploymentID != "dpl_conformance" {
+			t.Fatalf("listed run deployment = %q", run.DeploymentID)
+		}
+	}
+	unpinned := conformCreateRun(t, world, "unpinned")
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: unpinned})
+	if err != nil || run.DeploymentID != "" {
+		t.Fatalf("unpinned run deployment = %q err=%v", run.DeploymentID, err)
+	}
+}
+
 func conformBatch(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "batch")

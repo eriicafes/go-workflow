@@ -27,7 +27,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	data, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes})
+	data, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -36,7 +36,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
 	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
 	if conditional(err) {

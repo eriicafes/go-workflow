@@ -11,10 +11,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
@@ -56,17 +57,18 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	if deployment := os.Getenv("VERCEL_DEPLOYMENT_ID"); deployment != "" {
-		request.Header.Set("Vqs-Deployment-Id", deployment)
+	if request.Header.Get("Vqs-Deployment-Id") == "" && w.config.DeploymentID != "" {
+		request.Header.Set("Vqs-Deployment-Id", w.config.DeploymentID)
 	}
 	return w.http.Do(request)
 }
 
-// publishVQS sends messageID to the topic. The message ID doubles as the
-// idempotency key so only a retried publish of the same delivery is dropped.
-// Runtime idempotency keys are reused across distinct deliveries and Vercel
-// would silently drop those for up to 24 hours.
-func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Duration) error {
+// publishVQS sends messageID to the topic, addressed to deploymentID when it
+// is set. The message ID doubles as the idempotency key so only a retried
+// publish of the same delivery is dropped. Runtime idempotency keys are reused
+// across distinct deliveries and Vercel would silently drop those for up to 24
+// hours.
+func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Duration, deploymentID string) error {
 	body, err := json.Marshal(vqsMessage{ID: messageID})
 	if err != nil {
 		return err
@@ -79,11 +81,17 @@ func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Dur
 	if seconds := delaySeconds(delay); seconds > 0 {
 		header.Set("Vqs-Delay-Seconds", strconv.FormatInt(seconds, 10))
 	}
+	if deploymentID != "" {
+		header.Set("Vqs-Deployment-Id", deploymentID)
+	}
 	response, err := w.vqsRequest(ctx, http.MethodPost, "/topic/"+url.PathEscape(w.config.Topic), body, header)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: publish queue message: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusBadGateway && response.Header.Get("Vqs-Error-Code") == "consumer_discovery_failed" {
+		return fmt.Errorf("workflow/vercel: publish queue message to deployment %q: %w", deploymentID, worlds.ErrDeploymentUnavailable)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return responseError("publish queue message", response)
 	}

@@ -41,8 +41,8 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			id = ""
 			var inserted bool
 			err := tx.QueryRow(ctx, `WITH inserted AS (
-					INSERT INTO go_workflow_queue (id, queue_name, run_id, step_id, idempotency_key, dedupe_key, not_before)
-					VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()))
+					INSERT INTO go_workflow_queue (id, queue_name, run_id, step_id, idempotency_key, dedupe_key, not_before, replay_divergence_count)
+					VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()), $8)
 					ON CONFLICT (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 					RETURNING id
 				)
@@ -50,7 +50,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 				UNION ALL
 				SELECT id, false FROM go_workflow_queue WHERE run_id = $3 AND dedupe_key = $6
 				LIMIT 1`,
-				ulid.Make().String(), input.QueueName, input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore).Scan(&id, &inserted)
+				ulid.Make().String(), input.QueueName, input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore, input.ReplayDivergenceCount).Scan(&id, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -116,7 +116,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 		UPDATE go_workflow_queue q
 		SET lease_until = now() + make_interval(secs => $2), attempts = q.attempts + 1, dedupe_key = NULL
 		FROM candidate WHERE q.id = candidate.id
-		RETURNING q.id, q.attempts, q.queue_name, q.run_id, q.step_id, q.idempotency_key`,
+		RETURNING q.id, q.attempts, q.queue_name, q.run_id, q.step_id, q.idempotency_key, q.replay_divergence_count`,
 		limit, w.lease.Seconds())
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 	return collect(rows, func(row pgx.Row) (delivery, error) {
 		var value delivery
 		var stepID *string
-		if err := row.Scan(&value.id, &value.attempts, &value.input.QueueName, &value.input.RunID, &stepID, &value.input.IdempotencyKey); err != nil {
+		if err := row.Scan(&value.id, &value.attempts, &value.input.QueueName, &value.input.RunID, &stepID, &value.input.IdempotencyKey, &value.input.ReplayDivergenceCount); err != nil {
 			return delivery{}, err
 		}
 		if stepID != nil {

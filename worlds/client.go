@@ -107,10 +107,14 @@ func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput
 	if runID == "" {
 		runID = NewRunID()
 	}
-	if _, err := c.world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes}); err != nil {
+	deploymentID := input.DeploymentID
+	if deploymentID == "" {
+		deploymentID = c.world.DeploymentID()
+	}
+	if _, err := c.world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: deploymentID}); err != nil {
 		return "", err
 	}
-	if _, err := c.world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: string(runID)}); err != nil {
+	if _, err := c.world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: string(runID), DeploymentID: deploymentID}); err != nil {
 		return "", err
 	}
 	return runID, nil
@@ -190,7 +194,11 @@ func (c worldClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 	if err != nil {
 		return err
 	}
-	_, err = c.world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID)})
+	deploymentID, err := RunDeployment(ctx, c.world, hook.RunID)
+	if err != nil {
+		return err
+	}
+	_, err = c.world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID})
 	return err
 }
 

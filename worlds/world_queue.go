@@ -25,10 +25,10 @@ type Queue interface {
 type (
 	// QueueInput holds the arguments to Queue and describes one delivery.
 	QueueInput struct {
+		RunID RunID
 		// QueueName selects a queue in implementations that have more than
 		// one. Empty selects the default queue.
 		QueueName string
-		RunID     RunID
 		// StepID selects the step a step delivery executes. Nil makes the
 		// delivery a flow.
 		StepID *StepID
@@ -38,6 +38,18 @@ type (
 		// IdempotencyKey identifies retries of the same delivery to
 		// implementations that deduplicate publishing.
 		IdempotencyKey string
+		// DeploymentID addresses the delivery to a deployment, normally the
+		// one the run is pinned to. Worlds with deployment affinity deliver it
+		// there; other Worlds ignore it. Empty uses the World's own deployment.
+		DeploymentID string
+		// DeploymentMismatchRetryCount counts how many times the Runtime has
+		// re-routed this delivery to the run's deployment after it arrived at
+		// another one.
+		DeploymentMismatchRetryCount int
+		// ReplayDivergenceCount counts how many times the Runtime has queued
+		// this delivery again because its replay diverged from the run's
+		// event log.
+		ReplayDivergenceCount int
 	}
 	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {

@@ -51,6 +51,13 @@ type Config struct {
 	// HTTPClient sends Redis REST, Vercel Queues, and QStash requests. Nil uses
 	// http.DefaultClient.
 	HTTPClient *http.Client
+	// DeploymentID identifies the deployment this World runs in. Runs created
+	// through the World are pinned to it, deliveries are addressed to the
+	// deployment of their run, and a delivery that reaches another deployment
+	// is re-routed to the run's own. Empty uses the VERCEL_DEPLOYMENT_ID
+	// environment variable, which Vercel sets in every deployment. With
+	// neither, deployment affinity is off.
+	DeploymentID string
 }
 
 // World is the Vercel World. It is safe for concurrent use, and any number of
@@ -86,6 +93,9 @@ func New(config Config) (*World, error) {
 	if config.OIDCToken == nil {
 		config.OIDCToken = OIDCTokenFromEnv(DefaultOIDCTokenEnv)
 	}
+	if config.DeploymentID == "" {
+		config.DeploymentID = os.Getenv("VERCEL_DEPLOYMENT_ID")
+	}
 	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix}
 	if config.QStash != nil {
 		qstash := *config.QStash
@@ -115,9 +125,10 @@ func (w *World) Close() error { return w.redis.Close() }
 
 func (w *World) BaseURL() string             { return w.config.BaseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
+func (w *World) DeploymentID() string        { return w.config.DeploymentID }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
-func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+func (w *World) Capabilities() worlds.Capabilities {
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != ""}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the
