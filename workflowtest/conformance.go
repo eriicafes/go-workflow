@@ -89,7 +89,7 @@ func conformRunID(prefix string) worlds.RunID {
 func conformCreateRun(t *testing.T, world worlds.World, prefix string) worlds.RunID {
 	t.Helper()
 	runID := conformRunID(prefix)
-	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte("input")}); err != nil {
+	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`)}); err != nil {
 		t.Fatalf("EventsCreateRun: %v", err)
 	}
 	return runID

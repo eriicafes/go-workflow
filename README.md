@@ -94,6 +94,32 @@ fail, such as a generated ID, without a step delivery. When its result cannot
 be recorded, the delivery is retried and calls the function again. Work that
 can fail belongs in `Step`.
 
+## Errors
+
+A step's error is recorded and read back on replay as a `*workflow.Error`,
+and so is a failed run's error returned by `Run.Await`. A `Error` keeps the
+message, type, and JSON encoding of every error in the original chain, so
+`errors.Is` matches sentinel errors and `errors.As` decodes error types in the
+workflow and in the parent of a child run. `errors.As` restores exported
+fields only.
+
+```go
+var ErrCardDeclined = errors.New("card declined")
+
+type LimitError struct{ Limit int }
+
+func (e *LimitError) Error() string { return fmt.Sprintf("over limit %d", e.Limit) }
+
+_, err := workflow.Step(ctx, Charge, order)
+var limit *LimitError
+switch {
+case errors.Is(err, ErrCardDeclined):
+	// ...
+case errors.As(err, &limit):
+	// limit.Limit is decoded from the recorded error.
+}
+```
+
 ## Rollbacks
 
 Register a compensation after the work it reverses. If the workflow later

@@ -159,7 +159,8 @@ type Run struct {
 	Input []byte
 	// Output is the JSON-encoded workflow output of a completed run.
 	Output []byte
-	// Error is the error message of a failed run.
+	// Error is the JSON-encoded Error of a failed run. DecodeError
+	// decodes it.
 	Error       []byte
 	Attributes  map[string]string
 	CreatedAt   time.Time
@@ -196,7 +197,8 @@ type Step struct {
 	Input []byte
 	// Output is the JSON-encoded output of a completed step.
 	Output []byte
-	// Error is the error message of the last failed attempt.
+	// Error is the JSON-encoded Error of the last failed attempt.
+	// DecodeError decodes it.
 	Error []byte
 	// Attempt is the number of attempts started so far.
 	Attempt     int

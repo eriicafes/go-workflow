@@ -285,7 +285,7 @@ func (e *Runtime) failRun(ctx context.Context, execution *Execution, failure err
 		RunID: execution.run.RunID,
 		Event: EventsCreateEvent{
 			EventType: EventTypeRunFailed,
-			Data:      []byte(failure.Error()),
+			Data:      encodeError(failure),
 		},
 		Options: EventsCreateOptions{EventCount: &eventCount},
 	})
@@ -366,7 +366,7 @@ func (e *Runtime) failStep(ctx context.Context, execution *Execution, stepID Ste
 			return err
 		}
 	}
-	return e.finishStep(ctx, execution, stepID, stepResultData{Error: []byte(failure.Error())})
+	return e.finishStep(ctx, execution, stepID, stepResultData{Error: encodeError(failure)})
 }
 
 // observeCancellation polls events appended after the loaded prefix and

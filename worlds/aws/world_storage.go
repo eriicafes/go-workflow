@@ -18,7 +18,7 @@ import (
 
 type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
-	Input        []byte            `json:"input"`
+	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
 }
 
@@ -27,14 +27,14 @@ type attrSetData struct {
 }
 
 type stepCreatedData struct {
-	StepName string `json:"stepName"`
-	Input    []byte `json:"input"`
+	StepName string          `json:"stepName"`
+	Input    json.RawMessage `json:"input"`
 }
 
 type stepResultData struct {
-	Output     []byte     `json:"output"`
-	Error      []byte     `json:"error"`
-	RetryAfter *time.Time `json:"retryAfter"`
+	Output     json.RawMessage `json:"output"`
+	Error      json.RawMessage `json:"error"`
+	RetryAfter *time.Time      `json:"retryAfter"`
 }
 
 type hookCreatedData struct {

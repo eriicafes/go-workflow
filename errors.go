@@ -38,6 +38,12 @@ var (
 	ErrHookForceClaimed = worlds.ErrHookForceClaimed
 )
 
+// Error is the error Step returns for a failed step, and Run.Await and
+// Run.Done return for a failed run. It keeps the type, message, and exported
+// fields of each error in the original chain, so errors.Is matches sentinel
+// errors and errors.As decodes error types after replay.
+type Error = worlds.Error
+
 type fatalError struct{ cause error }
 
 func (e fatalError) Error() string { return e.cause.Error() }

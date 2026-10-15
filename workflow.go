@@ -206,8 +206,8 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 }
 
 // Done reports whether the run has finished. It does not block. When the run
-// failed, Done returns true and the run's error. When it was cancelled, Done
-// returns true and ErrRunCancelled.
+// failed, Done returns true and the run's error as an *Error. When it was
+// cancelled, Done returns true and ErrRunCancelled.
 func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 	var run worlds.Run
 	var err error
@@ -226,7 +226,7 @@ func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 	case run.Status == worlds.StatusCompleted:
 		return true, nil
 	case len(run.Error) != 0:
-		return true, fmt.Errorf("workflow: run failed: %s", run.Error)
+		return true, worlds.DecodeError(run.Error)
 	default:
 		return true, ErrRunCancelled
 	}
@@ -247,8 +247,8 @@ func runDone(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 // Await returns the output of the run once it has finished. In a run, in
 // workflow or step context, it reads the run once and returns ErrRunNotFinished
 // when the run had not finished. Outside a run, it blocks until the run
-// finishes or ctx is done. It returns the run's error when the run failed and
-// ErrRunCancelled when it was cancelled.
+// finishes or ctx is done. It returns the run's error as an *Error when
+// the run failed and ErrRunCancelled when it was cancelled.
 func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 	var zero Out
 	var run worlds.Run
@@ -267,7 +267,7 @@ func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 		return zero, ErrRunNotFinished
 	case run.Status == worlds.StatusCompleted:
 	case len(run.Error) != 0:
-		return zero, fmt.Errorf("workflow: run failed: %s", run.Error)
+		return zero, worlds.DecodeError(run.Error)
 	default:
 		return zero, ErrRunCancelled
 	}

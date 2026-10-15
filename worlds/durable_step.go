@@ -128,7 +128,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 			if err := json.Unmarshal(event.Data, &result); err != nil {
 				return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: decode step result: %w", err)}
 			}
-			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: fmt.Errorf("workflow: step failed: %s", result.Error)}
+			return DurableStepResult[Out]{StepID: stepID, Done: true, Err: DecodeError(result.Error)}
 		}
 	}
 
@@ -149,7 +149,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	// Report the target result to the engine, which appends the lifecycle
 	// event.
 	if callErr != nil {
-		result := stepResultData{Error: []byte(callErr.Error())}
+		result := stepResultData{Error: encodeError(callErr)}
 		if options.RetryAfter != nil && attempt <= options.MaxRetries {
 			result.RetryAfter = options.RetryAfter(callErr, attempt)
 		}
@@ -159,7 +159,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 
 	output, err := json.Marshal(value)
 	if err != nil {
-		options.Execution.SetTargetResult(stepResultData{Error: []byte(err.Error())})
+		options.Execution.SetTargetResult(stepResultData{Error: encodeError(err)})
 	} else {
 		options.Execution.SetTargetResult(stepResultData{Output: output})
 	}

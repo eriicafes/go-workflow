@@ -70,7 +70,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 
 type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
-	Input        []byte            `json:"input"`
+	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
 }
 
@@ -338,13 +338,13 @@ type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
 }
 type stepCreatedData struct {
-	StepName string `json:"stepName"`
-	Input    []byte `json:"input"`
+	StepName string          `json:"stepName"`
+	Input    json.RawMessage `json:"input"`
 }
 type stepResultData struct {
-	Output     []byte     `json:"output"`
-	Error      []byte     `json:"error"`
-	RetryAfter *time.Time `json:"retryAfter"`
+	Output     json.RawMessage `json:"output"`
+	Error      json.RawMessage `json:"error"`
+	RetryAfter *time.Time      `json:"retryAfter"`
 }
 type hookCreatedData struct {
 	Token        string          `json:"token"`

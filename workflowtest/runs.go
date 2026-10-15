@@ -13,7 +13,7 @@ import (
 func conformRunCreate(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformRunID("create")
-	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte("input"), Attributes: map[string]string{"team": "a"}})
+	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"team": "a"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.RunID != runID || run.WorkflowName != "conformance" || run.Status != worlds.StatusPending || string(run.Input) != "input" || run.Attributes["team"] != "a" || run.CreatedAt.IsZero() || run.StartedAt != nil {
+	if run.RunID != runID || run.WorkflowName != "conformance" || run.Status != worlds.StatusPending || string(run.Input) != `"input"` || run.Attributes["team"] != "a" || run.CreatedAt.IsZero() || run.StartedAt != nil {
 		t.Fatalf("run = %#v", run)
 	}
 	stripped, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
@@ -44,10 +44,10 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 		t.Fatalf("events = %#v", events)
 	}
 	var data struct {
-		WorkflowName string `json:"workflowName"`
-		Input        []byte `json:"input"`
+		WorkflowName string          `json:"workflowName"`
+		Input        json.RawMessage `json:"input"`
 	}
-	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != "input" {
+	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` {
 		t.Fatalf("run_created data = %s err=%v", events[0].Data, err)
 	}
 
@@ -142,7 +142,7 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	ids := make([]worlds.RunID, 3)
 	for i := range ids {
 		ids[i] = conformRunID("list")
-		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: ids[i], WorkflowName: name, Input: []byte("in")}); err != nil {
+		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: ids[i], WorkflowName: name, Input: []byte(`"in"`)}); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(2 * time.Millisecond)

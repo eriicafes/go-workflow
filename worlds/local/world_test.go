@@ -86,7 +86,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	world := startWorld(t, dir, nil)
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_persist", WorkflowName: "persist", Input: []byte("in"), Attributes: map[string]string{"k": "v"}}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_persist", WorkflowName: "persist", Input: []byte(`"in"`), Attributes: map[string]string{"k": "v"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: "wrun_persist", Events: []worlds.EventsCreateEvent{
@@ -112,7 +112,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 
 	reopened := startWorld(t, dir, nil)
 	run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_persist"})
-	if err != nil || run.Status != worlds.StatusRunning || string(run.Input) != "in" || run.Attributes["k"] != "v" {
+	if err != nil || run.Status != worlds.StatusRunning || string(run.Input) != `"in"` || run.Attributes["k"] != "v" {
 		t.Fatalf("run = %#v err=%v", run, err)
 	}
 	events, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_persist"})

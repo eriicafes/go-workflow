@@ -12,20 +12,20 @@ import (
 
 type runCreatedData struct {
 	WorkflowName string            `json:"workflowName"`
-	Input        []byte            `json:"input"`
+	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
 }
 type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
 }
 type stepCreatedData struct {
-	StepName string `json:"stepName"`
-	Input    []byte `json:"input"`
+	StepName string          `json:"stepName"`
+	Input    json.RawMessage `json:"input"`
 }
 type stepResultData struct {
-	Output     []byte     `json:"output"`
-	Error      []byte     `json:"error"`
-	RetryAfter *time.Time `json:"retryAfter"`
+	Output     json.RawMessage `json:"output"`
+	Error      json.RawMessage `json:"error"`
+	RetryAfter *time.Time      `json:"retryAfter"`
 }
 type hookCreatedData struct {
 	Token        string          `json:"token"`
@@ -415,7 +415,7 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 			ON CONFLICT (run_id, step_id) DO UPDATE SET step_name = excluded.step_name, status = excluded.status, input = excluded.input,
 				output = NULL, error = NULL, attempt = 0, created_at = excluded.created_at, updated_at = excluded.updated_at,
 				started_at = NULL, completed_at = NULL, retry_after = NULL`,
-			event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, value.Input, at)
+			event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, []byte(value.Input), at)
 		return err
 	case worlds.EventTypeStepStarted:
 		return a.updateStep(ctx, event, worlds.StatusRunning)
@@ -452,7 +452,7 @@ func (a *appender) updateStep(ctx context.Context, event worlds.Event, status wo
 			error = CASE WHEN $5::boolean THEN $7::bytea ELSE error END,
 			retry_after = CASE WHEN $5::boolean THEN $8::timestamptz ELSE retry_after END
 		WHERE run_id = $1 AND step_id = $2`,
-		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, result.Output, result.Error, result.RetryAfter)
+		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, []byte(result.Output), []byte(result.Error), result.RetryAfter)
 	return err
 }
 

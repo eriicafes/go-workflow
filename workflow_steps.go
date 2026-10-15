@@ -24,7 +24,9 @@ func stepOptions(values []StepOptions) StepOptions {
 
 // Step calls the step fn with input from a workflow and returns its result,
 // suspending the run until the step has settled. Step is Background followed
-// by Await. It returns ErrNoWorkflow when ctx does not belong to a run.
+// by Await. When the step fails, it returns the step's error as an *Error,
+// which errors.Is and errors.As match against the error the step returned. It
+// returns ErrNoWorkflow when ctx does not belong to a run.
 func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error) {
 	return Background(ctx, fn, input, options...).Await(ctx)
 }

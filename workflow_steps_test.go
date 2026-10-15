@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,8 @@ type nowInput struct{}
 type nowOutput struct{ Value time.Time }
 type retryInput struct{}
 type retryOutput struct{}
+type stepErrorInput struct{}
+type stepErrorOutput struct{}
 type collectionInput struct{}
 
 type collectionOutput struct {
@@ -44,6 +47,7 @@ func (joinedInput) Workflow(joinedOutput)         {}
 func (rollbackInput) Workflow(rollbackOutput)     {}
 func (nowInput) Workflow(nowOutput)               {}
 func (retryInput) Workflow(retryOutput)           {}
+func (stepErrorInput) Workflow(stepErrorOutput)   {}
 func (collectionInput) Workflow(collectionOutput) {}
 
 func increment(_ context.Context, value int) (int, error) { return value + 1, nil }
@@ -188,7 +192,7 @@ func TestOnRollbackRunsInReverseRegistrationOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
+	if _, err := run.Await(ctx); err == nil || err.Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	mutex.Lock()
@@ -219,7 +223,7 @@ func TestOnRollbackRunsAfterPriorDurableStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
+	if _, err := run.Await(ctx); err == nil || err.Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	if calls.Load() != 1 {
@@ -269,7 +273,7 @@ func TestOnRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
+	if _, err := run.Await(ctx); err == nil || err.Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
@@ -288,7 +292,7 @@ func TestOnRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
 		var result struct {
 			Error []byte `json:"error"`
 		}
-		if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && string(result.Error) == "rollback failure" {
+		if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeError(result.Error).Error() == "rollback failure" {
 			stepFailed = true
 		}
 	}
@@ -333,7 +337,7 @@ func TestOnRollbackRegistersAroundDurableSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil || err.Error() != "workflow: run failed: primary failure" {
+	if _, err := run.Await(ctx); err == nil || err.Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	mutex.Lock()
@@ -454,6 +458,52 @@ func TestFatalAndRetryableStepErrorsControlRetries(t *testing.T) {
 	}
 	if _, err := retryRun.Await(ctx); err != nil || retryAttempts.Load() != 2 {
 		t.Fatalf("retry run error = %v, attempts = %d", err, retryAttempts.Load())
+	}
+}
+
+var errCardDeclined = errors.New("card declined")
+
+type declinedError struct{ Code string }
+
+func (e *declinedError) Error() string { return "declined: " + e.Code }
+func (e *declinedError) Unwrap() error { return errCardDeclined }
+
+func TestStepErrorKeepsIdentityAcrossReplayAndRuns(t *testing.T) {
+	var mutex sync.Mutex
+	var inWorkflow []string
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ stepErrorInput) (stepErrorOutput, error) {
+		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+			return struct{}{}, workflow.FatalError(fmt.Errorf("charge: %w", &declinedError{Code: "insufficient_funds"}))
+		}, struct{}{})
+		var declined *declinedError
+		mutex.Lock()
+		inWorkflow = []string{err.Error(), fmt.Sprint(errors.Is(err, errCardDeclined))}
+		if errors.As(err, &declined) {
+			inWorkflow = append(inWorkflow, declined.Code)
+		}
+		mutex.Unlock()
+		return stepErrorOutput{}, fmt.Errorf("payment: %w", err)
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, stepErrorInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = run.Await(ctx)
+	var stepErr *workflow.Error
+	var declined *declinedError
+	if !errors.As(err, &stepErr) || err.Error() != "payment: charge: declined: insufficient_funds" {
+		t.Fatalf("run error = %#v", err)
+	}
+	if !errors.Is(err, errCardDeclined) || !errors.As(err, &declined) || declined.Code != "insufficient_funds" {
+		t.Fatalf("run error does not match its chain: %v", err)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if !slices.Equal(inWorkflow, []string{"charge: declined: insufficient_funds", "true", "insufficient_funds"}) {
+		t.Fatalf("step error in workflow = %#v", inWorkflow)
 	}
 }
 
