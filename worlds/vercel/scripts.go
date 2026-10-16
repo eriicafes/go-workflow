@@ -150,7 +150,7 @@ local function admit(c, d)
   if t == 'hook_received' and type(d.recv) == 'table' then
     local h = hook(corr)
     if d.recv.req and (not h or not h.webhook or h.rid or owner(h.token) ~= corr) then return {err = 'hook_not_active'} end
-    if d.recv.resp and (not h or not h.webhook or not h.rid or h.rid ~= d.recv.to or owner(h.token) ~= corr) then return {err = 'hook_not_active'} end
+    if d.recv.resp and (not h or not h.webhook or not h.rid or h.rid ~= d.recv.to or h.retainUntil or owner(h.token) ~= corr) then return {err = 'hook_not_active'} end
   end
   if t == 'hook_created' and mode ~= 'claim' and type(d.hook) == 'table' and (d.hook.token or '') ~= '' then
     expire(d.hook.token)

@@ -192,7 +192,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if received.Request != nil && hook.ReceivedEventID != "" {
 			return "", worlds.ErrHookNotActive
 		}
-		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID) {
+		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil) {
 			return "", worlds.ErrHookNotActive
 		}
 	case worlds.EventTypeHookCreated:

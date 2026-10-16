@@ -189,6 +189,20 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 201, Body: []byte("ok")}, ResponseTo: received.EventID})
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	conformExpect(t, err, worlds.ErrHookNotFound, "manual hook after response")
+	second := worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 202}, ResponseTo: received.EventID}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", second)})
+	conformExpect(t, err, worlds.ErrHookNotActive, "second response")
+
+	// A retained webhook keeps its token after responding, and still takes
+	// only one response.
+	retained := token + "-retained"
+	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, &worlds.Webhook{Method: "POST", Manual: true}, time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	retainedRequest := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", request)
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: retainedRequest.EventID})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_retained", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 202}, ResponseTo: retainedRequest.EventID})})
+	conformExpect(t, err, worlds.ErrHookNotActive, "second response to a retained webhook")
 
 	automatic := token + "-auto"
 	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_auto", conformHookData(automatic, &worlds.Webhook{Response: &worlds.WebhookResponse{Status: 202}}, 0))}); err != nil {

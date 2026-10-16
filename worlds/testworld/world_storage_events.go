@@ -267,7 +267,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		}
 		if json.Unmarshal(requested.Data, &received) == nil && received.Response != nil {
 			hook := m.hooks[worlds.HookID(requested.CorrelationID)]
-			if hook.Webhook == nil || hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || m.tokens[hook.Token] != hook.HookID {
+			if hook.Webhook == nil || hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil || m.tokens[hook.Token] != hook.HookID {
 				return worlds.EventResult{}, false, worlds.ErrHookNotActive
 			}
 		}

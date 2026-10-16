@@ -315,7 +315,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if received.Request != nil && hook.ReceivedEventID != "" {
 			return nil, worlds.ErrHookNotActive
 		}
-		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID) {
+		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil) {
 			return nil, worlds.ErrHookNotActive
 		}
 	case worlds.EventTypeHookCreated:

@@ -633,7 +633,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if received.Request != nil && (hook.Webhook == nil || hook.ReceivedEventID != "" || !owned) {
 			return nil, worlds.ErrHookNotActive
 		}
-		if received.Response != nil && (hook.Webhook == nil || hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || !owned) {
+		if received.Response != nil && (hook.Webhook == nil || hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil || !owned) {
 			return nil, worlds.ErrHookNotActive
 		}
 	case worlds.EventTypeHookCreated:
