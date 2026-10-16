@@ -56,7 +56,6 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	var result worlds.EventResult
-	var seen int
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
 		if err := tx.preload(ctx, input.RunID, []worlds.EventsCreateEvent{input.Event}); err != nil {
 			return err
@@ -65,26 +64,29 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err != nil {
 			return err
 		}
-		seen = run.seen
 		replay, err := tx.admit(ctx, run, input.Event)
-		if err != nil || replay != nil {
-			if replay != nil {
-				result = *replay
-			}
-			return err
-		}
-		event, err := tx.append(ctx, run, input.Event)
 		if err != nil {
 			return err
 		}
-		result = tx.result(event, true)
-		return nil
+		if replay != nil {
+			result = *replay
+		} else {
+			event, err := tx.append(ctx, run, input.Event)
+			if err != nil {
+				return err
+			}
+			result = tx.result(event, true)
+		}
+		// The delta is read before the commit, so a failed read does not
+		// report a committed append as failed. Events up to run.seen are
+		// already in the log and do not change.
+		result.Events, err = w.delta(ctx, input.RunID, run.seen, input.Options)
+		return err
 	})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	result.Events, err = w.delta(ctx, input.RunID, seen, input.Options)
-	return result, err
+	return result, nil
 }
 
 func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
@@ -146,7 +148,6 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
 	}
 	var result worlds.HooksClaimResult
-	var seen int
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
 		result = worlds.HooksClaimResult{}
 		if err := tx.preload(ctx, input.RunID, []worlds.EventsCreateEvent{input.Event}); err != nil {
@@ -159,7 +160,6 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		if claimant.view.Status.Terminal() {
 			return worlds.ErrRunTerminal
 		}
-		seen = claimant.seen
 		token, err := tx.token(ctx, created.Token)
 		if err != nil {
 			return err
@@ -193,13 +193,14 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 			return err
 		}
 		result.EventResult = tx.result(event, true)
-		return nil
+		// Read before the commit, as in EventsCreate.
+		result.Events, err = w.delta(ctx, input.RunID, claimant.seen, input.Options)
+		return err
 	})
 	if err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
-	result.Events, err = w.delta(ctx, input.RunID, seen, input.Options)
-	return result, err
+	return result, nil
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
