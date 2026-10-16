@@ -282,7 +282,7 @@ func TestQueueLongDelays(t *testing.T) {
 	}
 	requests := server.all()
 	publish := requests[len(requests)-1]
-	if publish.Path != "/qstash/v2/publish/https://app.example.com/v1/workflow/qstash" || publish.Header.Get("Authorization") != "Bearer qstash-token" {
+	if publish.Path != "/qstash/v2/publish/https://app.example.com/v1/workflow/callbacks/qstash" || publish.Header.Get("Authorization") != "Bearer qstash-token" {
 		t.Fatalf("QStash publish = %+v", publish)
 	}
 	if got := publish.Header.Get("Upstash-Not-Before"); got != strconv.FormatInt((due.UnixMilli()+999)/1000, 10) {
@@ -309,7 +309,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 	handler := HTTP(world)
 
 	body := []byte(`{"id":"01ID"}`)
-	request := httptest.NewRequest(http.MethodPost, qstashRoutePath, strings.NewReader(string(body)))
+	request := httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(body)))
 	request.Header.Set("Upstash-Signature", qstashTestSignature(t, body, world.qstashURL, "next"))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -324,8 +324,8 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 		t.Fatalf("QStash ID kept after release: %+v", record)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, qstashRoutePath, strings.NewReader(string(body)))
-	request.Header.Set("Upstash-Signature", qstashTestSignature(t, body, "https://evil.example.com/v1/workflow/qstash", "current"))
+	request = httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(body)))
+	request.Header.Set("Upstash-Signature", qstashTestSignature(t, body, "https://evil.example.com/v1/workflow/callbacks/qstash", "current"))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
@@ -333,7 +333,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 	}
 
 	missing := []byte(`{"id":"02ID"}`)
-	request = httptest.NewRequest(http.MethodPost, qstashRoutePath, strings.NewReader(string(missing)))
+	request = httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(missing)))
 	request.Header.Set("Upstash-Signature", qstashTestSignature(t, missing, world.qstashURL, "current"))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

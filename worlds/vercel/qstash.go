@@ -24,19 +24,15 @@ const (
 
 // QStashConfig configures QStash to deliver work due more than seven days
 // ahead, beyond the Vercel Queues delay limit. QStash holds such a delivery
-// until it is due, then calls the signed route served by HTTP(world), which
-// publishes it to Vercel Queues.
+// until it is due, then calls <Config.BaseURL>/callbacks/qstash, which
+// HTTP(world) serves with a signature check, and that route publishes it to
+// Vercel Queues. Config.BaseURL must be HTTPS.
 type QStashConfig struct {
 	// BaseURL is the QStash API root. Empty uses https://qstash.upstash.io.
 	BaseURL string
 	// Token authorizes publishing and cancelling QStash messages. It is
 	// required.
 	Token string
-	// WebhookEndpoint optionally overrides the HTTPS origin, without a path,
-	// that serves HTTP(world). QStash then calls
-	// <WebhookEndpoint>/v1/workflow/qstash. Empty uses <Config.BaseURL>/qstash.
-	// The resulting URL must be HTTPS.
-	WebhookEndpoint string
 	// CurrentSigningKey and NextSigningKey verify QStash request signatures
 	// across key rotation. Both are required.
 	CurrentSigningKey string
@@ -102,22 +98,13 @@ func (w *World) cancelQStash(ctx context.Context, qstashID string) error {
 	return responseError("cancel QStash timer", response)
 }
 
-// qstashDestination returns the public URL of the QStash route.
-func qstashDestination(webhookEndpoint, baseURL string) (string, error) {
-	if webhookEndpoint == "" {
-		if !strings.HasPrefix(baseURL, "https://") {
-			return "", errors.New("workflow/vercel: QStash requires an HTTPS base URL or webhook endpoint")
-		}
-		return baseURL + "/qstash", nil
+// qstashDestination returns the public URL of the QStash route under
+// baseURL, which QStash signs requests for.
+func qstashDestination(baseURL string) (string, error) {
+	if !strings.HasPrefix(baseURL, "https://") {
+		return "", errors.New("workflow/vercel: QStash requires an HTTPS base URL")
 	}
-	parsed, err := url.Parse(webhookEndpoint)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-		return "", errors.New("workflow/vercel: QStash webhook endpoint must be an HTTPS URL")
-	}
-	if parsed.Path != "" && parsed.Path != "/" {
-		return "", errors.New("workflow/vercel: QStash webhook endpoint must not include a path")
-	}
-	return "https://" + parsed.Host + qstashRoutePath, nil
+	return baseURL + qstashRouteSuffix, nil
 }
 
 // qstashHandler verifies a QStash delivery and moves the named queue record

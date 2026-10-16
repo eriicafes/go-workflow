@@ -9,7 +9,9 @@ It does not execute deliveries.
 | `POST <prefix>/rpc` | `worlds.RPCHandler` | CBOR RPC for clients and tools |
 | `<prefix>/webhooks/{token}` | `worlds.WebhookHandler` | webhook requests |
 
-The Vercel World adds `POST /v1/workflow/qstash` when QStash is configured.
+The Vercel World adds `POST <prefix>/callbacks/qstash` when QStash is
+configured. Callback routes under `<prefix>/callbacks/` are where a World mounts
+endpoints specific to it.
 
 ## RPC
 

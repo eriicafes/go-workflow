@@ -18,10 +18,9 @@ All are in `world.go`:
   executes workflows and steps.
 - `vercelworld.HTTP(world)`: the RPC endpoint (`/v1/workflow/rpc`), token
   webhooks (`/v1/workflow/webhooks/{token}`), and, when QStash is configured,
-  the signed timer route `/v1/workflow/qstash`.
+  the signed timer route `/v1/workflow/callbacks/qstash`.
 - `vercelworld.HTTPPrefix(world, prefix)`: the same routes under `prefix`.
-  `QStash.WebhookEndpoint` assumes `/v1/workflow`, so leave it empty with a
-  custom prefix.
+  `Config.BaseURL` must end with the same prefix.
 - `vercelworld.RPC(world)` and `vercelworld.Webhook(world)`: the RPC or webhook
   endpoint alone, for callers that mount their own routes.
 
@@ -166,13 +165,11 @@ QStash: &vercelworld.QStashConfig{
     Token:             os.Getenv("QSTASH_TOKEN"),
     CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
     NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
-    // WebhookEndpoint: "https://worker.example.com", // optional origin override
 },
 ```
 
-The timer is published to `<BaseURL>/qstash` (or
-`<WebhookEndpoint>/v1/workflow/qstash`) with `Upstash-Not-Before`. That URL must
-be HTTPS. When QStash calls it:
+The timer is published to `<BaseURL>/callbacks/qstash` with
+`Upstash-Not-Before`. That URL must be HTTPS. When QStash calls it:
 
 1. `HTTP(world)` verifies the `Upstash-Signature` JWT: HS256 with the current
    or next signing key, issuer `Upstash`, subject equal to that URL, within its

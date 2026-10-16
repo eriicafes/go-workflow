@@ -87,10 +87,9 @@ published them.
 - **`Queue(world, runners)`**: the Vercel Queues push consumer. It executes
   workflows and steps.
 - **`HTTP(world)`**: the RPC endpoint, token webhooks, and, when QStash is
-  configured, the signed timer route `/v1/workflow/qstash`.
+  configured, the signed timer callback `/v1/workflow/callbacks/qstash`.
 - **`HTTPPrefix(world, prefix)`**: the same routes, including the QStash
-  callback, under `prefix`. Leave `QStash.WebhookEndpoint` empty with a custom
-  prefix, since it assumes `/v1/workflow`.
+  callback, under `prefix`.
 - **`RPC(world)`** and **`Webhook(world)`**: each endpoint alone.
 
 ## Long timers with QStash
@@ -103,13 +102,12 @@ QStash: &vercelworld.QStashConfig{
 	Token:             os.Getenv("QSTASH_TOKEN"),
 	CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
 	NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
-	// WebhookEndpoint: "https://worker.example.com", // optional origin override
 },
 ```
 
-The timer is published to `<BaseURL>/qstash` (or
-`<WebhookEndpoint>/v1/workflow/qstash`) with `Upstash-Not-Before`. That URL must
-be HTTPS. When QStash calls it, `HTTP(world)` verifies the `Upstash-Signature`
+The timer is published to `<Config.BaseURL>/callbacks/qstash` with
+`Upstash-Not-Before`, so `BaseURL` must be HTTPS. The callback is mounted under
+the same prefix as the rest of the handler, so custom prefixes work. When QStash calls it, `HTTP(world)` verifies the `Upstash-Signature`
 JWT (HS256 with the current or next signing key, issuer `Upstash`, subject equal
 to the URL, within its `nbf`/`exp` window, and a matching body SHA-256), then
 publishes the delivery to Vercel Queues with the remaining delay.

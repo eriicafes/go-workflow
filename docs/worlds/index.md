@@ -40,7 +40,7 @@ Every World package exports the same handler constructors:
 | `POST /v1/workflow/rpc` | CBOR RPC used by `workflow.NewHTTPClient` and the [web UI](/tooling/web-ui) |
 | `/v1/workflow/webhooks/{token}` | [webhook](/guide/webhooks) requests |
 
-The Vercel World also serves `/v1/workflow/qstash` when QStash is configured.
+The Vercel World also serves `/v1/workflow/callbacks/qstash` when QStash is configured.
 See [HTTP Endpoints](/reference/http) for details.
 
 ### Base URL
