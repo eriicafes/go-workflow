@@ -39,7 +39,6 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 func (w *World) deliver(id string, input worlds.QueueInput) {
 	if input.NotBefore != nil {
 		timer := time.NewTimer(time.Until(*input.NotBefore))
-		defer timer.Stop()
 		select {
 		case <-w.ctx.Done():
 			return

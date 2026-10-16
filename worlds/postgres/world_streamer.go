@@ -207,13 +207,11 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 		timer := time.NewTimer(min(remaining, w.interval))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			release()
 			return worlds.StreamChunksResult{}, ctx.Err()
 		case <-wake:
 		case <-timer.C:
 		}
-		timer.Stop()
 		release()
 	}
 }

@@ -507,7 +507,6 @@ func backoff(attempt int, base, limit time.Duration) time.Duration {
 
 func sleep(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
-	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

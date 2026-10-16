@@ -166,7 +166,6 @@ func (m *World) StreamsClose(_ context.Context, input worlds.StreamsCloseInput) 
 func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	deadline := time.Now().Add(input.Wait)
 	timer := time.NewTimer(input.Wait)
-	defer timer.Stop()
 	for {
 		changed := m.changed()
 		m.mu.RLock()

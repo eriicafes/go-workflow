@@ -266,7 +266,6 @@ func (c *consumer) renewLease(ctx context.Context, delivery vqsDelivery) func() 
 			next = max(min(next, time.Until(delivery.VisibilityDeadline)/2), 0)
 		}
 		timer := time.NewTimer(next)
-		defer timer.Stop()
 		for {
 			select {
 			case <-done:

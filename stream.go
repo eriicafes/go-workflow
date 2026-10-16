@@ -111,7 +111,6 @@ func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, nam
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil, nil, ctx.Err()
 		case <-timer.C:
 		}

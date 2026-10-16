@@ -201,7 +201,6 @@ func (w *World) due(now time.Time) ([]delivery, time.Time) {
 func (w *World) dispatch() {
 	defer w.workers.Done()
 	timer := time.NewTimer(time.Hour)
-	defer timer.Stop()
 	for {
 		ready, next := w.due(time.Now())
 		for _, value := range ready {
@@ -219,7 +218,6 @@ func (w *World) dispatch() {
 		case <-w.queueWake:
 		case <-wait:
 		}
-		timer.Stop()
 	}
 }
 

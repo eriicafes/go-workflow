@@ -64,7 +64,6 @@ func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 func (m *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
 	deadline := time.Now().Add(input.Timeout)
 	timer := time.NewTimer(input.Timeout)
-	defer timer.Stop()
 	for {
 		changed := m.changed()
 		run, err := m.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID})

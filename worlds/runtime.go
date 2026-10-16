@@ -445,7 +445,6 @@ func (e *Runtime) observeCancellation(parent context.Context, runID RunID, stepI
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
 		defer close(done)
 		var cursor string
 		if count > 0 {

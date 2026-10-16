@@ -29,7 +29,6 @@ func (w *World) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 		timer := time.NewTimer(time.Duration(attempt*attempt) * 5 * time.Millisecond)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}

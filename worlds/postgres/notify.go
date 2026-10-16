@@ -113,7 +113,6 @@ func (n *notifier) run() {
 		timer := time.NewTimer(delay)
 		select {
 		case <-n.ctx.Done():
-			timer.Stop()
 			return
 		case <-timer.C:
 		}

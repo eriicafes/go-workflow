@@ -57,13 +57,11 @@ func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.Runs
 		timer := time.NewTimer(min(remaining, w.interval))
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			release()
 			return worlds.Run{}, ctx.Err()
 		case <-wake:
 		case <-timer.C:
 		}
-		timer.Stop()
 		release()
 	}
 }

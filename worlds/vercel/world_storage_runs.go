@@ -185,7 +185,6 @@ func decodeRun(runID worlds.RunID, fields, attrs map[string]string, resolve worl
 
 func sleep(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
-	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

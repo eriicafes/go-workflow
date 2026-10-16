@@ -169,7 +169,6 @@ func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
 		timer := time.NewTimer(w.interval)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			release()
 			for ; inflight > 0; inflight-- {
 				<-finished
@@ -180,7 +179,6 @@ func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
 		case <-finished:
 			inflight--
 		}
-		timer.Stop()
 		release()
 		for drained := false; !drained; {
 			select {
@@ -202,7 +200,6 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 	go func() {
 		defer close(renewed)
 		ticker := time.NewTicker(w.lease / 3)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-renewCtx.Done():

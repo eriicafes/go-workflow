@@ -51,7 +51,6 @@ func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.Runs
 	// Sleep on the change channel between reads.
 	deadline := time.Now().Add(input.Timeout)
 	timer := time.NewTimer(input.Timeout)
-	defer timer.Stop()
 	for {
 		changed := w.changed()
 		run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: input.ResolveData})

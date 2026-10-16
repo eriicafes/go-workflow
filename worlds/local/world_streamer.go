@@ -177,7 +177,6 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	}
 	deadline := time.Now().Add(input.Wait)
 	timer := time.NewTimer(input.Wait)
-	defer timer.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
 			return worlds.StreamChunksResult{}, err
