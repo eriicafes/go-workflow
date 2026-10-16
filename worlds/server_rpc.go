@@ -632,7 +632,7 @@ func newRPCError(err error) *RPCError {
 		code = "not_found"
 	case errors.Is(err, ErrEventInvalid), errors.As(err, &specVersionMismatch):
 		code = "invalid_argument"
-	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict):
+	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict), errors.Is(err, ErrInBandSuperseded):
 		code = "conflict"
 	case errors.Is(err, context.Canceled):
 		code = "cancelled"

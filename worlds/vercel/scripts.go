@@ -46,15 +46,17 @@ return {'ok'}
 `)
 
 // scriptAppend admits and appends events. Its ARGV are prefix, runID, now, mode
-// (append|batch|claim), delta start index (-1 for none), force flag, then one
-// JSON descriptor per event (see eventDescriptor). In claim mode the last ARGV
-// is the base64 data of the hook_disposed a forced claim appends. Changes are
-// staged in memory and written only after every event is admitted, so a
-// rejected batch writes nothing.
+// (append|batch|claim), delta start index (-1 for none), force flag, in-band
+// count (empty for an out-of-band write), then one JSON descriptor per event (see
+// eventDescriptor). In claim mode the last ARGV is the base64 data of the
+// hook_disposed a forced claim appends. Changes are staged in memory and
+// written only after every event is admitted, so a rejected batch writes
+// nothing. An in-band count that is not the run's 'inband' field rejects the
+// write with in_band_superseded, and an accepted in-band write advances it.
 //
 // append and claim return {'ok', slot, type, allocated, step, forcedRunID,
-// deltaStart, deltaRecords...}, while batch returns {'ok', n, slot, type, step,
-// ...}.
+// deltaStart, inBandCount, deltaRecords...}, while batch returns {'ok', n,
+// slot, type, step, ..., inBandCount}.
 var scriptAppend = newRedisScript(luaPrelude + `
 local now, mode, force = ARGV[3], ARGV[4], ARGV[6] == '1'
 local nowN = tonumber(now)
@@ -301,10 +303,18 @@ end
 
 local c = load(ARGV[2])
 if not c then return {'err', 'run_not_found'} end
+local fence = ARGV[7]
+local inBand = tonumber(c.run.inband or '0')
+if fence ~= '' and tonumber(fence) ~= inBand then return {'err', 'in_band_superseded'} end
+local function advance(n)
+  if fence == '' then return end
+  inBand = inBand + n
+  setRun(c, 'inband', fmt(inBand))
+end
 
 if mode == 'batch' then
   local out = {'ok', 0}
-  for i = 7, #ARGV do
+  for i = 8, #ARGV do
     local d = cjson.decode(ARGV[i])
     if d.bad then return {'err', 'invalid'} end
     local admitted = admit(c, d)
@@ -318,11 +328,13 @@ if mode == 'batch' then
     table.insert(out, stepResult(c, d))
     out[2] = out[2] + 1
   end
+  advance(out[2])
   flush()
+  table.insert(out, inBand)
   return out
 end
 
-local d = cjson.decode(ARGV[7])
+local d = cjson.decode(ARGV[8])
 local forced = ''
 local start, records
 if mode == 'claim' then
@@ -338,7 +350,7 @@ if mode == 'claim' then
     if not oc or terminal(oc.run.status) then
       setOwner(token, nil)
     else
-      append(oc, {t = 'hook_disposed', c = id, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[8], at = now})})
+      append(oc, {t = 'hook_disposed', c = id, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[9], at = now})})
       forced = oc.id
     end
   end
@@ -347,14 +359,15 @@ else
   local admitted = admit(c, d)
   if admitted then
     if admitted.err then return {'err', admitted.err} end
-    local out = {'ok', tonumber(admitted.replay), d.t, 0, stepResult(c, d), '', start}
+    local out = {'ok', tonumber(admitted.replay), d.t, 0, stepResult(c, d), '', start, inBand}
     for _, record in ipairs(records) do table.insert(out, record) end
     return out
   end
 end
 local slot = append(c, d)
+advance(1)
 flush()
-local out = {'ok', slot, d.t, 1, stepResult(c, d), forced, start}
+local out = {'ok', slot, d.t, 1, stepResult(c, d), forced, start, inBand}
 for _, record in ipairs(records) do table.insert(out, record) end
 return out
 `)

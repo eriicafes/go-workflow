@@ -27,7 +27,8 @@ CREATE TABLE go_workflow_runs (
 	updated_at timestamptz NOT NULL,
 	started_at timestamptz,
 	completed_at timestamptz,
-	deployment_id text NOT NULL DEFAULT ''
+	deployment_id text NOT NULL DEFAULT '',
+	in_band_count bigint NOT NULL DEFAULT 0
 );
 CREATE INDEX go_workflow_runs_created_idx ON go_workflow_runs (created_at, run_id);
 CREATE INDEX go_workflow_runs_workflow_idx ON go_workflow_runs (workflow_name, created_at, run_id);

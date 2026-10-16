@@ -122,7 +122,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "append", deltaStart(input.Options), "0", desc))
+	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "append", deltaStart(input.Options), "0", inBandArg(input.Options.InBandCount), desc))
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -138,7 +138,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, nil
 	}
 	now := time.Now().UTC()
-	args := []string{w.prefix, string(input.RunID), micros(now), "batch", "-1", "0"}
+	args := []string{w.prefix, string(input.RunID), micros(now), "batch", "-1", "0", inBandArg(input.InBandCount)}
 	for _, event := range input.Events {
 		desc, err := describeEvent(event, now)
 		if err != nil {
@@ -150,11 +150,11 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	if len(values) != 1+3*len(input.Events) || int(replyInt(values[0])) != len(input.Events) {
+	if len(values) != 2+3*len(input.Events) || int(replyInt(values[0])) != len(input.Events) {
 		return worlds.EventBatchResult{}, errCorrupt
 	}
-	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events))}
-	for index := 1; index < len(values); index += 3 {
+	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events)), InBandCount: int(replyInt(values[len(values)-1]))}
+	for index := 1; index < len(values)-1; index += 3 {
 		correlationID := input.Events[len(result.Events)].CorrelationID
 		item := worlds.EventResult{EventID: worlds.EventIDForSlot(uint64(replyInt(values[index]))), EventType: worlds.EventType(replyString(values[index+1])), AllocatedEventCount: 1}
 		if raw := replyString(values[index+2]); raw != "" {
@@ -407,10 +407,10 @@ func deltaStart(options worlds.EventsCreateOptions) string {
 // decodeAppendReply reads {slot, type, allocated, step, forcedRunID,
 // deltaStart, deltaRecords...}.
 func decodeAppendReply(runID worlds.RunID, correlationID string, values []any, resolve worlds.EventsResolveData) (worlds.EventResult, worlds.RunID, error) {
-	if len(values) < 6 {
+	if len(values) < 7 {
 		return worlds.EventResult{}, "", errCorrupt
 	}
-	result := worlds.EventResult{EventID: worlds.EventIDForSlot(uint64(replyInt(values[0]))), EventType: worlds.EventType(replyString(values[1])), AllocatedEventCount: int(replyInt(values[2]))}
+	result := worlds.EventResult{EventID: worlds.EventIDForSlot(uint64(replyInt(values[0]))), EventType: worlds.EventType(replyString(values[1])), AllocatedEventCount: int(replyInt(values[2])), InBandCount: int(replyInt(values[6]))}
 	if raw := replyString(values[3]); raw != "" {
 		step, err := decodeStep(runID, worlds.StepID(correlationID), raw, worlds.ResolveDataAll)
 		if err != nil {
@@ -420,7 +420,7 @@ func decodeAppendReply(runID worlds.RunID, correlationID string, values []any, r
 		result.StepCreated = result.AllocatedEventCount == 1
 	}
 	start := uint64(replyInt(values[5]))
-	records := values[6:]
+	records := values[7:]
 	if len(records) > 0 {
 		result.Events = make([]worlds.Event, len(records))
 		for index, record := range records {
@@ -432,4 +432,13 @@ func decodeAppendReply(runID worlds.RunID, correlationID string, values []any, r
 		}
 	}
 	return result, worlds.RunID(replyString(values[4])), nil
+}
+
+// inBandArg encodes an in-band write's count for scriptAppend, or an empty
+// string for an out-of-band write.
+func inBandArg(count *int) string {
+	if count == nil {
+		return ""
+	}
+	return strconv.Itoa(*count)
 }

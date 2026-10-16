@@ -114,6 +114,9 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 		if claimant.run.Status.Terminal() {
 			return worlds.ErrRunTerminal
 		}
+		if err := claimant.fence(input.Options.InBandCount); err != nil {
+			return err
+		}
 		holder, err := lockToken(ctx, tx, token, now())
 		if err != nil {
 			return err
@@ -153,6 +156,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 		if err != nil {
 			return err
 		}
+		claimant.advance(input.Options.InBandCount, 1)
 		if result.EventResult, err = claimant.result(ctx, event, true); err != nil {
 			return err
 		}

@@ -111,6 +111,9 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	if claimant.run.Status.Terminal() {
 		return worlds.HooksClaimResult{}, worlds.ErrRunTerminal
 	}
+	if err := claimant.fence(input.Options.InBandCount); err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
 	delta, err := w.delta(claimant.run, input.Options)
 	if err != nil {
 		return worlds.HooksClaimResult{}, err
@@ -135,6 +138,7 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	if err != nil {
 		return worlds.HooksClaimResult{}, err
 	}
+	claimant.advance(input.Options.InBandCount, 1)
 	if err := claimant.commit(); err != nil {
 		return worlds.HooksClaimResult{}, err
 	}

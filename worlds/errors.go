@@ -63,6 +63,10 @@ var (
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
 	ErrWebhookRequestTooLarge = errors.New("workflow: webhook request is too large")
+	// ErrInBandSuperseded is returned by an in-band write whose InBandCount
+	// no longer matches the run's, because another orchestrator replaying
+	// the run has written since. The writer reloads the run and replays.
+	ErrInBandSuperseded = errors.New("workflow: in-band write superseded")
 	// ErrDeploymentUnavailable is returned by Queue when the deployment a
 	// delivery is addressed to no longer exists or cannot receive deliveries.
 	ErrDeploymentUnavailable = errors.New("workflow: deployment is unavailable")

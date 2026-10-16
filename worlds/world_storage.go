@@ -168,10 +168,14 @@ type Run struct {
 	// DeploymentID is the deployment the run is pinned to, recorded when the
 	// run is created. Empty means the run is not pinned.
 	DeploymentID string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	StartedAt    *time.Time
-	CompletedAt  *time.Time
+	// InBandCount counts the events appended by in-band writes, those the
+	// run's orchestrator fences with EventsCreateOptions.InBandCount. A flow
+	// starts from it and passes it with each in-band write.
+	InBandCount int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
 }
 
 type (
@@ -423,11 +427,23 @@ type (
 		// the same terms. When both are unset, Events is empty.
 		SinceCursor string
 		ResolveData EventsResolveData
+		// InBandCount makes the append an in-band write: one made by the run's
+		// orchestrator, which fences it with the run's InBandCount as the
+		// orchestrator last saw it. The World appends only when the run's
+		// InBandCount still equals it, and advances the count by the events it
+		// appends. Otherwise it returns ErrInBandSuperseded and appends
+		// nothing, because another orchestrator has written since. Nil makes
+		// the write out-of-band, which is never refused and leaves the count
+		// unchanged.
+		InBandCount *int
 	}
 	// EventsCreateBatchInput holds the arguments to EventsCreateBatch.
 	EventsCreateBatchInput struct {
-		RunID  RunID
-		Events []EventsCreateEvent
+		RunID RunID
+		// InBandCount fences the whole batch as one in-band write, as
+		// EventsCreateOptions.InBandCount does.
+		InBandCount *int
+		Events      []EventsCreateEvent
 	}
 	// EventsGetInput holds the arguments to EventsGet.
 	EventsGetInput struct {
@@ -471,11 +487,15 @@ type (
 		StepCreated bool
 		// AllocatedEventCount is the number of events newly appended by this call.
 		AllocatedEventCount int
+		// InBandCount is the run's InBandCount after the call.
+		InBandCount int
 	}
 	// EventBatchResult is the result of EventsCreateBatch, with one
 	// EventResult per event in order.
 	EventBatchResult struct {
 		Events []EventResult
+		// InBandCount is the run's InBandCount after the batch.
+		InBandCount int
 	}
 )
 

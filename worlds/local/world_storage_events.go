@@ -417,8 +417,25 @@ func (t *txn) writeViews() error {
 	return nil
 }
 
+// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// run's current InBandCount.
+func (t *txn) fence(count *int) error {
+	if count != nil && *count != t.run.InBandCount {
+		return worlds.ErrInBandSuperseded
+	}
+	return nil
+}
+
+// advance stages appended more in-band events on the run record, which commits
+// them with the events.
+func (t *txn) advance(count *int, appended int) {
+	if count != nil {
+		t.run.InBandCount += appended
+	}
+}
+
 func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: delta, AllocatedEventCount: 1}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
 	if event.EventType == worlds.EventTypeStepCreated {
 		if step := t.steps[worlds.StepID(event.CorrelationID)]; step != nil {
 			value := cloneStep(step.Step, worlds.ResolveDataAll)
@@ -511,6 +528,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	if err := t.fence(input.Options.InBandCount); err != nil {
+		return worlds.EventResult{}, err
+	}
 	now := time.Now().UTC()
 	replay, err := t.admit(input.Event, now)
 	if err != nil {
@@ -521,12 +541,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if replay != "" {
-		return worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta}, nil
+		return worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}, nil
 	}
 	event, err := t.append(input.Event, now)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	t.advance(input.Options.InBandCount, 1)
 	if err := t.commit(); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -550,6 +571,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if err != nil {
 		return worlds.EventBatchResult{}, err
 	}
+	if err := t.fence(input.InBandCount); err != nil {
+		return worlds.EventBatchResult{}, err
+	}
 	results := make([]worlds.EventResult, 0, len(input.Events))
 	for _, value := range input.Events {
 		if !validAppend(value.EventType) {
@@ -569,11 +593,12 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		}
 		results = append(results, t.result(event, nil))
 	}
+	t.advance(input.InBandCount, len(input.Events))
 	if err := t.commit(); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
 	w.signal()
-	return worlds.EventBatchResult{Events: results}, nil
+	return worlds.EventBatchResult{Events: results, InBandCount: t.run.InBandCount}, nil
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {

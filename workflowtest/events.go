@@ -82,6 +82,70 @@ func conformRunDeployment(t *testing.T, world worlds.World) {
 	}
 }
 
+// conformInBandFence checks the in-band writer fence: an in-band write is
+// accepted only at the run's current InBandCount and advances it by the events
+// it appends, a stale one appends nothing, and an out-of-band write is never
+// refused and leaves the count alone.
+func conformInBandFence(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "fence")
+	inBandCount := func() int {
+		t.Helper()
+		run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return run.InBandCount
+	}
+	eventCount := func() int {
+		t.Helper()
+		page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(page.Data)
+	}
+	if count := inBandCount(); count != 0 {
+		t.Fatalf("new run InBandCount = %d", count)
+	}
+
+	zero, one, three := 0, 1, 3
+	first, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_a"}, Options: worlds.EventsCreateOptions{InBandCount: &zero}})
+	if err != nil || first.InBandCount != 1 || inBandCount() != 1 {
+		t.Fatalf("fenced append = %#v err=%v, run InBandCount %d", first, err, inBandCount())
+	}
+
+	before := eventCount()
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_stale"}, Options: worlds.EventsCreateOptions{InBandCount: &zero}})
+	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band append")
+	if eventCount() != before || inBandCount() != 1 {
+		t.Fatalf("stale in-band append wrote events %d -> %d, InBandCount %d", before, eventCount(), inBandCount())
+	}
+
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_out"}}); err != nil || inBandCount() != 1 {
+		t.Fatalf("out-of-band append err=%v, InBandCount %d", err, inBandCount())
+	}
+
+	batch, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &one, Events: []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_b"},
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_c"},
+	}})
+	if err != nil || batch.InBandCount != 3 || inBandCount() != 3 {
+		t.Fatalf("fenced batch = %#v err=%v, run InBandCount %d", batch, err, inBandCount())
+	}
+
+	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &one, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_d"}}})
+	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
+
+	token := "fence:" + string(runID)
+	_, err = world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
+	claimed, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
+	if err != nil || claimed.InBandCount != 4 || inBandCount() != 4 {
+		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
+	}
+}
+
 func conformBatch(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "batch")

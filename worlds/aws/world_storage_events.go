@@ -64,6 +64,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err != nil {
 			return err
 		}
+		if err := fence(run, input.Options.InBandCount); err != nil {
+			return err
+		}
 		replay, err := tx.admit(ctx, run, input.Event)
 		if err != nil {
 			return err
@@ -75,8 +78,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 			if err != nil {
 				return err
 			}
+			advance(run, input.Options.InBandCount, 1)
 			result = tx.result(event, true)
 		}
+		result.InBandCount = run.view.InBandCount
 		// The delta is read before the commit, so a failed read does not
 		// report a committed append as failed. Events up to run.seen are
 		// already in the log and do not change.
@@ -97,6 +102,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, nil
 	}
 	var results []worlds.EventResult
+	var inBandCount int
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
 		results = make([]worlds.EventResult, 0, len(input.Events))
 		if err := tx.preload(ctx, input.RunID, input.Events); err != nil {
@@ -104,6 +110,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		}
 		run, err := tx.run(ctx, input.RunID)
 		if err != nil {
+			return err
+		}
+		if err := fence(run, input.InBandCount); err != nil {
 			return err
 		}
 		for _, value := range input.Events {
@@ -123,12 +132,31 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			}
 			results = append(results, tx.result(event, true))
 		}
+		advance(run, input.InBandCount, len(input.Events))
+		inBandCount = run.view.InBandCount
 		return nil
 	})
 	if err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	return worlds.EventBatchResult{Events: results}, nil
+	return worlds.EventBatchResult{Events: results, InBandCount: inBandCount}, nil
+}
+
+// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// run's InBandCount. The commit's condition on the event count keeps the two
+// read together.
+func fence(run *runEntry, count *int) error {
+	if count != nil && *count != run.view.InBandCount {
+		return worlds.ErrInBandSuperseded
+	}
+	return nil
+}
+
+// advance adds appended in-band events to the run view the commit writes.
+func advance(run *runEntry, count *int, appended int) {
+	if count != nil {
+		run.view.InBandCount += appended
+	}
 }
 
 func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
@@ -159,6 +187,9 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		}
 		if claimant.view.Status.Terminal() {
 			return worlds.ErrRunTerminal
+		}
+		if err := fence(claimant, input.Options.InBandCount); err != nil {
+			return err
 		}
 		token, err := tx.token(ctx, created.Token)
 		if err != nil {
@@ -192,7 +223,9 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 		if err != nil {
 			return err
 		}
+		advance(claimant, input.Options.InBandCount, 1)
 		result.EventResult = tx.result(event, true)
+		result.InBandCount = claimant.view.InBandCount
 		// Read before the commit, as in EventsCreate.
 		result.Events, err = w.delta(ctx, input.RunID, claimant.seen, input.Options)
 		return err

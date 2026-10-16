@@ -80,15 +80,17 @@ func runColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		data = "NULL::bytea, NULL::bytea"
 	}
-	return "run_id, workflow_name, status, " + data + ", error, attributes, deployment_id, created_at, updated_at, started_at, completed_at"
+	return "run_id, workflow_name, status, " + data + ", error, attributes, deployment_id, in_band_count, created_at, updated_at, started_at, completed_at"
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
 	var run worlds.Run
 	var attributes []byte
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &run.Input, &run.Output, &run.Error, &attributes, &run.DeploymentID, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
+	var inBandCount int64
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &run.Input, &run.Output, &run.Error, &attributes, &run.DeploymentID, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
 		return worlds.Run{}, err
 	}
+	run.InBandCount = int(inBandCount)
 	run.Attributes = map[string]string{}
 	if err := json.Unmarshal(attributes, &run.Attributes); err != nil {
 		return worlds.Run{}, err

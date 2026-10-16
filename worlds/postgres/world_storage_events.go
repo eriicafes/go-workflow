@@ -88,6 +88,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err != nil {
 			return err
 		}
+		if err := a.fence(input.Options.InBandCount); err != nil {
+			return err
+		}
 		replay, err := a.admit(ctx, input.Event)
 		if err != nil {
 			return err
@@ -99,12 +102,14 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if replay != nil {
 			result = *replay
 			result.Events = delta
+			result.InBandCount = a.run.InBandCount
 			return nil
 		}
 		event, err := a.append(ctx, input.Event)
 		if err != nil {
 			return err
 		}
+		a.advance(input.Options.InBandCount, 1)
 		if result, err = a.result(ctx, event, true); err != nil {
 			return err
 		}
@@ -125,10 +130,14 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, nil
 	}
 	var results []worlds.EventResult
+	var inBandCount int
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
 		results = make([]worlds.EventResult, 0, len(input.Events))
 		a, err := lockRun(ctx, tx, input.RunID)
 		if err != nil {
+			return err
+		}
+		if err := a.fence(input.InBandCount); err != nil {
 			return err
 		}
 		for _, value := range input.Events {
@@ -152,12 +161,14 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			}
 			results = append(results, result)
 		}
+		a.advance(input.InBandCount, len(input.Events))
+		inBandCount = a.run.InBandCount
 		return a.flush(ctx)
 	})
 	if err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	return worlds.EventBatchResult{Events: results}, nil
+	return worlds.EventBatchResult{Events: results, InBandCount: inBandCount}, nil
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
@@ -529,8 +540,24 @@ func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
 	return err
 }
 
+// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// locked run's InBandCount.
+func (a *appender) fence(count *int) error {
+	if count != nil && *count != a.run.InBandCount {
+		return worlds.ErrInBandSuperseded
+	}
+	return nil
+}
+
+// advance adds appended in-band events to the run, which flush writes.
+func (a *appender) advance(count *int, appended int) {
+	if count != nil {
+		a.run.InBandCount += appended
+	}
+}
+
 func (a *appender) result(ctx context.Context, event worlds.Event, created bool) (worlds.EventResult, error) {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, InBandCount: a.run.InBandCount}
 	if created {
 		result.AllocatedEventCount = 1
 	}
@@ -556,8 +583,8 @@ func (a *appender) flush(ctx context.Context) error {
 		return err
 	}
 	if _, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET status = $2, output = $3, error = $4, attributes = $5, updated_at = $6,
-			started_at = $7, completed_at = $8, event_count = $9 WHERE run_id = $1`,
-		a.run.RunID, a.run.Status, a.run.Output, a.run.Error, attributes, a.run.UpdatedAt, a.run.StartedAt, a.run.CompletedAt, int64(a.count)); err != nil {
+			started_at = $7, completed_at = $8, event_count = $9, in_band_count = $10 WHERE run_id = $1`,
+		a.run.RunID, a.run.Status, a.run.Output, a.run.Error, attributes, a.run.UpdatedAt, a.run.StartedAt, a.run.CompletedAt, int64(a.count), int64(a.run.InBandCount)); err != nil {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
@@ -593,10 +620,10 @@ func validEvent(event worlds.EventsCreateEvent) bool {
 func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, error) {
 	a := &appender{tx: tx}
 	var attributes []byte
-	var count int64
-	err := tx.QueryRow(ctx, `SELECT run_id, status, output, error, attributes, updated_at, started_at, completed_at, event_count
+	var count, inBandCount int64
+	err := tx.QueryRow(ctx, `SELECT run_id, status, output, error, attributes, updated_at, started_at, completed_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.Status, &a.run.Output, &a.run.Error, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count)
+		Scan(&a.run.RunID, &a.run.Status, &a.run.Output, &a.run.Error, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}
@@ -608,6 +635,7 @@ func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, err
 		return nil, err
 	}
 	a.count = uint64(count)
+	a.run.InBandCount = int(inBandCount)
 	a.wasTerminal = a.run.Status.Terminal()
 	return a, nil
 }

@@ -24,9 +24,13 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if _, ok := m.runs[input.RunID]; !ok {
 		return worlds.EventResult{}, worlds.ErrRunNotFound
 	}
+	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if result, duplicate, err := m.admitLocked(input.RunID, input.Event); err != nil || duplicate {
 		if duplicate {
 			result.Events = resolveEventData(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
+			result.InBandCount = m.runs[input.RunID].InBandCount
 		}
 		return result, err
 	}
@@ -34,7 +38,29 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	before := resolveEventData(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
-	return m.eventResultLocked(event, before, true), nil
+	result := m.eventResultLocked(event, before, true)
+	result.InBandCount = m.advanceLocked(input.RunID, input.Options.InBandCount, 1)
+	return result, nil
+}
+
+// fenceLocked returns ErrInBandSuperseded when an in-band write's count is
+// not the run's current InBandCount.
+func (m *World) fenceLocked(runID worlds.RunID, count *int) error {
+	if count != nil && *count != m.runs[runID].InBandCount {
+		return worlds.ErrInBandSuperseded
+	}
+	return nil
+}
+
+// advanceLocked adds appended to the run's InBandCount for an in-band write
+// and returns the count.
+func (m *World) advanceLocked(runID worlds.RunID, count *int, appended int) int {
+	run := m.runs[runID]
+	if count != nil {
+		run.InBandCount += appended
+		m.runs[runID] = run
+	}
+	return run.InBandCount
 }
 
 func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
@@ -85,6 +111,9 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if _, ok := m.runs[input.RunID]; !ok {
 		return worlds.EventBatchResult{}, worlds.ErrRunNotFound
 	}
+	if err := m.fenceLocked(input.RunID, input.InBandCount); err != nil {
+		return worlds.EventBatchResult{}, err
+	}
 	checkpoint := m.checkpointLocked()
 	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events))}
 	for _, value := range input.Events {
@@ -104,6 +133,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		m.materializeLocked(event)
 		result.Events = append(result.Events, m.eventResultLocked(event, nil, true))
 	}
+	result.InBandCount = m.advanceLocked(input.RunID, input.InBandCount, len(input.Events))
 	return result, nil
 }
 
@@ -151,6 +181,9 @@ func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	if claimant.Status.Terminal() {
 		return worlds.HooksClaimResult{}, worlds.ErrRunTerminal
 	}
+	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
+		return worlds.HooksClaimResult{}, err
+	}
 	m.expireTokenLocked(created.Token, time.Now().UTC())
 	result := worlds.HooksClaimResult{EventResult: worlds.EventResult{Events: m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)}}
 	if ownerID := m.tokens[created.Token]; ownerID != "" {
@@ -175,6 +208,7 @@ func (m *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
 	result.EventResult = m.eventResultLocked(event, result.Events, true)
+	result.InBandCount = m.advanceLocked(input.RunID, input.Options.InBandCount, 1)
 	return result, nil
 }
 

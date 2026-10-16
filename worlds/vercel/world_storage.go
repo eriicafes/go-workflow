@@ -84,6 +84,12 @@ type hookView struct {
 
 func micros(t time.Time) string { return strconv.FormatInt(t.UnixMicro(), 10) }
 
+// parseCount parses a counter stored in a run hash, where a missing field is 0.
+func parseCount(value string) int {
+	count, _ := strconv.Atoi(value)
+	return count
+}
+
 func parseMicros(value string) time.Time {
 	n, _ := strconv.ParseInt(value, 10, 64)
 	return time.UnixMicro(n).UTC()
@@ -216,6 +222,8 @@ func scriptReply(result any, err error) ([]any, error) {
 		return nil, worlds.ErrHookNotActive
 	case "hook_conflict":
 		return nil, worlds.ErrHookConflict
+	case "in_band_superseded":
+		return nil, worlds.ErrInBandSuperseded
 	case "invalid":
 		return nil, worlds.ErrEventInvalid
 	case "stream_locked":
