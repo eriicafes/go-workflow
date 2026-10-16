@@ -42,6 +42,10 @@ if done, _ := approved.Done(ctx); !done {
 }
 ```
 
+A timer fires when a flow replays past its declaration after it is due: the
+flow records `wait_completed` there. Like any result, the runner sees it only
+once the replay reaches it where the runner waits, so `Done` on a timer gives
+the same answer at the same point of every replay.
 Cancelling a timer settles it immediately.
 
 ## Timeouts

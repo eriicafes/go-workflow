@@ -25,7 +25,7 @@ The **Context** column says where a function can be called:
 | `Background(ctx, fn, input, ...StepOptions) Promise[Out]` | W | Starts a step without waiting. |
 | `Map(ctx, fn, inputs) []Promise[Out]` | W | Starts one step per input. |
 | `All(ctx, fn, inputs) ([]Out, error)` | W | `Map` + `Join`. |
-| `InlineStep(ctx, fn func(context.Context) Out) (Out, error)` | W, S | Records the result of a function that cannot fail, without a step delivery. In step context calls `fn` without recording. |
+| `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Runs the step `fn` with `input` in the flow, without a step delivery, retrying failed attempts like a step. In step context calls `fn` without recording. |
 | `OnRollback(ctx, fn func(context.Context, In) error, input, ...StepOptions) error` | W | Registers a compensation that runs if the run fails. |
 | `FatalError(err) error` | S | Wraps an error so the step fails without retrying. |
 | `RetryableError(err, after) error` | S | Wraps an error so the step retries no sooner than `after`. |
@@ -56,7 +56,7 @@ type WorkflowMetadata struct {
 
 ```go
 type Promise[T any] interface {
-	Done(context.Context) (bool, error) // settled or not; never the promise's error
+	Done(context.Context) (bool, error) // settled as of delivered results; never the promise's error
 	Await(context.Context) (T, error)
 	Unwrap(context.Context) T
 	Cancel(context.Context) error
@@ -67,9 +67,9 @@ type Promise[T any] interface {
 | --- | --- | --- |
 | `Join(ctx, ...Promise[T]) ([]T, error)` | W | Waits for all; first error in argument order. |
 | `JoinSettled(ctx, ...Promise[T]) ([]T, error)` | W | Waits for all to settle; zero values for failures. |
-| `Select(ctx, ...Promise[T]) (Promise[T], error)` | W | First to settle. |
+| `Select(ctx, ...Promise[T]) (Promise[T], error)` | W | First to settle, by the order results were recorded. |
 | `SelectWithCancel(ctx, ...Promise[T]) (Promise[T], error)` | W | `Select`, cancelling the rest. |
-| `SelectOk(ctx, ...Promise[T]) (Promise[T], error)` | W | First to succeed. |
+| `SelectOk(ctx, ...Promise[T]) (Promise[T], error)` | W | First to succeed, by the order results were recorded. |
 | `SelectOkWithCancel(ctx, ...Promise[T]) (Promise[T], error)` | W | `SelectOk`, cancelling the rest. |
 | `Cancel(ctx, ...Promise[T]) error` | W | Cancels each promise in order. |
 

@@ -19,27 +19,39 @@ type Promise[T any] interface {
 }
 ```
 
-**`Done`** reports only whether the promise has **settled**, whether it
-succeeded or failed. It never suspends the run and never returns the error the
-promise failed with. Its error is reserved for when settlement can't be
-determined, such as `ErrNoWorkflow` outside workflow context. To get a settled
-promise's error, call `Await`, which returns immediately once the promise has
-settled.
+Results are delivered in the order they were recorded, and only where the
+runner waits: `Await`, `Join`, and the `Select` functions. See
+[Delivering results in order](/guide/replay#delivering-results-in-order).
 
-This checks whether a background step has finished without waiting for it:
+**`Done`** reports whether the promise has **settled**, whether it succeeded
+or failed, as of the results delivered so far. It never suspends the run or
+waits for more results, and never returns the error the promise failed with.
+Its error is reserved for when settlement can't be determined, such as
+`ErrNoWorkflow` outside workflow context. To get a settled promise's error,
+call `Await`, which returns immediately once the promise has settled.
+
+Because `Done` only sees delivered results, it is false right after a promise
+is created. Check it after waiting on something else. This waits for the
+receipt and then checks whether the slower fraud check has finished:
 
 ```go
-promise := workflow.Background(ctx, chargeCard, order)
+fraud := workflow.Background(ctx, checkFraud, order)
 
-done, err := promise.Done(ctx)
+receipt, err := workflow.Step(ctx, chargeCard, order)
 if err != nil {
 	return Result{}, err
 }
 
-if done {
-	// Settled: Await returns at once with the receipt or the step's error.
-	receipt, err := promise.Await(ctx)
-	_, _ = receipt, err
+done, err := fraud.Done(ctx)
+if err != nil {
+	return Result{}, err
+}
+
+if !done {
+	// The fraud check had not finished when the charge did, on every replay.
+	if _, err := workflow.Step(ctx, flagForReview, receipt); err != nil {
+		return Result{}, err
+	}
 }
 ```
 
@@ -144,8 +156,9 @@ for i, p := range promises {
 ### Select
 
 `Select` waits until **any** promise settles and returns it, with the error it
-settled with. When several have settled, the first in argument order wins, and
-the others keep running. This takes whichever lookup answers first:
+settled with. When several have settled, the one whose result was recorded
+first wins, so every replay picks the same promise, and the others keep
+running. This takes whichever lookup answers first:
 
 ```go
 primary := workflow.Background(ctx, lookupPrimary, query)
@@ -234,5 +247,10 @@ run may take.
 ## Determinism with promises
 
 Promises keep concurrency deterministic because the order in which you start
-operations is fixed by your code, not by the scheduler. Start operations in a
-stable order: iterate slices, not maps, when calling `Background` in a loop.
+operations is fixed by your code, not by the scheduler, and the order results
+are delivered in is fixed by the event log. Start operations in a stable order:
+iterate slices, not maps, when calling `Background` in a loop.
+
+A promise you implement yourself works with `Join` and `Await`. The `Select`
+functions check it with `Done` before each wait, so it can't take part in the
+ordering by recorded result.

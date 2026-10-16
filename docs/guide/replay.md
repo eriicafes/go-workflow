@@ -43,11 +43,50 @@ safe: a delivery for a run or step that is already terminal returns without
 running any code. A delivery that dies before recording its result is
 redelivered by the queue and runs the step again as a new attempt.
 
+### Concurrent flows
+
+Two flow deliveries of the same run can replay at once, for example when two
+steps finish together. Each loaded the log before the other wrote, so each
+would declare the next operation on its own. The flow's writes are therefore
+**in-band** and fenced: the run keeps a count of them (`Run.InBandCount`), and
+every flow write carries the count it last saw. When another flow has written
+since, the World refuses the write with `worlds.ErrInBandSuperseded`. The refused flow
+stops and queues one follow-up flow, which replays the run and sees the other
+flow's declarations. Flows refused by the same write share one
+follow-up on a World that deduplicates deliveries. Writes from step deliveries, hook resumes, `WakeUp`, and
+cancellation are out-of-band: they are never refused and don't move the count.
+
 ## Identifying operations
 
 Operations are identified by **position**: the order in which the runner
 reaches them. Each recorded operation stores its position, and replay checks
 that the runner reaches a matching operation there.
+
+## Delivering results in order
+
+Replay walks the event log in order, and a result (a step finishing, a timer
+firing, a hook receiving its payload) becomes visible to the runner only once
+the walk has passed it. The walk advances only where the runner waits: `Await`,
+`Join`, and the `Select` functions. So:
+
+- **`Done` is the same on every replay.** It reports what the walk has
+  delivered so far. A result recorded after the runner checked `Done` stays
+  invisible at that point on later replays too, so a branch taken on `Done`
+  is taken again.
+- **`Select` picks the first promise to settle.** When several promises have
+  settled, the one whose result was recorded first wins, not the first in
+  argument order. Every replay picks the same winner.
+- **Timers fire where they are declared.** A flow that replays past a timer's
+  declaration once it is due records its `wait_completed`, or cancels the run
+  for a due `Timeout`. The runner sees it when the walk reaches it, like any
+  other result.
+
+Inline steps (`InlineStep`, `Now`, and the `Run` methods in workflow context)
+and hook conflicts are the exception: the runner sees them where it declares
+them, because the flow that declares them also settles them.
+
+This matches how the Workflow SDK consumes its event log, where a promise
+resolves when the walk reaches its result.
 
 ## Replay divergence
 

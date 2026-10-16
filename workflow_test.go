@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -91,6 +92,9 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 	}
 	if result.Value != "child" || result.AwaitErr != workflow.ErrRunNotFinished.Error() {
 		t.Fatalf("result = %#v", result)
+	}
+	if !strings.HasPrefix(result.ChildID, "wrun_") || len(result.ChildID) != len(worlds.NewRunID()) {
+		t.Fatalf("child ID = %q, want a run ID", result.ChildID)
 	}
 	childRun, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(result.ChildID)})
 	if err != nil {
@@ -514,4 +518,61 @@ func TestSleepUnderSynctest(t *testing.T) {
 			t.Fatalf("elapsed = %v, want at least 30 days", output.Elapsed)
 		}
 	})
+}
+
+type wakeChildInput struct{}
+type wakeChildOutput struct{}
+
+func (wakeChildInput) Workflow(wakeChildOutput) {}
+
+type wakeParentInput struct{}
+type wakeParentOutput struct {
+	Woken int
+	Child string
+}
+
+func (wakeParentInput) Workflow(wakeParentOutput) {}
+
+func TestRunWakeUpInWorkflowWakesAChildTimer(t *testing.T) {
+	world := testworld.New(
+		workflow.Use(func(ctx context.Context, _ wakeChildInput) (wakeChildOutput, error) {
+			return wakeChildOutput{}, workflow.Sleep(ctx, time.Hour)
+		}),
+		workflow.Use(func(ctx context.Context, _ wakeParentInput) (wakeParentOutput, error) {
+			child, err := workflow.Start(ctx, wakeChildInput{})
+			if err != nil {
+				return wakeParentOutput{}, err
+			}
+			// Each WakeUp is recorded, so polling until the child has
+			// created its timer replays the same way.
+			for range 100 {
+				woken, err := child.WakeUp(ctx)
+				if err != nil || woken != 0 {
+					return wakeParentOutput{Woken: woken, Child: child.ID()}, err
+				}
+				if err := workflow.Sleep(ctx, 10*time.Millisecond); err != nil {
+					return wakeParentOutput{}, err
+				}
+			}
+			return wakeParentOutput{}, errors.New("child never created its timer")
+		}),
+	)
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, wakeParentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Await(ctx)
+	if err != nil || output.Woken != 1 {
+		t.Fatalf("output = %#v, err = %v, want one timer woken", output, err)
+	}
+	child, err := workflow.Get[wakeChildOutput](ctx, output.Child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := child.Await(ctx); err != nil {
+		t.Fatal(err)
+	}
 }

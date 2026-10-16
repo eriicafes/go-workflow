@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,6 +115,8 @@ func (w *Webhook[T]) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (w *Webhook[T]) settlementID() (string, bool) { return w.hook.settlementID() }
+
 // Done reports whether the webhook has settled. It never suspends the run.
 func (w *Webhook[T]) Done(ctx context.Context) (bool, error) { return w.hook.Done(ctx) }
 
@@ -168,8 +171,8 @@ func (w *Webhook[T]) GetConflict(ctx context.Context) (worlds.RunID, bool, error
 func (w *Webhook[T]) Cancel(ctx context.Context) error { return w.hook.Cancel(ctx) }
 
 // RespondWith sends response to the request that resumed a webhook created
-// with WebhookOption.Manual. In workflow context it records the response in a
-// step, so replay does not send it again. RespondWith fails when the webhook
+// with WebhookOption.Manual. In workflow context it records the response in an
+// inline step, so replay does not send it again. RespondWith fails when the webhook
 // is not manual or has not received a request, and returns ErrNoWorkflow
 // outside a run.
 func (w *Webhook[T]) RespondWith(ctx context.Context, response *http.Response) error {
@@ -185,7 +188,7 @@ func (w *Webhook[T]) RespondWith(ctx context.Context, response *http.Response) e
 	}
 	input := webhookRespondInput{Token: w.Token(), HookID: w.hook.id, Received: w.hook.received, Response: value}
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		_, err := Step(ctx, webhookRespondWith, input)
+		_, err := InlineStep(ctx, webhookRespondWith, input)
 		return err
 	}
 	_, err = webhookRespondWith(ctx, input)
@@ -215,16 +218,6 @@ func webhookRespondWith(ctx context.Context, input webhookRespondInput) (struct{
 	if input.Received == "" {
 		return struct{}{}, fmt.Errorf("workflow: webhook was not received")
 	}
-	recorded, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: string(input.HookID)})
-	if err != nil {
-		return struct{}{}, err
-	}
-	for _, event := range recorded.Data {
-		var received worlds.WebhookReceivedEventData
-		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &received) == nil && received.Response != nil && received.ResponseTo == input.Received {
-			return struct{}{}, nil
-		}
-	}
 	data, err := json.Marshal(worlds.WebhookReceivedEventData{Response: input.Response, ResponseTo: input.Received})
 	if err != nil {
 		return struct{}{}, err
@@ -234,6 +227,21 @@ func webhookRespondWith(ctx context.Context, input webhookRespondInput) (struct{
 		CorrelationID: string(input.HookID),
 		Data:          data,
 	}})
+	if !errors.Is(err, worlds.ErrHookNotActive) {
+		return struct{}{}, err
+	}
+	// The World admits one response per request, so a refused response was
+	// either sent by an earlier attempt or can no longer be sent.
+	recorded, listErr := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: string(input.HookID)})
+	if listErr != nil {
+		return struct{}{}, listErr
+	}
+	for _, event := range recorded.Data {
+		var received worlds.WebhookReceivedEventData
+		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &received) == nil && received.Response != nil && received.ResponseTo == input.Received {
+			return struct{}{}, nil
+		}
+	}
 	return struct{}{}, err
 }
 

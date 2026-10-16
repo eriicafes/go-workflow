@@ -97,6 +97,16 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 
 Steps use the same statuses.
 
+### In workflow context
+
+Inside a runner, `Status`, `Exists`, `WorkflowName`, `Done`, `Await`, `Cancel`,
+and `WakeUp` each run once as an [inline step](/guide/steps#inline-steps), and
+replay returns the recorded result. They never wait: `Await` returns
+`workflow.ErrRunNotFinished` for a run that hadn't finished. `WakeUp` records
+which waits it will wake before waking them, so a retry never wakes a timer the
+other run created later. `Reader`, `ReaderAt`, and `Writer` are I/O and return
+`workflow.ErrNotInStep` there; use them in a step.
+
 ## Resuming hooks
 
 `workflow.ResumeHook`, `ResumeHookWithRetries`, and `GetHook` also use the

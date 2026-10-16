@@ -67,12 +67,19 @@ rules atomically:
 - A step can only be started while pending or running (`ErrStepNotStartable`).
   Starting a running step appends a new attempt, so a delivery can take over a
   step whose previous delivery died.
-- `hook_received` only targets an active hook that still owns its token
-  (`ErrHookNotActive`).
+- A webhook's `hook_received` only targets an active webhook that still owns
+  its token (`ErrHookNotActive`). A plain hook may receive more payloads after
+  it settles, but its run keeps the first.
+- A `hook_received` that carries a webhook's response is refused with
+  `ErrHookNotActive` once that webhook has responded, even while
+  `MinRetention` keeps its token: one response per request.
 - A `hook_created` whose token another active hook owns is rejected
   (`ErrHookConflict`) unless the claim is forced.
 - An event that repeats an admitted transition, such as a second
   `run_started`, returns the earlier event without appending.
+- A flow's writes are in-band: each is fenced by the run's `InBandCount` and
+  refused with `ErrInBandSuperseded` when another flow has written since. See
+  [Concurrent flows](/guide/replay#concurrent-flows).
 
 ## A sample run
 

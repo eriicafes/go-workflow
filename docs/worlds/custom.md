@@ -43,6 +43,15 @@ type World interface {
 - **Exclusive hook tokens.** `HooksClaim` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run.
+- **One webhook response.** Refuse a `hook_received` carrying a response with
+  `ErrHookNotActive` once the webhook has completed, including while
+  `MinRetention` keeps its token, in the same atomic step as the append.
+- **The in-band fence.** Keep a per-run `InBandCount`. An append that carries
+  `InBandCount` (in `EventsCreateOptions`, or on `EventsCreateBatchInput`) is
+  accepted only when it equals the run's count, in the same atomic step as the
+  append, and advances it by the events appended. A mismatch returns
+  `ErrInBandSuperseded` and appends nothing. This is what keeps two flow
+  deliveries of one run from both declaring the same operation.
 - **At-least-once delivery.** `Queue` must not deliver before `NotBefore`, and
   must redeliver failed deliveries. Deduplicating by `IdempotencyKey` is
   optional. Store every `QueueInput` field and hand it back unchanged,

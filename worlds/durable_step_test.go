@@ -93,7 +93,7 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	}
 }
 
-func TestDurableInlineStepPersistsNowWithoutTargetedExecution(t *testing.T) {
+func TestDurableInlineStepRecordsNowInOneAttempt(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
 		captured, err := workflow.Now(ctx)
 		return inlineStepOutput{Captured: captured}, err
@@ -113,18 +113,11 @@ func TestDurableInlineStepPersistsNowWithoutTargetedExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seenCreated, seenCompleted := false, false
+	counts := map[worlds.EventType]int{}
 	for _, event := range events.Data {
-		switch event.EventType {
-		case worlds.EventTypeStepCreated:
-			seenCreated = true
-		case worlds.EventTypeStepCompleted:
-			seenCompleted = true
-		case worlds.EventTypeStepStarted:
-			t.Fatal("inline step was sent to targeted execution")
-		}
+		counts[event.EventType]++
 	}
-	if !seenCreated || !seenCompleted {
+	if counts[worlds.EventTypeStepCreated] != 1 || counts[worlds.EventTypeStepStarted] != 1 || counts[worlds.EventTypeStepCompleted] != 1 {
 		t.Fatalf("inline events = %#v", events.Data)
 	}
 }

@@ -19,12 +19,12 @@ import (
 // A replay that diverges from the run's event log ends with a
 // replayDivergenceError that runner code never sees. The Runtime queues a
 // recovery delivery that replays the run again from a fresh read of its log,
-// and fails the run with a corruptedEventLogError once replayDivergenceRetries
+// and fails the run with a corruptedEventLogError once maxReplayDivergenceRetries
 // recovery deliveries have diverged too.
 //
 // When the World reports DeploymentAffinity, a run executes only on the
 // deployment it is pinned to. A delivery that reaches another deployment is
-// re-routed to the run's own, and after deploymentMismatchRetries re-routes,
+// re-routed to the run's own, and after maxDeploymentMismatchRetries re-routes,
 // or when that deployment is unavailable, the run fails with a
 // deploymentMismatchError.
 type Runtime struct {
@@ -33,13 +33,13 @@ type Runtime struct {
 }
 
 const (
-	// replayDivergenceRetries is how many recovery deliveries a diverged
+	// maxReplayDivergenceRetries is how many recovery deliveries a diverged
 	// replay gets, each counted in QueueInput.ReplayDivergenceCount, before
 	// the run fails.
-	replayDivergenceRetries = 3
-	// deploymentMismatchRetries is how many times a delivery that reached a
+	maxReplayDivergenceRetries = 3
+	// maxDeploymentMismatchRetries is how many times a delivery that reached a
 	// deployment other than its run's is re-routed before the run fails.
-	deploymentMismatchRetries = 3
+	maxDeploymentMismatchRetries = 3
 	// maxRerouteDelay caps the backoff between re-routes.
 	maxRerouteDelay = 8 * time.Second
 )
@@ -67,7 +67,34 @@ func (e *Runtime) Execute(ctx context.Context, input QueueInput) error {
 	if input.StepID != nil {
 		return e.executeStep(ctx, input)
 	}
-	return e.executeFlow(ctx, input)
+	err := e.executeFlow(ctx, input)
+	if errors.Is(err, errReplaySuperseded) {
+		return e.supersede(ctx, input)
+	}
+	return err
+}
+
+// supersede queues a follow-up of a flow whose in-band write was refused,
+// because another flow wrote to the run first, and acknowledges the flow.
+// Acknowledging it without a follow-up could lose the result that queued it,
+// which the other flow may have loaded the run too early to see. The
+// follow-up's idempotency key names the run's in-band count, so flows
+// superseded by the same write share one follow-up on a World that
+// deduplicates, instead of superseding each other again.
+func (e *Runtime) supersede(ctx context.Context, input QueueInput) error {
+	run, err := e.world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
+	if err != nil {
+		return err
+	}
+	if run.Status.Terminal() {
+		return nil
+	}
+	followUp := input
+	followUp.NotBefore = nil
+	followUp.IdempotencyKey = fmt.Sprintf("superseded:%s:%d", run.RunID, run.InBandCount)
+	followUp.DeploymentID = run.DeploymentID
+	_, err = e.world.Queue(ctx, followUp)
+	return err
 }
 
 // executeFlow admits root execution, replays its complete event prefix, and
@@ -112,7 +139,7 @@ func (e *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// Build the replay context and merge the admission append without a
 	// follow-up storage read.
 	execution := newExecution(e.world, run, events, nil)
-	execution.Merge(started, startedLatest)
+	execution.merge(started, startedLatest)
 
 	// A run whose workflow is not registered fails without replaying, so it
 	// has no compensations to run and no replay to check.
@@ -151,6 +178,8 @@ func (e *Runtime) replayFlow(ctx context.Context, input QueueInput, runner Runne
 		return context.Cause(ctx)
 	case errors.Is(err, errReplayComplete), errors.Is(err, errReplaySuspended):
 		return nil
+	case errors.Is(err, errReplaySuperseded):
+		return errReplaySuperseded
 	case errors.As(err, &divergenceErr):
 		return e.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):
@@ -211,10 +240,13 @@ func (e *Runtime) completeRun(ctx context.Context, input QueueInput, execution *
 	_, err := e.world.EventsCreate(ctx, EventsCreateInput{
 		RunID:   execution.run.RunID,
 		Event:   EventsCreateEvent{EventType: EventTypeRunCompleted, Data: data},
-		Options: EventsCreateOptions{EventCount: &eventCount},
+		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: execution.InBandCount()},
 	})
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
+	}
+	if errors.Is(err, ErrInBandSuperseded) {
+		return errReplaySuperseded
 	}
 	return err
 }
@@ -249,11 +281,15 @@ func (e *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 		return e.recoverDivergence(ctx, input, &replayDivergenceError{Position: position, Reason: "runner returned without reaching the recorded operation"})
 	}
 	_, err = e.world.EventsCreate(ctx, EventsCreateInput{
-		RunID: execution.run.RunID,
-		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(failure)},
+		RunID:   execution.run.RunID,
+		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(failure)},
+		Options: EventsCreateOptions{InBandCount: execution.InBandCount()},
 	})
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
+	}
+	if errors.Is(err, ErrInBandSuperseded) {
+		return errReplaySuperseded
 	}
 	return err
 }
@@ -309,7 +345,7 @@ func (e *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	// Replay the root workflow with the target selected. DurableStep runs
 	// only when replay reaches the matching step declaration.
 	execution := newExecution(e.world, run, events, input.StepID)
-	execution.Merge(started, startedLatest)
+	execution.merge(started, startedLatest)
 	runner, ok := e.runners[run.WorkflowName]
 	if !ok {
 		return e.failStep(ctx, input, execution, *input.StepID, fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))
@@ -384,7 +420,7 @@ func (e *Runtime) finishStep(ctx context.Context, execution *Execution, stepID S
 	if err != nil {
 		return err
 	}
-	execution.Merge(eventResult, Event{
+	execution.merge(eventResult, Event{
 		RunID:         execution.run.RunID,
 		EventID:       eventResult.EventID,
 		EventType:     eventType,
@@ -498,12 +534,12 @@ func (e *Runtime) run(runner Runner, ctx context.Context, input json.RawMessage)
 // recoverDivergence queues input again as a fresh, immediate delivery of the
 // same flow or step that counts the divergence, and acknowledges this
 // delivery, so the recovery replay reads the event log anew and may run on
-// another worker. Once replayDivergenceRetries recovery deliveries have
+// another worker. Once maxReplayDivergenceRetries recovery deliveries have
 // diverged too, it fails the run with a corruptedEventLogError, without
 // running compensations, since they would replay against the same diverging
 // log.
 func (e *Runtime) recoverDivergence(ctx context.Context, input QueueInput, divergenceErr *replayDivergenceError) error {
-	if input.ReplayDivergenceCount >= replayDivergenceRetries {
+	if input.ReplayDivergenceCount >= maxReplayDivergenceRetries {
 		corrupted := &corruptedEventLogError{Position: divergenceErr.Position, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
 		_, err := e.world.EventsCreate(ctx, EventsCreateInput{
 			RunID: input.RunID,
@@ -528,11 +564,11 @@ func (e *Runtime) misrouted(run Run) bool {
 
 // reroute queues input again, addressed to the deployment run is pinned to,
 // with a growing delay, and acknowledges this delivery. Once input has been
-// re-routed deploymentMismatchRetries times, or the World reports the
+// re-routed maxDeploymentMismatchRetries times, or the World reports the
 // deployment unavailable, it fails the run with a deploymentMismatchError.
 func (e *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error {
 	attempts := input.DeploymentMismatchRetryCount
-	if attempts < deploymentMismatchRetries {
+	if attempts < maxDeploymentMismatchRetries {
 		notBefore := time.Now().Add(min(time.Second<<attempts, maxRerouteDelay))
 		input.NotBefore = &notBefore
 		input.DeploymentID = run.DeploymentID

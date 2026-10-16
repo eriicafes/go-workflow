@@ -370,7 +370,7 @@ func TestNowUsesAnImmediatelyCompletedInlineStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, completed := false, false
+	created, started, completed := false, 0, false
 	for _, event := range events.Data {
 		if event.EventType == worlds.EventTypeStepCreated {
 			var data struct {
@@ -381,15 +381,16 @@ func TestNowUsesAnImmediatelyCompletedInlineStep(t *testing.T) {
 			}
 			created = data.StepName == "now"
 		}
+		if event.EventType == worlds.EventTypeStepStarted {
+			started++
+		}
 		if event.EventType == worlds.EventTypeStepCompleted {
 			completed = true
 		}
-		if event.EventType == worlds.EventTypeStepStarted {
-			t.Fatal("inline now queued targeted step work")
-		}
 	}
-	if !created || !completed {
-		t.Fatalf("inline now events created=%t completed=%t", created, completed)
+	// Now is an inline step: one attempt, run in the flow.
+	if !created || started != 1 || !completed {
+		t.Fatalf("inline now events created=%t started=%d completed=%t", created, started, completed)
 	}
 }
 
@@ -573,8 +574,10 @@ func TestWorkflowCollectionHelpers(t *testing.T) {
 	if !slices.Equal(output.All, []int{1, 2}) || !output.SettledFailed || !output.SelectError || output.SelectOK != 5 || !output.SelectWithCancel || !output.SelectOKCancel {
 		t.Fatalf("collection output = %#v", output)
 	}
+	// A superseded flow's follow-up may still be queued for a moment, but no
+	// hour-long timer may be.
 	for _, queued := range world.Queued() {
-		if queued.NotBefore != nil {
+		if queued.NotBefore != nil && time.Until(*queued.NotBefore) > time.Minute {
 			t.Fatalf("SelectWithCancel left timer queued until %v", *queued.NotBefore)
 		}
 	}
@@ -587,7 +590,7 @@ func (inlineStepInput) Workflow(inlineStepOutput) {}
 
 var inlineCounter atomic.Int64
 
-func nextInlineValue(context.Context) int64 { return inlineCounter.Add(1) }
+func nextInlineValue(context.Context, struct{}) (int64, error) { return inlineCounter.Add(1), nil }
 
 // flakyEventWorld fails EventsCreate for events of eventType with err for its
 // first failures calls.
@@ -607,7 +610,7 @@ func (w *flakyEventWorld) EventsCreate(ctx context.Context, input worlds.EventsC
 
 func inlineStepRunner() worlds.Runner {
 	return workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
-		first, err := workflow.InlineStep(ctx, nextInlineValue)
+		first, err := workflow.InlineStep(ctx, nextInlineValue, struct{}{})
 		if err != nil {
 			return inlineStepOutput{}, err
 		}
@@ -643,8 +646,9 @@ func TestInlineStepRecordsItsResultOnce(t *testing.T) {
 	}
 	for index, event := range events.Data {
 		if event.EventType == worlds.EventTypeStepCreated {
-			if next := events.Data[index+1]; next.EventType != worlds.EventTypeStepCompleted || next.CorrelationID != event.CorrelationID {
-				t.Fatalf("step_created is not followed by its step_completed: %#v", events.Data)
+			started, completed := events.Data[index+1], events.Data[index+2]
+			if started.EventType != worlds.EventTypeStepStarted || completed.EventType != worlds.EventTypeStepCompleted || completed.CorrelationID != event.CorrelationID {
+				t.Fatalf("step_created is not followed by step_started and step_completed: %#v", events.Data)
 			}
 			return
 		}
@@ -665,33 +669,83 @@ func TestInlineStepStorageErrorRetriesDeliveryAndCompletesStep(t *testing.T) {
 	}
 	delivery := world.QueuedMessages()[0].Input
 	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
-	// step_created is recorded, then recording step_completed fails, so the
-	// delivery returns the storage error instead of failing the run.
+	before := inlineCounter.Load()
+	// fn runs, then recording step_completed fails, so the delivery returns
+	// the storage error instead of failing the run.
 	if err := runtime.Execute(ctx, delivery); !errors.Is(err, storageErr) {
 		t.Fatalf("first delivery error = %v, want the storage error", err)
 	}
-	if status, err := run.Status(ctx); err != nil || status != workflow.StatusRunning {
-		t.Fatalf("status after storage error = %q err=%v", status, err)
-	}
-	// The retried delivery finds step_created without a result and completes it.
+	// The retried delivery finds the attempt without a result, starts
+	// another, and completes the step.
 	if err := runtime.Execute(ctx, delivery); err != nil {
 		t.Fatalf("retried delivery: %v", err)
+	}
+	if calls := inlineCounter.Load() - before; calls != 2 {
+		t.Fatalf("fn calls = %d, want 2", calls)
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, completed := 0, 0
+	counts := map[worlds.EventType]int{}
 	for _, event := range events.Data {
-		switch event.EventType {
-		case worlds.EventTypeStepCreated:
-			created++
-		case worlds.EventTypeStepCompleted:
-			completed++
-		}
+		counts[event.EventType]++
 	}
-	if created != 1 || completed != 1 {
-		t.Fatalf("step_created = %d, step_completed = %d, want 1 each", created, completed)
+	if counts[worlds.EventTypeStepCreated] != 1 || counts[worlds.EventTypeStepStarted] != 2 || counts[worlds.EventTypeStepCompleted] != 1 {
+		t.Fatalf("event counts = %v", counts)
+	}
+}
+
+type flakyInlineInput struct{ Failures int32 }
+type flakyInlineOutput struct{ Attempts int32 }
+
+func (flakyInlineInput) Workflow(flakyInlineOutput) {}
+
+var errFlakyInline = errors.New("flaky inline step")
+
+func TestInlineStepRetriesAFailedAttemptAndThenFails(t *testing.T) {
+	var attempts atomic.Int32
+	world := testworld.New(workflow.Use(func(ctx context.Context, input flakyInlineInput) (flakyInlineOutput, error) {
+		// Retries run with the input recorded by the first attempt.
+		_, err := workflow.InlineStep(ctx, func(ctx context.Context, failures int32) (struct{}, error) {
+			if attempts.Add(1) <= failures {
+				return struct{}{}, errFlakyInline
+			}
+			return struct{}{}, nil
+		}, input.Failures, workflow.StepOptions{MaxRetries: 2})
+		return flakyInlineOutput{Attempts: attempts.Load()}, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+
+	run, err := workflow.Start(ctx, flakyInlineInput{Failures: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Await(ctx)
+	if err != nil || output.Attempts != 3 {
+		t.Fatalf("output = %#v, err = %v, want success on the third attempt", output, err)
+	}
+
+	attempts.Store(0)
+	run, err = workflow.Start(ctx, flakyInlineInput{Failures: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Await(ctx); !errors.Is(err, errFlakyInline) {
+		t.Fatalf("error = %v, want the step's error once retries run out", err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[worlds.EventType]int{}
+	for _, event := range events.Data {
+		counts[event.EventType]++
+	}
+	if counts[worlds.EventTypeStepStarted] != 3 || counts[worlds.EventTypeStepRetrying] != 2 || counts[worlds.EventTypeStepFailed] != 1 {
+		t.Fatalf("event counts = %v", counts)
 	}
 }
 
@@ -717,5 +771,56 @@ func TestInlineStepStorageErrorBeforeStepCreatedRecordsNothing(t *testing.T) {
 		if event.EventType == worlds.EventTypeStepCreated || event.EventType == worlds.EventTypeRunFailed {
 			t.Fatalf("unexpected %s after a failed step_created: %#v", event.EventType, events.Data)
 		}
+	}
+}
+
+func TestInlineStepQueuesItsRetryBeforeRecordingIt(t *testing.T) {
+	var attempts atomic.Int32
+	runner := workflow.Use(func(ctx context.Context, input flakyInlineInput) (flakyInlineOutput, error) {
+		_, err := workflow.InlineStep(ctx, func(ctx context.Context, failures int32) (struct{}, error) {
+			if attempts.Add(1) <= failures {
+				return struct{}{}, errFlakyInline
+			}
+			return struct{}{}, nil
+		}, input.Failures)
+		return flakyInlineOutput{Attempts: attempts.Load()}, err
+	})
+	storageErr := errors.New("storage unavailable")
+	world := &flakyEventWorld{World: testworld.NewManual(runner), eventType: worlds.EventTypeStepRetrying, err: storageErr}
+	world.failures.Store(1)
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, flakyInlineInput{Failures: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := world.QueuedMessages()[0]
+	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+
+	// The attempt fails, its retry flow is queued, and then recording
+	// step_retrying fails.
+	if err := runtime.Execute(ctx, first.Input); !errors.Is(err, storageErr) {
+		t.Fatalf("delivery error = %v, want the storage error", err)
+	}
+	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: first.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if queued := world.QueuedMessages(); len(queued) != 1 || queued[0].Input.NotBefore == nil {
+		t.Fatalf("queued = %#v, want the retry flow", queued)
+	}
+
+	// The retry flow alone finishes the run.
+	for len(world.QueuedMessages()) != 0 {
+		message := world.QueuedMessages()[0]
+		if err := runtime.Execute(ctx, message.Input); err != nil {
+			t.Fatal(err)
+		}
+		if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := run.Await(ctx)
+	if err != nil || output.Attempts != 2 {
+		t.Fatalf("output = %#v, err = %v, want success on the second attempt", output, err)
 	}
 }

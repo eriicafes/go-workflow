@@ -3,6 +3,7 @@ package worlds
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -12,72 +13,47 @@ type (
 	// timer fires, and Cancel makes the timer cancel the run when it fires.
 	DurableWaitOptions struct {
 		Execution *Execution
-		Position  int
 		DueAt     time.Time
 		Cancel    bool
 	}
 
-	// DurableWaitResult is the state of a timer at one replay. Done reports
-	// whether the timer has fired.
+	// DurableWaitResult is a declared timer: its ID, the queue message that
+	// fires it, and any error from declaring it.
 	DurableWaitResult struct {
 		WaitID         WaitID
 		QueueMessageID string
-		Done           bool
 		Err            error
 	}
 )
 
-// DurableWait declares the timer at options.Position. On first execution it
-// queues a delivery for DueAt and records wait_created. On replay it reports
-// Done once the timer has fired, appending wait_completed when the due
-// delivery arrives. A timer with Cancel instead cancels the run when it fires
-// and returns ErrRunCancelled. When the operation recorded at the position is
-// not a timer, it ends the replay with a panic carrying a
-// *replayDivergenceError.
+// DurableWait declares the timer at the next position. On first execution it
+// queues a delivery for DueAt and records wait_created. On replay it matches
+// the recorded declaration, and a flow that reaches the declaration once the
+// timer is due completes it, or cancels the run when Cancel is set. The timer
+// settles when the walk reaches its wait_completed, which Execution.Settled
+// reports. When the operation recorded at the position is not a timer, it ends
+// the replay with a panic carrying a *replayDivergenceError.
 func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitResult {
-	creationIndex, exists := options.Execution.index[options.Position]
+	position := options.Execution.NextPosition()
+	creationIndex, exists := options.Execution.index[position]
 	if !exists {
 		// On first execution, schedule the timer, then persist the queue message
-		// ID with its durable declaration so a later replay can cancel that
-		// schedule.
+		// ID with its durable declaration so a later replay can cancel that schedule.
 		waitID := NewWaitID()
-		data := waitCreatedData{Position: options.Position, DueAt: options.DueAt, Cancel: options.Cancel}
-		queued, err := options.Execution.World().Queue(ctx, QueueInput{
-			RunID:          options.Execution.Run().RunID,
-			NotBefore:      &data.DueAt,
-			IdempotencyKey: string(waitID),
-			DeploymentID:   options.Execution.Run().DeploymentID,
-		})
-		if err != nil {
-			return DurableWaitResult{WaitID: waitID, Err: err}
-		}
+		data := waitCreatedData{Position: position, DueAt: options.DueAt, Cancel: options.Cancel}
+		queued := options.Execution.queue(ctx, QueueInput{NotBefore: &data.DueAt, IdempotencyKey: string(waitID)})
 		data.QueueMessageID = queued.MessageID
 		encoded, err := json.Marshal(data)
 		if err != nil {
 			_ = options.Execution.World().QueueCancel(ctx, QueueCancelInput{MessageID: queued.MessageID})
 			return DurableWaitResult{WaitID: waitID, Err: err}
 		}
-		event := EventsCreateEvent{
-			EventType:     EventTypeWaitCreated,
-			CorrelationID: string(waitID),
-			Data:          encoded,
-		}
-		eventCount := len(options.Execution.events)
-		result, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
-			RunID:   options.Execution.Run().RunID,
-			Event:   event,
-			Options: EventsCreateOptions{EventCount: &eventCount},
-		})
-		if err != nil {
+		// A write that fails or is refused leaves the queued delivery behind.
+		// Cancelling it is best-effort, since an orphan delivery only replays
+		// the run once more.
+		options.Execution.CreateEvent(ctx, EventsCreateEvent{EventType: EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, func(err error) error {
 			_ = options.Execution.World().QueueCancel(ctx, QueueCancelInput{MessageID: queued.MessageID})
-			return DurableWaitResult{WaitID: waitID, Err: err}
-		}
-		options.Execution.Merge(result, Event{
-			RunID:         options.Execution.Run().RunID,
-			EventID:       result.EventID,
-			EventType:     event.EventType,
-			CorrelationID: event.CorrelationID,
-			Data:          event.Data,
+			return err
 		})
 		return DurableWaitResult{WaitID: waitID, QueueMessageID: queued.MessageID}
 	}
@@ -85,7 +61,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeWaitCreated {
-		panic(&replayDivergenceError{Position: options.Position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)})
+		panic(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)})
 	}
 	var data waitCreatedData
 	if err := json.Unmarshal(event.Data, &data); err != nil {
@@ -93,51 +69,28 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	}
 	waitID := WaitID(event.CorrelationID)
 
-	// A recorded completion makes the wait immediately available on replay.
-	for _, event := range options.Execution.events[creationIndex+1:] {
-		if event.EventType == EventTypeWaitCompleted && event.CorrelationID == string(waitID) {
-			return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID, Done: true}
-		}
-	}
-
-	// The scheduled delivery arrived early, so keep the wait unresolved.
-	if time.Now().Before(data.DueAt) {
+	// A flow completes a due timer where it reaches its declaration, which
+	// every replay does, so the timer's own delivery or any later flow
+	// completes it. A due Timeout cancels the run instead.
+	_, completed := options.Execution.settles[string(waitID)]
+	if completed || options.Execution.target != nil || time.Now().Before(data.DueAt) {
 		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
 	}
-
-	// A cancelling wait completes and cancels its run atomically.
 	if data.Cancel {
-		_, err := options.Execution.World().EventsCreateBatch(ctx, EventsCreateBatchInput{RunID: options.Execution.Run().RunID, Events: []EventsCreateEvent{
+		_, err := options.Execution.World().EventsCreateBatch(ctx, EventsCreateBatchInput{RunID: options.Execution.Run().RunID, InBandCount: options.Execution.InBandCount(), Events: []EventsCreateEvent{
 			{EventType: EventTypeWaitCompleted, CorrelationID: string(waitID)},
 			{EventType: EventTypeRunCancelled},
 		}})
-		if err != nil {
-			return DurableWaitResult{WaitID: waitID, Err: err}
+		switch {
+		case errors.Is(err, ErrInBandSuperseded):
+			panic(errReplaySuperseded)
+		case err != nil && !errors.Is(err, ErrRunTerminal):
+			panic(deliveryError{cause: err})
 		}
-		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID, Err: ErrRunCancelled}
+		panic(ErrRunCancelled)
 	}
-
-	// Otherwise this root delivery records completion and continues replay.
-	writeEvent := EventsCreateEvent{
-		EventType:     EventTypeWaitCompleted,
-		CorrelationID: string(waitID),
-	}
-	eventCount := len(options.Execution.events)
-	result, err := options.Execution.World().EventsCreate(ctx, EventsCreateInput{
-		RunID:   options.Execution.Run().RunID,
-		Event:   writeEvent,
-		Options: EventsCreateOptions{EventCount: &eventCount},
-	})
-	if err != nil {
-		return DurableWaitResult{WaitID: waitID, Err: err}
-	}
-	options.Execution.Merge(result, Event{
-		RunID:         options.Execution.Run().RunID,
-		EventID:       result.EventID,
-		EventType:     writeEvent.EventType,
-		CorrelationID: writeEvent.CorrelationID,
-	})
-	return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID, Done: true}
+	options.Execution.CreateEvent(ctx, EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
+	return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
 }
 
 type waitCreatedData struct {

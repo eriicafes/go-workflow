@@ -82,7 +82,7 @@ settles, so no other hook can take it in the meantime.
 | Method | Description |
 | --- | --- |
 | `Await(ctx)` | Payload, suspending until resumed. Returns `ErrHookConflict`, `ErrHookForceClaimed`, or `ErrHookNotRegistered` when applicable. |
-| `Done(ctx)` | Whether the hook has settled: received a payload, was cancelled, or failed to be created. Never suspends and never returns the hook's error; `Await` does. |
+| `Done(ctx)` | Whether the hook has settled (received a payload, was cancelled, or failed to be created) as of the results [delivered so far](/guide/replay#delivering-results-in-order). Never suspends and never returns the hook's error; `Await` does. |
 | `Cancel(ctx)` | Disposes of the hook so it no longer accepts a payload. |
 | `Unwrap(ctx)` | `Await`, panicking on error. |
 | `ID()` | Hook ID, or `""` before the hook is created. |

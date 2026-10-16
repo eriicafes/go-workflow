@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/oklog/ulid/v2"
@@ -152,6 +153,12 @@ type StreamID string
 // event's position in the log (see EventIDForSlot and EventSlot).
 type EventID string
 
+// NewChildRunID returns the ID of the run started by step stepID. It shares the
+// step ID's ULID, so every attempt of the step derives the same run ID.
+func NewChildRunID(stepID StepID) RunID {
+	return RunID("wrun_" + strings.TrimPrefix(string(stepID), "step_"))
+}
+
 // NewRunID returns a new unique run ID.
 func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
 
@@ -216,45 +223,14 @@ type (
 // selects every pending wait. It returns the number of waits it completed and
 // queues nothing when that number is zero.
 func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []string) (int, error) {
-	created := make(map[string]struct{})
-	completed := make(map[string]struct{})
-	page, err := world.EventsList(ctx, EventsListInput{RunID: runID})
+	pending, err := PendingWaits(ctx, world, runID)
 	if err != nil {
 		return 0, err
 	}
-	for {
-		for _, event := range page.Data {
-			switch event.EventType {
-			case EventTypeWaitCreated:
-				created[event.CorrelationID] = struct{}{}
-			case EventTypeWaitCompleted:
-				completed[event.CorrelationID] = struct{}{}
-			}
-		}
-		if !page.HasMore {
-			break
-		}
-		page, err = world.EventsList(ctx, EventsListInput{RunID: runID, Pagination: Pagination{Cursor: page.Cursor}})
-		if err != nil {
-			return 0, err
-		}
-	}
 	count := 0
-	for waitID := range created {
-		if _, ok := completed[waitID]; ok {
+	for _, waitID := range pending {
+		if len(correlationIDs) != 0 && !slices.Contains(correlationIDs, waitID) {
 			continue
-		}
-		if len(correlationIDs) != 0 {
-			found := false
-			for _, correlationID := range correlationIDs {
-				if correlationID == waitID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
 		}
 		if _, err := world.EventsCreate(ctx, EventsCreateInput{
 			RunID: runID,
@@ -276,6 +252,42 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	}
 	_, err = world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: "wake:" + string(runID), DeploymentID: deploymentID})
 	return count, err
+}
+
+// PendingWaits returns the IDs of run runID's waits that have not completed,
+// in the order they were created.
+func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, error) {
+	var created []string
+	completed := make(map[string]struct{})
+	var cursor Pagination
+	for {
+		page, err := world.EventsList(ctx, EventsListInput{
+			RunID:      runID,
+			Pagination: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range page.Data {
+			switch event.EventType {
+			case EventTypeWaitCreated:
+				created = append(created, event.CorrelationID)
+			case EventTypeWaitCompleted:
+				completed[event.CorrelationID] = struct{}{}
+			}
+		}
+		if !page.HasMore {
+			break
+		}
+		cursor = Pagination{Cursor: page.Cursor}
+	}
+	pending := created[:0]
+	for _, waitID := range created {
+		if _, ok := completed[waitID]; !ok {
+			pending = append(pending, waitID)
+		}
+	}
+	return pending, nil
 }
 
 // ResumeHook appends payload to hook as a hook_received event and queues a

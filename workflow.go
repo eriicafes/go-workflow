@@ -51,7 +51,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -108,7 +108,7 @@ type workflow[Out any] interface{ Workflow(Out) }
 // Get return one. Run implements Promise.
 //
 // A Run started in workflow context is a child run. In workflow context, every
-// Run method reads or changes the run once in a step and replay returns the
+// Run method reads or changes the run once in an inline step and replay returns the
 // recorded result, so a method does not wait for the run to finish. Await
 // returns ErrRunNotFinished for a run that had not finished when it was called.
 // To wait for a child run, create a hook and have the child resume it.
@@ -126,7 +126,7 @@ func (r *Run[Out]) Status(ctx context.Context) (Status, error) {
 	var status Status
 	var err error
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		status, err = Step(ctx, runStatus, r.id)
+		status, err = InlineStep(ctx, runStatus, r.id)
 	} else {
 		status, err = runStatus(NewContext(ctx, r.client), r.id)
 	}
@@ -151,7 +151,7 @@ func runStatus(ctx context.Context, runID worlds.RunID) (Status, error) {
 // Exists reports whether the run is recorded in its World.
 func (r *Run[Out]) Exists(ctx context.Context) (bool, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return Step(ctx, runExists, r.id)
+		return InlineStep(ctx, runExists, r.id)
 	}
 	return runExists(NewContext(ctx, r.client), r.id)
 }
@@ -174,7 +174,7 @@ func (r *Run[Out]) WorkflowName(ctx context.Context) (string, error) {
 	var name string
 	var err error
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		name, err = Step(ctx, runWorkflowName, r.id)
+		name, err = InlineStep(ctx, runWorkflowName, r.id)
 	} else {
 		name, err = runWorkflowName(NewContext(ctx, r.client), r.id)
 	}
@@ -212,9 +212,35 @@ func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, err
 		option = options[len(options)-1]
 	}
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return Step(ctx, runWakeUp, worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
+		// Record which waits to wake before waking them, so a retried wake
+		// does not reach waits the run created since.
+		waitIDs, err := InlineStep(ctx, runPendingWaits, worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
+		if err != nil || len(waitIDs) == 0 {
+			return 0, err
+		}
+		return InlineStep(ctx, runWakeUp, worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: waitIDs})
 	}
 	return runWakeUp(NewContext(ctx, r.client), worlds.ClientRunsWakeInput{RunID: r.id, CorrelationIDs: option.CorrelationIDs})
+}
+
+// runPendingWaits returns the pending waits of input.RunID that WakeUp would
+// wake, in workflow context, where the run is in the execution's World.
+func runPendingWaits(ctx context.Context, input worlds.ClientRunsWakeInput) ([]string, error) {
+	execution, ok := worlds.ExecutionFromContext(ctx)
+	if !ok {
+		return nil, ErrNoWorkflow
+	}
+	pending, err := worlds.PendingWaits(ctx, execution.World(), input.RunID)
+	if err != nil || len(input.CorrelationIDs) == 0 {
+		return pending, err
+	}
+	selected := []string{}
+	for _, waitID := range pending {
+		if slices.Contains(input.CorrelationIDs, waitID) {
+			selected = append(selected, waitID)
+		}
+	}
+	return selected, nil
 }
 
 func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, error) {
@@ -232,7 +258,7 @@ func (r *Run[Out]) Done(ctx context.Context) (bool, error) {
 	var run worlds.Run
 	var err error
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		run, err = Step(ctx, runDone, r.id)
+		run, err = InlineStep(ctx, runDone, r.id)
 	} else {
 		run, err = runDone(NewContext(ctx, r.client), r.id)
 	}
@@ -262,17 +288,28 @@ func runDone(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 // run's error as an *Error when the run failed and ErrRunCancelled when it was
 // cancelled.
 //
-// In a run, in workflow or step context, Await reads the run once and returns
-// ErrRunNotFinished when the run had not finished. Outside a run, it blocks
-// until the run finishes or ctx is done.
+// In workflow context, Await reads the run once and returns ErrRunNotFinished
+// when the run had not finished, so replay stays deterministic. In step context
+// and outside a run, it blocks until the run finishes or ctx is done.
 func (r *Run[Out]) Await(ctx context.Context) (Out, error) {
 	var zero Out
 	var run worlds.Run
 	var err error
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		run, err = Step(ctx, runAwait, r.id)
+		run, err = InlineStep(ctx, runAwait, r.id)
 	} else {
-		run, err = runAwait(NewContext(ctx, r.client), r.id)
+		for {
+			run, err = r.client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: r.id, Timeout: clientWait})
+			if err != nil || run.Status.Terminal() {
+				break
+			}
+			timer := time.NewTimer(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			case <-timer.C:
+			}
+		}
 	}
 	switch {
 	case err != nil:
@@ -298,27 +335,12 @@ func runAwait(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 	if err != nil {
 		return worlds.Run{}, err
 	}
-	if _, ok := worlds.ExecutionFromContext(ctx); ok {
-		run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-		if errors.Is(err, worlds.ErrRunNotFound) {
-			return worlds.Run{}, nil
-		}
-		run.Input = nil
-		return run, err
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return worlds.Run{}, nil
 	}
-	for {
-		run, err := client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: clientWait})
-		if err != nil || run.Status.Terminal() {
-			return run, err
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return worlds.Run{}, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	run.Input = nil
+	return run, err
 }
 
 // Unwrap is like Await but panics if Await returns an error.
@@ -334,7 +356,7 @@ func (r *Run[Out]) Unwrap(ctx context.Context) Out {
 // no-op.
 func (r *Run[Out]) Cancel(ctx context.Context) error {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		_, err := Step(ctx, runCancel, r.id)
+		_, err := InlineStep(ctx, runCancel, r.id)
 		return err
 	}
 	_, err := runCancel(NewContext(ctx, r.client), r.id)
@@ -413,7 +435,7 @@ func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out],
 		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
 	}
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := Step(ctx, startChild, childStartInput{WorkflowName: name, Input: raw})
+		id, err := InlineStep(ctx, startChild, childStartInput{WorkflowName: name, Input: raw})
 		if err != nil {
 			return nil, err
 		}
@@ -431,9 +453,11 @@ type childStartInput struct {
 	Input        json.RawMessage
 }
 
-// startChild is the step Start uses in workflow context. It creates the child
-// run and queues its first delivery. The child run ID is derived from the
-// step ID, so a retried step finds the run an earlier attempt created.
+// startChild is the inline step Start uses in workflow context. It creates the
+// child run, pinned to the deployment executing the parent, and queues its
+// first delivery. The child run ID comes from worlds.NewChildRunID, so a retried
+// attempt finds the run an earlier attempt created and queues its first
+// delivery again while it has not started.
 func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error) {
 	execution, ok := worlds.ExecutionFromContext(ctx)
 	if !ok {
@@ -444,9 +468,11 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 	if root == "" {
 		root = string(parent.RunID)
 	}
-	id := worlds.RunID("wrun_" + strings.TrimPrefix(StepID(ctx), "step_"))
+	id := worlds.NewChildRunID(worlds.StepID(StepID(ctx)))
+	deploymentID := execution.World().DeploymentID()
 	_, err := execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
 		RunID:        id,
+		DeploymentID: deploymentID,
 		WorkflowName: input.WorkflowName,
 		Input:        input.Input,
 		Attributes: map[string]string{
@@ -455,14 +481,15 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 		},
 	})
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
-		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id})
+		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})
 		if err != nil || run.Status != worlds.StatusPending {
 			return id, err
 		}
+		deploymentID = run.DeploymentID
 	} else if err != nil {
 		return "", err
 	}
-	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, IdempotencyKey: string(id)}); err != nil {
+	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, IdempotencyKey: string(id), DeploymentID: deploymentID}); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -518,9 +545,5 @@ func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) st
 }
 
 func rollbackFunctionIdentity[In any](fn func(context.Context, In) error) string {
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-}
-
-func inlineFunctionIdentity[Out any](fn func(context.Context) Out) string {
 	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }

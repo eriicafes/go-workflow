@@ -28,8 +28,10 @@ This is the simplest option: one run, one event log, one result.
 ## Starting a child run
 
 `workflow.Start` in workflow context starts a **child run**. The child is
-started in a step, so replay returns the same run, and it carries two
-attributes:
+started in an [inline step](/guide/steps#inline-steps), so replay returns the
+same run. Its ID is derived from that recorded step, so calling it again never
+starts a second child. It is pinned to the deployment executing the parent, and
+it carries two attributes:
 
 | Attribute | Value |
 | --- | --- |
@@ -41,8 +43,8 @@ workers, and can outlive its parent.
 
 ### Waiting for a child
 
-In workflow context, `Run` methods read or change the run once in a step and
-replay returns the recorded result, so they never wait. `Run.Await` returns
+In workflow context, `Run` methods read or change the run once in an inline
+step and replay returns the recorded result, so they never wait. `Run.Await` returns
 `workflow.ErrRunNotFinished` for a child that had not finished.
 
 To wait for a child, pass it a hook token and have it resume the hook when it

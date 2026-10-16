@@ -436,3 +436,437 @@ func TestDeploymentAffinityAddressesHookResumesToTheRunsDeployment(t *testing.T)
 		t.Fatalf("resume delivery = %#v", queued)
 	}
 }
+
+// deliverStep executes and acknowledges the queued delivery of the step whose
+// function name ends in name.
+func deliverStep(t *testing.T, ctx context.Context, world *testworld.World, runtime *worlds.Runtime, runID worlds.RunID, name string) {
+	t.Helper()
+	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, step := range steps.Data {
+		if !strings.HasSuffix(step.StepName, name) {
+			continue
+		}
+		for _, message := range world.QueuedMessages() {
+			if message.Input.StepID == nil || *message.Input.StepID != step.StepID {
+				continue
+			}
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatalf("no queued delivery for step %s", name)
+}
+
+type raceInput struct{}
+type raceOutput struct{ Winner string }
+
+func (raceInput) Workflow(raceOutput) {}
+
+func lookupFirst(context.Context, struct{}) (string, error)  { return "first", nil }
+func lookupSecond(context.Context, struct{}) (string, error) { return "second", nil }
+func announceFirst(context.Context, string) (string, error)  { return "first", nil }
+func announceSecond(context.Context, string) (string, error) { return "second", nil }
+
+// race announces the lookup that finishes first, through a step named after
+// it, so a replay that picked another winner would diverge.
+func race(ctx context.Context, _ raceInput) (raceOutput, error) {
+	first := workflow.Background(ctx, lookupFirst, struct{}{})
+	second := workflow.Background(ctx, lookupSecond, struct{}{})
+	winner, err := workflow.Select(ctx, first, second)
+	if err != nil {
+		return raceOutput{}, err
+	}
+
+	value, err := winner.Await(ctx)
+	if err != nil {
+		return raceOutput{}, err
+	}
+
+	announce := announceFirst
+	if value == "second" {
+		announce = announceSecond
+	}
+	announced, err := workflow.Step(ctx, announce, value)
+	return raceOutput{Winner: announced}, err
+}
+
+func TestSelectKeepsTheFirstPromiseToSettleAcrossReplays(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	world := testworld.NewManual()
+	defer world.Close()
+
+	runtime := worlds.NewRuntime(world, worlds.Runners(workflow.Use(race)))
+	client := workflow.NewContext(ctx, workflow.NewClient(world))
+	run, err := workflow.Start(client, raceInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runID := worlds.RunID(run.ID())
+
+	// The second lookup finishes first, and the flow announces it.
+	deliverNext(t, ctx, world, runtime)
+	deliverStep(t, ctx, world, runtime, runID, "lookupSecond")
+	deliverNext(t, ctx, world, runtime)
+
+	// Once both lookups have finished, later replays still pick the second,
+	// although it comes after the first in argument order.
+	drain(t, ctx, world, runtime)
+
+	output, err := run.Await(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if output.Winner != "second" {
+		t.Fatalf("winner = %q, want second", output.Winner)
+	}
+}
+
+type nudgeInput struct{ Token string }
+type nudgeOutput struct {
+	Nudged bool
+	Value  string
+}
+
+func (nudgeInput) Workflow(nudgeOutput) {}
+
+func prepare(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }
+func nudge(context.Context, struct{}) (struct{}, error)   { return struct{}{}, nil }
+
+// awaitWithNudge sends a nudge when the hook has not been resumed by the time
+// the preparation step finishes.
+func awaitWithNudge(ctx context.Context, input nudgeInput) (nudgeOutput, error) {
+	hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+	if err != nil {
+		return nudgeOutput{}, err
+	}
+
+	if _, err := workflow.Step(ctx, prepare, struct{}{}); err != nil {
+		return nudgeOutput{}, err
+	}
+
+	var output nudgeOutput
+	if done, _ := hook.Done(ctx); !done {
+		if _, err := workflow.Step(ctx, nudge, struct{}{}); err != nil {
+			return nudgeOutput{}, err
+		}
+
+		output.Nudged = true
+	}
+
+	output.Value, err = hook.Await(ctx)
+	return output, err
+}
+
+func TestDoneGivesTheSameAnswerOnEveryReplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	world := testworld.NewManual()
+	defer world.Close()
+
+	runtime := worlds.NewRuntime(world, worlds.Runners(workflow.Use(awaitWithNudge)))
+	client := workflow.NewContext(ctx, workflow.NewClient(world))
+	token := workflow.NewHookToken()
+	run, err := workflow.Start(client, nudgeInput{Token: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The preparation finishes before the hook is resumed, so the flow nudges.
+	deliverNext(t, ctx, world, runtime)
+	deliverNext(t, ctx, world, runtime)
+	deliverNext(t, ctx, world, runtime)
+
+	// The hook is resumed afterwards. Later replays must still see it as not
+	// done where the runner checked it, and keep the nudge.
+	if err := workflow.ResumeHook(client, token, "approved"); err != nil {
+		t.Fatal(err)
+	}
+
+	drain(t, ctx, world, runtime)
+
+	output, err := run.Await(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !output.Nudged || output.Value != "approved" {
+		t.Fatalf("output = %+v, want nudged and approved", output)
+	}
+}
+
+// racingWorld lets another flow declare the same step just before this flow's
+// first in-band step_created, as a concurrent delivery of the run would.
+type racingWorld struct {
+	*testworld.World
+	raced bool
+}
+
+func (w *racingWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if !w.raced && input.Options.InBandCount != nil && input.Event.EventType == worlds.EventTypeStepCreated {
+		w.raced = true
+		other := input
+		other.Event.CorrelationID = "step_other_flow"
+		other.Options.EventCount = nil
+		if _, err := w.World.EventsCreate(ctx, other); err != nil {
+			return worlds.EventResult{}, err
+		}
+
+		stepID := worlds.StepID("step_other_flow")
+		if _, err := w.World.Queue(ctx, worlds.QueueInput{RunID: input.RunID, StepID: &stepID}); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
+	return w.World.EventsCreate(ctx, input)
+}
+
+func TestSupersededFlowReplaysInsteadOfDuplicatingDeclarations(t *testing.T) {
+	resetCalls()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	world := testworld.NewManual()
+	defer world.Close()
+
+	racing := &racingWorld{World: world}
+	runtime := worlds.NewRuntime(racing, worlds.Runners(workflow.Use(alphaThenBeta)))
+	run := startVersioned(t, ctx, world)
+	drain(t, ctx, world, runtime)
+
+	output, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if output.Version != "v1" {
+		t.Fatalf("version = %q", output.Version)
+	}
+
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	declared := map[string]int{}
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeStepCreated {
+			declared[event.CorrelationID]++
+		}
+	}
+	if len(declared) != 2 || declared["step_other_flow"] != 1 {
+		t.Fatalf("declared steps = %v, want the other flow's step and beta", declared)
+	}
+
+	if alphaCalls.Load() != 1 {
+		t.Fatalf("alpha calls = %d, want 1", alphaCalls.Load())
+	}
+}
+
+// lossyWorld fails the first step delivery it is asked to queue, after the
+// flow has recorded the step.
+type lossyWorld struct {
+	*testworld.World
+	failed bool
+}
+
+var errQueueUnavailable = errors.New("queue unavailable")
+
+func (w *lossyWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	if !w.failed && input.StepID != nil {
+		w.failed = true
+		return worlds.QueueResult{}, errQueueUnavailable
+	}
+	return w.World.Queue(ctx, input)
+}
+
+func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
+	resetCalls()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+
+	lossy := &lossyWorld{World: world}
+	runtime := worlds.NewRuntime(lossy, worlds.Runners(workflow.Use(alphaThenBeta)))
+	run := startVersioned(t, ctx, world)
+	delivery := world.QueuedMessages()[0]
+
+	// The flow records alpha, then fails to queue it, so the delivery fails.
+	if err := runtime.Execute(ctx, delivery.Input); !errors.Is(err, errQueueUnavailable) {
+		t.Fatalf("delivery error = %v, want the queue error", err)
+	}
+
+	// Its redelivery finds alpha recorded but never started, and queues it.
+	if err := runtime.Execute(ctx, delivery.Input); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if queued := world.QueuedMessages(); len(queued) != 1 || queued[0].Input.StepID == nil {
+		t.Fatalf("queued = %#v, want alpha's delivery", queued)
+	}
+
+	drain(t, ctx, world, runtime)
+	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
+		t.Fatal(err)
+	}
+	if alphaCalls.Load() != 1 {
+		t.Fatalf("alpha calls = %d, want 1", alphaCalls.Load())
+	}
+}
+
+func TestSupersededFlowQueuesOneFollowUpAndAcknowledges(t *testing.T) {
+	resetCalls()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	world := testworld.NewManual()
+	defer world.Close()
+
+	racing := &racingWorld{World: world}
+	runtime := worlds.NewRuntime(racing, worlds.Runners(workflow.Use(alphaThenBeta)))
+	run := startVersioned(t, ctx, world)
+	deliverNext(t, ctx, world, runtime)
+
+	followUps := 0
+	for _, message := range world.QueuedMessages() {
+		if strings.HasPrefix(message.Input.IdempotencyKey, "superseded:") {
+			followUps++
+			if message.Input.StepID != nil || message.Input.NotBefore != nil {
+				t.Fatalf("follow-up = %#v, want an immediate flow", message.Input)
+			}
+		}
+	}
+	if followUps != 1 {
+		t.Fatalf("follow-ups = %d, want 1", followUps)
+	}
+
+	drain(t, ctx, world, runtime)
+	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type sleeperInput struct{}
+type sleeperOutput struct{}
+
+func (sleeperInput) Workflow(sleeperOutput) {}
+
+func sleepAnHour(ctx context.Context, _ sleeperInput) (sleeperOutput, error) {
+	return sleeperOutput{}, workflow.Sleep(ctx, time.Hour)
+}
+
+// refusingWorld refuses the first in-band wait_created as if another flow had
+// written first, without appending it.
+type refusingWorld struct {
+	*testworld.World
+	refused bool
+}
+
+func (w *refusingWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if !w.refused && input.Options.InBandCount != nil && input.Event.EventType == worlds.EventTypeWaitCreated {
+		w.refused = true
+		return worlds.EventResult{}, worlds.ErrInBandSuperseded
+	}
+	return w.World.EventsCreate(ctx, input)
+}
+
+func TestRefusedWaitCancelsItsQueuedTimer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	world := testworld.NewManual()
+	defer world.Close()
+
+	refusing := &refusingWorld{World: world}
+	runtime := worlds.NewRuntime(refusing, worlds.Runners(workflow.Use(sleepAnHour)))
+	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), sleeperInput{}); err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, world, runtime)
+	if !refusing.refused {
+		t.Fatal("wait_created was not refused")
+	}
+	for _, message := range world.QueuedMessages() {
+		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
+			t.Fatalf("the refused wait left its timer queued: %#v", message.Input)
+		}
+	}
+
+	// The follow-up replays and declares the wait once.
+	deliverNext(t, ctx, world, runtime)
+	timers := 0
+	for _, message := range world.QueuedMessages() {
+		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
+			timers++
+		}
+	}
+	if timers != 1 {
+		t.Fatalf("timers = %d, want 1", timers)
+	}
+}
+
+type backoffInput struct{}
+type backoffOutput struct{}
+
+func (backoffInput) Workflow(backoffOutput) {}
+
+func failForAnHour(context.Context, struct{}) (struct{}, error) {
+	return struct{}{}, workflow.RetryableError(errors.New("not yet"), time.Hour)
+}
+
+func awaitBackoff(ctx context.Context, _ backoffInput) (backoffOutput, error) {
+	_, err := workflow.Step(ctx, failForAnHour, struct{}{}, workflow.StepOptions{MaxRetries: 1})
+	return backoffOutput{}, err
+}
+
+func TestSuspendingFlowLeavesARetryThatIsNotDueQueuedOnce(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := worlds.NewRuntime(world, worlds.Runners(workflow.Use(awaitBackoff)))
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), backoffInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, world, runtime) // declares the step
+	deliverNext(t, ctx, world, runtime) // fails it and queues the retry in an hour
+
+	// Another flow suspends on the step while its retry is not yet due.
+	flow, err := world.Queue(ctx, worlds.QueueInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: worlds.RunID(run.ID())}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: flow.MessageID}); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := 0
+	for _, message := range world.QueuedMessages() {
+		if message.Input.StepID != nil {
+			steps++
+		}
+	}
+	if steps != 1 {
+		t.Fatalf("step deliveries = %d, want only the retry", steps)
+	}
+}

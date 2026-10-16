@@ -44,6 +44,32 @@ After three re-routes, or when the World returns `ErrDeploymentUnavailable`,
 the run fails with an error matching `ErrDeploymentMismatch`. See
 [Pinning runs to a deployment](/guide/replay#pinning-runs-to-a-deployment).
 
+A flow whose write another flow superseded (`ErrInBandSuperseded`) queues one
+follow-up flow delivery right away and acknowledges its own. Flows refused by
+the same write share that follow-up. See
+[Concurrent flows](/guide/replay#concurrent-flows).
+
+A storage error while declaring a step, timer, or hook, or while cancelling a
+promise or hook, ends the delivery so the queue retries it, instead of reaching
+runner code.
+
+When a flow replays past a step's declaration, it queues the step's delivery
+again if the step hasn't started since it was declared or last scheduled for a
+retry, in case a crash or queue error lost the first one. This covers steps
+started with `Background` that nothing awaits. The re-queue uses the step ID as
+its idempotency key. A step waiting for a retry that isn't due yet is
+left alone, since its own queued retry runs it; once the retry time has passed
+without a start, it is re-queued like any unstarted step. Steps declared in the
+same replay are skipped, and inline steps never need it. If the re-queue fails,
+the flow delivery fails so the queue retries it. Local and Postgres drop the
+duplicate while the original delivery is still queued; AWS and Vercel don't
+deduplicate, so a step waiting to start may be delivered twice, which its
+at-least-once contract already allows. The Workflow SDK re-ensures pending
+steps on replay the same way.
+
+Timers settle the same way: a flow that replays past a timer's declaration
+once it is due completes it, or, for a due `Timeout`, cancels the run.
+
 ## World
 
 ```go
@@ -94,6 +120,15 @@ World reports affinity.
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
 | `HooksClaim` | Atomically claims a token and appends `hook_created`, optionally forcing. |
 
+**In-band fence.** An append whose `EventsCreateOptions.InBandCount` (or
+`EventsCreateBatchInput.InBandCount`) is set is an in-band write by the run's
+orchestrator. The World appends it only when `Run.InBandCount` still equals that
+count, advances the count by the events appended, and returns it as
+`EventResult.InBandCount`. Otherwise it appends nothing and returns
+`ErrInBandSuperseded`. Appends without a count are out-of-band: never refused,
+and they leave the count alone. See
+[Concurrent flows](/guide/replay#concurrent-flows).
+
 Lists take `Pagination{Cursor, Limit, SortOrder}` and return
 `Page[T]{Data, Cursor, HasMore}`. `ResolveData` selects whether payloads
 (inputs, outputs, hook metadata) are returned.
@@ -110,6 +145,7 @@ type Run struct {
 	Error        []byte // JSON Error; DecodeError decodes it
 	Attributes   map[string]string
 	DeploymentID string // the deployment the run is pinned to
+	InBandCount  int    // events appended by the run's orchestrator, which fence its writes
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
@@ -198,20 +234,38 @@ an unknown message. A World with deployment affinity returns an error wrapping
 
 ## Client
 
-`Client` is the API outside a run. `workflow.Client` is an alias.
+`Client` is the API outside a run. `workflow.Client` is an alias. Its first
+methods are shared with the World:
+
+| Method | Description |
+| --- | --- |
+| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes` | Read runs and change their attributes. |
+| `StepsGet`, `StepsList` | Read steps. |
+| `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
+| `StreamsCreateWriteSession` | Open an exclusive writer session. |
+| `HooksGetByToken` | Look up an active hook. |
+| `Analytics` | As on World. |
+
+The rest are the Client's own:
 
 | Method | Description |
 | --- | --- |
 | `RunsCreate` | Starts a run and queues its first delivery; returns the run ID. |
-| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus` | Read runs. |
 | `RunsCancel` | Cancels a run; `ErrRunTerminal` if finished. |
 | `RunsWake` | Settles pending waits early. |
-| `RunsSetAttributes` | Changes attributes. |
-| `StepsGet`, `StepsList` | Read steps. |
-| `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
-| `StreamsCreateWriteSession`, `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams. |
-| `HooksGetByToken`, `HooksResume` | Look up and resume hooks. |
-| `Analytics`, `Capabilities` | As on World. |
+| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams without a session. |
+| `HooksResume` | Resumes the hook that owns a token. |
+| `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
+
+```go
+type ClientSpec struct {
+	SpecVersion  int
+	Capabilities Capabilities
+}
+```
+
+`Spec` takes a context and returns an error, because the HTTP client asks the
+World for it over RPC. The HTTP client caches a successful result.
 
 ```go
 func NewClient(world World) Client
@@ -235,15 +289,26 @@ See [HTTP Endpoints](/reference/http).
 
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced
-integrations.
+integrations. Each takes the runner's next position itself, with
+`Execution.NextPosition`, so callers declare operations in order without passing
+positions.
 
 | Function | Description |
 | --- | --- |
-| `DurableStep` | Declares a step at a position; records it, replays its result, or executes it. |
-| `DurableInlineStep` | Records an inline step's result. |
+| `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
+| `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
 | `DurableWait` | Declares a timer; with `Cancel` it cancels the run when it fires. |
-| `DurableHook` | Creates a hook and claims its token, or returns its recorded state. |
-| `WakeRun` | Completes pending waits and queues a delivery. |
+| `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. |
+| `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
+| `Execution.Select` | Walk the log until one of several operations has settled, or the log ends; reports which. |
+| `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued; other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
+| `Execution.ClaimHook` | Claim a hook's token and append `hook_created`, fenced and handled like `CreateEvent`. A forced claim also queues a delivery that wakes the displaced run on its deployment. `ErrHookConflict` reaches `mapError`. |
+| `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
+| `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |
+| `WakeRun` | Completes pending waits in log order and queues a delivery. |
+| `PendingWaits` | The IDs of a run's pending waits, in creation order. |
+| `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
+| `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
 | `ExecutionFromContext` | The replay state of the current delivery. |
 
 ## Errors
@@ -269,6 +334,7 @@ integrations.
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
 | `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |
 | `ErrDeploymentUnavailable` | `Queue` addressed a deployment that no longer exists. |
+| `ErrInBandSuperseded` | An in-band write's count is stale because another flow wrote to the run first. |
 | `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
 
 ```go

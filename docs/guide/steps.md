@@ -113,23 +113,60 @@ Inside a step function, the context belongs to the step:
 
 ## Inline steps
 
-`workflow.InlineStep` records the result of a function that cannot fail, such as
-a generated ID or a random choice, without a separate step delivery.
+`workflow.InlineStep` runs a short function as a step **inside the flow**,
+without a separate step delivery, and records its result. Use it for quick work
+such as generating an ID or reading another run. Its result is available right
+where you call it, with no extra delivery round trip.
+
+`InlineStep` takes the same arguments as `Step`: a named step function, its
+input, and optional `StepOptions`. The input is recorded, and every attempt runs
+with the recorded input.
+
+This generates an order ID once; every replay returns the recorded ID:
 
 ```go
-orderID, err := workflow.InlineStep(ctx, newOrderID)
+orderID, err := workflow.InlineStep(ctx, newOrderID, struct{}{})
 if err != nil {
 	return Result{}, err
 }
 
-func newOrderID(ctx context.Context) string {
-	return ulid.Make().String()
+func newOrderID(ctx context.Context, _ struct{}) (string, error) {
+	return ulid.Make().String(), nil
 }
 ```
 
-`fn` runs once in the flow and its result is recorded as a step, so replay
-returns the recorded value. Unlike `Step`, `fn` cannot return an error. If the
-result cannot be recorded, the delivery is retried and `fn` runs again. Use
-`Step` for anything that can fail.
+`fn` can fail, and failures are retried like a step's: three retries by
+default, `StepOptions` to change that, `FatalError` to fail at once, and
+`RetryableError` to delay the next attempt. A failed attempt is recorded and
+suspends the run, and a flow delivery is queued for when the retry is due; that
+replay starts the next attempt. Retries never run back to back in the same
+delivery. When retries run out, `InlineStep` returns
+the error as a [`*workflow.Error`](/guide/errors).
+
+This reads a price that may be briefly unavailable, retrying up to five times:
+
+```go
+price, err := workflow.InlineStep(ctx, currentPrice, input.SKU, workflow.StepOptions{MaxRetries: 5})
+if err != nil {
+	return Result{}, err
+}
+
+func currentPrice(ctx context.Context, sku string) (int, error) {
+	return pricing.Current(ctx, sku)
+}
+```
+
+Inline steps suit work that is short, rarely fails, and is idempotent or free
+of side effects, like reading the time or another run. If a delivery stops
+before an attempt's result is recorded, the next replay simply starts another
+attempt, and if two flows run it at once, the first to record a result wins. Use `Step`
+for anything long, failure-prone, or with side effects that must not repeat. If
+the World fails to record the step, the whole delivery is retried.
+
+Each attempt records `step_started` and then its outcome: `step_completed`,
+`step_retrying`, or `step_failed`. On the happy path an inline step writes
+`step_created`, `step_started`, and `step_completed`. `workflow.Now` is an inline
+step too, with one attempt. A step delivery never runs
+an inline step: if it reaches one that hasn't settled, it suspends.
 
 In step context, `InlineStep` calls `fn` without recording it.

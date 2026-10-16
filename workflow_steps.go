@@ -48,7 +48,6 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 	option := stepOptions(options)
 	durable := worlds.DurableStep(ctx, worlds.DurableStepOptions{
 		Execution:  execution,
-		Position:   execution.NextPosition(),
 		Name:       functionIdentity(fn),
 		MaxRetries: option.MaxRetries,
 		RetryAfter: func(cause error, attempt int) *time.Time {
@@ -56,39 +55,50 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 		},
 	}, fn, input)
 	return &promise[Out]{
-		data:      durable.Data,
-		done:      durable.Done,
 		err:       durable.Err,
 		execution: execution,
-		stepID:    durable.StepID,
+		id:        string(durable.StepID),
+		outcome: func() (Out, error) {
+			return worlds.StepOutcome[Out](execution, durable.StepID)
+		},
+		stepID: durable.StepID,
 	}
 }
 
-// InlineStep calls fn once in workflow context and records its result as a
-// step, so replay returns the recorded result instead of calling fn again. The
-// step is identified by fn's function name and its position in the runner. It
-// returns ErrNoWorkflow outside a run.
+// InlineStep calls the step fn with input in workflow context, without a step
+// delivery, and records its result, so replay returns the recorded result
+// instead of calling fn again. Like Step, the step is identified by fn's
+// function name and its position in the runner, records input, and is retried
+// on error according to options, where the last option applies and the
+// default allows 3 retries. It returns the step's final error as an *Error,
+// and ErrNoWorkflow outside a run.
 //
-// Unlike Step, InlineStep runs in the flow without a step delivery, and fn
-// cannot fail. Use it for results such as a generated ID or a random choice,
-// and use Step for work that can fail. When the result cannot be recorded, the
-// delivery is retried and calls fn again.
+// A retry suspends the run and runs on a later replay once it is due. Use
+// InlineStep for short work that rarely fails, such as generating an ID or
+// reading another run, and Step for anything else. fn is executed at least
+// once, and a delivery that stopped before recording its result calls it
+// again, so it should be idempotent or free of side effects. A World error
+// while recording the step retries the delivery.
 //
 // In step context, InlineStep calls fn without recording it.
-func InlineStep[Out any](ctx context.Context, fn func(context.Context) Out) (Out, error) {
+func InlineStep[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
 		if _, inStep := worlds.ExecutionFromContext(ctx); inStep {
-			return fn(ctx), nil
+			return fn(ctx, input)
 		}
 		var zero Out
 		return zero, ErrNoWorkflow
 	}
+	option := stepOptions(options)
 	result := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
-		Execution: execution,
-		Position:  execution.NextPosition(),
-		Name:      inlineFunctionIdentity(fn),
-	}, fn)
+		Execution:  execution,
+		Name:       functionIdentity(fn),
+		MaxRetries: option.MaxRetries,
+		RetryAfter: func(cause error, attempt int) *time.Time {
+			return stepRetryAfter(cause, option, attempt)
+		},
+	}, fn, input)
 	return result.Data, result.Err
 }
 
@@ -118,14 +128,14 @@ func timer(ctx context.Context, duration time.Duration, cancel bool) Promise[str
 	}
 	wait := worlds.DurableWait(ctx, worlds.DurableWaitOptions{
 		Execution: execution,
-		Position:  execution.NextPosition(),
 		DueAt:     time.Now().Add(duration),
 		Cancel:    cancel,
 	})
 	return &promise[struct{}]{
-		done:      wait.Done,
 		err:       wait.Err,
 		execution: execution,
+		id:        string(wait.WaitID),
+		outcome:   func() (struct{}, error) { return struct{}{}, nil },
 		waitID:    wait.WaitID,
 		messageID: wait.QueueMessageID,
 	}
@@ -140,14 +150,11 @@ func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error,
 	if !ok {
 		return ErrNoWorkflow
 	}
-	name := rollbackFunctionIdentity(fn)
 	option := stepOptions(options)
 	execution.AddRollback(func(ctx context.Context, execution *worlds.Execution) error {
-		position := execution.NextPosition()
 		result := worlds.DurableStep(ctx, worlds.DurableStepOptions{
 			Execution:  execution,
-			Position:   position,
-			Name:       name,
+			Name:       rollbackFunctionIdentity(fn),
 			MaxRetries: option.MaxRetries,
 			RetryAfter: func(cause error, attempt int) *time.Time {
 				return stepRetryAfter(cause, option, attempt)
@@ -156,13 +163,13 @@ func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error,
 		}, func(ctx context.Context, value In) (struct{}, error) {
 			return struct{}{}, fn(ctx, input)
 		}, input)
-		if result.Done {
-			return nil
-		}
 		if result.Err != nil {
 			return result.Err
 		}
-		execution.Suspend()
+		// A compensation that fails is recorded and does not stop the others.
+		if _, ok := execution.Select(string(result.StepID)); !ok {
+			execution.Suspend()
+		}
 		return nil
 	})
 	return nil
@@ -179,11 +186,10 @@ func Now(ctx context.Context) (time.Time, error) {
 	}
 	result := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
 		Execution: execution,
-		Position:  execution.NextPosition(),
 		Name:      "now",
-	}, func(context.Context) time.Time {
-		return time.Now().UTC()
-	})
+	}, func(context.Context, struct{}) (time.Time, error) {
+		return time.Now().UTC(), nil
+	}, struct{}{})
 	return result.Data, result.Err
 }
 
@@ -209,19 +215,11 @@ func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, 
 // it finds in argument order, and ErrNoWorkflow when ctx does not belong to a
 // run.
 func Join[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
+	if _, ok := workflowExecutionFromContext(ctx); !ok {
 		return nil, ErrNoWorkflow
 	}
 	values := make([]T, len(results))
 	for index, result := range results {
-		done, err := result.Done(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !done {
-			execution.Suspend()
-		}
 		value, err := result.Await(ctx)
 		if err != nil {
 			return nil, err
@@ -236,16 +234,11 @@ func Join[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
 // promises do not make JoinSettled fail, so inspect each one with Await.
 // It returns ErrNoWorkflow when ctx does not belong to a run.
 func JoinSettled[T any](ctx context.Context, results ...Promise[T]) ([]T, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
+	if _, ok := workflowExecutionFromContext(ctx); !ok {
 		return nil, ErrNoWorkflow
 	}
 	values := make([]T, len(results))
 	for index, result := range results {
-		done, _ := result.Done(ctx)
-		if !done {
-			execution.Suspend()
-		}
 		value, _ := result.Await(ctx)
 		values[index] = value
 	}
@@ -264,16 +257,17 @@ func Cancel[T any](ctx context.Context, results ...Promise[T]) error {
 }
 
 // Select waits until one of the promises has settled and returns it with the
-// error it settled with. When several have settled, the first in argument
-// order wins. When none has settled, the run suspends.
+// error it settled with. The promise that settled first wins, in the order its
+// result was recorded, so every replay picks the same one. When none has
+// settled, the run suspends.
 func Select[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
 	return selectPromise(ctx, false, results...)
 }
 
 // SelectOk waits until one of the promises has completed successfully and
-// returns it. Failed promises are skipped while another can still succeed.
-// When all have failed, SelectOk returns a nil promise and the first error in
-// argument order.
+// returns it, the first to complete winning as in Select. Failed promises are
+// skipped while another can still succeed. When all have failed, SelectOk
+// returns a nil promise and the first error in argument order.
 func SelectOk[T any](ctx context.Context, results ...Promise[T]) (Promise[T], error) {
 	return selectPromise(ctx, true, results...)
 }
@@ -298,36 +292,6 @@ func selectPromise[T any](ctx context.Context, successful bool, results ...Promi
 	return results[index], err
 }
 
-func selectPromiseIndex[T any](ctx context.Context, successful bool, results ...Promise[T]) (int, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return -1, ErrNoWorkflow
-	}
-	var firstErr error
-	pending := false
-	for index, result := range results {
-		done, err := result.Done(ctx)
-		if err != nil {
-			return -1, err
-		}
-		if !done {
-			pending = true
-			continue
-		}
-		_, err = result.Await(ctx)
-		if !successful || err == nil {
-			return index, err
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
-	if pending {
-		execution.Suspend()
-	}
-	return -1, firstErr
-}
-
 func selectWithCancel[T any](ctx context.Context, successful bool, results ...Promise[T]) (Promise[T], error) {
 	index, err := selectPromiseIndex(ctx, successful, results...)
 	if index < 0 {
@@ -338,9 +302,93 @@ func selectWithCancel[T any](ctx context.Context, successful bool, results ...Pr
 		if resultIndex == index {
 			continue
 		}
-		if cancelErr := Cancel(ctx, result); cancelErr != nil {
+		if cancelErr := result.Cancel(ctx); cancelErr != nil {
 			return winner, cancelErr
 		}
 	}
 	return winner, err
+}
+
+// selectPromiseIndex returns the index of the promise that settled first, or
+// completed first when successful is true. Promises that settled when they
+// were declared come first, in argument order. The rest are ordered by when
+// replay delivers their results. A promise that does not report its
+// settlement to replay, such as a user-defined one, is checked with Done each
+// time the walk delivers a result.
+func selectPromiseIndex[T any](ctx context.Context, successful bool, results ...Promise[T]) (int, error) {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return -1, ErrNoWorkflow
+	}
+	pending := make(map[int]bool, len(results))
+	for index := range results {
+		pending[index] = true
+	}
+	firstErrIndex, firstErr := -1, error(nil)
+	settle := func(index int) (int, error, bool) {
+		delete(pending, index)
+		_, err := results[index].Await(ctx)
+		if !successful || err == nil {
+			return index, err, true
+		}
+		if firstErrIndex < 0 || index < firstErrIndex {
+			firstErrIndex, firstErr = index, err
+		}
+		return 0, nil, false
+	}
+	for len(pending) > 0 {
+		// Promises outside the walk, in argument order.
+		var ids []string
+		owners := make(map[string]int)
+		settledNow := -1
+		for index := range results {
+			if !pending[index] {
+				continue
+			}
+			if s, ok := results[index].(settlement); ok {
+				if id, ok := s.settlementID(); ok {
+					if _, seen := owners[id]; !seen {
+						owners[id] = index
+						ids = append(ids, id)
+					}
+					continue
+				}
+			}
+			done, err := results[index].Done(ctx)
+			if err != nil {
+				return -1, err
+			}
+			if done && settledNow < 0 {
+				settledNow = index
+			}
+		}
+		if settledNow >= 0 {
+			if index, err, won := settle(settledNow); won {
+				return index, err
+			}
+			continue
+		}
+		if len(ids) == 0 {
+			if len(pending) > 0 {
+				execution.Suspend()
+			}
+			break
+		}
+		id, ok := execution.Select(ids...)
+		if !ok {
+			execution.Suspend()
+		}
+		if index, err, won := settle(owners[id]); won {
+			return index, err
+		}
+		// Every promise with this settlement failed.
+		for index := range pending {
+			if s, ok := results[index].(settlement); ok {
+				if other, ok := s.settlementID(); ok && other == id {
+					settle(index)
+				}
+			}
+		}
+	}
+	return -1, firstErr
 }

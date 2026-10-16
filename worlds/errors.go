@@ -82,6 +82,9 @@ var (
 
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")
+	// errReplaySuperseded ends a flow whose in-band write was refused
+	// because another orchestrator wrote first. The Runtime replays again.
+	errReplaySuperseded = errors.New("workflow: replay superseded")
 )
 
 // deliveryError ends a replay because the World failed to record an event.

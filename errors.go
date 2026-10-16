@@ -21,8 +21,8 @@ var (
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
 	// ErrRunCancelled is returned when awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
-	// ErrRunNotFinished is returned by Run.Await in a run when the run it
-	// awaits had not finished.
+	// ErrRunNotFinished is returned by Run.Await in workflow context when the
+	// run it awaits had not finished.
 	ErrRunNotFinished = errors.New("workflow: run has not finished")
 	// ErrHookNotFound is returned when resuming a hook token that no active
 	// hook has.

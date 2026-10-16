@@ -80,8 +80,9 @@ Steps run at least once and retry on error, three times by default. Set
 `workflow.RetryableError(err, after)` to retry after a delay. Step functions
 should be idempotent, and `workflow.StepID(ctx)` is a stable idempotency key.
 
-`workflow.InlineStep(ctx, fn)` records the result of a function that cannot
-fail, such as a generated ID, without a separate step delivery.
+`workflow.InlineStep(ctx, fn, input)` takes the same arguments as `Step` but
+runs a short step, such as generating an ID, in the flow itself, without a
+separate step delivery. Failed attempts are retried like a step's.
 
 ## Running workflows
 

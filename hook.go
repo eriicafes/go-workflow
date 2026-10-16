@@ -63,11 +63,15 @@ func CreateHook[T any](ctx context.Context, options ...HookOption) (*Hook[T], er
 type Hook[T any] struct {
 	token        string
 	id           worlds.HookID
-	position     *int
+	registered   bool
 	webhook      *worlds.Webhook
 	minRetention time.Duration
 	force        bool
 	received     worlds.EventID
+	// err is the error creating the hook failed with.
+	err error
+	// conflict is the run that owns its token then.
+	conflict worlds.RunID
 }
 
 // ID returns the hook ID, or "" before the hook is created.
@@ -76,15 +80,20 @@ func (h *Hook[T]) ID() string { return string(h.id) }
 // Token returns the hook token.
 func (h *Hook[T]) Token() string { return h.token }
 
+func (h *Hook[T]) settlementID() (string, bool) {
+	return string(h.id), h.registered && h.err == nil && h.id != ""
+}
+
 // Done reports whether the hook has settled, which means it received a
-// payload, was cancelled, or failed to be created. It never suspends the run
-// and does not return the hook's error, which Await returns.
+// payload, was cancelled, or failed to be created, as of the results delivered
+// so far. It never suspends the run and does not return the hook's error,
+// which Await returns.
 func (h *Hook[T]) Done(ctx context.Context) (bool, error) {
-	result, _, err := h.result(ctx)
+	execution, err := h.execution(ctx)
 	if err != nil {
 		return false, err
 	}
-	return result.Done, nil
+	return h.err != nil || execution.Settled(string(h.id)), nil
 }
 
 // Await returns the hook's payload, suspending the run until the hook is
@@ -93,18 +102,19 @@ func (h *Hook[T]) Done(ctx context.Context) (bool, error) {
 // ErrHookNotRegistered when the hook was not created in this run.
 func (h *Hook[T]) Await(ctx context.Context) (T, error) {
 	var zero T
-	result, execution, err := h.result(ctx)
+	execution, err := h.execution(ctx)
 	if err != nil {
 		return zero, err
 	}
-	if result.Err != nil {
-		return zero, result.Err
+	if h.err != nil {
+		return zero, h.err
 	}
-	if result.Done {
-		return result.Data, nil
+	if _, ok := execution.Select(string(h.id)); !ok {
+		execution.Suspend()
 	}
-	execution.Suspend()
-	return zero, nil
+	outcome := worlds.HookOutcome[T](execution, h.id)
+	h.received = outcome.ReceivedEventID
+	return outcome.Data, outcome.Err
 }
 
 // Unwrap is like Await but panics if Await returns an error.
@@ -120,14 +130,23 @@ func (h *Hook[T]) Unwrap(ctx context.Context) T {
 // creating the hook failed with ErrHookConflict. It returns false when there
 // was no conflict.
 func (h *Hook[T]) GetConflict(ctx context.Context) (worlds.RunID, bool, error) {
-	result, _, err := h.result(ctx)
-	if err != nil && result.ConflictRunID == "" {
+	if _, err := h.execution(ctx); err != nil {
 		return "", false, err
 	}
-	if result.ConflictRunID == "" {
-		return "", false, nil
+	return h.conflict, h.conflict != "", nil
+}
+
+// execution returns the Execution of the run ctx belongs to, for a hook
+// created in it.
+func (h *Hook[T]) execution(ctx context.Context) (*worlds.Execution, error) {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return nil, ErrNoWorkflow
 	}
-	return result.ConflictRunID, true, nil
+	if !h.registered {
+		return nil, ErrHookNotRegistered
+	}
+	return execution, nil
 }
 
 func (h *Hook[T]) create(ctx context.Context) error {
@@ -135,33 +154,16 @@ func (h *Hook[T]) create(ctx context.Context) error {
 	if !ok {
 		return ErrNoWorkflow
 	}
-	position := execution.NextPosition()
-	h.position = &position
-	result, _, err := h.result(ctx)
-	if err != nil {
-		return err
-	}
-	return result.Err
-}
-
-func (h *Hook[T]) result(ctx context.Context) (worlds.DurableHookResult[T], *worlds.Execution, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return worlds.DurableHookResult[T]{}, nil, ErrNoWorkflow
-	}
-	if h.position == nil {
-		return worlds.DurableHookResult[T]{}, execution, ErrHookNotRegistered
-	}
 	result := worlds.DurableHook[T](ctx, worlds.DurableHookOptions{
 		Execution:    execution,
-		Position:     *h.position,
 		Token:        h.token,
 		Webhook:      h.webhook,
 		MinRetention: h.minRetention,
 		Force:        h.force,
 	})
-	h.id, h.token, h.received = result.HookID, result.Token, result.ReceivedEventID
-	return result, execution, nil
+	h.registered = true
+	h.id, h.token, h.err, h.conflict = result.HookID, result.Token, result.Err, result.ConflictRunID
+	return h.err
 }
 
 // Cancel disposes of the hook so it no longer accepts a payload. It returns
@@ -171,31 +173,14 @@ func (h *Hook[T]) Cancel(ctx context.Context) error {
 	if !ok {
 		return ErrNoWorkflow
 	}
-	if h.id == "" {
-		if _, _, err := h.result(ctx); err != nil {
-			return err
-		}
+	if !h.registered || h.id == "" {
+		return ErrHookNotRegistered
 	}
 	event := worlds.EventsCreateEvent{
 		EventType:     worlds.EventTypeHookDisposed,
 		CorrelationID: string(h.id),
 	}
-	eventCount := execution.EventCount()
-	result, err := execution.World().EventsCreate(ctx, worlds.EventsCreateInput{
-		RunID:   execution.Run().RunID,
-		Event:   event,
-		Options: worlds.EventsCreateOptions{EventCount: &eventCount},
-	})
-	if err != nil {
-		return err
-	}
-	execution.Merge(result, worlds.Event{
-		RunID:         execution.Run().RunID,
-		EventID:       result.EventID,
-		EventType:     event.EventType,
-		CorrelationID: event.CorrelationID,
-		Data:          event.Data,
-	})
+	execution.CreateEvent(ctx, event, nil)
 	return nil
 }
 
