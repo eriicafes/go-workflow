@@ -109,32 +109,16 @@ func WebhookHandler(world World) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		result, err := world.EventsCreate(r.Context(), EventsCreateInput{
-			RunID: hook.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: payload},
-		})
-		if errors.Is(err, ErrRunTerminal) {
+		result, err := ResumeHook(r.Context(), world, hook, payload)
+		if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrHookNotActive) {
 			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
 			return
 		}
-		if errors.Is(err, ErrHookNotActive) {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-		deploymentID, err := RunDeployment(r.Context(), world, hook.RunID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if hook.Webhook.Manual {
-			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
 			response, err := waitWebhookResponse(r.Context(), world, hook.RunID, hook.HookID, result.EventID)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusGatewayTimeout)
@@ -151,15 +135,7 @@ func WebhookHandler(world World) http.Handler {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
-			if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
 			writeWebhookResponse(w, *hook.Webhook.Response)
-			return
-		}
-		if _, err := world.Queue(r.Context(), QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)

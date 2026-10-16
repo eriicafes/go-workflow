@@ -13,8 +13,19 @@ export interface CallOptions {
 }
 
 export namespace RPC {
-	// These are the camel-cased values emitted by worlds.HTTPHandler, not
+	// These are the camel-cased values the RPC server returns, not
 	// @workflow/world SDK entities.
+	/** The RPC server's protocol version and capabilities, from `client.spec`. */
+	export type Spec = {
+		specVersion: number;
+		capabilities: Capabilities;
+	};
+	/** The optional behavior the RPC server's World implements. */
+	export type Capabilities = {
+		analytics: boolean;
+		setAttributes: boolean;
+		deploymentAffinity?: boolean;
+	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";
 	export type EventType = string;
 	export type Page<T> = {

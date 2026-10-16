@@ -94,8 +94,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		return nil, &specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
 	}
 	switch request.Method {
-	case "world.capabilities":
-		return encodeRPC(world.Capabilities())
 	case "world.deploymentId":
 		return encodeRPC(world.DeploymentID())
 	case "runs.get":
@@ -515,6 +513,8 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		default:
 			return nil, fmt.Errorf("workflow: unknown analytics RPC method %q", request.Method)
 		}
+	case "client.spec":
+		return encodeRPC(ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()})
 	case "client.runs.create":
 		input, err := decodeRPC[ClientRunsCreateInput](request.Input)
 		if err != nil {
@@ -588,15 +588,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		result, err := world.EventsCreate(ctx, EventsCreateInput{RunID: hook.RunID, Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: input.Data}})
-		if err != nil {
-			return nil, err
-		}
-		deploymentID, err := RunDeployment(ctx, world, hook.RunID)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID}); err != nil {
+		if _, err := ResumeHook(ctx, world, hook, input.Data); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
@@ -624,8 +616,8 @@ type (
 		CorrelationIDs []string
 	}
 	// ClientHooksResumeInput holds the arguments to the client.hooks.resume
-	// RPC method, which resolves the hook that owns Token with Data and queues
-	// a delivery for its run.
+	// RPC method, which calls ResumeHook for the hook that owns Token with
+	// Data.
 	ClientHooksResumeInput struct {
 		Token string
 		Data  []byte

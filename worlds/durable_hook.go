@@ -83,7 +83,7 @@ func DurableHook[T any](ctx context.Context, options DurableHookOptions) Durable
 		if claim.ForcedRunID != "" {
 			// Wake the displaced run on its own deployment. A failed wake is
 			// harmless: the run reads the takeover on its next delivery.
-			if deploymentID, err := RunDeployment(ctx, options.Execution.World(), claim.ForcedRunID); err == nil {
+			if deploymentID, err := RunDeploymentID(ctx, options.Execution.World(), claim.ForcedRunID); err == nil {
 				_, _ = options.Execution.World().Queue(ctx, QueueInput{RunID: claim.ForcedRunID, IdempotencyKey: "hook-force:" + string(hookID), DeploymentID: deploymentID})
 			}
 		}

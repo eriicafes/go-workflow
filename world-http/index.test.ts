@@ -14,15 +14,15 @@ function rpcResponse(output: unknown): Response {
 	});
 }
 
-test("creates a world from capabilities and maps Go CBOR fields", async () => {
+test("creates a world from its spec and maps Go CBOR fields", async () => {
 	const requests: { url: string | URL | Request; init: RequestInit; envelope: Record<string, unknown> }[] = [];
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow/",
 		fetch: async (url, init) => {
 			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
 			requests.push({ url, init: init ?? {}, envelope });
-			if (envelope.method === "world.capabilities") {
-				return rpcResponse({ Analytics: false, SetAttributes: true });
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: true } });
 			}
 			expect(envelope.method).toBe("runs.get");
 			expect(decode(envelope.input as Uint8Array)).toEqual({ RunID: "wrun_01" });
@@ -36,7 +36,7 @@ test("creates a world from capabilities and maps Go CBOR fields", async () => {
 	});
 
 	expect(world.specVersion).toBe(SPEC_VERSION_CURRENT);
-	expect(world._capabilities).toEqual({ analytics: false, setAttributes: true });
+	expect(world._spec).toEqual({ specVersion: 1, capabilities: { analytics: false, setAttributes: true } });
 	expect(requests[0]?.envelope.specVersion).toBe(1);
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
@@ -61,8 +61,8 @@ test("passes deployment IDs through to the Go world", async () => {
 			const input = envelope.input ? decode(envelope.input as Uint8Array) : undefined;
 			calls.push({ method: envelope.method, input });
 			switch (envelope.method) {
-				case "world.capabilities":
-					return rpcResponse({ Analytics: false, SetAttributes: false, DeploymentAffinity: true });
+				case "client.spec":
+					return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false, DeploymentAffinity: true } });
 				case "world.deploymentId":
 					return rpcResponse("dpl_go");
 				case "events.createRun":
@@ -76,7 +76,7 @@ test("passes deployment IDs through to the Go world", async () => {
 	expect(world.capabilities).toMatchObject({ deploymentAffinity: true });
 	await expect(world.getDeploymentId()).resolves.toBe("dpl_go");
 	await expect(world.getDeploymentId()).resolves.toBe("dpl_go");
-	expect(calls.filter((call) => call.method === "world.deploymentId")).toHaveLength(1);
+	expect(calls.filter((call) => call.method === "world.deploymentId")).toHaveLength(2);
 
 	await world.events.create("wrun_01", {
 		eventType: "run_created",
@@ -97,8 +97,8 @@ test("uses WORKFLOW_HTTP_BASE_URL when no base URL is passed", async () => {
 			fetch: async (requestURL, init) => {
 				url = requestURL;
 				const request = decode(init?.body as Uint8Array) as Record<string, unknown>;
-				expect(request.method).toBe("world.capabilities");
-				return rpcResponse({ Analytics: false, SetAttributes: false });
+				expect(request.method).toBe("client.spec");
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
 			},
 		});
 		expect(url).toBe("https://workflow.example/v1/workflow/rpc");
@@ -118,8 +118,8 @@ test("pulls stream chunks through bounded RPC polling", async () => {
 		fetch: async (_url, init) => {
 			const request = decode(init?.body as Uint8Array) as { method: unknown; input: Uint8Array };
 			calls.push({ method: request.method, input: decode(request.input) });
-			if (request.method === "world.capabilities") {
-				return rpcResponse({ Analytics: true, SetAttributes: false });
+			if (request.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: true, SetAttributes: false } });
 			}
 			expect(request.method).toBe("streams.getChunks");
 			expect(calls.at(-1)?.input).toMatchObject({ Wait: 100_000_000 });
@@ -146,8 +146,8 @@ test("raises structured RPC errors", async () => {
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
 			const request = decode(init?.body as Uint8Array) as Record<string, unknown>;
-			if (request.method === "world.capabilities") {
-				return rpcResponse({ Analytics: false, SetAttributes: false });
+			if (request.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
 			}
 			const encoded = encode({ error: { code: "not_found", message: "workflow: run not found" } });
 			const body = new Uint8Array(encoded.byteLength);
@@ -162,4 +162,19 @@ test("raises structured RPC errors", async () => {
 		code: "not_found",
 		name: HTTPWorldError.name,
 	});
+});
+
+test("does not queue health checks", async () => {
+	const methods: unknown[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			methods.push(envelope.method);
+			return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+		},
+	});
+
+	await expect(world.queue("__wkf_workflow_report" as never, { __healthCheck: true, correlationId: "probe_01" })).resolves.toEqual({ messageId: null });
+	expect(methods).toEqual(["client.spec"]);
 });

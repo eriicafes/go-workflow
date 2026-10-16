@@ -389,7 +389,7 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	assertRPCError(t, response, "conflict")
 
-	body, err = cbor.Marshal(rpcRequest{Method: "world.capabilities"})
+	body, err = cbor.Marshal(rpcRequest{Method: "client.spec"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
-		t.Fatalf("capabilities status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("spec status=%d body=%s", response.Code, response.Body.String())
 	}
 	if err := cbor.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
@@ -406,12 +406,12 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	if envelope.Error != nil {
 		t.Fatal(envelope.Error)
 	}
-	var capabilities worlds.Capabilities
-	if err := cbor.Unmarshal(envelope.Output, &capabilities); err != nil {
+	var spec worlds.ClientSpec
+	if err := cbor.Unmarshal(envelope.Output, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if !capabilities.Analytics || !capabilities.SetAttributes {
-		t.Fatalf("capabilities=%#v", capabilities)
+	if spec.SpecVersion != worlds.SpecVersion || !spec.Capabilities.Analytics || !spec.Capabilities.SetAttributes {
+		t.Fatalf("spec=%#v", spec)
 	}
 }
 

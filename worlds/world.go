@@ -9,6 +9,7 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -269,7 +270,7 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	if count == 0 {
 		return 0, nil
 	}
-	deploymentID, err := RunDeployment(ctx, world, runID)
+	deploymentID, err := RunDeploymentID(ctx, world, runID)
 	if err != nil {
 		return count, err
 	}
@@ -277,10 +278,37 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	return count, err
 }
 
-// RunDeployment returns the deployment run runID is pinned to, so a delivery
+// ResumeHook appends payload to hook as a hook_received event and queues a
+// delivery so the hook's run resumes, addressed to the run's deployment. When
+// the World refuses the payload with ErrHookNotActive, it still queues the
+// delivery, because an earlier resume may have recorded its payload without
+// queueing one, and returns the error.
+func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (EventResult, error) {
+	result, err := world.EventsCreate(ctx, EventsCreateInput{
+		RunID: hook.RunID,
+		Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: payload},
+	})
+	key := string(result.EventID)
+	switch {
+	case errors.Is(err, ErrHookNotActive):
+		key = "resume:" + string(hook.HookID)
+	case err != nil:
+		return result, err
+	}
+	deploymentID, deploymentErr := RunDeploymentID(ctx, world, hook.RunID)
+	if deploymentErr != nil {
+		return result, deploymentErr
+	}
+	if _, queueErr := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: key, DeploymentID: deploymentID}); queueErr != nil {
+		return result, queueErr
+	}
+	return result, err
+}
+
+// RunDeploymentID returns the deployment run runID is pinned to, so a delivery
 // queued from outside the run can be addressed to it. It returns "" without
 // reading the run when world does not report DeploymentAffinity.
-func RunDeployment(ctx context.Context, world World, runID RunID) (string, error) {
+func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, error) {
 	if !world.Capabilities().DeploymentAffinity {
 		return "", nil
 	}

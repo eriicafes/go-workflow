@@ -54,8 +54,10 @@ const finished = await world.runs.waitForTerminalStatus(run.runId, { timeoutMs: 
 | `headers` | none | Headers sent with every RPC request, such as `Authorization`. |
 | `fetch` | `globalThis.fetch` | A custom `fetch` implementation. |
 
-`createWorld` reads the World's capabilities over RPC before it returns, so it
-fails fast when the handler is unreachable.
+`createWorld` calls the `client.spec` RPC once before it returns, to read the
+World's protocol version and capabilities, so it fails fast when the handler is
+unreachable. `world.getDeploymentId()` asks the Go World for its deployment on
+every call, so it stays correct across redeploys.
 
 If you [protect the RPC path](/worlds/#protecting-the-rpc-path) with a token,
 pass it in `headers`:
@@ -82,7 +84,7 @@ Loaded this way, the adapter is created without options and reads
 ## Limits
 
 The adapter is a client only. Deliveries are executed by your Go process, so it
-cannot create queue handlers, and it has no deployment ID of its own.
+cannot create queue handlers. Its deployment ID is the Go World's.
 
 ::: warning
 The RPC endpoint is unauthenticated unless you protect it. Point the adapter

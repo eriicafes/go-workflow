@@ -33,15 +33,9 @@ export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
 export type { RPC } from "./rpc.js";
 
-export interface Capabilities {
-	analytics: boolean;
-	setAttributes: boolean;
-	deploymentAffinity?: boolean;
-}
-
 export interface HTTPWorldOptions {
 	/**
-	 * The `worlds.HTTPHandler` prefix.
+	 * The RPC server's base URL, under which it serves `/rpc`.
 	 * Defaults to `WORKFLOW_HTTP_BASE_URL`.
 	 */
 	baseURL?: string;
@@ -50,8 +44,8 @@ export interface HTTPWorldOptions {
 }
 
 /**
- * Creates a World backed by a go-workflow `worlds.HTTPHandler`.
- * `baseURL` is the handler prefix, for example
+ * Creates a World backed by an RPC server.
+ * `baseURL` is the server's base URL, for example
  * `https://workflows.example.com/v1/workflow`.
  */
 export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPWorld> {
@@ -59,21 +53,20 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 		...options,
 		baseURL: options.baseURL ?? environment("WORKFLOW_HTTP_BASE_URL"),
 	});
-	const capabilities = await client.call<Capabilities>("world.capabilities", {});
-	return new HTTPWorld(client, capabilities);
+	// The first request already carries the protocol version, so a mismatched
+	// server fails it instead of answering.
+	client.specVersion = HTTP_WORLD_SPEC_VERSION;
+	const spec = await client.call<RPC.Spec>("client.spec", {});
+	return new HTTPWorld(client, spec);
 }
 
 export class HTTPWorld implements World {
 	/**
-	 * The RPC server protocol version sent with every request. It is separate
-	 * from `specVersion`, which identifies the Workflow SDK World interface.
+	 * The RPC server's protocol version and capabilities. They are separate
+	 * from `specVersion` and `capabilities`, which describe the Workflow SDK
+	 * World interface.
 	 */
-	readonly _specVersion = HTTP_WORLD_SPEC_VERSION;
-	/**
-	 * The RPC server capabilities remain available separately because they
-	 * describe its RPC surface, not the Workflow SDK's optional capabilities.
-	 */
-	readonly _capabilities: Capabilities;
+	readonly _spec: RPC.Spec;
 
 	readonly specVersion = SPEC_VERSION_CURRENT;
 	readonly capabilities: World["capabilities"];
@@ -85,9 +78,9 @@ export class HTTPWorld implements World {
 	readonly streams: World["streams"];
 	readonly analytics?: World["analytics"];
 	/**
-	 * The deployment of the Go World behind the RPC server, which runs started
-	 * through this World are pinned to. Read once and cached, since a World's
-	 * deployment does not change while it runs.
+	 * The deployment of the World behind the RPC server, which runs started
+	 * through this World are pinned to. It is read on every call, since the
+	 * server behind the URL can be redeployed while this World is in use.
 	 */
 	readonly getDeploymentId: World["getDeploymentId"];
 	/**
@@ -98,28 +91,21 @@ export class HTTPWorld implements World {
 		throw new HTTPWorldError("unsupported", "workflow: HTTP worlds do not create queue handlers");
 	};
 
-	constructor(client: RPCClient, capabilities: Capabilities) {
-		client.specVersion = this._specVersion;
-		this._capabilities = capabilities;
-		this.capabilities = HTTPWorld.createCapabilities(this._capabilities);
-		let deploymentId: Promise<string> | undefined;
-		this.getDeploymentId = () => {
-			deploymentId ??= client.call<string>("world.deploymentId", {}).catch((error: unknown) => {
-				deploymentId = undefined;
-				throw error;
-			});
-			return deploymentId;
-		};
-		this.runs = HTTPWorld.createRuns(client, this._capabilities);
+	constructor(client: RPCClient, spec: RPC.Spec) {
+		client.specVersion = HTTP_WORLD_SPEC_VERSION;
+		this._spec = spec;
+		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
+		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});
+		this.runs = HTTPWorld.createRuns(client, spec.capabilities);
 		this.steps = HTTPWorld.createSteps(client);
 		this.events = HTTPWorld.createEvents(client);
 		this.hooks = HTTPWorld.createHooks(client);
 		this.queue = HTTPWorld.createQueue(client);
 		this.streams = HTTPWorld.createStreams(client);
-		this.analytics = HTTPWorld.createAnalytics(client, this._capabilities);
+		this.analytics = HTTPWorld.createAnalytics(client, spec.capabilities);
 	}
 
-	private static createCapabilities(capabilities: Capabilities): World["capabilities"] {
+	private static createCapabilities(capabilities: RPC.Capabilities): World["capabilities"] {
 		return {
 			hookRetention: { active: true },
 			hookForceClaim: true,
@@ -127,7 +113,7 @@ export class HTTPWorld implements World {
 		};
 	}
 
-	private static createRuns(client: RPCClient, capabilities: Capabilities): World["runs"] {
+	private static createRuns(client: RPCClient, capabilities: RPC.Capabilities): World["runs"] {
 		function get(runId: string, params: { resolveData: "none" }): Promise<WorkflowRunWithoutData>;
 		function get(runId: string, params?: { resolveData?: "all" }): Promise<WorkflowRun>;
 		function get(runId: string, params?: { resolveData?: "all" | "none" }): Promise<WorkflowRun | WorkflowRunWithoutData> {
@@ -245,8 +231,11 @@ export class HTTPWorld implements World {
 
 	private static createQueue(client: RPCClient): World["queue"] {
 		return (queueName, message, options) => {
-			if (!("runId" in message) || message.runId === undefined) {
-				throw new TypeError("world-http: queue messages must include runId");
+			// A health check probes a queue consumer in JavaScript, and an HTTP
+			// world's deliveries are consumed by the RPC server instead, so the
+			// probe is not queued.
+			if ("__healthCheck" in message) {
+				return Promise.resolve({ messageId: null });
 			}
 			return client.call<{ messageId: MessageId | null }>("queue.queue", {
 				queueName,
@@ -290,7 +279,7 @@ export class HTTPWorld implements World {
 		};
 	}
 
-	private static createAnalytics(client: RPCClient, capabilities: Capabilities): World["analytics"] {
+	private static createAnalytics(client: RPCClient, capabilities: RPC.Capabilities): World["analytics"] {
 		if (!capabilities.analytics) {
 			return undefined;
 		}

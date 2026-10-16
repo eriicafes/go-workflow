@@ -3,9 +3,11 @@ package worlds_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,8 +76,10 @@ func TestNewHTTPClientRejectsInvalidEndpoints(t *testing.T) {
 	}
 }
 
-func TestHTTPClientReportsRPCFailuresAndCapabilitiesFallback(t *testing.T) {
+func TestHTTPClientReportsRPCFailures(t *testing.T) {
+	var calls atomic.Int32
 	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusServiceUnavailable,
 			Status:     "503 Service Unavailable",
@@ -89,8 +93,15 @@ func TestHTTPClientReportsRPCFailuresAndCapabilitiesFallback(t *testing.T) {
 	if _, err := workflow.Start(ctx, clientInput{}); err == nil {
 		t.Fatal("Start accepted a failed RPC response")
 	}
-	if capabilities := client.Capabilities(); capabilities != (worlds.Capabilities{}) {
-		t.Fatalf("capabilities after RPC failure = %#v", capabilities)
+	// A failed spec is returned as an error and not cached.
+	before := calls.Load()
+	for range 2 {
+		if spec, err := client.Spec(ctx); err == nil || spec != (worlds.ClientSpec{}) {
+			t.Fatalf("spec after RPC failure = %#v, %v", spec, err)
+		}
+	}
+	if calls.Load()-before != 2 {
+		t.Fatalf("spec calls = %d, want 2", calls.Load()-before)
 	}
 }
 
@@ -167,5 +178,60 @@ func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
 	}
 	if string(data) != "remote" {
 		t.Fatalf("stream = %q", data)
+	}
+}
+
+func TestHTTPClientCachesItsSpec(t *testing.T) {
+	world := testworld.New()
+	defer world.Close()
+	var requests atomic.Int32
+	handler := worlds.HTTPHandler(world, "")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		handler.ServeHTTP(writer, request)
+	}))
+	defer server.Close()
+
+	client := worlds.NewHTTPClient(server.URL + "/v1/workflow")
+	for range 3 {
+		spec, err := client.Spec(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := (worlds.ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()}); spec != want {
+			t.Fatalf("spec = %#v, want %#v", spec, want)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_resume", WorkflowName: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resume", Data: []byte(`{"token":"resume-token","webhook":{}}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "resume-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"request":{"method":"POST","url":"/"}}`)
+	if _, err := worlds.ResumeHook(ctx, world, hook, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	// A webhook takes one request, so a second resume is refused, as when an
+	// earlier resume recorded its request but stopped before queueing.
+	if _, err := worlds.ResumeHook(ctx, world, hook, payload); !errors.Is(err, worlds.ErrHookNotActive) {
+		t.Fatalf("error = %v, want ErrHookNotActive", err)
+	}
+	if queued := world.QueuedMessages(); len(queued) != 2 || queued[1].Input.RunID != "wrun_resume" || queued[1].Input.StepID != nil {
+		t.Fatalf("queued = %#v, want a flow of the run for each resume", queued)
 	}
 }

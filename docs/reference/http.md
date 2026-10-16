@@ -34,13 +34,14 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 
 - **Spec version:** when `specVersion` is set and differs from the World's
   (`worlds.SpecVersion`, currently `1`), the request fails with
-  `invalid_argument`.
+  `invalid_argument`. Clients call `client.spec` first, which returns
+  `{ specVersion, capabilities }`.
 
 ### Methods
 
 | Group | Methods |
 | --- | --- |
-| World | `world.capabilities`, `world.deploymentId` |
+| World | `world.deploymentId` |
 | Runs | `runs.get`, `runs.list`, `runs.waitForTerminalStatus`, `runs.setAttributes` |
 | Steps | `steps.get`, `steps.list` |
 | Events | `events.create`, `events.createRun`, `events.createBatch`, `events.get`, `events.list`, `events.listByCorrelationID` |
@@ -48,7 +49,7 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 | Queue | `queue.queue`, `queue.queueBatch`, `queue.cancel` |
 | Streams | `streams.write`, `streams.createWriteSession`, `streams.writeSession`, `streams.closeWriteSession`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
-| Client | `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
+| Client | `client.spec`, `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
 ::: danger Unauthenticated
 The RPC endpoint can start runs, append events, and read every payload. Never

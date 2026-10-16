@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -31,11 +32,10 @@ func ClientFromContext(ctx context.Context) (Client, bool) {
 // for reading and writing their streams, from outside a run. It does not
 // execute runs. Start, Get, GetHook, and ResumeHook use the Client carried in
 // a context by workflow.NewContext or workflow.Middleware.
+//
+// The methods up to Analytics call the World method of the same name. The
+// methods after it are the Client's own.
 type Client interface {
-	// RunsCreate starts a run of the named workflow and queues its first
-	// delivery. It generates a run ID when input.RunID is empty and returns
-	// the run ID.
-	RunsCreate(context.Context, ClientRunsCreateInput) (RunID, error)
 	// RunsGet returns a run. It returns ErrRunNotFound when the run does not
 	// exist.
 	RunsGet(context.Context, RunsGetInput) (Run, error)
@@ -45,12 +45,6 @@ type Client interface {
 	// and returns the run as it is when the run finishes or the timeout
 	// expires.
 	RunsWaitForTerminalStatus(context.Context, RunsWaitForTerminalStatusInput) (Run, error)
-	// RunsCancel cancels a run. It returns ErrRunTerminal when the run
-	// has already finished.
-	RunsCancel(context.Context, ClientRunsCancelInput) error
-	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
-	// returns the number of waits it settled.
-	RunsWake(context.Context, ClientRunsWakeInput) (int, error)
 	// RunsSetAttributes applies attribute changes to a run.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
 
@@ -72,6 +66,25 @@ type Client interface {
 	// stream. It returns ErrStreamLocked while another session holds the
 	// stream.
 	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
+
+	// HooksGetByToken returns the active hook with a hook token. It returns
+	// ErrHookNotFound when no active hook has the token.
+	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
+
+	// Analytics returns the World's analytics API. It may be nil when the
+	// World has analytics disabled.
+	Analytics() Analytics
+
+	// RunsCreate starts a run of the named workflow and queues its first
+	// delivery. It generates a run ID when input.RunID is empty and returns
+	// the run ID.
+	RunsCreate(context.Context, ClientRunsCreateInput) (RunID, error)
+	// RunsCancel cancels a run. It returns ErrRunTerminal when the run
+	// has already finished.
+	RunsCancel(context.Context, ClientRunsCancelInput) error
+	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
+	// returns the number of waits it settled.
+	RunsWake(context.Context, ClientRunsWakeInput) (int, error)
 	// StreamsWrite appends a chunk to a stream. It returns
 	// ErrStreamLocked while a writer holds the stream.
 	StreamsWrite(context.Context, StreamsWriteInput) error
@@ -81,44 +94,26 @@ type Client interface {
 	// StreamsClose closes a stream. It returns ErrStreamLocked while a
 	// writer holds the stream.
 	StreamsClose(context.Context, StreamsCloseInput) error
-
-	// HooksGetByToken returns the active hook with a hook token. It returns
-	// ErrHookNotFound when no active hook has the token.
-	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 	// HooksResume resumes the hook with input.Token with the payload
-	// input.Data and queues a delivery so its run resumes. It returns
-	// ErrHookNotFound when no active hook has the token.
+	// input.Data, as ResumeHook does. It returns ErrHookNotFound when no
+	// active hook has the token.
 	HooksResume(context.Context, ClientHooksResumeInput) error
+	// Spec returns the RPC protocol version and capabilities of the World.
+	Spec(context.Context) (ClientSpec, error)
+}
 
-	// Analytics returns the World's analytics API. It may be nil when the
-	// World has analytics disabled.
-	Analytics() Analytics
-	// Capabilities reports the optional features the World supports.
-	Capabilities() Capabilities
+// ClientSpec describes the World a Client calls.
+type ClientSpec struct {
+	// SpecVersion is the World's RPC protocol version.
+	SpecVersion int `cbor:"specVersion"`
+	// Capabilities reports the optional behavior the World implements.
+	Capabilities Capabilities `cbor:"capabilities"`
 }
 
 // NewClient returns a Client that calls world directly, in the same process.
 func NewClient(world World) Client { return worldClient{world: world} }
 
 type worldClient struct{ world World }
-
-func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
-	runID := input.RunID
-	if runID == "" {
-		runID = NewRunID()
-	}
-	deploymentID := input.DeploymentID
-	if deploymentID == "" {
-		deploymentID = c.world.DeploymentID()
-	}
-	if _, err := c.world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: deploymentID}); err != nil {
-		return "", err
-	}
-	if _, err := c.world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: string(runID), DeploymentID: deploymentID}); err != nil {
-		return "", err
-	}
-	return runID, nil
-}
 
 func (c worldClient) RunsGet(ctx context.Context, input RunsGetInput) (Run, error) {
 	return c.world.RunsGet(ctx, input)
@@ -130,15 +125,6 @@ func (c worldClient) RunsList(ctx context.Context, input RunsListInput) (Page[Ru
 
 func (c worldClient) RunsWaitForTerminalStatus(ctx context.Context, input RunsWaitForTerminalStatusInput) (Run, error) {
 	return c.world.RunsWaitForTerminalStatus(ctx, input)
-}
-
-func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
-	_, err := c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled}})
-	return err
-}
-
-func (c worldClient) RunsWake(ctx context.Context, input ClientRunsWakeInput) (int, error) {
-	return WakeRun(ctx, c.world, input.RunID, input.CorrelationIDs)
 }
 
 func (c worldClient) RunsSetAttributes(ctx context.Context, input RunsSetAttributesInput) error {
@@ -165,6 +151,43 @@ func (c worldClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return c.world.StreamsList(ctx, input)
 }
 
+func (c worldClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
+	return c.world.StreamsCreateWriteSession(ctx, input)
+}
+
+func (c worldClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenInput) (Hook, error) {
+	return c.world.HooksGetByToken(ctx, input)
+}
+
+func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
+
+func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
+	runID := input.RunID
+	if runID == "" {
+		runID = NewRunID()
+	}
+	deploymentID := input.DeploymentID
+	if deploymentID == "" {
+		deploymentID = c.world.DeploymentID()
+	}
+	if _, err := c.world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: deploymentID}); err != nil {
+		return "", err
+	}
+	if _, err := c.world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: string(runID), DeploymentID: deploymentID}); err != nil {
+		return "", err
+	}
+	return runID, nil
+}
+
+func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
+	_, err := c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled}})
+	return err
+}
+
+func (c worldClient) RunsWake(ctx context.Context, input ClientRunsWakeInput) (int, error) {
+	return WakeRun(ctx, c.world, input.RunID, input.CorrelationIDs)
+}
+
 func (c worldClient) StreamsWrite(ctx context.Context, input StreamsWriteInput) error {
 	return c.world.StreamsWrite(ctx, input)
 }
@@ -177,34 +200,18 @@ func (c worldClient) StreamsClose(ctx context.Context, input StreamsCloseInput) 
 	return c.world.StreamsClose(ctx, input)
 }
 
-func (c worldClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
-	return c.world.StreamsCreateWriteSession(ctx, input)
-}
-
-func (c worldClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenInput) (Hook, error) {
-	return c.world.HooksGetByToken(ctx, input)
-}
-
 func (c worldClient) HooksResume(ctx context.Context, input ClientHooksResumeInput) error {
 	hook, err := c.world.HooksGetByToken(ctx, HooksGetByTokenInput{Token: input.Token})
 	if err != nil {
 		return err
 	}
-	result, err := c.world.EventsCreate(ctx, EventsCreateInput{RunID: hook.RunID, Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: input.Data}})
-	if err != nil {
-		return err
-	}
-	deploymentID, err := RunDeployment(ctx, c.world, hook.RunID)
-	if err != nil {
-		return err
-	}
-	_, err = c.world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: string(result.EventID), DeploymentID: deploymentID})
+	_, err = ResumeHook(ctx, c.world, hook, input.Data)
 	return err
 }
 
-func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
-
-func (c worldClient) Capabilities() Capabilities { return c.world.Capabilities() }
+func (c worldClient) Spec(context.Context) (ClientSpec, error) {
+	return ClientSpec{SpecVersion: c.world.SpecVersion(), Capabilities: c.world.Capabilities()}, nil
+}
 
 // maxHTTPWait caps how long one RPC request may block in
 // runs.waitForTerminalStatus or streams.getChunks, so a long wait never holds a
@@ -232,6 +239,8 @@ func NewHTTPClient(endpoint string, clients ...*http.Client) Client {
 type httpClient struct {
 	endpoint string
 	client   *http.Client
+	mutex    sync.Mutex
+	spec     *ClientSpec
 }
 
 func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
@@ -276,12 +285,6 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 	return nil
 }
 
-func (c *httpClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
-	var output RunID
-	err := c.call(ctx, "client.runs.create", input, &output)
-	return output, err
-}
-
 func (c *httpClient) RunsGet(ctx context.Context, input RunsGetInput) (Run, error) {
 	var output Run
 	err := c.call(ctx, "runs.get", input, &output)
@@ -298,16 +301,6 @@ func (c *httpClient) RunsWaitForTerminalStatus(ctx context.Context, input RunsWa
 	input.Timeout = min(input.Timeout, maxHTTPWait)
 	var output Run
 	err := c.call(ctx, "runs.waitForTerminalStatus", input, &output)
-	return output, err
-}
-
-func (c *httpClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
-	return c.call(ctx, "client.runs.cancel", input, nil)
-}
-
-func (c *httpClient) RunsWake(ctx context.Context, input ClientRunsWakeInput) (int, error) {
-	var output int
-	err := c.call(ctx, "client.runs.wake", input, &output)
 	return output, err
 }
 
@@ -346,18 +339,6 @@ func (c *httpClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return output, err
 }
 
-func (c *httpClient) StreamsWrite(ctx context.Context, input StreamsWriteInput) error {
-	return c.call(ctx, "client.streams.write", input, nil)
-}
-
-func (c *httpClient) StreamsWriteMulti(ctx context.Context, input StreamsWriteMultiInput) error {
-	return c.call(ctx, "client.streams.writeMulti", input, nil)
-}
-
-func (c *httpClient) StreamsClose(ctx context.Context, input StreamsCloseInput) error {
-	return c.call(ctx, "client.streams.close", input, nil)
-}
-
 func (c *httpClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
 	var id StreamID
 	if err := c.call(ctx, "streams.createWriteSession", input, &id); err != nil {
@@ -390,18 +371,54 @@ func (c *httpClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenI
 	return output, err
 }
 
+func (c *httpClient) Analytics() Analytics { return httpAnalytics{client: c} }
+
+func (c *httpClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
+	var output RunID
+	err := c.call(ctx, "client.runs.create", input, &output)
+	return output, err
+}
+
+func (c *httpClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
+	return c.call(ctx, "client.runs.cancel", input, nil)
+}
+
+func (c *httpClient) RunsWake(ctx context.Context, input ClientRunsWakeInput) (int, error) {
+	var output int
+	err := c.call(ctx, "client.runs.wake", input, &output)
+	return output, err
+}
+
+func (c *httpClient) StreamsWrite(ctx context.Context, input StreamsWriteInput) error {
+	return c.call(ctx, "client.streams.write", input, nil)
+}
+
+func (c *httpClient) StreamsWriteMulti(ctx context.Context, input StreamsWriteMultiInput) error {
+	return c.call(ctx, "client.streams.writeMulti", input, nil)
+}
+
+func (c *httpClient) StreamsClose(ctx context.Context, input StreamsCloseInput) error {
+	return c.call(ctx, "client.streams.close", input, nil)
+}
+
 func (c *httpClient) HooksResume(ctx context.Context, input ClientHooksResumeInput) error {
 	return c.call(ctx, "client.hooks.resume", input, nil)
 }
 
-func (c *httpClient) Analytics() Analytics { return httpAnalytics{client: c} }
-
-func (c *httpClient) Capabilities() Capabilities {
-	var output Capabilities
-	if err := c.call(context.Background(), "world.capabilities", nil, &output); err != nil {
-		return Capabilities{}
+// Spec calls client.spec once and returns its result from then on, since a
+// World's spec does not change while it serves.
+func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.spec != nil {
+		return *c.spec, nil
 	}
-	return output
+	var output ClientSpec
+	if err := c.call(ctx, "client.spec", nil, &output); err != nil {
+		return ClientSpec{}, err
+	}
+	c.spec = &output
+	return output, nil
 }
 
 type httpAnalytics struct{ client *httpClient }
