@@ -2,4 +2,4 @@
 "@eriicafes/go-workflow": minor
 ---
 
-Add `Webhook.RespondWith` for durable webhook responses.
+Add `Webhook.Request` and serializable `WebhookRequest[T]` with `JSON` and step-only `RespondWith`.

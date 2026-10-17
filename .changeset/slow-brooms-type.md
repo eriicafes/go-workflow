@@ -2,4 +2,4 @@
 "@eriicafes/go-workflow": minor
 ---
 
-Add `Select`, `SelectOk`, `SelectWithCancel`, and `SelectOkWithCancel`.
+Add `Select`, `SelectOk`, `Join`, and `JoinOk` for racing and waiting on durable outcomes.

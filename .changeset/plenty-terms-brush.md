@@ -2,4 +2,4 @@
 "@eriicafes/go-workflow": minor
 ---
 
-Add `workflow.Timeout` to cancel a workflow after a durable delay.
+Add `workflow.WithTimeout`, `WithDeadline`, and their Cause variants for durable cancellation deadlines.

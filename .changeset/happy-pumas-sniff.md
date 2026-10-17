@@ -2,4 +2,4 @@
 "@eriicafes/go-workflow": minor
 ---
 
-Add `Promise` for durable values with `Await`, `Done`, `Cancel`, and `Unwrap`.
+Add `Result[T]` with `Value` and `Unwrap` for durable step and timer outcomes, and `Run.Value` for run outputs.
