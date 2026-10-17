@@ -148,13 +148,7 @@ func WebhookHandler(world World) http.Handler {
 			return
 		}
 		if hook.Webhook.Response != nil {
-			if _, err := world.EventsCreate(r.Context(), EventsCreateInput{
-				RunID: hook.RunID,
-				Event: EventsCreateEvent{EventType: EventTypeHookDisposed, CorrelationID: string(hook.HookID)},
-			}); err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
-				return
-			}
+			// Receiving the request already deactivated this webhook atomically.
 			writeWebhookResponse(w, *hook.Webhook.Response)
 			return
 		}

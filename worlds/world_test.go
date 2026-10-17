@@ -208,8 +208,21 @@ func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
 	}
 }
 
+type webhookCompletingWorld struct{ *testworld.World }
+
+func (w webhookCompletingWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	result, err := w.World.Queue(ctx, input)
+	if err != nil {
+		return result, err
+	}
+	// A resumed workflow can finish before the handler returns from Queue.
+	_, err = w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted}})
+	return result, err
+}
+
 func TestWebhookHandlerOnlyResumesPublicWebhooksWithTheConfiguredMethod(t *testing.T) {
-	world := testworld.New()
+	world := webhookCompletingWorld{testworld.NewManual()}
+	defer world.Close()
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_webhook", WorkflowName: "webhook"})
 	if err != nil {
