@@ -23,11 +23,7 @@ Use `workflow.Timer` when the runner needs to do other work during a wait.
 For example, race an approval hook against a reminder timer:
 
 ```go
-approved, err := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
-if err != nil {
-	return Output{}, err
-}
-
+approved := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
 defer approved.Dispose(ctx)
 
 reminder := workflow.Timer(ctx, 48*time.Hour)

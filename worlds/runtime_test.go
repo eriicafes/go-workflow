@@ -255,10 +255,7 @@ type hookedOutput struct{ Value string }
 func (hookedInput) Workflow(hookedOutput) {}
 
 func awaitHook(ctx context.Context, input hookedInput) (hookedOutput, error) {
-	hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-	if err != nil {
-		return hookedOutput{}, err
-	}
+	hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return hookedOutput{}, err
 	} else if owner != nil {
@@ -554,10 +551,7 @@ func nudge(context.Context, struct{}) (struct{}, error)   { return struct{}{}, n
 // awaitWithNudge sends a nudge when the hook has not been resumed by the time
 // the preparation step finishes.
 func awaitWithNudge(ctx context.Context, input nudgeInput) (nudgeOutput, error) {
-	hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-	if err != nil {
-		return nudgeOutput{}, err
-	}
+	hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return nudgeOutput{}, err
 	} else if owner != nil {

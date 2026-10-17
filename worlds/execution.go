@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -66,7 +65,6 @@ type Execution struct {
 	// which fences a flow's writes.
 	inBand        int
 	continuations []func()
-	registrations []func()
 	prematureExit bool
 }
 
@@ -237,7 +235,6 @@ func (e *Execution) DeliveredEventID() EventID {
 // It panics with a value the Runtime recovers and does not return. It is for
 // operations that await a promise that is not ready, not for runner code.
 func (e *Execution) Suspend() {
-	e.FlushHooks()
 	panic(e.exit(errReplaySuspended))
 }
 
@@ -316,44 +313,6 @@ func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) er
 	return result
 }
 
-// RegisterHook reserves a declaration position and queues its registration
-// for the next workflow wait. Generated tokens are available immediately and
-// recovered from the declaration on replay, without claiming ownership yet.
-func (e *Execution) RegisterHook(token string, fn func(int, string)) (string, error) {
-	position := e.NextPosition()
-	if index, exists := e.index[position]; exists {
-		event := e.events[index]
-		if event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
-			panic(e.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
-		}
-		var created DataHookCreated
-		if err := json.Unmarshal(event.Data, &created); err != nil {
-			return "", fmt.Errorf("workflow: decode hook: %w", err)
-		}
-		if token != "" && created.Token != token {
-			panic(e.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, token)}))
-		}
-		token = created.Token
-	} else if token == "" {
-		// A step can capture the token before registration is committed. Derive
-		// it from the run and declaration so a retry before that commit still
-		// registers the same token the step received.
-		token = NewRunHookToken(e.run, position)
-	}
-	e.registrations = append(e.registrations, func() { fn(position, token) })
-	return token, nil
-}
-
-// FlushHooks commits pending registrations without waiting for payloads.
-// It is used by workflow waits and explicit ownership checks.
-func (e *Execution) FlushHooks() {
-	registrations := e.registrations
-	e.registrations = nil
-	for _, register := range registrations {
-		register()
-	}
-}
-
 // OnAdvance registers workflow work that becomes runnable as results arrive.
 func (e *Execution) OnAdvance(fn func()) {
 	e.continuations = append(e.continuations, fn)
@@ -362,7 +321,6 @@ func (e *Execution) OnAdvance(fn func()) {
 
 // Advance delivers one recorded event and runs newly ready continuations.
 func (e *Execution) Advance() bool {
-	e.FlushHooks()
 	if e.horizon == len(e.events) {
 		return false
 	}

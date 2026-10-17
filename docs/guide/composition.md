@@ -53,10 +53,8 @@ finishes:
 
 ```go
 func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
-	hook, err := workflow.CreateHook[string](ctx)
-	if err != nil {
-		return workflows.ParentResult{}, err
-	}
+	hook := workflow.CreateHook[string](ctx)
+	defer hook.Dispose(ctx)
 
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return workflows.ParentResult{}, err
@@ -67,8 +65,6 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
 		return workflows.ParentResult{}, err
 	}
-
-	defer hook.Dispose(ctx)
 
 	value, err := hook.Next(ctx)
 	return workflows.ParentResult{Value: value}, err
@@ -101,11 +97,7 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 ```go
 hooks := make([]*workflow.Hook[string], len(input.Items))
 for i, item := range input.Items {
-	hook, err := workflow.CreateHook[string](ctx)
-	if err != nil {
-		return Output{}, err
-	}
-
+	hook := workflow.CreateHook[string](ctx)
 	defer hook.Dispose(ctx)
 
 	if owner, err := hook.GetConflict(ctx); err != nil {

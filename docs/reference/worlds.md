@@ -295,8 +295,8 @@ See [HTTP Endpoints](/reference/http).
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced
 integrations. Operations normally take the runner's next position with
-`Execution.NextPosition`. Lazy hooks reserve their position through
-`Execution.RegisterHook` and pass it to `DurableHook` when registration commits.
+`Execution.NextPosition`. Lazy hooks reserve a position at creation and pass it
+to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 
 | Function | Description |
 | --- | --- |
@@ -305,9 +305,7 @@ integrations. Operations normally take the runner's next position with
 | `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
 | `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
-| `Execution.RegisterHook` | Reserve a hook position and token, queuing registration for a workflow wait. |
-| `Execution.FlushHooks` | Commit pending registrations without waiting for payloads. |
-| `Execution.Advance` | Commit pending hooks, deliver the next recorded event, and run continuations. Returns false at the end of the loaded log. |
+| `Execution.Advance` | Deliver the next recorded event and run continuations. Returns false at the end of the loaded log. |
 | `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
 | `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
 | `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |

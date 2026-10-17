@@ -8,40 +8,31 @@ import (
 )
 
 var (
-	// ErrNoClient is returned by Start, Get, GetHook, and ResumeHook when ctx
-	// carries no Client and does not belong to a run.
+	// ErrNoClient reports that the context has no client.
 	ErrNoClient = errors.New("workflow: context has no client")
-	// ErrNoWorkflow is returned when a function that must be called in
-	// workflow context, such as Step, Join, or CreateHook, is called outside
-	// it, including in step context, and when a stream function is called
-	// outside a run.
+	// ErrNoWorkflow reports that an operation requires workflow context.
 	ErrNoWorkflow = errors.New("workflow: context has no active workflow")
-	// ErrNotInStep is returned when a function that does I/O, such as Writer
-	// or Run.Reader, is called in workflow context.
+	// ErrNotInStep reports that an operation cannot be called in workflow context.
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
 	// ErrRunCancelled is returned when awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
-	// ErrRunNotFinished is returned by Run.Value in workflow context when the
-	// run it awaits had not finished.
+	// ErrRunNotFinished reports that a run is still waiting or running.
 	ErrRunNotFinished = errors.New("workflow: run has not finished")
-	// ErrHookNotFound is returned when resuming a hook token that no active
-	// hook has.
+	// ErrHookNotFound reports that no active hook owns the requested token.
 	ErrHookNotFound = worlds.ErrHookNotFound
-	// ErrHookNotActive is returned when receiving from a disposed hook.
+	// ErrHookNotActive reports that a hook can no longer receive payloads.
 	ErrHookNotActive = worlds.ErrHookNotActive
-	// ErrHookNotRegistered is returned when receiving or selecting an unbound
-	// hook, or when GetConflict or Dispose uses a handle from another execution.
+	// ErrHookNotRegistered reports that a hook does not belong to the current
+	// workflow execution.
 	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
 	// ErrHookConflict is returned when claiming a hook whose token another
 	// active hook already has. Hook.GetConflict reports the run that owns it.
 	ErrHookConflict = worlds.ErrHookConflict
-	// ErrHookForceClaimed is returned when awaiting a hook whose token
-	// another run took over with HookOption.Force.
+	// ErrHookForceClaimed reports that another hook took over this hook's token.
 	ErrHookForceClaimed = worlds.ErrHookForceClaimed
 )
 
-// Error is the error Step returns for a failed step and Run.Value returns
-// for a failed run. It keeps the type, message, and exported
+// Error represents a recorded failure. It keeps the type, message, and exported
 // fields of each error in the original chain, so errors.Is matches sentinel
 // errors and errors.As decodes error types after replay.
 type Error = worlds.Error

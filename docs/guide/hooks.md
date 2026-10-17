@@ -27,11 +27,7 @@ var Approvals = workflow.DefineHook[Approval](workflow.HookOption{
 Create a handle in the runner and wait for a payload:
 
 ```go
-hook, err := workflows.Approvals.Create(ctx)
-if err != nil {
-	return Output{}, err
-}
-
+hook := workflows.Approvals.Create(ctx)
 defer hook.Dispose(ctx)
 
 approval, err := hook.Next(ctx)
@@ -46,13 +42,9 @@ A fixed token allows one owner at a time. For a token tied to an order, create
 the hook directly:
 
 ```go
-hook, err := workflow.CreateHook[workflows.Approval](ctx, workflow.HookOption{
+hook := workflow.CreateHook[workflows.Approval](ctx, workflow.HookOption{
 	Token: "approve:" + input.OrderID,
 })
-if err != nil {
-	return Output{}, err
-}
-
 defer hook.Dispose(ctx)
 ```
 
@@ -61,9 +53,12 @@ stable across replay, even if a delivery stops before registration.
 
 ## Registering before starting work
 
-Creating a handle does not claim its token. Registration happens when the
-workflow waits, such as on `Next` or `Select`. The hook's ID becomes available
-after registration.
+Creating a handle returns no error and does not claim its token. Registration
+happens when receiving from or selecting that specific hook, including through
+`Next`, `Values`, `Select`, or `Join`. Unrelated waits and ownership checks on
+other hooks do not register it. Its ID becomes available after registration.
+
+A handle created outside workflow context reports `ErrNoWorkflow` when used.
 
 Call `GetConflict` before passing a token to work that might resume it
 immediately. This commits registration without waiting for a payload:
@@ -172,11 +167,16 @@ Webhook requests follow the same rule.
 
 ## Disposal and retention
 
-Use a direct `defer hook.Dispose(ctx)` when the token should be released as
-the workflow body returns. Replay suspension does not trigger this disposal.
+Place `defer hook.Dispose(ctx)` immediately after creation when the token
+should be released as the workflow body returns. Replay suspension does not
+trigger this disposal.
 Disposal stops receiving immediately, including unread buffered payloads,
 and releases the token. Disposing an unregistered handle does not claim it
 or write a hook event.
+
+`Dispose` returns nothing and panics on failure, so errors from a deferred call
+reach the workflow runtime. Storage failures retry the delivery; a terminal
+disposal failure fails the workflow and can replace its original error.
 
 To reserve a token after a run ends, set `MinRetention`. The reservation lasts
 until creation time plus the duration. An active run keeps its token beyond

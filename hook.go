@@ -26,7 +26,7 @@ type HookOption struct {
 }
 
 // HookDefinition is a hook declared with DefineHook but not yet created in a
-// run. Waiting commits its registration; GetConflict waits only for ownership.
+// run. Receiving or selecting registers it; GetConflict waits only for ownership.
 type HookDefinition[T any] struct {
 	token        string
 	minRetention time.Duration
@@ -44,32 +44,30 @@ func DefineHook[T any](options ...HookOption) HookDefinition[T] {
 }
 
 // Create creates a hook handle in workflow context without claiming its token.
-// Waiting registers pending hooks. Use GetConflict to claim ownership before
-// starting work that depends on the token.
-func (d HookDefinition[T]) Create(ctx context.Context) (*Hook[T], error) {
+// Receiving or selecting this hook registers it. Use GetConflict to claim
+// ownership before starting work that depends on the token. Outside workflow
+// context, the handle reports ErrNoWorkflow when used.
+func (d HookDefinition[T]) Create(ctx context.Context) *Hook[T] {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
-		return nil, ErrNoWorkflow
+		return &Hook[T]{err: ErrNoWorkflow}
 	}
 	hook := &Hook[T]{
 		token:          d.token,
 		minRetention:   d.minRetention,
 		force:          d.force,
 		executionState: execution,
+		position:       execution.NextPosition(),
 	}
-	token, err := execution.RegisterHook(hook.token, func(position int, token string) {
-		if hook.disposed {
-			return
-		}
-		hook.create(execution, position, token)
-	})
-	hook.token = token
-	return hook, err
+	if hook.token == "" {
+		hook.token = worlds.NewRunHookToken(execution.Run(), hook.position)
+	}
+	return hook
 }
 
 // CreateHook creates an unregistered hook handle for payloads of type T. It is
 // DefineHook followed by Create.
-func CreateHook[T any](ctx context.Context, options ...HookOption) (*Hook[T], error) {
+func CreateHook[T any](ctx context.Context, options ...HookOption) *Hook[T] {
 	return DefineHook[T](options...).Create(ctx)
 }
 
@@ -78,6 +76,7 @@ type Hook[T any] struct {
 	token          string
 	id             worlds.HookID
 	registered     bool
+	position       int
 	disposed       bool
 	webhook        *worlds.Webhook
 	minRetention   time.Duration
@@ -127,13 +126,16 @@ func (h *Hook[T]) settlementID() (string, bool) {
 func (h *Hook[T]) done() (bool, error, error) {
 	execution := h.executionState
 	if execution == nil {
+		if h.err != nil {
+			return true, h.err, nil
+		}
 		return false, nil, ErrHookNotRegistered
 	}
 	if h.disposed {
 		return true, ErrHookNotActive, nil
 	}
 	if !h.registered {
-		return false, nil, nil
+		h.create(execution, h.position, h.token)
 	}
 	if h.err != nil {
 		// Wait until replay reaches the conflict event so Select cannot choose
@@ -152,8 +154,7 @@ func (h *Hook[T]) done() (bool, error, error) {
 
 // Next waits for and consumes one payload. A disposed or displaced hook
 // returns an error; payloads received before takeover are delivered first.
-// Waiting commits pending hook registrations; a conflicting token returns
-// ErrHookConflict.
+// It registers this hook on first use; a conflicting token returns ErrHookConflict.
 func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 	var zero T
 	if _, err := Select(ctx, h); err != nil {
@@ -186,13 +187,16 @@ func (h *Hook[T]) GetConflict(ctx context.Context) (*Run[any], error) {
 		return nil, ErrNoWorkflow
 	}
 	if h.executionState != execution {
+		if h.err != nil {
+			return nil, h.err
+		}
 		return nil, ErrHookNotRegistered
 	}
 	if h.disposed {
 		return nil, ErrHookNotActive
 	}
 	if !h.registered {
-		execution.FlushHooks()
+		h.create(execution, h.position, h.token)
 	}
 	if h.conflict == "" {
 		return nil, h.err
@@ -201,30 +205,34 @@ func (h *Hook[T]) GetConflict(ctx context.Context) (*Run[any], error) {
 }
 
 // Dispose deactivates the hook and immediately releases its token. It is a
-// durable inline step and may be deferred directly in workflow code.
-func (h *Hook[T]) Dispose(ctx context.Context) error {
+// durable inline step and may be deferred directly in workflow code. Errors
+// panic so a deferred disposal failure propagates to the workflow runtime.
+func (h *Hook[T]) Dispose(ctx context.Context) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
-		return ErrNoWorkflow
+		panic(ErrNoWorkflow)
 	}
 	if h.executionState != execution {
-		return ErrHookNotRegistered
+		if h.err != nil {
+			panic(h.err)
+		}
+		panic(ErrHookNotRegistered)
 	}
 	if execution.IsPrematureExit() || h.disposed {
-		return nil
+		return
 	}
 	if !h.registered {
 		h.disposed = true
-		return nil
+		return
 	}
 	if h.err != nil {
-		return nil
+		return
 	}
 	_, err := InlineStep(execution.Context(), disposeHook, h.id)
-	if err == nil {
-		h.disposed = true
+	if err != nil {
+		panic(err)
 	}
-	return err
+	h.disposed = true
 }
 
 func disposeHook(ctx context.Context, id worlds.HookID) (struct{}, error) {

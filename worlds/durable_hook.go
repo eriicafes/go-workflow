@@ -12,7 +12,7 @@ type (
 	// hook that owns it instead of failing with ErrHookConflict.
 	DurableHookOptions struct {
 		Execution *Execution
-		// Position is a declaration position reserved by RegisterHook. When nil,
+		// Position is a declaration position reserved by NextPosition. When nil,
 		// DurableHook declares and registers at the next position immediately.
 		Position     *int
 		Token        string

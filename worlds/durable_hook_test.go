@@ -42,20 +42,14 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 	base := testworld.NewManual()
 	defer base.Close()
 	runner := workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
-		old, err := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return durableHookOutput{}, err
-		}
+		old := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token})
 		if owner, err := old.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
 			return durableHookOutput{}, workflow.ErrHookConflict
 		}
 		oldID := old.ID()
-		current, err := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token, Force: true})
-		if err != nil {
-			return durableHookOutput{}, err
-		}
+		current := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token, Force: true})
 		if owner, err := current.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
@@ -73,9 +67,7 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 		if err != nil {
 			return durableHookOutput{}, err
 		}
-		if err := current.Dispose(ctx); err != nil {
-			return durableHookOutput{}, err
-		}
+		current.Dispose(ctx)
 		if _, err := current.Next(ctx); !errors.Is(err, workflow.ErrHookNotActive) {
 			return durableHookOutput{}, errors.New("disposed hook yielded buffered data")
 		}
@@ -113,17 +105,14 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 	for _, wrapped := range []bool{false, true} {
 		t.Run(map[bool]string{false: "direct defer", true: "wrapped defer"}[wrapped], func(t *testing.T) {
 			world := testworld.New(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
-				hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
-				if err != nil {
-					return durableHookOutput{}, err
-				}
+				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
 				if owner, err := hook.GetConflict(ctx); err != nil {
 					return durableHookOutput{}, err
 				} else if owner != nil {
 					return durableHookOutput{}, workflow.ErrHookConflict
 				}
 				if wrapped {
-					defer func() { _ = hook.Dispose(ctx) }()
+					defer func() { hook.Dispose(ctx) }()
 				} else {
 					defer hook.Dispose(ctx)
 				}
@@ -171,10 +160,7 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 
 func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return durableHookOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
@@ -225,19 +211,14 @@ func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
 
 func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ durableHookInput) (durableHookOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx)
-		if err != nil {
-			return durableHookOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx)
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
 			return durableHookOutput{}, workflow.ErrHookConflict
 		}
-		if err := hook.Dispose(ctx); err != nil {
-			return durableHookOutput{}, err
-		}
-		_, err = hook.Next(ctx)
+		hook.Dispose(ctx)
+		_, err := hook.Next(ctx)
 		return durableHookOutput{Cancelled: errors.Is(err, worlds.ErrHookNotActive)}, nil
 	}))
 	defer world.Close()
@@ -255,10 +236,7 @@ func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
 
 func TestDurableHookConflictRecordsTheOwningRun(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
-		hook, createErr := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
-		if createErr != nil && !errors.Is(createErr, workflow.ErrHookConflict) {
-			return hookConflictOutput{}, createErr
-		}
+		hook := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
 		owner, err := hook.GetConflict(ctx)
 		if owner == nil {
 			return hookConflictOutput{}, err
@@ -303,16 +281,13 @@ func TestDurableHookConflictRecordsTheOwningRun(t *testing.T) {
 
 func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookForceInput) (hookForceOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, Force: input.Force})
-		if err != nil && !errors.Is(err, worlds.ErrHookForceClaimed) {
-			return hookForceOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, Force: input.Force})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookForceOutput{}, err
 		} else if owner != nil {
 			return hookForceOutput{}, workflow.ErrHookConflict
 		}
-		_, err = hook.Next(ctx)
+		_, err := hook.Next(ctx)
 		return hookForceOutput{ForceClaimed: errors.Is(err, worlds.ErrHookForceClaimed)}, nil
 	}))
 	defer world.Close()
@@ -359,10 +334,7 @@ func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 
 func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookRetentionInput) (hookRetentionOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: input.Retention})
-		if err != nil {
-			return hookRetentionOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: input.Retention})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookRetentionOutput{}, err
 		} else if owner != nil {

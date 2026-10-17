@@ -308,15 +308,13 @@ A hook receives repeated typed payloads. Declare reusable hook definitions besid
 Pass a token when the caller must know it in advance.
 
 ```go
-hook, err := workflow.CreateHook[Approval](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
-if err != nil {
-	return Result{}, err
-}
+hook := workflow.CreateHook[Approval](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
 defer hook.Dispose(ctx)
+
 approval, err := hook.Next(ctx) // registers the hook and waits for a payload
 ```
 
-Creation is lazy: pending hooks register when the workflow waits. Use `GetConflict(ctx)` before starting work that requires ownership or exposes the token; it registers without waiting for a payload and returns the conflicting run, or nil.
+Creation is local and returns only a handle. Receiving from or selecting that hook registers it; unrelated waits do not. Use `GetConflict(ctx)` before starting work that requires ownership or exposes the token; it registers without waiting for a payload and returns the conflicting run, or nil. `Dispose` propagates failures by panicking, including when deferred.
 
 ```go
 err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
@@ -333,6 +331,8 @@ webhook, err := workflow.CreateWebhook[Payment](ctx)
 if err != nil {
 	return Result{}, err
 }
+defer webhook.Dispose(ctx)
+
 if _, err := workflow.Step(ctx, registerCallback, webhook.URL()); err != nil {
 	return Result{}, err
 }
@@ -361,10 +361,9 @@ pass it a hook token and have it resume the hook when it finishes.
 
 ```go
 func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
-	hook, err := workflow.CreateHook[string](ctx)
-	if err != nil {
-		return workflows.ParentResult{}, err
-	}
+	hook := workflow.CreateHook[string](ctx)
+	defer hook.Dispose(ctx)
+
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return workflows.ParentResult{}, err
 	} else if owner != nil {

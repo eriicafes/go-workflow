@@ -26,10 +26,9 @@ func (hookResumeInput) Workflow(hookResumeOutput)     {}
 
 func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 	runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		unused := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+		defer unused.Dispose(ctx)
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		defer hook.Dispose(ctx)
 		if hook.ID() != "" || hook.Token() != input.Token {
 			return hookResumeOutput{}, errors.New("unclaimed hook identity changed")
@@ -49,6 +48,9 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 		}
 		if hook.ID() == "" {
 			return hookResumeOutput{}, errors.New("GetConflict did not register the hook")
+		}
+		if unused.ID() != "" {
+			return hookResumeOutput{}, errors.New("GetConflict registered another hook")
 		}
 		return hookResumeOutput{Value: hook.Token()}, nil
 	})
@@ -82,15 +84,105 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 	}
 }
 
+func TestHookCreatedOutsideWorkflowReportsErrorWhenUsed(t *testing.T) {
+	hook := workflow.CreateHook[string](context.Background())
+	if _, err := hook.Next(context.Background()); !errors.Is(err, workflow.ErrNoWorkflow) {
+		t.Fatalf("Next error=%v", err)
+	}
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ hookResumeInput) (hookResumeOutput, error) {
+		if _, err := workflow.Select(ctx, hook); !errors.Is(err, workflow.ErrNoWorkflow) {
+			return hookResumeOutput{}, errors.New("invalid hook selection did not report ErrNoWorkflow")
+		}
+		_, err := hook.GetConflict(ctx)
+		if !errors.Is(err, workflow.ErrNoWorkflow) {
+			return hookResumeOutput{}, errors.New("invalid hook ownership check did not report ErrNoWorkflow")
+		}
+		return hookResumeOutput{}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, hookResumeInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeferredHookDisposalPropagatesFailures(t *testing.T) {
+	for _, recordedFailure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "storage retry", true: "recorded failure"}[recordedFailure], func(t *testing.T) {
+			base := testworld.NewManual()
+			defer base.Close()
+			storageErr := errors.New("disposal storage unavailable")
+			world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookDisposed, err: storageErr}
+			world.failures.Store(1)
+			runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
+				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+				defer hook.Dispose(ctx)
+				_, err := hook.GetConflict(ctx)
+				return hookResumeOutput{}, err
+			})
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, hookResumeInput{Token: "dispose-failure"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+			delivery := base.QueuedMessages()[0].Input
+			if err := runtime.Execute(ctx, delivery); !errors.Is(err, storageErr) {
+				t.Fatalf("disposal delivery error=%v", err)
+			}
+			failure := errors.New("disposal failed")
+			if recordedFailure {
+				events, err := base.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+				if err != nil {
+					t.Fatal(err)
+				}
+				encoded, err := json.Marshal(worlds.NewError(failure))
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(worlds.DataStepResult{Error: encoded})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events.Data {
+					if event.EventType == worlds.EventTypeStepCreated {
+						if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: event.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepFailed, CorrelationID: event.CorrelationID, Data: data}}); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			if err := runtime.Execute(ctx, delivery); err != nil {
+				t.Fatal(err)
+			}
+			_, err = run.Value(ctx)
+			if recordedFailure {
+				if !errors.Is(err, failure) {
+					t.Fatalf("deferred failure=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if _, found, err := workflow.GetHook[string](ctx, "dispose-failure"); err != nil || found {
+				t.Fatalf("disposed token found=%t err=%v", found, err)
+			}
+		})
+	}
+}
+
 func TestHookCombinatorsRegisterBeforeWaitingForPayload(t *testing.T) {
 	for _, operation := range []string{"Next", "Values", "Select", "SelectOk", "Join", "JoinOk"} {
 		t.Run(operation, func(t *testing.T) {
 			runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-				hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-				if err != nil {
-					return hookResumeOutput{}, err
-				}
+				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 				defer hook.Dispose(ctx)
+				var err error
 				switch operation {
 				case "Values":
 					for value, err := range hook.Values(ctx) {
@@ -147,12 +239,9 @@ func TestHookCombinatorsRegisterBeforeWaitingForPayload(t *testing.T) {
 	}
 }
 
-func TestHookRegistersAtAnotherPromiseWaitAndKeepsTokenAfterInterruptedCommit(t *testing.T) {
+func TestHookRegistersOnlyWhenUsedAndKeepsTokenAfterInterruptedCommit(t *testing.T) {
 	runner := workflow.Use(func(ctx context.Context, _ hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx)
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx)
 		defer hook.Dispose(ctx)
 		if len(hook.Token()) != 21 || hook.ID() != "" {
 			return hookResumeOutput{}, errors.New("generated identity unavailable before registration")
@@ -165,6 +254,9 @@ func TestHookRegistersAtAnotherPromiseWaitAndKeepsTokenAfterInterruptedCommit(t 
 		}
 		if token != hook.Token() {
 			return hookResumeOutput{}, errors.New("token changed after the step captured it")
+		}
+		if hook.ID() != "" {
+			return hookResumeOutput{}, errors.New("waiting for the step registered the hook")
 		}
 		value, err := hook.Next(ctx)
 		return hookResumeOutput{Value: value}, err
@@ -182,8 +274,8 @@ func TestHookRegistersAtAnotherPromiseWaitAndKeepsTokenAfterInterruptedCommit(t 
 	}
 	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
 	delivery := base.QueuedMessages()[0].Input
-	if err := runtime.Execute(ctx, delivery); !errors.Is(err, commitErr) {
-		t.Fatalf("interrupted commit error=%v", err)
+	if err := runtime.Execute(ctx, delivery); err != nil {
+		t.Fatal(err)
 	}
 	events, err := base.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
@@ -207,21 +299,24 @@ func TestHookRegistersAtAnotherPromiseWaitAndKeepsTokenAfterInterruptedCommit(t 
 		}
 	}
 	if capturedToken == "" {
-		t.Fatal("step was not started alongside pending registration")
+		t.Fatal("step did not capture the unregistered hook token")
 	}
-	if err := runtime.Execute(ctx, delivery); err != nil {
-		t.Fatal(err)
-	}
-	if _, found, err := workflow.GetHook[string](ctx, capturedToken); err != nil || !found {
-		t.Fatalf("captured token registration found=%t err=%v", found, err)
+	if _, found, err := workflow.GetHook[string](ctx, capturedToken); err != nil || found {
+		t.Fatalf("unused hook registration found=%t err=%v", found, err)
 	}
 	stepDelivery := delivery
 	stepDelivery.StepID = &stepID
 	if err := runtime.Execute(ctx, stepDelivery); err != nil {
 		t.Fatal(err)
 	}
+	if err := runtime.Execute(ctx, delivery); !errors.Is(err, commitErr) {
+		t.Fatalf("interrupted commit error=%v", err)
+	}
 	if err := runtime.Execute(ctx, delivery); err != nil {
 		t.Fatal(err)
+	}
+	if _, found, err := workflow.GetHook[string](ctx, capturedToken); err != nil || !found {
+		t.Fatalf("captured token registration found=%t err=%v", found, err)
 	}
 	if err := workflow.ResumeHook(ctx, capturedToken, "stable"); err != nil {
 		t.Fatal(err)
@@ -243,18 +338,12 @@ func TestHookGetConflictPreventsWorkBeforeOwnership(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ownerRunner := workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
-				hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
-				if err != nil {
-					return hookConflictOutput{}, err
-				}
-				_, err = hook.GetConflict(ctx)
+				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
+				_, err := hook.GetConflict(ctx)
 				return hookConflictOutput{}, err
 			})
 			duplicateRunner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-				hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-				if err != nil {
-					return hookResumeOutput{}, err
-				}
+				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 				defer hook.Dispose(ctx)
 				if checkFirst {
 					owner, err := hook.GetConflict(ctx)
@@ -265,7 +354,7 @@ func TestHookGetConflictPreventsWorkBeforeOwnership(t *testing.T) {
 						return hookResumeOutput{Value: owner.ID()}, nil
 					}
 				}
-				_, err = workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+				_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 					return struct{}{}, nil
 				}, struct{}{})
 				if err != nil {
@@ -320,18 +409,12 @@ func TestHookGetConflictPreventsWorkBeforeOwnership(t *testing.T) {
 
 func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 	ownerRunner := workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
-		if err != nil {
-			return hookConflictOutput{}, err
-		}
-		_, err = hook.GetConflict(ctx)
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
+		_, err := hook.GetConflict(ctx)
 		return hookConflictOutput{}, err
 	})
 	runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		defer hook.Dispose(ctx)
 		step := workflow.Background(ctx, func(context.Context, struct{}) (struct{}, error) {
 			return struct{}{}, nil
@@ -383,10 +466,7 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 
 func TestUnregisteredHookDisposeDoesNotClaimToken(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		defer hook.Dispose(ctx)
 		return hookResumeOutput{Value: hook.Token()}, nil
 	}))
@@ -413,10 +493,7 @@ func TestUnregisteredHookDisposeDoesNotClaimToken(t *testing.T) {
 
 func TestHookGetConflictRecordsTheOwningRun(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
-		hook, createErr := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
-		if createErr != nil && !errors.Is(createErr, workflow.ErrHookConflict) {
-			return hookConflictOutput{}, createErr
-		}
+		hook := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
 		owner, err := hook.GetConflict(ctx)
 		if owner == nil {
 			return hookConflictOutput{}, err
@@ -462,10 +539,7 @@ func TestHookGetConflictRecordsTheOwningRun(t *testing.T) {
 
 func TestGetHookAndResumeHookDeliverTheTypedValue(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		value, err := hook.Next(ctx)
 		return hookResumeOutput{Value: value}, err
 	}))
@@ -508,10 +582,7 @@ func TestGetHookAndResumeHookDeliverTheTypedValue(t *testing.T) {
 
 func TestHookLookupAndResumeRequireStepOrExternalContext(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		defer hook.Dispose(ctx)
 		if _, err := hook.GetConflict(ctx); err != nil {
 			return hookResumeOutput{}, err
@@ -541,10 +612,16 @@ func TestHookLookupAndResumeRequireStepOrExternalContext(t *testing.T) {
 			if _, err := hook.GetConflict(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
 				return struct{}{}, errors.New("step checked hook ownership")
 			}
-			if err := hook.Dispose(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
-				return struct{}{}, errors.New("step disposed a workflow hook")
+			defer func() {
+				if err, ok := recover().(error); !ok || !errors.Is(err, workflow.ErrNoWorkflow) {
+					panic(errors.New("step disposal did not panic with ErrNoWorkflow"))
+				}
+			}()
+			if err := workflow.ResumeHookWithRetries(ctx, token, "step", 1, time.Second); err != nil {
+				return struct{}{}, err
 			}
-			return struct{}{}, workflow.ResumeHookWithRetries(ctx, token, "step", 1, time.Second)
+			hook.Dispose(ctx)
+			return struct{}{}, nil
 		}, input.Token); err != nil {
 			return hookResumeOutput{}, err
 		}
@@ -600,10 +677,7 @@ func TestResumeHookWithRetriesRejectsNonpositiveAttempts(t *testing.T) {
 
 func TestHookValuesBreakAndNextShareTheReplayCursor(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-		if err != nil {
-			return hookResumeOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		defer hook.Dispose(ctx)
 		var first string
 		for value, err := range hook.Values(ctx) {

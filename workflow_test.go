@@ -65,10 +65,7 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 		return childRunOutput{Value: value}, err
 	}
 	parent := func(ctx context.Context, _ parentRunInput) (parentRunOutput, error) {
-		hook, err := workflow.CreateHook[string](ctx)
-		if err != nil {
-			return parentRunOutput{}, err
-		}
+		hook := workflow.CreateHook[string](ctx)
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return parentRunOutput{}, err
 		} else if owner != nil {

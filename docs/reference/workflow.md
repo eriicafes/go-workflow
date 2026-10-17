@@ -138,9 +138,9 @@ type WakeOptions struct {
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `CreateHook[T](ctx, ...HookOption) (*Hook[T], error)` | W | Creates a local handle. Pending hooks register at workflow waits. `GetConflict` commits ownership without awaiting payloads. |
+| `CreateHook[T](ctx, ...HookOption) *Hook[T]` | W | Creates a local handle. Receiving from or selecting this hook registers it. `GetConflict` claims ownership without awaiting payloads. |
 | `DefineHook[T](...HookOption) HookDefinition[T]` | — | Declares a reusable hook. An empty token is generated when a handle is created. |
-| `(HookDefinition[T]) Create(ctx) (*Hook[T], error)` | W | Creates an unregistered handle for the declared hook. |
+| `(HookDefinition[T]) Create(ctx) *Hook[T]` | W | Creates an unregistered handle for the declared hook. Invalid context errors are reported when used. |
 | `ResumeHook[T](ctx, token, value) error` | S, O | Resumes the active hook with `token`. |
 | `ResumeHookWithRetries[T](ctx, token, value, attempts, interval) error` | S, O | Attempts resume immediately, then at fixed intervals while the hook is not found. |
 | `GetHook[T](ctx, token) (*Hook[T], bool, error)` | S, O | Looks up an active hook. The result cannot be awaited. |
@@ -160,7 +160,7 @@ type HookOption struct {
 | --- | --- | --- |
 | `Next(ctx) (T, error)` | W | Registers automatically when waiting, then consumes the next payload. Conflicts return `ErrHookConflict`. |
 | `Values(ctx) iter.Seq2[T, error]` | W | Iterates with the same receive cursor. Stops after an error. |
-| `Dispose(ctx) error` | W | Disposes durably and releases the token immediately. |
+| `Dispose(ctx)` | W | Disposes durably and releases the token immediately. Panics on failure, including when deferred. |
 | `GetConflict(ctx) (*Run[any], error)` | W | Registers and claims the token. Returns the conflicting owner, or nil. Repeated calls use the recorded result. |
 | `ID() string`, `Token() string` | W, S, O | Reads identity without registering. An unregistered handle has an empty ID. |
 
@@ -187,7 +187,7 @@ type WebhookOption struct {
 | `URL() string` | W | Absolute endpoint URL. |
 | `Token() string`, `ID() string` | W | Hook identity. |
 | `Request(ctx) (*WebhookRequest[T], error)` | W | Waits for the request. |
-| `Dispose(ctx) error` | W | Durable disposal, deactivating the endpoint. |
+| `Dispose(ctx)` | W | Durable disposal, deactivating the endpoint. Panics on failure, including when deferred. |
 
 ### `WebhookRequest[T]`
 

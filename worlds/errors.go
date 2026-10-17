@@ -9,49 +9,36 @@ import (
 )
 
 var (
-	// ErrWorkflowNotFound is returned when a run names a workflow that is not
-	// registered with the Runtime. The runtime fails the run, or the step
-	// being executed, with this error.
+	// ErrWorkflowNotFound reports that the run's workflow is not registered
+	// with the Runtime.
 	ErrWorkflowNotFound = errors.New("workflow: workflow not found")
 	// ErrRunNotFound is returned when no run has the requested run ID.
 	ErrRunNotFound = errors.New("workflow: run not found")
 	// ErrRunAlreadyExists is returned by EventsCreateRun when a run with the
 	// requested run ID already exists.
 	ErrRunAlreadyExists = errors.New("workflow: run already exists")
-	// ErrRunTerminal is returned when an event is appended to, or a stream is
-	// written for, a run that has already completed, failed, or been cancelled.
+	// ErrRunTerminal reports that a run has already completed, failed, or
+	// been cancelled.
 	ErrRunTerminal = errors.New("workflow: run is terminal")
-	// ErrRunCancelled reports that a run was cancelled. It is returned by
-	// operations that observe the cancellation during replay and is the cause
-	// of the context passed to a cancelled run's runner and steps.
+	// ErrRunCancelled reports that a run was cancelled.
 	ErrRunCancelled = errors.New("workflow: run cancelled")
 	// ErrStepNotFound is returned when a run has no step with the requested
 	// step ID.
 	ErrStepNotFound = errors.New("workflow: step not found")
-	// ErrStepNotStartable is returned when a step_started
-	// event names a step that does not exist or whose status does not allow
-	// the transition, such as starting a step that has completed.
+	// ErrStepNotStartable reports that a step cannot be started in its current state.
 	ErrStepNotStartable = errors.New("workflow: step is not startable")
-	// ErrEventNotFound is returned when a run has no event with the requested
-	// event ID, or no wait with the requested wait ID.
+	// ErrEventNotFound reports that the requested event does not exist.
 	ErrEventNotFound = errors.New("workflow: event not found")
-	// ErrHookNotFound is returned when no hook has the requested hook ID, or
-	// no active hook owns the requested hook token.
+	// ErrHookNotFound reports that the requested hook could not be found.
 	ErrHookNotFound = errors.New("workflow: hook not found")
-	// ErrHookNotActive is returned when a hook_received event targets a hook
-	// that has already been resolved, has been disposed, or no longer owns its
-	// token. It is also the result of a disposed hook on replay.
+	// ErrHookNotActive reports that a hook can no longer receive payloads.
 	ErrHookNotActive = errors.New("workflow: hook is not active")
 	// ErrHookConflict is returned when a hook token is already owned by
 	// another active hook and the claim is not forced.
 	ErrHookConflict = errors.New("workflow: hook token is already claimed")
-	// ErrHookForceClaimed is the result of a hook whose token another run
-	// claimed with Force.
+	// ErrHookForceClaimed reports that another hook took over this hook's token.
 	ErrHookForceClaimed = errors.New("workflow: hook token was force claimed")
-	// ErrStreamLocked is returned when a stream write conflicts with its
-	// writer session. This happens when another session owns the stream, the
-	// session is no longer current, or the write sequence is not the next one
-	// expected.
+	// ErrStreamLocked reports that a stream write conflicts with its writer session.
 	ErrStreamLocked = errors.New("workflow: stream namespace is already being written")
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
 	// malformed or names an unknown event type.

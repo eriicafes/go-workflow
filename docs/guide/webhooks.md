@@ -8,7 +8,6 @@ webhook, err := workflow.CreateWebhook[Payment](ctx)
 if err != nil {
 	return Output{}, err
 }
-
 defer webhook.Dispose(ctx)
 
 if _, err := workflow.Step(ctx, registerCallback, webhook.URL()); err != nil {
@@ -66,7 +65,6 @@ webhook, err := workflow.CreateWebhook[Command](ctx, workflow.WebhookOption{
 if err != nil {
 	return Output{}, err
 }
-
 defer webhook.Dispose(ctx)
 
 request, err := webhook.Request(ctx)
