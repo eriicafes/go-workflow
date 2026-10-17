@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
@@ -11,18 +12,14 @@ import (
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
-type durableWaitInput struct{ Timeout bool }
+type durableWaitInput struct{}
 type durableWaitOutput struct{}
 
 func (durableWaitInput) Workflow(durableWaitOutput) {}
 
-func TestDurableWaitCompletesAndCancellingWaitCancelsRun(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input durableWaitInput) (durableWaitOutput, error) {
-		if input.Timeout {
-			_, err := workflow.Timeout(ctx, time.Millisecond).Await(ctx)
-			return durableWaitOutput{}, err
-		}
-		_, err := workflow.Timer(ctx, time.Millisecond).Await(ctx)
+func TestDurableWaitCompletes(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
+		_, err := workflow.Timer(ctx, time.Millisecond).Value(ctx)
 		return durableWaitOutput{}, err
 	}))
 	defer world.Close()
@@ -32,33 +29,14 @@ func TestDurableWaitCompletesAndCancellingWaitCancelsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := completed.Await(ctx); err != nil {
+	if _, err := completed.Value(ctx); err != nil {
 		t.Fatal(err)
-	}
-	cancelled, err := workflow.Start(ctx, durableWaitInput{Timeout: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cancelled.Await(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
-		t.Fatalf("cancelling wait error = %v", err)
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(cancelled.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	seenWait, seenCancel := false, false
-	for _, event := range events.Data {
-		seenWait = seenWait || event.EventType == worlds.EventTypeWaitCompleted
-		seenCancel = seenCancel || event.EventType == worlds.EventTypeRunCancelled
-	}
-	if !seenWait || !seenCancel {
-		t.Fatalf("timeout events = %#v", events.Data)
 	}
 }
 
 func TestWakeRunCompletesOnlySelectedWaits(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
-		_, err := workflow.Join(ctx, workflow.Timer(ctx, time.Hour), workflow.Timer(ctx, time.Hour))
+		err := workflow.Join(ctx, workflow.Timer(ctx, time.Hour), workflow.Timer(ctx, time.Hour))
 		return durableWaitOutput{}, err
 	}))
 	defer world.Close()
@@ -90,13 +68,101 @@ func TestWakeRunCompletesOnlySelectedWaits(t *testing.T) {
 	if count, err := worlds.WakeRun(ctx, world, worlds.RunID(run.ID()), waitIDs[:1]); err != nil || count != 1 {
 		t.Fatalf("selected wake count = %d, %v", count, err)
 	}
-	if done, err := run.Done(ctx); err != nil || done {
-		t.Fatalf("run done after one wake = %t, %v", done, err)
+	if status, err := run.Status(ctx); err != nil || status.Terminal() {
+		t.Fatalf("run status after one wake = %s, %v", status, err)
 	}
 	if count, err := worlds.WakeRun(ctx, world, worlds.RunID(run.ID()), nil); err != nil || count != 1 {
 		t.Fatalf("remaining wake count = %d, %v", count, err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCancelledDeadlinesDoNotFireOnReplayAfterExpiry(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		deadline bool
+		parent   bool
+	}{
+		{name: "timeout"},
+		{name: "deadline", deadline: true},
+		{name: "parent cancellation", deadline: true, parent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				world := testworld.NewManual()
+				defer world.Close()
+				runner := workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
+					parent := ctx
+					var cancelParent func(error) error
+					var err error
+					if test.parent {
+						parent, cancelParent, err = workflow.WithCancelCause(ctx)
+						if err != nil {
+							return durableWaitOutput{}, err
+						}
+					}
+					var cancelCtx context.Context
+					var cancel func() error
+					if test.deadline {
+						now, nowErr := workflow.Now(ctx)
+						if nowErr != nil {
+							return durableWaitOutput{}, nowErr
+						}
+						cancelCtx, cancel, err = workflow.WithDeadline(parent, now.Add(time.Hour))
+					} else {
+						cancelCtx, cancel, err = workflow.WithTimeout(parent, time.Hour)
+					}
+					if err != nil {
+						return durableWaitOutput{}, err
+					}
+					var cause error = context.Canceled
+					if test.parent {
+						cause = errors.New("parent stopped")
+						err = cancelParent(cause)
+					} else {
+						err = cancel()
+					}
+					if err != nil {
+						return durableWaitOutput{}, err
+					}
+					if !errors.Is(context.Cause(cancelCtx), cause) {
+						return durableWaitOutput{}, errors.New("cancellation cause changed on replay")
+					}
+					return durableWaitOutput{}, workflow.Sleep(ctx, 2*time.Hour)
+				})
+				runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+				ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+				run, err := workflow.Start(ctx, durableWaitInput{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				deliverNext(t, ctx, world, runtime)
+				// Replay reconstructs the deadline timer before reaching the recorded cancellation.
+				time.Sleep(3 * time.Hour)
+				drain(t, ctx, world, runtime)
+				status, err := run.Status(ctx)
+				if err != nil || status != workflow.StatusCompleted {
+					t.Fatalf("status=%s err=%v", status, err)
+				}
+				if _, err := run.Value(ctx); err != nil {
+					t.Fatal(err)
+				}
+				events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+				if err != nil {
+					t.Fatal(err)
+				}
+				completed := 0
+				for _, event := range events.Data {
+					if event.EventType == worlds.EventTypeWaitCompleted {
+						completed++
+					}
+				}
+				if completed != 1 {
+					t.Fatalf("completed timers=%d; only the independent sleep should fire", completed)
+				}
+			})
+		})
 	}
 }

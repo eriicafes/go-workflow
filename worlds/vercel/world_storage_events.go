@@ -14,16 +14,18 @@ import (
 // eventDescriptor is the scriptAppend argument for one event. Go parses the
 // event data and passes only the fields admission and the views need.
 type eventDescriptor struct {
-	Type          worlds.EventType `json:"t"`
-	CorrelationID string           `json:"c"`
-	Record        string           `json:"r"`
-	Invalid       bool             `json:"bad,omitempty"`
-	Data          string           `json:"d,omitempty"`
-	Step          *stepCreatedArg  `json:"step,omitempty"`
-	Result        *stepResultArg   `json:"res,omitempty"`
-	Attributes    []attributeArg   `json:"attrs,omitempty"`
-	Hook          *hookCreatedArg  `json:"hook,omitempty"`
-	Received      *hookReceivedArg `json:"recv,omitempty"`
+	Type          worlds.EventType       `json:"t"`
+	CorrelationID string                 `json:"c"`
+	Record        string                 `json:"r"`
+	Invalid       bool                   `json:"bad,omitempty"`
+	Data          string                 `json:"d,omitempty"`
+	Step          *stepCreatedArg        `json:"step,omitempty"`
+	Result        *stepResultArg         `json:"res,omitempty"`
+	Attributes    []attributeArg         `json:"attrs,omitempty"`
+	Payload       json.RawMessage        `json:"payload,omitempty"`
+	Taken         *worlds.HookForceClaim `json:"taken,omitempty"`
+	Hook          *hookCreatedArg        `json:"hook,omitempty"`
+	Received      *hookReceivedArg       `json:"recv,omitempty"`
 }
 
 type stepCreatedArg struct {
@@ -43,12 +45,13 @@ type attributeArg struct {
 }
 
 type hookCreatedArg struct {
-	Token        string `json:"token"`
-	Metadata     string `json:"metadata,omitempty"`
-	Webhook      string `json:"webhook,omitempty"`
-	Manual       bool   `json:"manual,omitempty"`
-	MinRetention string `json:"minRetention,omitempty"`
-	RetentionUs  string `json:"retentionUs,omitempty"`
+	Token        string                 `json:"token"`
+	Metadata     string                 `json:"metadata,omitempty"`
+	Webhook      string                 `json:"webhook,omitempty"`
+	Manual       bool                   `json:"manual,omitempty"`
+	MinRetention string                 `json:"minRetention,omitempty"`
+	ClaimedFrom  *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
+	RetentionUs  string                 `json:"retentionUs,omitempty"`
 }
 
 type hookReceivedArg struct {
@@ -62,24 +65,6 @@ type runCreatedData struct {
 	Input        json.RawMessage   `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
 	DeploymentID string            `json:"deploymentId,omitempty"`
-}
-
-type stepCreatedData struct {
-	StepName string          `json:"stepName"`
-	Input    json.RawMessage `json:"input"`
-}
-
-type stepResultData struct {
-	Output     json.RawMessage `json:"output"`
-	Error      json.RawMessage `json:"error"`
-	RetryAfter *time.Time      `json:"retryAfter"`
-}
-
-type hookCreatedData struct {
-	Token        string          `json:"token"`
-	Metadata     []byte          `json:"metadata"`
-	Webhook      *worlds.Webhook `json:"webhook"`
-	MinRetention time.Duration   `json:"minRetention"`
 }
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
@@ -111,6 +96,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if input.Event.EventType == worlds.EventTypeHookCreated {
+		return w.createHook(ctx, input)
+	}
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -350,11 +338,11 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 			}
 		}
 	case worlds.EventTypeStepCreated:
-		var data stepCreatedData
+		var data worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &data)
 		desc.Step = &stepCreatedArg{Name: data.StepName, Input: encodeBytes(data.Input)}
-	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying, worlds.EventTypeStepCancelled:
-		var data stepResultData
+	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		var data worlds.DataStepResult
 		if json.Unmarshal(event.Data, &data) == nil {
 			desc.Result = &stepResultArg{Output: encodeBytes(data.Output), Error: encodeBytes(data.Error)}
 			if data.RetryAfter != nil {
@@ -362,7 +350,8 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 			}
 		}
 	case worlds.EventTypeHookCreated:
-		var data hookCreatedData
+		desc.Payload = event.Data
+		var data worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &data) == nil {
 			desc.Hook = &hookCreatedArg{Token: data.Token, Metadata: encodeBytes(data.Metadata)}
 			if data.Webhook != nil {
@@ -376,6 +365,11 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 				desc.Hook.MinRetention = strconv.FormatInt(int64(data.MinRetention), 10)
 				desc.Hook.RetentionUs = strconv.FormatInt((int64(data.MinRetention)+999)/1000, 10)
 			}
+		}
+	case worlds.EventTypeHookDisposed:
+		var data worlds.HookDisposedEventData
+		if json.Unmarshal(event.Data, &data) == nil {
+			desc.Taken = data.ForceClaimedBy
 		}
 	case worlds.EventTypeHookReceived:
 		var data worlds.WebhookReceivedEventData

@@ -173,7 +173,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(map[string]any{"dueAt": dueAt, "cancel": true, "queueMessageId": "queue_1"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{DueAt: dueAt, QueueMessageID: "queue_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	}
 	analytics := world.Analytics()
 	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: "wrun_wait_analytics", WaitID: "wait_1"})
-	if err != nil || wait.QueueMessageID != "queue_1" || !wait.Cancel {
+	if err != nil || wait.QueueMessageID != "queue_1" || !wait.DueAt.Equal(dueAt) {
 		t.Fatalf("wait = %#v, %v", wait, err)
 	}
 	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_wait_analytics"})
@@ -196,38 +196,15 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	}
 }
 
-func TestStepCancelledEventCancelsOnlyTheTargetStep(t *testing.T) {
+func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cancel", WorkflowName: "test"})
-	if err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cancel", WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	stepData, err := json.Marshal(map[string]any{"stepName": "target"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{
-		RunID: "wrun_step_cancel",
-		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_target", Data: stepData},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{
-		RunID: "wrun_step_cancel",
-		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCancelled, CorrelationID: "step_target"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_step_cancel", StepID: "step_target"})
-	if err != nil || step.Status != worlds.StatusCancelled {
-		t.Fatalf("step=%#v err=%v", step, err)
-	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_step_cancel"})
-	if err != nil || run.Status != worlds.StatusPending {
-		t.Fatalf("run=%#v err=%v", run, err)
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_step_cancel", Event: worlds.EventsCreateEvent{EventType: "step_cancelled", CorrelationID: "step_target"}})
+	if !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("removed event = %v", err)
 	}
 }
 
@@ -239,7 +216,7 @@ func TestWebhookHandlerOnlyResumesPublicWebhooksWithTheConfiguredMethod(t *testi
 		t.Fatal(err)
 	}
 	createHook := func(runID, id, token string, webhook *worlds.Webhook) {
-		data, err := json.Marshal(map[string]any{"token": token, "webhook": webhook})
+		data, err := json.Marshal(worlds.DataHookCreated{Token: token, Webhook: webhook})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -328,7 +305,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(map[string]any{"token": "manual", "webhook": &worlds.Webhook{Manual: true}})
+	data, err := json.Marshal(worlds.DataHookCreated{Token: "manual", Webhook: &worlds.Webhook{Manual: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

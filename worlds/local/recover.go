@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -13,6 +14,9 @@ import (
 // touched, partially created runs are removed, and stream sessions, which only
 // live as long as the process that opened them, are released.
 func (w *World) recoverLocked() error {
+	if err := w.recoverHandoff(); err != nil {
+		return err
+	}
 	runs, err := w.readRuns()
 	if err != nil {
 		return err
@@ -46,6 +50,66 @@ func (w *World) recoverLocked() error {
 	return w.releaseStreamSessions()
 }
 
+// hookHandoff is a write-ahead decision spanning both owners' event logs.
+type hookHandoff struct {
+	RunID       worlds.RunID
+	Event       worlds.EventsCreateEvent
+	InBandCount *int
+	Previous    worlds.HookForceClaim
+	At          time.Time
+}
+
+func (w *World) recoverHandoff() error {
+	var handoff hookHandoff
+	exists, err := w.readOptional("hook-handoff.json", &handoff)
+	if err != nil || !exists {
+		return err
+	}
+	// Repair partial per-run writes before completing the cross-run decision.
+	for _, id := range []worlds.RunID{handoff.Previous.RunID, handoff.RunID} {
+		if err := w.rebuildRun(id); err != nil {
+			return err
+		}
+	}
+	previous, err := w.readHook(handoff.Previous.HookID)
+	if err != nil {
+		return err
+	}
+	if previous != nil && previous.DisposedAt == nil {
+		victim, err := w.begin(previous.RunID)
+		if err != nil {
+			return err
+		}
+		if !victim.run.Status.Terminal() {
+			data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: handoff.RunID, HookID: worlds.HookID(handoff.Event.CorrelationID)}})
+			if _, err := victim.append(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(previous.HookID), Data: data}, handoff.At); err != nil {
+				return err
+			}
+			if err := victim.commit(); err != nil {
+				return err
+			}
+		}
+	}
+	current, err := w.readHook(worlds.HookID(handoff.Event.CorrelationID))
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		claimant, err := w.begin(handoff.RunID)
+		if err != nil {
+			return err
+		}
+		if _, err := claimant.append(handoff.Event, handoff.At); err != nil {
+			return err
+		}
+		claimant.advance(handoff.InBandCount, 1)
+		if err := claimant.commit(); err != nil {
+			return err
+		}
+	}
+	return remove(w.root, "hook-handoff.json")
+}
+
 // rebuildRun discards event files past the committed EventCount and rewrites
 // the run's steps, hooks, and token claims by replaying the committed events.
 // Discarded files are removed last, highest slot first, so an interrupted
@@ -76,7 +140,7 @@ func (w *World) rebuildRun(runID worlds.RunID) error {
 			continue
 		}
 		discardedHooks[worlds.HookID(event.CorrelationID)] = true
-		var created hookCreatedData
+		var created worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &created) == nil && created.Token != "" {
 			tokens[created.Token] = true
 		}

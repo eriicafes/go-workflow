@@ -10,25 +10,23 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-func conformHooksClaim(t *testing.T, world worlds.World) {
+func conformHookTokens(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "hooks")
 	other := conformCreateRun(t, world, "hooks_other")
 	token := fmt.Sprintf("token-%d", time.Now().UnixNano())
 
-	_, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated}})
-	conformExpect(t, err, worlds.ErrEventInvalid, "claim with wrong event type")
-	_, err = world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_x", map[string]any{"token": ""})})
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_x", worlds.DataHookCreated{Token: ""})})
 	conformExpect(t, err, worlds.ErrEventInvalid, "claim without token")
 	_, err = conformClaim(world, "wrun_missing", "hook_x", token, false)
 	conformExpect(t, err, worlds.ErrRunNotFound, "claim for missing run")
 
 	zero := 0
-	claimed, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_a", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{EventCount: &zero}})
+	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_a", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{EventCount: &zero}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claimed.EventID != worlds.EventIDForSlot(2) || claimed.EventType != worlds.EventTypeHookCreated || claimed.AllocatedEventCount != 1 || claimed.ForcedRunID != "" || len(claimed.Events) != 1 {
+	if claimed.EventID != worlds.EventIDForSlot(2) || claimed.EventType != worlds.EventTypeHookCreated || claimed.AllocatedEventCount != 1 || claimed.Hook == nil || claimed.Hook.ClaimedFrom != nil || len(claimed.Events) != 1 {
 		t.Fatalf("claim = %#v", claimed)
 	}
 	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
@@ -48,14 +46,20 @@ func conformHooksClaim(t *testing.T, world worlds.World) {
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "token-missing"})
 	conformExpect(t, err, worlds.ErrHookNotFound, "missing token")
 
-	_, err = conformClaim(world, other, "hook_b", token, false)
-	conformExpect(t, err, worlds.ErrHookConflict, "claim held token")
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: other, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_b", conformHookData(token, nil, 0))})
-	conformExpect(t, err, worlds.ErrHookConflict, "hook_created append with held token")
+	conflict, err := conformClaim(world, other, "hook_b", token, false)
+	var data worlds.DataHookCreated
+	if err != nil || conflict.EventType != worlds.EventTypeHookConflict || json.Unmarshal(conflict.Data, &data) != nil || data.ConflictingRunID != runID {
+		t.Fatalf("conflict = %#v, %v", conflict, err)
+	}
 
 	second := token + "-second"
 	if _, err := conformClaim(world, runID, "hook_c", second, false); err != nil {
 		t.Fatal(err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_c", map[string]any{"request": map[string]any{"method": "hello"}, "response": map[string]any{"status": 42}})
+	plainHook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: second})
+	if err != nil || plainHook.WebhookEventID != "" || plainHook.DisposedAt != nil {
+		t.Fatalf("ordinary payload was interpreted as webhook metadata: %#v err=%v", plainHook, err)
 	}
 	if _, err := conformClaim(world, other, "hook_d", token+"-other", false); err != nil {
 		t.Fatal(err)
@@ -97,7 +101,7 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forced.ForcedRunID != owner || forced.EventType != worlds.EventTypeHookCreated || forced.AllocatedEventCount != 1 {
+	if forced.Hook == nil || forced.Hook.ClaimedFrom == nil || forced.Hook.ClaimedFrom.RunID != owner || forced.EventType != worlds.EventTypeHookCreated || forced.AllocatedEventCount != 1 {
 		t.Fatalf("forced claim = %#v", forced)
 	}
 	events := conformAllEvents(t, world, owner)
@@ -111,17 +115,22 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	if err != nil || hook.HookID != "hook_claimant" || hook.RunID != claimant {
 		t.Fatalf("token owner after force = %#v err=%v", hook, err)
 	}
+	// A takeover within one run returns the induced disposal in the delta and
+	// counts both writes, so replay cannot omit a slot or reuse a stale fence.
+	seen, fence := 2, 0
+	self, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: claimant, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_self", worlds.DataHookCreated{Token: token, Force: true}), Options: worlds.EventsCreateOptions{EventCount: &seen, InBandCount: &fence}})
+	if err != nil || self.AllocatedEventCount != 2 || self.InBandCount != 2 || len(self.Events) != 1 || self.Events[0].EventType != worlds.EventTypeHookDisposed || self.Events[0].CorrelationID != "hook_claimant" {
+		t.Fatalf("same-run takeover = %#v err=%v", self, err)
+	}
 
 	conformAppend(t, world, claimant, worlds.EventTypeRunFailed, "", nil)
 	late := conformCreateRun(t, world, "force_late")
 	takeover, err := conformClaim(world, late, "hook_late", token, true)
-	if err != nil || takeover.ForcedRunID != "" {
+	if err != nil || takeover.EventType != worlds.EventTypeHookCreated {
 		t.Fatalf("force over terminal owner = %#v err=%v", takeover, err)
 	}
-	for _, event := range conformAllEvents(t, world, claimant) {
-		if event.EventType == worlds.EventTypeHookDisposed {
-			t.Fatal("terminal owner received hook_disposed")
-		}
+	if events := conformAllEvents(t, world, claimant); events[len(events)-1].EventType != worlds.EventTypeRunFailed {
+		t.Fatal("terminal owner received an additional event")
 	}
 }
 
@@ -138,21 +147,29 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 		t.Fatalf("received hook = %#v err=%v", hook, err)
 	}
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: plain})
-	conformExpect(t, err, worlds.ErrHookNotFound, "received hook without retention")
+	if err != nil {
+		t.Fatalf("active hook released on receive: %v", err)
+	}
 
 	retained := fmt.Sprintf("retained-%d", time.Now().UnixNano())
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, nil, 300*time.Millisecond))}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, nil, 300*time.Millisecond))}); err != nil {
 		t.Fatal(err)
 	}
 	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", nil)
 	hook, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
-	if err != nil || hook.RetainUntil == nil || hook.MinRetention != 300*time.Millisecond {
+	if err != nil || hook.TokenRetentionUntil == nil || hook.MinRetention != 300*time.Millisecond {
 		t.Fatalf("retained hook = %#v err=%v", hook, err)
 	}
 	other := conformCreateRun(t, world, "retention_other")
-	_, err = conformClaim(world, other, "hook_other", retained, false)
-	conformExpect(t, err, worlds.ErrHookConflict, "claim retained token")
+	conflict, err := conformClaim(world, other, "hook_other", retained, false)
+	if err != nil || conflict.EventType != worlds.EventTypeHookConflict {
+		t.Fatalf("retained conflict = %#v, %v", conflict, err)
+	}
 	time.Sleep(400 * time.Millisecond)
+	if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained}); err != nil {
+		t.Fatalf("active hook expired: %v", err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
 	conformExpect(t, err, worlds.ErrHookNotFound, "expired retained token")
 	if _, err := conformClaim(world, other, "hook_other", retained, false); err != nil {
@@ -164,7 +181,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "webhooks")
 	token := fmt.Sprintf("manual-%d", time.Now().UnixNano())
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_manual", conformHookData(token, &worlds.Webhook{Method: "POST", Manual: true}, 0))}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_manual", conformHookData(token, &worlds.Webhook{Method: "POST", Manual: true}, 0))}); err != nil {
 		t.Fatal(err)
 	}
 	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
@@ -176,7 +193,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrHookNotActive, "response before request")
 	received := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", request)
 	hook, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_manual"})
-	if err != nil || hook.ReceivedEventID != received.EventID || hook.ReceivedAt == nil {
+	if err != nil || hook.WebhookEventID != received.EventID || hook.ReceivedAt == nil {
 		t.Fatalf("manual hook after request = %#v err=%v", hook, err)
 	}
 	if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token}); err != nil {
@@ -196,7 +213,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	// A retained webhook keeps its token after responding, and still takes
 	// only one response.
 	retained := token + "-retained"
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, &worlds.Webhook{Method: "POST", Manual: true}, time.Hour))}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, &worlds.Webhook{Method: "POST", Manual: true}, time.Hour))}); err != nil {
 		t.Fatal(err)
 	}
 	retainedRequest := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", request)
@@ -205,7 +222,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrHookNotActive, "second response to a retained webhook")
 
 	automatic := token + "-auto"
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_auto", conformHookData(automatic, &worlds.Webhook{Response: &worlds.WebhookResponse{Status: 202}}, 0))}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_auto", conformHookData(automatic, &worlds.Webhook{Response: &worlds.WebhookResponse{Status: 202}}, 0))}); err != nil {
 		t.Fatal(err)
 	}
 	hook, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_auto"})

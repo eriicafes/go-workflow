@@ -69,12 +69,15 @@ CREATE TABLE go_workflow_hooks (
 	token text NOT NULL,
 	metadata bytea,
 	webhook jsonb,
-	received_event_id text NOT NULL DEFAULT '',
+	webhook_event_id text NOT NULL DEFAULT '',
 	created_at timestamptz NOT NULL,
 	updated_at timestamptz NOT NULL,
 	received_at timestamptz,
 	min_retention bigint NOT NULL DEFAULT 0,
-	retain_until timestamptz
+	token_retention_until timestamptz,
+ claimed_from jsonb,
+ force_claimed_by jsonb,
+ disposed_at timestamptz
 );
 CREATE INDEX go_workflow_hooks_run_idx ON go_workflow_hooks (run_id, created_at, hook_id);
 CREATE INDEX go_workflow_hooks_created_idx ON go_workflow_hooks (created_at, hook_id);

@@ -75,6 +75,8 @@ export namespace RPC {
 		eventId: string;
 		eventType: EventType;
 		events: Event[];
+		hook?: Hook;
+		data?: Uint8Array;
 	};
 	export type EventBatchResult = { events: EventResult[] };
 	export type WebhookResponse = {
@@ -93,12 +95,15 @@ export namespace RPC {
 		token: string;
 		metadata: Uint8Array;
 		webhook: Webhook | null;
-		receivedEventId: string;
+		webhookEventId: string;
 		createdAt: Date;
 		updatedAt: Date;
 		receivedAt: Date | null;
 		minRetention: number;
-		retainUntil: Date | null;
+		tokenRetentionUntil: Date | null;
+		claimedFrom: { runId: string; hookId: string } | null;
+		forceClaimedBy: { runId: string; hookId: string } | null;
+		disposedAt: Date | null;
 	};
 	export type QueueResult = { messageId: string };
 	export type StreamInfo = { tailIndex: number; done: boolean };
@@ -113,7 +118,6 @@ export namespace RPC {
 		runId: string;
 		waitId: string;
 		dueAt: Date;
-		cancel: boolean;
 		queueMessageId: string;
 		createdAt: Date;
 		completedAt: Date | null;

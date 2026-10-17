@@ -40,9 +40,9 @@ func cloneWebhook(value *worlds.Webhook) *worlds.Webhook {
 func cloneHook(value worlds.Hook) worlds.Hook {
 	value.Metadata = bytes.Clone(value.Metadata)
 	value.Webhook = cloneWebhook(value.Webhook)
-	if value.RetainUntil != nil {
-		until := *value.RetainUntil
-		value.RetainUntil = &until
+	if value.TokenRetentionUntil != nil {
+		until := *value.TokenRetentionUntil
+		value.TokenRetentionUntil = &until
 	}
 	return value
 }

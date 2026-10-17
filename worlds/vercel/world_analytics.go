@@ -117,18 +117,14 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 			id := worlds.WaitID(event.CorrelationID)
 			switch event.EventType {
 			case worlds.EventTypeWaitCreated:
-				var data struct {
-					DueAt          time.Time `json:"dueAt"`
-					Cancel         bool      `json:"cancel"`
-					QueueMessageID string    `json:"queueMessageId"`
-				}
+				var data worlds.DataWaitCreated
 				if json.Unmarshal(event.Data, &data) != nil {
 					continue
 				}
 				if _, ok := waits[id]; !ok {
 					order = append(order, id)
 				}
-				waits[id] = &worlds.AnalyticsWait{RunID: input.RunID, WaitID: id, DueAt: data.DueAt, Cancel: data.Cancel, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				waits[id] = &worlds.AnalyticsWait{RunID: input.RunID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			case worlds.EventTypeWaitCompleted:
 				if wait, ok := waits[id]; ok {
 					at := event.CreatedAt

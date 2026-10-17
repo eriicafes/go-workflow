@@ -77,7 +77,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(map[string]any{"dueAt": dueAt, "queueMessageId": "message"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{DueAt: dueAt, QueueMessageID: "message"})
 	if err != nil {
 		t.Fatal(err)
 	}

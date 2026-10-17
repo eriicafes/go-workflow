@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -69,5 +70,47 @@ func TestStepErrorKeepsRecordedChainWhenWrapped(t *testing.T) {
 func TestDecodeStepErrorAcceptsPlainMessages(t *testing.T) {
 	if err := worlds.DecodeError([]byte("boom")); err.Error() != "boom" {
 		t.Fatalf("message = %q", err.Error())
+	}
+}
+
+func TestFatalErrorRecordsMarkerAndCauseInErrorChain(t *testing.T) {
+	for _, original := range []error{
+		worlds.FatalError{Cause: errSentinel},
+		&worlds.FatalError{Cause: errSentinel},
+	} {
+		decoded := roundTripError(t, fmt.Errorf("outer: %w", original))
+		var matched bool
+		switch original.(type) {
+		case worlds.FatalError:
+			var fatal worlds.FatalError
+			matched = errors.As(decoded, &fatal)
+		case *worlds.FatalError:
+			var fatal *worlds.FatalError
+			matched = errors.As(decoded, &fatal)
+		}
+		if !matched || !errors.Is(decoded, errSentinel) || decoded.Error() != "outer: sentinel" {
+			t.Fatalf("fatal marker=%v decoded=%v", matched, decoded)
+		}
+	}
+}
+
+func TestRetryableErrorRecordsMarkerAndCauseInErrorChain(t *testing.T) {
+	for _, original := range []error{
+		worlds.RetryableError{Cause: errSentinel, After: time.Minute},
+		&worlds.RetryableError{Cause: errSentinel, After: time.Minute},
+	} {
+		decoded := roundTripError(t, fmt.Errorf("outer: %w", original))
+		var matched bool
+		switch original.(type) {
+		case worlds.RetryableError:
+			var retryable worlds.RetryableError
+			matched = errors.As(decoded, &retryable)
+		case *worlds.RetryableError:
+			var retryable *worlds.RetryableError
+			matched = errors.As(decoded, &retryable)
+		}
+		if !matched || !errors.Is(decoded, errSentinel) || decoded.Error() != "outer: sentinel" {
+			t.Fatalf("retryable marker=%v decoded=%v", matched, decoded)
+		}
 	}
 }

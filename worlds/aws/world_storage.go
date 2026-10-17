@@ -27,30 +27,6 @@ type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
 }
 
-type stepCreatedData struct {
-	StepName string          `json:"stepName"`
-	Input    json.RawMessage `json:"input"`
-}
-
-type stepResultData struct {
-	Output     json.RawMessage `json:"output"`
-	Error      json.RawMessage `json:"error"`
-	RetryAfter *time.Time      `json:"retryAfter"`
-}
-
-type hookCreatedData struct {
-	Token        string          `json:"token"`
-	Metadata     []byte          `json:"metadata"`
-	Webhook      *worlds.Webhook `json:"webhook"`
-	MinRetention time.Duration   `json:"minRetention"`
-}
-
-type waitCreatedData struct {
-	DueAt          time.Time `json:"dueAt"`
-	Cancel         bool      `json:"cancel"`
-	QueueMessageID string    `json:"queueMessageId"`
-}
-
 // runView is the META item of a run partition.
 type runView struct {
 	worlds.Run
@@ -59,10 +35,9 @@ type runView struct {
 	cancelledEventID worlds.EventID
 }
 
-// stepView is a STEP# item. The event IDs answer idempotent replays.
+// stepView is a STEP# item.
 type stepView struct {
 	worlds.Step
-	cancelledEventID worlds.EventID
 }
 
 // tokenView is a TOKEN# item. It holds the hook owning a token and, once the
@@ -262,7 +237,6 @@ func stepItem(view stepView) map[string]ddb.AttributeValue {
 	setTime(item, "startedAt", step.StartedAt)
 	setTime(item, "completedAt", step.CompletedAt)
 	setTime(item, "retryAfter", step.RetryAfter)
-	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	return item
 }
 
@@ -283,7 +257,6 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			CompletedAt: readTimePtr(item, "completedAt"),
 			RetryAfter:  readTimePtr(item, "retryAfter"),
 		},
-		cancelledEventID: worlds.EventID(read(item, "cancelledEventId")),
 	}
 }
 
@@ -307,9 +280,18 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		item["webhook"] = avs(string(webhook))
 	}
 	setBytes(item, "metadata", hook.Metadata)
-	setString(item, "receivedEventId", string(hook.ReceivedEventID))
+	setString(item, "webhookEventId", string(hook.WebhookEventID))
 	setTime(item, "receivedAt", hook.ReceivedAt)
-	setTime(item, "retainUntil", hook.RetainUntil)
+	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
+	setTime(item, "disposedAt", hook.DisposedAt)
+	if hook.ClaimedFrom != nil {
+		data, _ := json.Marshal(hook.ClaimedFrom)
+		item["claimedFrom"] = avs(string(data))
+	}
+	if hook.ForceClaimedBy != nil {
+		data, _ := json.Marshal(hook.ForceClaimedBy)
+		item["forceClaimedBy"] = avs(string(data))
+	}
 	if hook.MinRetention != 0 {
 		item["minRetention"] = avn(int64(hook.MinRetention))
 	}
@@ -318,16 +300,27 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	hook := worlds.Hook{
-		RunID:           worlds.RunID(read(item, "runId")),
-		HookID:          worlds.HookID(read(item, "hookId")),
-		Token:           read(item, "token"),
-		Metadata:        readBytes(item, "metadata"),
-		ReceivedEventID: worlds.EventID(read(item, "receivedEventId")),
-		CreatedAt:       readTime(item, "createdAt"),
-		UpdatedAt:       readTime(item, "updatedAt"),
-		ReceivedAt:      readTimePtr(item, "receivedAt"),
-		MinRetention:    time.Duration(readInt(item, "minRetention")),
-		RetainUntil:     readTimePtr(item, "retainUntil"),
+		RunID:               worlds.RunID(read(item, "runId")),
+		HookID:              worlds.HookID(read(item, "hookId")),
+		Token:               read(item, "token"),
+		Metadata:            readBytes(item, "metadata"),
+		WebhookEventID:      worlds.EventID(read(item, "webhookEventId")),
+		CreatedAt:           readTime(item, "createdAt"),
+		UpdatedAt:           readTime(item, "updatedAt"),
+		ReceivedAt:          readTimePtr(item, "receivedAt"),
+		MinRetention:        time.Duration(readInt(item, "minRetention")),
+		TokenRetentionUntil: readTimePtr(item, "tokenRetentionUntil"),
+	}
+	hook.DisposedAt = readTimePtr(item, "disposedAt")
+	if data := read(item, "claimedFrom"); data != "" {
+		if err := json.Unmarshal([]byte(data), &hook.ClaimedFrom); err != nil {
+			return worlds.Hook{}, err
+		}
+	}
+	if data := read(item, "forceClaimedBy"); data != "" {
+		if err := json.Unmarshal([]byte(data), &hook.ForceClaimedBy); err != nil {
+			return worlds.Hook{}, err
+		}
 	}
 	if value := read(item, "webhook"); value != "" {
 		hook.Webhook = new(worlds.Webhook)
@@ -343,12 +336,12 @@ func tokenItem(token string, view tokenView) map[string]ddb.AttributeValue {
 		"hookId": avs(string(view.hookID)),
 		"runId":  avs(string(view.runID)),
 	})
-	setTime(item, "retainUntil", view.retainUntil)
+	setTime(item, "tokenRetentionUntil", view.retainUntil)
 	return item
 }
 
 func tokenFromItem(item map[string]ddb.AttributeValue) *tokenView {
-	return &tokenView{hookID: worlds.HookID(read(item, "hookId")), runID: worlds.RunID(read(item, "runId")), retainUntil: readTimePtr(item, "retainUntil")}
+	return &tokenView{hookID: worlds.HookID(read(item, "hookId")), runID: worlds.RunID(read(item, "runId")), retainUntil: readTimePtr(item, "tokenRetentionUntil")}
 }
 
 // tokenCondition requires a token item to still be in the state seen when it
@@ -359,10 +352,10 @@ func tokenCondition(seen *tokenView) (string, map[string]ddb.AttributeValue) {
 	}
 	values := map[string]ddb.AttributeValue{":seenHook": avs(string(seen.hookID))}
 	if seen.retainUntil == nil {
-		return "hookId = :seenHook AND attribute_not_exists(retainUntil)", values
+		return "hookId = :seenHook AND attribute_not_exists(tokenRetentionUntil)", values
 	}
 	values[":seenRetain"] = avs(stamp(*seen.retainUntil))
-	return "hookId = :seenHook AND retainUntil = :seenRetain", values
+	return "hookId = :seenHook AND tokenRetentionUntil = :seenRetain", values
 }
 
 func eventItem(event worlds.Event, slot uint64) map[string]ddb.AttributeValue {

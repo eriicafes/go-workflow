@@ -32,7 +32,7 @@ func TestReportWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestReportWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, err := publish.Await(ctx)
+	published, err := publish.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

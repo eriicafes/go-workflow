@@ -13,12 +13,6 @@ import (
 // with the storage methods but take different inputs.
 type analytics struct{ world *World }
 
-type waitCreatedData struct {
-	DueAt          time.Time `json:"dueAt"`
-	Cancel         bool      `json:"cancel"`
-	QueueMessageID string    `json:"queueMessageId"`
-}
-
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	run, err := a.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
 	if err != nil {
@@ -150,12 +144,12 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID) ([]worlds.Anal
 		id := worlds.WaitID(event.CorrelationID)
 		switch event.EventType {
 		case worlds.EventTypeWaitCreated:
-			var data waitCreatedData
+			var data worlds.DataWaitCreated
 			if json.Unmarshal(event.Data, &data) != nil {
 				continue
 			}
 			index[id] = len(waits)
-			waits = append(waits, worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, Cancel: data.Cancel, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt})
+			waits = append(waits, worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt})
 		case worlds.EventTypeWaitCompleted:
 			if position, ok := index[id]; ok {
 				at := event.CreatedAt

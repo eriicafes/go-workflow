@@ -56,9 +56,7 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 			Response: response,
 		},
 	}
-	if err := hook.create(ctx); err != nil {
-		return &Webhook[T]{hook: hook, baseURL: execution.World().BaseURL()}, err
-	}
+	hook.create(execution, execution.NextPosition(), hook.token)
 	return &Webhook[T]{hook: hook, baseURL: execution.World().BaseURL()}, nil
 }
 
@@ -80,169 +78,121 @@ func (w *Webhook[T]) URL() string {
 	return strings.TrimRight(w.baseURL, "/") + "/webhooks/" + url.PathEscape(w.Token())
 }
 
-// MarshalJSON encodes the webhook so it can be passed to a step as input or
-// returned from one.
-func (w *Webhook[T]) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		Token    string          `json:"token"`
-		HookID   worlds.HookID   `json:"hookId"`
-		Received worlds.EventID  `json:"receivedEventId"`
-		Webhook  *worlds.Webhook `json:"webhook"`
-		BaseURL  string          `json:"baseURL"`
-	}{
-		Token:    w.hook.token,
-		HookID:   w.hook.id,
-		Received: w.hook.received,
-		Webhook:  w.hook.webhook,
-		BaseURL:  w.baseURL,
-	})
-}
-
-// UnmarshalJSON decodes a webhook encoded by MarshalJSON.
-func (w *Webhook[T]) UnmarshalJSON(data []byte) error {
-	var value struct {
-		Token    string          `json:"token"`
-		HookID   worlds.HookID   `json:"hookId"`
-		Received worlds.EventID  `json:"receivedEventId"`
-		Webhook  *worlds.Webhook `json:"webhook"`
-		BaseURL  string          `json:"baseURL"`
-	}
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-	w.hook = &Hook[webhookPayload]{token: value.Token, id: value.HookID, received: value.Received, webhook: value.Webhook}
-	w.baseURL = value.BaseURL
-	return nil
-}
-
 func (w *Webhook[T]) settlementID() (string, bool) { return w.hook.settlementID() }
+func (w *Webhook[T]) done() (bool, error, error)   { return w.hook.done() }
 
-// Done reports whether the webhook has settled. It never suspends the run.
-func (w *Webhook[T]) Done(ctx context.Context) (bool, error) { return w.hook.Done(ctx) }
-
-// Await returns the request body decoded from JSON as T, suspending the run
-// until the webhook receives a request. It returns the same errors as
-// Hook.Await.
-func (w *Webhook[T]) Await(ctx context.Context) (T, error) {
-	var value T
-	payload, err := w.hook.Await(ctx)
-	if err != nil {
-		return value, err
-	}
-	if err := json.Unmarshal(payload.value, &value); err != nil {
-		return value, fmt.Errorf("workflow: decode webhook body: %w", err)
-	}
-	return value, nil
-}
-
-// Unwrap is like Await but panics if Await returns an error.
-func (w *Webhook[T]) Unwrap(ctx context.Context) T {
-	value, err := w.Await(ctx)
-	if err != nil {
-		panic(err)
-	}
-	return value
-}
-
-// Request returns the request that resumed the webhook, with its method, URL,
-// header, and body, suspending the run until the webhook receives one.
-func (w *Webhook[T]) Request(ctx context.Context) (*http.Request, error) {
-	payload, err := w.hook.Await(ctx)
+// Request waits for the HTTP request and preserves its origin for a step response.
+func (w *Webhook[T]) Request(ctx context.Context) (*WebhookRequest[T], error) {
+	payload, err := w.hook.Next(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if payload.Request == nil {
 		return nil, fmt.Errorf("workflow: webhook was not received over HTTP")
 	}
-	request, err := http.NewRequestWithContext(ctx, payload.Request.Method, payload.Request.URL, bytes.NewReader(payload.Request.Body))
+	request, err := http.NewRequest(payload.Request.Method, payload.Request.URL, bytes.NewReader(payload.Request.Body))
 	if err != nil {
-		return nil, fmt.Errorf("workflow: reconstruct webhook request: %w", err)
+		return nil, err
 	}
 	request.Header = http.Header(payload.Request.Header).Clone()
-	return request, nil
+	return &WebhookRequest[T]{Request: request, data: webhookRequestData{Request: *payload.Request, RunID: w.hook.executionState.Run().RunID, HookID: w.hook.id, WebhookEventID: w.hook.received, Manual: w.hook.webhook.Manual}}, nil
 }
 
-// GetConflict is like Hook.GetConflict.
-func (w *Webhook[T]) GetConflict(ctx context.Context) (worlds.RunID, bool, error) {
-	return w.hook.GetConflict(ctx)
+// Dispose deactivates the webhook endpoint as a durable inline step.
+func (w *Webhook[T]) Dispose(ctx context.Context) error {
+	return w.hook.Dispose(ctx)
 }
 
-// Cancel disposes of the webhook so its URL no longer accepts requests.
-func (w *Webhook[T]) Cancel(ctx context.Context) error { return w.hook.Cancel(ctx) }
+// WebhookRequest is a serializable HTTP request. Pass it to a step to inspect
+// its body or send a manual response.
+type WebhookRequest[T any] struct {
+	*http.Request
+	data webhookRequestData
+}
 
-// RespondWith sends response to the request that resumed a webhook created
-// with WebhookOption.Manual. In workflow context it records the response in an
-// inline step, so replay does not send it again. RespondWith fails when the webhook
-// is not manual or has not received a request, and returns ErrNoWorkflow
-// outside a run.
-func (w *Webhook[T]) RespondWith(ctx context.Context, response *http.Response) error {
-	if _, ok := worlds.ExecutionFromContext(ctx); !ok {
-		return ErrNoWorkflow
+type webhookRequestData struct {
+	Request        worlds.WebhookRequest `json:"request"`
+	RunID          worlds.RunID          `json:"runId"`
+	HookID         worlds.HookID         `json:"hookId"`
+	WebhookEventID worlds.EventID        `json:"webhookEventId"`
+	Manual         bool                  `json:"manual"`
+}
+
+func (r *WebhookRequest[T]) MarshalJSON() ([]byte, error) { return json.Marshal(r.data) }
+func (r *WebhookRequest[T]) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &r.data); err != nil {
+		return err
 	}
-	if w.hook.webhook == nil || !w.hook.webhook.Manual {
-		return fmt.Errorf("workflow: webhook does not use a manual response")
+	request, err := http.NewRequest(r.data.Request.Method, r.data.Request.URL, bytes.NewReader(r.data.Request.Body))
+	if err != nil {
+		return err
+	}
+	request.Header = http.Header(r.data.Request.Header).Clone()
+	r.Request = request
+	return nil
+}
+
+// JSON decodes the stored body without consuming Request.Body.
+func (r *WebhookRequest[T]) JSON() (T, error) {
+	var value T
+	err := json.Unmarshal(r.data.Request.Body, &value)
+	return value, err
+}
+
+// RespondWith records the response for this request. It is step-only, and
+// retrying the same response is idempotent.
+func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Response) error {
+	execution, ok := stepExecutionFromContext(ctx)
+	if !ok {
+		return ErrNotInStep
+	}
+	if !r.data.Manual {
+		return FatalError(fmt.Errorf("workflow: webhook does not use a manual response"))
+	}
+	if r.data.RunID != execution.Run().RunID || r.data.HookID == "" || r.data.WebhookEventID == "" {
+		return FatalError(fmt.Errorf("workflow: invalid webhook request origin"))
 	}
 	value, err := webhookResponse(response)
 	if err != nil {
-		return fmt.Errorf("workflow: encode webhook response: %w", err)
+		return FatalError(fmt.Errorf("workflow: encode webhook response: %w", err))
 	}
-	input := webhookRespondInput{Token: w.Token(), HookID: w.hook.id, Received: w.hook.received, Response: value}
-	if _, ok := workflowExecutionFromContext(ctx); ok {
-		_, err := InlineStep(ctx, webhookRespondWith, input)
+	if value == nil {
+		value = &worlds.WebhookResponse{}
+	}
+	data, err := json.Marshal(worlds.WebhookReceivedEventData{Response: value, ResponseTo: r.data.WebhookEventID})
+	if err != nil {
 		return err
 	}
-	_, err = webhookRespondWith(ctx, input)
-	return err
-}
-
-type webhookRespondInput struct {
-	Token    string
-	HookID   worlds.HookID
-	Received worlds.EventID
-	Response *worlds.WebhookResponse
-}
-
-func webhookRespondWith(ctx context.Context, input webhookRespondInput) (struct{}, error) {
-	execution, ok := worlds.ExecutionFromContext(ctx)
-	if !ok {
-		return struct{}{}, ErrNoWorkflow
+	world := execution.World()
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: r.data.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: string(r.data.HookID), Data: data}})
+	if err == nil {
+		return nil
 	}
-	world, runID := execution.World(), execution.Run().RunID
-	if input.HookID == "" || input.Received == "" {
-		hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: input.Token})
-		if err != nil {
-			return struct{}{}, err
+	if !errors.Is(err, worlds.ErrHookNotActive) && !errors.Is(err, worlds.ErrRunTerminal) {
+		return err
+	}
+	cursor := ""
+	for {
+		recorded, listErr := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: r.data.RunID, CorrelationID: string(r.data.HookID), Pagination: worlds.Pagination{Cursor: cursor}})
+		if listErr != nil {
+			return listErr
 		}
-		input.HookID, input.Received = hook.HookID, hook.ReceivedEventID
-	}
-	if input.Received == "" {
-		return struct{}{}, fmt.Errorf("workflow: webhook was not received")
-	}
-	data, err := json.Marshal(worlds.WebhookReceivedEventData{Response: input.Response, ResponseTo: input.Received})
-	if err != nil {
-		return struct{}{}, err
-	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{
-		EventType:     worlds.EventTypeHookReceived,
-		CorrelationID: string(input.HookID),
-		Data:          data,
-	}})
-	if !errors.Is(err, worlds.ErrHookNotActive) {
-		return struct{}{}, err
-	}
-	// The World admits one response per request, so a refused response was
-	// either sent by an earlier attempt or can no longer be sent.
-	recorded, listErr := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: string(input.HookID)})
-	if listErr != nil {
-		return struct{}{}, listErr
-	}
-	for _, event := range recorded.Data {
-		var received worlds.WebhookReceivedEventData
-		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &received) == nil && received.Response != nil && received.ResponseTo == input.Received {
-			return struct{}{}, nil
+		for _, event := range recorded.Data {
+			var received worlds.WebhookReceivedEventData
+			if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &received) == nil && received.Response != nil && received.ResponseTo == r.data.WebhookEventID {
+				actual, _ := json.Marshal(received.Response)
+				expected, _ := json.Marshal(value)
+				if bytes.Equal(actual, expected) {
+					return nil
+				}
+				return FatalError(fmt.Errorf("workflow: webhook request already has a different response"))
+			}
 		}
+		if !recorded.HasMore {
+			return FatalError(err)
+		}
+		cursor = recorded.Cursor
 	}
-	return struct{}{}, err
 }
 
 type webhookPayload struct {

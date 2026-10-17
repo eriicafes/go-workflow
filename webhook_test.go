@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func TestCreateWebhookRejectsLargeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil {
+	if _, err := run.Value(ctx); err == nil {
 		t.Fatal("CreateWebhook accepted an oversized response body")
 	}
 }
@@ -76,8 +77,11 @@ func TestWebhookUsesDurableHookAndPublicHandler(t *testing.T) {
 		if err != nil {
 			return webhookOutput{}, err
 		}
-		value, err := webhook.Await(ctx)
-		return value, err
+		request, err := webhook.Request(ctx)
+		if err != nil {
+			return webhookOutput{}, err
+		}
+		return request.JSON()
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -92,7 +96,7 @@ func TestWebhookUsesDurableHookAndPublicHandler(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,18 +111,16 @@ func TestManualWebhookRespondWithWritesTheDurableResponse(t *testing.T) {
 		if err != nil {
 			return webhookOutput{}, err
 		}
-		value, err := webhook.Await(ctx)
+		request, err := webhook.Request(ctx)
 		if err != nil {
 			return webhookOutput{}, err
 		}
-		if err := webhook.RespondWith(ctx, &http.Response{
-			StatusCode: http.StatusCreated,
-			Header:     http.Header{"X-Workflow": {"done"}},
-			Body:       io.NopCloser(bytes.NewBufferString("accepted")),
-		}); err != nil {
-			return webhookOutput{}, err
-		}
-		return value, nil
+		return workflow.Step(ctx, func(ctx context.Context, request *workflow.WebhookRequest[webhookOutput]) (webhookOutput, error) {
+			if err := request.RespondWith(ctx, &http.Response{StatusCode: http.StatusCreated, Header: http.Header{"X-Workflow": {"done"}}, Body: io.NopCloser(bytes.NewBufferString("accepted"))}); err != nil {
+				return webhookOutput{}, err
+			}
+			return request.JSON()
+		}, request)
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -133,8 +135,83 @@ func TestManualWebhookRespondWithWritesTheDurableResponse(t *testing.T) {
 	if response.Code != http.StatusCreated || response.Header().Get("X-Workflow") != "done" || response.Body.String() != "accepted" {
 		t.Fatalf("manual response = %d %q %q", response.Code, response.Header().Get("X-Workflow"), response.Body.String())
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWebhookRequestSurvivesStepSerializationAndResponseRetry(t *testing.T) {
+	var attempts atomic.Int32
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookRequestInput) (webhookRequestOutput, error) {
+		webhook, err := workflow.CreateWebhook[webhookOutput](ctx, workflow.WebhookOption{Manual: true, Method: http.MethodPost})
+		if err != nil {
+			return webhookRequestOutput{}, err
+		}
+		defer webhook.Dispose(ctx)
+		request, err := webhook.Request(ctx)
+		if err != nil {
+			return webhookRequestOutput{}, err
+		}
+		if !errors.Is(request.RespondWith(ctx, nil), workflow.ErrNotInStep) {
+			return webhookRequestOutput{}, errors.New("workflow response was accepted")
+		}
+		return workflow.Step(ctx, func(ctx context.Context, request *workflow.WebhookRequest[webhookOutput]) (webhookRequestOutput, error) {
+			attempt := attempts.Add(1)
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				return webhookRequestOutput{}, err
+			}
+			for range 2 {
+				value, err := request.JSON()
+				if err != nil || value.Value != 42 {
+					return webhookRequestOutput{}, workflow.FatalError(errors.New("JSON consumed the request body"))
+				}
+			}
+			if err := request.RespondWith(ctx, &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(bytes.NewBufferString("accepted"))}); err != nil {
+				return webhookRequestOutput{}, err
+			}
+			if attempt == 1 {
+				return webhookRequestOutput{}, errors.New("retry after committed response")
+			}
+			var fatal worlds.FatalError
+			if err := request.RespondWith(ctx, &http.Response{StatusCode: http.StatusBadRequest}); !errors.As(err, &fatal) {
+				return webhookRequestOutput{}, errors.New("different response was accepted")
+			}
+			return webhookRequestOutput{Method: request.Method, Header: request.Header.Get("X-Request-ID"), Body: string(body)}, nil
+		}, request)
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, webhookRequestInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := waitForWebhook(t, ctx, world)
+	request := httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/"+hook.Token, bytes.NewBufferString(`{"Value":42}`))
+	request.Header.Set("X-Request-ID", "serialized")
+	response := httptest.NewRecorder()
+	worlds.HTTPHandler(world, "").ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || response.Body.String() != "accepted" {
+		t.Fatalf("response=%d %s", response.Code, response.Body.String())
+	}
+	output, err := run.Value(ctx)
+	if err != nil || output.Method != http.MethodPost || output.Header != "serialized" || output.Body != `{"Value":42}` || attempts.Load() != 2 {
+		t.Fatalf("output=%#v err=%v attempts=%d", output, err, attempts.Load())
+	}
+	page, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: worlds.RunID(run.ID()), CorrelationID: string(hook.HookID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := 0
+	for _, event := range page.Data {
+		var payload worlds.WebhookReceivedEventData
+		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &payload) == nil && payload.Response != nil {
+			responses++
+		}
+	}
+	if responses != 1 {
+		t.Fatalf("response events=%d", responses)
 	}
 }
 
@@ -169,30 +246,19 @@ func TestWebhookRequestReconstructsMethodHeadersAndBody(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Method != http.MethodPatch || output.Header != "request-1" || output.Body != "request body" {
 		t.Fatalf("request output = %#v, %v", output, err)
 	}
 }
 
-func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
+func TestWebhookDeclarationUsesPublicBaseURL(t *testing.T) {
 	runner := workflow.Use(func(ctx context.Context, _ webhookSerializationInput) (webhookSerializationOutput, error) {
 		webhook, err := workflow.CreateWebhook[webhookOutput](ctx)
 		if err != nil {
 			return webhookSerializationOutput{}, err
 		}
-		data, err := json.Marshal(webhook)
-		if err != nil {
-			return webhookSerializationOutput{}, err
-		}
-		var restored workflow.Webhook[webhookOutput]
-		if err := json.Unmarshal(data, &restored); err != nil {
-			return webhookSerializationOutput{}, err
-		}
-		if restored.Token() != webhook.Token() || restored.URL() != webhook.URL() {
-			return webhookSerializationOutput{}, io.ErrUnexpectedEOF
-		}
-		return webhookSerializationOutput{Token: restored.Token(), URL: restored.URL()}, nil
+		return webhookSerializationOutput{Token: webhook.Token(), URL: webhook.URL()}, nil
 	})
 	world := &webhookWorld{
 		World:   testworld.NewManual(runner),
@@ -212,19 +278,16 @@ func TestWebhookDeclarationRoundTripsThroughJSON(t *testing.T) {
 	if err := worlds.NewRuntime(world, worlds.Runners(runner)).Execute(ctx, queued[0].Input); err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Token == "" || output.URL != "https://webhooks.example.com/v1/workflow/webhooks/"+output.Token {
 		t.Fatalf("round trip = %#v, %v", output, err)
 	}
 }
 
-func TestRespondWithRejectsAutomaticWebhooks(t *testing.T) {
+func TestRespondWithRequiresStepContext(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookResponseInput) (webhookResponseOutput, error) {
-		webhook, err := workflow.CreateWebhook[webhookOutput](ctx)
-		if err != nil {
-			return webhookResponseOutput{}, err
-		}
-		return webhookResponseOutput{Rejected: webhook.RespondWith(ctx, nil) != nil}, nil
+		var request workflow.WebhookRequest[webhookOutput]
+		return webhookResponseOutput{Rejected: errors.Is(request.RespondWith(ctx, nil), workflow.ErrNotInStep)}, nil
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -233,7 +296,7 @@ func TestRespondWithRejectsAutomaticWebhooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || !output.Rejected {
 		t.Fatalf("automatic webhook response = %#v, %v", output, err)
 	}
@@ -241,11 +304,9 @@ func TestRespondWithRejectsAutomaticWebhooks(t *testing.T) {
 
 func TestManualWebhookRespondWithRejectsRequestsThatHaveNotArrived(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookResponseInput) (webhookResponseOutput, error) {
-		webhook, err := workflow.CreateWebhook[webhookOutput](ctx, workflow.WebhookOption{Manual: true})
-		if err != nil {
-			return webhookResponseOutput{}, err
-		}
-		return webhookResponseOutput{Rejected: webhook.RespondWith(ctx, nil) != nil}, nil
+		return workflow.Step(ctx, func(ctx context.Context, request *workflow.WebhookRequest[webhookOutput]) (webhookResponseOutput, error) {
+			return webhookResponseOutput{Rejected: request.RespondWith(ctx, nil) != nil}, nil
+		}, &workflow.WebhookRequest[webhookOutput]{})
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -254,19 +315,23 @@ func TestManualWebhookRespondWithRejectsRequestsThatHaveNotArrived(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || !output.Rejected {
 		t.Fatalf("early manual webhook response = %#v, %v", output, err)
 	}
 }
 
-func TestWebhookAwaitRejectsMalformedJSON(t *testing.T) {
+func TestWebhookJSONRejectsMalformedPayload(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ webhookInput) (webhookOutput, error) {
 		webhook, err := workflow.CreateWebhook[webhookOutput](ctx)
 		if err != nil {
 			return webhookOutput{}, err
 		}
-		return webhook.Await(ctx)
+		request, err := webhook.Request(ctx)
+		if err != nil {
+			return webhookOutput{}, err
+		}
+		return request.JSON()
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -281,8 +346,8 @@ func TestWebhookAwaitRejectsMalformedJSON(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("webhook response = %d", response.Code)
 	}
-	if _, err := run.Await(ctx); err == nil {
-		t.Fatal("Webhook.Await accepted malformed JSON")
+	if _, err := run.Value(ctx); err == nil {
+		t.Fatal("WebhookRequest.JSON accepted malformed JSON")
 	}
 }
 

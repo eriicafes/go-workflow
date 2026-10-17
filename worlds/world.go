@@ -9,6 +9,8 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -175,6 +177,14 @@ func NewWaitID() WaitID { return WaitID("wait_" + ulid.Make().String()) }
 func NewStreamID() StreamID { return StreamID("strm_" + ulid.Make().String()) }
 
 const hookTokenAlphabet = "useandom-26T19834_0v5b7qw9zxcgfkrljAIJPVYKhpGUCXW"
+
+// NewRunHookToken returns a 21-character token derived from the run and hook
+// declaration position. It stays the same across replays, including retries
+// before the hook registration is committed.
+func NewRunHookToken(run Run, position int) string {
+	seed := sha256.Sum256(fmt.Appendf(nil, "%s:%s:%s:hook:%d", run.RunID, run.WorkflowName, run.DeploymentID, position))
+	return base64.RawURLEncoding.EncodeToString(seed[:])[:21]
+}
 
 // NewHookToken returns a new random hook token, which is a 21-character Nano
 // ID.

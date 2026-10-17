@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"path"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -20,24 +21,6 @@ type runCreatedData struct {
 
 type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
-}
-
-type stepCreatedData struct {
-	StepName string          `json:"stepName"`
-	Input    json.RawMessage `json:"input"`
-}
-
-type stepResultData struct {
-	Output     json.RawMessage `json:"output"`
-	Error      json.RawMessage `json:"error"`
-	RetryAfter *time.Time      `json:"retryAfter"`
-}
-
-type hookCreatedData struct {
-	Token        string          `json:"token"`
-	Metadata     []byte          `json:"metadata"`
-	Webhook      *worlds.Webhook `json:"webhook"`
-	MinRetention time.Duration   `json:"minRetention"`
 }
 
 // txn stages appends to one run. Records are loaded lazily and only dirty
@@ -136,6 +119,15 @@ func (t *txn) releaseToken(token string, hookID worlds.HookID) error {
 // ID is an idempotent replay of that earlier event.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
 	if t.run.Status.Terminal() {
+		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
+			step, err := t.step(worlds.StepID(event.CorrelationID))
+			if err != nil {
+				return "", err
+			}
+			if step != nil && step.Status == worlds.StatusRunning {
+				return "", nil
+			}
+		}
 		if event.EventType == worlds.EventTypeRunCancelled && t.run.Status == worlds.StatusCancelled {
 			return t.run.CancelledEventID, nil
 		}
@@ -146,7 +138,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if t.run.Status == worlds.StatusRunning {
 			return t.run.StartedEventID, nil
 		}
-	case worlds.EventTypeStepStarted, worlds.EventTypeStepCancelled:
+	case worlds.EventTypeStepStarted:
 		step, err := t.step(worlds.StepID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -154,49 +146,42 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if step == nil {
 			return "", worlds.ErrStepNotStartable
 		}
-		if event.EventType == worlds.EventTypeStepStarted {
-			// A running step may be started again, because its previous attempt's
-			// delivery may have died, and each start records a new attempt.
-			if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
-				return "", worlds.ErrStepNotStartable
-			}
-		} else {
-			if step.Status == worlds.StatusCancelled {
-				return step.CancelledEventID, nil
-			}
-			if step.Status.Terminal() {
-				return "", worlds.ErrStepNotStartable
-			}
+		// A running step can be redelivered after its worker dies.
+		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
+			return "", worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
 		return t.findWaitCompleted(event.CorrelationID)
+
 	case worlds.EventTypeHookReceived:
-		var received worlds.WebhookReceivedEventData
-		if json.Unmarshal(event.Data, &received) != nil || received.Request == nil && received.Response == nil {
-			return "", nil
-		}
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
 		}
-		if hook == nil || hook.Webhook == nil {
+		if hook == nil || hook.RunID != t.run.RunID {
 			return "", worlds.ErrHookNotActive
 		}
 		owner, err := t.token(hook.Token)
 		if err != nil {
 			return "", err
 		}
-		if owner == nil || owner.HookID != hook.HookID {
+		if owner == nil || owner.HookID != hook.HookID || hook.DisposedAt != nil {
+			if hook.ForceClaimedBy != nil {
+				return "", worlds.ErrHookForceClaimed
+			}
 			return "", worlds.ErrHookNotActive
 		}
-		if received.Request != nil && hook.ReceivedEventID != "" {
+		var received worlds.WebhookReceivedEventData
+		_ = json.Unmarshal(event.Data, &received)
+		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
 			return "", worlds.ErrHookNotActive
 		}
-		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil) {
+		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
 			return "", worlds.ErrHookNotActive
 		}
+
 	case worlds.EventTypeHookCreated:
-		var created hookCreatedData
+		var created worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &created) != nil || created.Token == "" {
 			return "", nil
 		}
@@ -268,7 +253,7 @@ func (t *txn) materialize(event worlds.Event) error {
 			}
 		}
 	case worlds.EventTypeStepCreated:
-		var value stepCreatedData
+		var value worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.StepID(event.CorrelationID)
 		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, Input: value.Input, CreatedAt: now, UpdatedAt: now}})
@@ -280,13 +265,16 @@ func (t *txn) materialize(event worlds.Event) error {
 		return t.updateStep(event, worlds.StatusFailed)
 	case worlds.EventTypeStepRetrying:
 		return t.updateStep(event, worlds.StatusPending)
-	case worlds.EventTypeStepCancelled:
-		return t.updateStep(event, worlds.StatusCancelled)
 	case worlds.EventTypeHookCreated:
-		var value hookCreatedData
+		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		t.setHook(&worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Metadata: value.Metadata, Webhook: value.Webhook, MinRetention: value.MinRetention, CreatedAt: now, UpdatedAt: now})
+		hook := &worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Metadata: value.Metadata, Webhook: value.Webhook, MinRetention: value.MinRetention, ClaimedFrom: value.ClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		if value.MinRetention > 0 {
+			until := now.Add(value.MinRetention)
+			hook.TokenRetentionUntil = &until
+		}
+		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})
 		}
@@ -299,13 +287,13 @@ func (t *txn) materialize(event worlds.Event) error {
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
 		complete := false
 		var value worlds.WebhookReceivedEventData
-		if json.Unmarshal(event.Data, &value) == nil {
+		if hook.Webhook != nil && json.Unmarshal(event.Data, &value) == nil {
 			if value.Request != nil {
-				hook.ReceivedEventID = event.EventID
+				hook.WebhookEventID = event.EventID
 			}
-			complete = value.Response != nil && value.ResponseTo == hook.ReceivedEventID
+			complete = value.Response != nil && value.ResponseTo == hook.WebhookEventID
 		}
-		if complete || hook.Webhook == nil || !hook.Webhook.Manual && hook.ReceivedEventID != "" {
+		if complete || hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
 			if err := t.completeHook(&hook, now); err != nil {
 				return err
 			}
@@ -316,25 +304,66 @@ func (t *txn) materialize(event worlds.Event) error {
 		if err != nil || hook == nil {
 			return err
 		}
+		value := *hook
+		value.DisposedAt, value.UpdatedAt = &now, now
+		var disposed worlds.HookDisposedEventData
+		_ = json.Unmarshal(event.Data, &disposed)
+		value.ForceClaimedBy = disposed.ForceClaimedBy
+		t.setHook(&value)
 		return t.releaseToken(hook.Token, hook.HookID)
+	}
+
+	if event.EventType == worlds.EventTypeRunCompleted || event.EventType == worlds.EventTypeRunFailed || event.EventType == worlds.EventTypeRunCancelled {
+		names, err := listJSON(t.w.root, "hooks")
+		if err != nil {
+			return err
+		}
+		hooks := make([]worlds.Hook, 0, len(names))
+		for _, name := range names {
+			var hook worlds.Hook
+			if err := readJSON(t.w.root, path.Join("hooks", name), &hook); err != nil {
+				return err
+			}
+			hooks = append(hooks, hook)
+		}
+		for id, staged := range t.hooks {
+			replaced := false
+			for i := range hooks {
+				if hooks[i].HookID == id {
+					hooks[i] = *staged
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				hooks = append(hooks, *staged)
+			}
+		}
+		for _, hook := range hooks {
+			if hook.RunID != run.RunID {
+				continue
+			}
+			owner, err := t.token(hook.Token)
+			if err != nil {
+				return err
+			}
+			if owner == nil || owner.HookID != hook.HookID {
+				continue
+			}
+			if hook.TokenRetentionUntil != nil && hook.TokenRetentionUntil.After(now) {
+				t.setToken(hook.Token, &tokenRecord{HookID: hook.HookID, TokenRetentionUntil: hook.TokenRetentionUntil})
+			} else {
+				t.setToken(hook.Token, nil)
+			}
+		}
 	}
 	return nil
 }
 
-// completeHook releases the token now or holds it until the retention ends.
+// completeHook deactivates a completed webhook and releases its token.
 func (t *txn) completeHook(hook *worlds.Hook, now time.Time) error {
-	if hook.MinRetention <= 0 {
-		hook.RetainUntil = nil
-		return t.releaseToken(hook.Token, hook.HookID)
-	}
-	until := now.Add(hook.MinRetention)
-	hook.RetainUntil = &until
-	owner, err := t.token(hook.Token)
-	if err != nil || owner == nil || owner.HookID != hook.HookID {
-		return err
-	}
-	t.setToken(hook.Token, &tokenRecord{HookID: hook.HookID, RetainUntil: &until})
-	return nil
+	hook.DisposedAt = &now
+	return t.releaseToken(hook.Token, hook.HookID)
 }
 
 func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
@@ -348,13 +377,13 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 	switch status {
 	case worlds.StatusRunning:
 		step.Attempt++
-		step.StartedAt = &at
+		if step.StartedAt == nil {
+			step.StartedAt = &at
+		}
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &at
-	case worlds.StatusCancelled:
-		step.CancelledEventID = event.EventID
 	}
-	var result stepResultData
+	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
 		step.Output, step.Error, step.RetryAfter = result.Output, result.Error, result.RetryAfter
 	}
@@ -435,7 +464,10 @@ func (t *txn) advance(count *int, appended int) {
 }
 
 func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
+	if event.EventType == worlds.EventTypeHookCreated {
+		result.Hook = t.hooks[worlds.HookID(event.CorrelationID)]
+	}
 	if event.EventType == worlds.EventTypeStepCreated {
 		if step := t.steps[worlds.StepID(event.CorrelationID)]; step != nil {
 			value := cloneStep(step.Step, worlds.ResolveDataAll)
@@ -513,6 +545,9 @@ func (w *World) createRun(run runRecord, event worlds.Event) error {
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if input.Event.EventType == worlds.EventTypeHookCreated {
+		return w.createHook(ctx, input)
+	}
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}

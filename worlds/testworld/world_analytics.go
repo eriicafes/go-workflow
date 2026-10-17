@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"maps"
 	"sort"
-	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -48,13 +47,9 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 	for _, event := range a.world.events[input.RunID] {
 		switch event.EventType {
 		case worlds.EventTypeWaitCreated:
-			var data struct {
-				DueAt          time.Time `json:"dueAt"`
-				Cancel         bool      `json:"cancel"`
-				QueueMessageID string    `json:"queueMessageId"`
-			}
+			var data worlds.DataWaitCreated
 			if json.Unmarshal(event.Data, &data) == nil {
-				values[worlds.WaitID(event.CorrelationID)] = worlds.AnalyticsWait{RunID: input.RunID, WaitID: worlds.WaitID(event.CorrelationID), DueAt: data.DueAt, Cancel: data.Cancel, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				values[worlds.WaitID(event.CorrelationID)] = worlds.AnalyticsWait{RunID: input.RunID, WaitID: worlds.WaitID(event.CorrelationID), DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			}
 		case worlds.EventTypeWaitCompleted:
 			id := worlds.WaitID(event.CorrelationID)

@@ -34,11 +34,11 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"RunsWaitForTerminalStatus", conformRunsWaitForTerminalStatus},
 		{"RunsList", conformRunsList},
 		{"Steps", conformSteps},
-		{"StepCancel", conformStepCancel},
+		{"TerminalSteps", conformTerminalSteps},
 		{"Batch", conformBatch},
 		{"EventsList", conformEventsList},
 		{"Attributes", conformAttributes},
-		{"HooksClaim", conformHooksClaim},
+		{"HookTokens", conformHookTokens},
 		{"HooksForce", conformHooksForce},
 		{"HooksRetention", conformHooksRetention},
 		{"Webhooks", conformWebhooks},
@@ -139,23 +139,15 @@ func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []wo
 	return page.Data
 }
 
-func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) map[string]any {
-	data := map[string]any{"token": token, "metadata": []byte("meta")}
-	if webhook != nil {
-		data["webhook"] = webhook
-	}
-	if retention > 0 {
-		data["minRetention"] = retention
-	}
-	return data
+func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) worlds.DataHookCreated {
+	return worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), Webhook: webhook, MinRetention: retention}
 }
 
-func conformClaim(world worlds.World, runID worlds.RunID, hookID worlds.HookID, token string, force bool) (worlds.HooksClaimResult, error) {
-	data, _ := json.Marshal(conformHookData(token, nil, 0))
-	return world.HooksClaim(context.Background(), worlds.HooksClaimInput{
+func conformClaim(world worlds.World, runID worlds.RunID, hookID worlds.HookID, token string, force bool) (worlds.EventResult, error) {
+	data, _ := json.Marshal(worlds.DataHookCreated{Token: token, Force: force, Metadata: []byte("meta")})
+	return world.EventsCreate(context.Background(), worlds.EventsCreateInput{
 		RunID: runID,
 		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: data},
-		Force: force,
 	})
 }
 

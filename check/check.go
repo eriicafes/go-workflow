@@ -154,14 +154,21 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 			if isSDKCall(pass, node, "Writer") || isSDKCall(pass, node, "Reader") ||
 				isSDKCall(pass, node, "ReaderAt") ||
 				isSDKMethod(pass, node, "Writer") || isSDKMethod(pass, node, "Reader") ||
-				isSDKMethod(pass, node, "ReaderAt") {
-				pass.Reportf(node.Pos(), "workflow streams can only be read or written inside a durable step")
+				isSDKMethod(pass, node, "ReaderAt") || isSDKMethod(pass, node, "RespondWith") {
+				pass.Reportf(node.Pos(), "workflow stream access and webhook responses require a durable step")
 			}
 			if banned, ok := bannedCall(pass, node); ok {
-				if banned == "time.Now" {
+				if strings.HasPrefix(banned, "context.With") {
+					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.WithCancel/WithCancelCause and durable timers instead", banned)
+				} else if banned == "time.Now" {
 					pass.Reportf(node.Pos(), "workflow body calls time.Now, use workflow.Now instead")
 				} else {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Step or workflow.Background instead", banned)
+				}
+			}
+			if isSDKCall(pass, node, "Then") && len(node.Args) == 3 {
+				if callback, ok := node.Args[2].(*ast.FuncLit); ok {
+					checkBody(pass, callback.Body)
 				}
 			}
 			if isDurableOperation(pass, node) {
@@ -231,7 +238,7 @@ func isSDKCall(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 }
 
 func isDurableOperation(pass *analysis.Pass, call *ast.CallExpr) bool {
-	for _, name := range []string{"Step", "Background", "Map", "All", "OnRollback"} {
+	for _, name := range []string{"Step", "InlineStep", "Background", "Map", "All", "OnRollback"} {
 		if isSDKCall(pass, call, name) {
 			return true
 		}
@@ -249,6 +256,9 @@ func bannedCall(pass *analysis.Pass, call *ast.CallExpr) (string, bool) {
 		return "", false
 	}
 	path, name := function.Pkg().Path(), function.Name()
+	if path == "context" && (name == "WithCancel" || name == "WithCancelCause" || name == "WithTimeout" || name == "WithTimeoutCause" || name == "WithDeadline" || name == "WithDeadlineCause") {
+		return path + "." + name, true
+	}
 	if path == "time" && name == "Now" {
 		return path + "." + name, true
 	}

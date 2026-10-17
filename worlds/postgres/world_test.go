@@ -96,7 +96,7 @@ func TestStartWorkersExecuteOnce(t *testing.T) {
 		handles[i] = run
 	}
 	for i, run := range handles {
-		result, err := run.Await(ctx)
+		result, err := run.Value(ctx)
 		if err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}
@@ -283,10 +283,9 @@ func TestConcurrentForcedClaims(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			_, err := world.HooksClaim(ctx, worlds.HooksClaimInput{
+			_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{
 				RunID: runID,
-				Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: fmt.Sprintf("hook_%d", i), Data: []byte(`{"token":"forced"}`)},
-				Force: true,
+				Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: fmt.Sprintf("hook_%d", i), Data: []byte(`{"token":"forced","force":true}`)},
 			})
 			errs <- err
 		}()

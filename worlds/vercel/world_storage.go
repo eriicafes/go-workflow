@@ -48,6 +48,7 @@ func (w *World) corrKey(runID worlds.RunID, correlationID string) string {
 type eventRecord struct {
 	Type          worlds.EventType `json:"t"`
 	CorrelationID string           `json:"c,omitempty"`
+	JSONData      json.RawMessage  `json:"j,omitempty"`
 	Data          []byte           `json:"d,omitempty"`
 	At            string           `json:"at"`
 }
@@ -70,16 +71,19 @@ type stepView struct {
 
 // hookView is the hook JSON written by scriptAppend.
 type hookView struct {
-	RunID        worlds.RunID `json:"runId"`
-	Token        string       `json:"token"`
-	Metadata     string       `json:"metadata,omitempty"`
-	Webhook      string       `json:"webhook,omitempty"`
-	MinRetention string       `json:"minRetention,omitempty"`
-	ReceivedSlot uint64       `json:"rid,omitempty"`
-	CreatedAt    string       `json:"createdAt"`
-	UpdatedAt    string       `json:"updatedAt"`
-	ReceivedAt   string       `json:"receivedAt,omitempty"`
-	RetainUntil  string       `json:"retainUntil,omitempty"`
+	RunID               worlds.RunID           `json:"runId"`
+	Token               string                 `json:"token"`
+	Metadata            string                 `json:"metadata,omitempty"`
+	Webhook             string                 `json:"webhook,omitempty"`
+	MinRetention        string                 `json:"minRetention,omitempty"`
+	ReceivedSlot        uint64                 `json:"rid,omitempty"`
+	CreatedAt           string                 `json:"createdAt"`
+	UpdatedAt           string                 `json:"updatedAt"`
+	ReceivedAt          string                 `json:"receivedAt,omitempty"`
+	TokenRetentionUntil string                 `json:"tokenRetentionUntil,omitempty"`
+	ClaimedFrom         *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
+	ForceClaimedBy      *worlds.HookForceClaim `json:"forceClaimedBy,omitempty"`
+	DisposedAt          string                 `json:"disposedAt,omitempty"`
 }
 
 func micros(t time.Time) string { return strconv.FormatInt(t.UnixMicro(), 10) }
@@ -127,6 +131,9 @@ func decodeEvent(runID worlds.RunID, slot uint64, raw string, resolve worlds.Eve
 		return worlds.Event{}, fmt.Errorf("workflow/vercel: decode event %d of %s: %w", slot, runID, err)
 	}
 	event := worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(slot), EventType: record.Type, CorrelationID: record.CorrelationID, Data: record.Data, CreatedAt: parseMicros(record.At)}
+	if len(record.JSONData) > 0 {
+		event.Data = record.JSONData
+	}
 	if resolve == worlds.EventsResolveDataNone {
 		event.Data = nil
 	}
@@ -166,9 +173,9 @@ func decodeHook(hookID worlds.HookID, raw string, resolve worlds.ResolveData) (w
 	if err := json.Unmarshal([]byte(raw), &view); err != nil {
 		return worlds.Hook{}, fmt.Errorf("workflow/vercel: decode hook %s: %w", hookID, err)
 	}
-	hook := worlds.Hook{RunID: view.RunID, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), RetainUntil: optionalMicros(view.RetainUntil)}
+	hook := worlds.Hook{RunID: view.RunID, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
 	if view.ReceivedSlot != 0 {
-		hook.ReceivedEventID = worlds.EventIDForSlot(view.ReceivedSlot)
+		hook.WebhookEventID = worlds.EventIDForSlot(view.ReceivedSlot)
 	}
 	if view.MinRetention != "" {
 		retention, err := strconv.ParseInt(view.MinRetention, 10, 64)
@@ -218,6 +225,8 @@ func scriptReply(result any, err error) ([]any, error) {
 		return nil, worlds.ErrRunTerminal
 	case "step_not_startable":
 		return nil, worlds.ErrStepNotStartable
+	case "hook_force_claimed":
+		return nil, worlds.ErrHookForceClaimed
 	case "hook_not_active":
 		return nil, worlds.ErrHookNotActive
 	case "hook_conflict":

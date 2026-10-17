@@ -29,7 +29,7 @@ func TestRunStreamsSupportWritersReadersAndByteOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 	writer, release, err := run.Writer(ctx)
@@ -72,7 +72,7 @@ func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 	name := "audit"
@@ -136,7 +136,7 @@ func TestStepStreamReaderAndWriterUseTheActiveStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Data != "step stream" {
 		t.Fatalf("step stream output = %#v, %v", output, err)
 	}

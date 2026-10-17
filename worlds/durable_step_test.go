@@ -2,6 +2,7 @@ package worlds_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -44,7 +45,7 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Value != 42 || attempts.Load() != 2 {
 		t.Fatalf("output = %#v, attempts=%d, err=%v", output, attempts.Load(), err)
 	}
@@ -65,10 +66,11 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 
 func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	var attempts atomic.Int32
+	original := errors.New("fatal")
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ fatalStepInput) (fatalStepOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			attempts.Add(1)
-			return struct{}{}, workflow.FatalError(errors.New("fatal"))
+			return struct{}{}, workflow.FatalError(original)
 		}, struct{}{}, workflow.StepOptions{MaxRetries: 3})
 		return fatalStepOutput{}, err
 	}))
@@ -79,7 +81,7 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil || attempts.Load() != 1 {
+	if _, err := run.Value(ctx); !errors.Is(err, original) || attempts.Load() != 1 {
 		t.Fatalf("fatal step error=%v attempts=%d", err, attempts.Load())
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
@@ -89,6 +91,28 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	for _, event := range events.Data {
 		if event.EventType == worlds.EventTypeStepRetrying {
 			t.Fatal("fatal step was retried")
+		}
+		if event.EventType == worlds.EventTypeStepFailed {
+			var result worlds.DataStepResult
+			if err := json.Unmarshal(event.Data, &result); err != nil {
+				t.Fatal(err)
+			}
+			var recorded worlds.Error
+			if err := json.Unmarshal(result.Error, &recorded); err != nil {
+				t.Fatalf("step event error is not a JSON error object: %s: %v", result.Error, err)
+			}
+			if !errors.Is(&recorded, original) {
+				t.Fatalf("step event lost error chain: %s", result.Error)
+			}
+			step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: event.RunID, StepID: worlds.StepID(event.CorrelationID)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fatal worlds.FatalError
+			decoded := worlds.DecodeError(step.Error)
+			if !errors.Is(decoded, original) || !errors.As(decoded, &fatal) {
+				t.Fatalf("stored step error lost its cause or fatal marker: %s", step.Error)
+			}
 		}
 	}
 }
@@ -105,7 +129,7 @@ func TestDurableInlineStepRecordsNowInOneAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Captured.IsZero() {
 		t.Fatalf("inline output = %#v, %v", output, err)
 	}
@@ -136,7 +160,7 @@ func TestTargetedStepErrorPanicIsRecordedAsStepFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err == nil {
+	if _, err := run.Value(ctx); err == nil {
 		t.Fatal("step panic did not fail the run")
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})

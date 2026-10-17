@@ -19,21 +19,6 @@ type runCreatedData struct {
 type attrSetData struct {
 	Changes []worlds.RunsAttributeChange `json:"changes"`
 }
-type stepCreatedData struct {
-	StepName string          `json:"stepName"`
-	Input    json.RawMessage `json:"input"`
-}
-type stepResultData struct {
-	Output     json.RawMessage `json:"output"`
-	Error      json.RawMessage `json:"error"`
-	RetryAfter *time.Time      `json:"retryAfter"`
-}
-type hookCreatedData struct {
-	Token        string          `json:"token"`
-	Metadata     []byte          `json:"metadata"`
-	Webhook      *worlds.Webhook `json:"webhook"`
-	MinRetention time.Duration   `json:"minRetention"`
-}
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -76,6 +61,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if input.Event.EventType == worlds.EventTypeHookCreated {
+		return w.createHook(ctx, input)
+	}
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -266,6 +254,15 @@ type appender struct {
 // event is an idempotent replay of an earlier one.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
 	if a.run.Status.Terminal() {
+		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
+			step, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
+			if err != nil {
+				return nil, err
+			}
+			if step.Status == worlds.StatusRunning {
+				return nil, nil
+			}
+		}
 		if event.EventType == worlds.EventTypeRunCancelled && a.run.Status == worlds.StatusCancelled {
 			return a.replay(ctx, event.EventType, event.CorrelationID, true)
 		}
@@ -276,7 +273,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if a.run.Status == worlds.StatusRunning {
 			return a.replay(ctx, event.EventType, "", true)
 		}
-	case worlds.EventTypeStepStarted, worlds.EventTypeStepCancelled:
+	case worlds.EventTypeStepStarted:
 		var status worlds.Status
 		err := a.tx.QueryRow(ctx, `SELECT status FROM go_workflow_steps WHERE run_id = $1 AND step_id = $2`, a.run.RunID, event.CorrelationID).Scan(&status)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -304,33 +301,36 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if err != nil || result.EventID != "" {
 			return result, err
 		}
+
 	case worlds.EventTypeHookReceived:
-		var received worlds.WebhookReceivedEventData
-		if json.Unmarshal(event.Data, &received) != nil || (received.Request == nil && received.Response == nil) {
-			return nil, nil
-		}
 		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return nil, err
 		}
-		if !found || hook.Webhook == nil {
+		if !found || hook.RunID != a.run.RunID {
 			return nil, worlds.ErrHookNotActive
 		}
 		owner, err := tokenOwner(ctx, a.tx, hook.Token)
 		if err != nil {
 			return nil, err
 		}
-		if owner != hook.HookID {
+		if owner != hook.HookID || hook.DisposedAt != nil {
+			if hook.ForceClaimedBy != nil {
+				return nil, worlds.ErrHookForceClaimed
+			}
 			return nil, worlds.ErrHookNotActive
 		}
-		if received.Request != nil && hook.ReceivedEventID != "" {
+		var received worlds.WebhookReceivedEventData
+		_ = json.Unmarshal(event.Data, &received)
+		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
 			return nil, worlds.ErrHookNotActive
 		}
-		if received.Response != nil && (hook.ReceivedEventID == "" || received.ResponseTo != hook.ReceivedEventID || hook.RetainUntil != nil) {
+		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
 			return nil, worlds.ErrHookNotActive
 		}
+
 	case worlds.EventTypeHookCreated:
-		var created hookCreatedData
+		var created worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &created) != nil {
 			return nil, nil
 		}
@@ -420,7 +420,7 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 			}
 		}
 	case worlds.EventTypeStepCreated:
-		var value stepCreatedData
+		var value worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &value)
 		_, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_steps (run_id, step_id, step_name, status, input, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $6)
@@ -437,8 +437,6 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 		return a.updateStep(ctx, event, worlds.StatusFailed)
 	case worlds.EventTypeStepRetrying:
 		return a.updateStep(ctx, event, worlds.StatusPending)
-	case worlds.EventTypeStepCancelled:
-		return a.updateStep(ctx, event, worlds.StatusCancelled)
 	case worlds.EventTypeHookCreated:
 		return a.createHook(ctx, event)
 	case worlds.EventTypeHookReceived:
@@ -448,17 +446,23 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 		if err != nil || !found {
 			return err
 		}
+		var disposed worlds.HookDisposedEventData
+		_ = json.Unmarshal(event.Data, &disposed)
+		taken, _ := json.Marshal(disposed.ForceClaimedBy)
+		if _, err := a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET disposed_at = $2, updated_at = $2, force_claimed_by = $3 WHERE hook_id = $1`, hook.HookID, event.CreatedAt, taken); err != nil {
+			return err
+		}
 		return releaseToken(ctx, a.tx, hook)
 	}
 	return nil
 }
 
 func (a *appender) updateStep(ctx context.Context, event worlds.Event, status worlds.Status) error {
-	var result stepResultData
+	var result worlds.DataStepResult
 	parsed := json.Unmarshal(event.Data, &result) == nil
 	_, err := a.tx.Exec(ctx, `UPDATE go_workflow_steps SET status = $3::text, updated_at = $4,
 			attempt = attempt + CASE WHEN $3::text = 'running' THEN 1 ELSE 0 END,
-			started_at = CASE WHEN $3::text = 'running' THEN $4 ELSE started_at END,
+			started_at = CASE WHEN $3::text = 'running' THEN coalesce(started_at, $4) ELSE started_at END,
 			completed_at = CASE WHEN $3::text IN ('completed', 'failed') THEN $4 ELSE completed_at END,
 			output = CASE WHEN $5::boolean THEN $6::bytea ELSE output END,
 			error = CASE WHEN $5::boolean THEN $7::bytea ELSE error END,
@@ -469,7 +473,7 @@ func (a *appender) updateStep(ctx context.Context, event worlds.Event, status wo
 }
 
 func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
-	var value hookCreatedData
+	var value worlds.DataHookCreated
 	_ = json.Unmarshal(event.Data, &value)
 	var webhook []byte
 	if value.Webhook != nil {
@@ -479,14 +483,18 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
 		}
 		webhook = encoded
 	}
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, metadata, webhook, created_at, updated_at, min_retention)
-		VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
-		ON CONFLICT (hook_id) DO UPDATE SET run_id = excluded.run_id, token = excluded.token, metadata = excluded.metadata,
-			webhook = excluded.webhook, received_event_id = '', created_at = excluded.created_at, updated_at = excluded.updated_at,
-			received_at = NULL, min_retention = excluded.min_retention, retain_until = NULL`,
-		event.CorrelationID, event.RunID, value.Token, value.Metadata, webhook, event.CreatedAt, int64(value.MinRetention)); err != nil {
+
+	var until *time.Time
+	if value.MinRetention > 0 {
+		deadline := event.CreatedAt.Add(value.MinRetention)
+		until = &deadline
+	}
+	claimed, _ := json.Marshal(value.ClaimedFrom)
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, metadata, webhook, created_at, updated_at, min_retention, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)`, event.CorrelationID, event.RunID, value.Token, value.Metadata, webhook, event.CreatedAt, int64(value.MinRetention), until, claimed); err != nil {
 		return err
 	}
+
 	if value.Token == "" {
 		return nil
 	}
@@ -513,30 +521,27 @@ func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
 	hook.UpdatedAt, hook.ReceivedAt = at, &at
 	complete := false
 	var value worlds.WebhookReceivedEventData
-	if json.Unmarshal(event.Data, &value) == nil {
+	if hook.Webhook != nil && json.Unmarshal(event.Data, &value) == nil {
 		if value.Request != nil {
-			hook.ReceivedEventID = event.EventID
+			hook.WebhookEventID = event.EventID
 		}
-		if value.Response != nil && value.ResponseTo == hook.ReceivedEventID {
+		if value.Response != nil && value.ResponseTo == hook.WebhookEventID {
 			complete = true
 		}
 	}
-	if hook.Webhook == nil || (!hook.Webhook.Manual && hook.ReceivedEventID != "") {
+
+	if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
 		complete = true
 	}
 	if complete {
-		if hook.MinRetention <= 0 {
-			hook.RetainUntil = nil
-			if err := releaseToken(ctx, a.tx, hook); err != nil {
-				return err
-			}
-		} else {
-			until := at.Add(hook.MinRetention)
-			hook.RetainUntil = &until
+		hook.DisposedAt = &at
+		if err := releaseToken(ctx, a.tx, hook); err != nil {
+			return err
 		}
 	}
-	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3, received_event_id = $4, retain_until = $5 WHERE hook_id = $1`,
-		hook.HookID, hook.UpdatedAt, hook.ReceivedAt, hook.ReceivedEventID, hook.RetainUntil)
+
+	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3, webhook_event_id = $4, token_retention_until = $5, disposed_at = $6 WHERE hook_id = $1`,
+		hook.HookID, hook.UpdatedAt, hook.ReceivedAt, hook.WebhookEventID, hook.TokenRetentionUntil, hook.DisposedAt)
 	return err
 }
 
@@ -557,9 +562,16 @@ func (a *appender) advance(count *int, appended int) {
 }
 
 func (a *appender) result(ctx context.Context, event worlds.Event, created bool) (worlds.EventResult, error) {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, InBandCount: a.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: event.Data, InBandCount: a.run.InBandCount}
 	if created {
 		result.AllocatedEventCount = 1
+	}
+	if event.EventType == worlds.EventTypeHookCreated {
+		hook, _, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		result.Hook = &hook
 	}
 	if event.EventType != worlds.EventTypeStepCreated {
 		return result, nil

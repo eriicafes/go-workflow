@@ -31,7 +31,7 @@ type childRunOutput struct{ Value string }
 type parentRunInput struct{}
 type parentRunOutput struct {
 	Value    string
-	AwaitErr string
+	ValueErr string
 	ChildID  string
 }
 
@@ -69,14 +69,19 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 		if err != nil {
 			return parentRunOutput{}, err
 		}
+		if owner, err := hook.GetConflict(ctx); err != nil {
+			return parentRunOutput{}, err
+		} else if owner != nil {
+			return parentRunOutput{}, workflow.ErrHookConflict
+		}
 		run, err := workflow.Start(ctx, childRunInput{Token: hook.Token()})
 		if err != nil {
 			return parentRunOutput{}, err
 		}
-		// Await records the child as unfinished instead of waiting for it.
-		_, awaitErr := run.Await(ctx)
-		value, err := hook.Await(ctx)
-		return parentRunOutput{Value: value, AwaitErr: fmt.Sprint(awaitErr), ChildID: run.ID()}, err
+		// Value records the child as unfinished instead of waiting for it.
+		_, valueErr := run.Value(ctx)
+		value, err := hook.Next(ctx)
+		return parentRunOutput{Value: value, ValueErr: fmt.Sprint(valueErr), ChildID: run.ID()}, err
 	}
 	world := testworld.New(workflow.Use(child), workflow.Use(parent))
 	defer world.Close()
@@ -86,11 +91,11 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := run.Await(ctx)
+	result, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Value != "child" || result.AwaitErr != workflow.ErrRunNotFinished.Error() {
+	if result.Value != "child" || result.ValueErr != workflow.ErrRunNotFinished.Error() {
 		t.Fatalf("result = %#v", result)
 	}
 	if !strings.HasPrefix(result.ChildID, "wrun_") || len(result.ChildID) != len(worlds.NewRunID()) {
@@ -120,7 +125,7 @@ func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 	if name, err := run.WorkflowName(ctx); err != nil || name != expected {
 		t.Fatalf("workflow name = %q, %v; want %q", name, err, expected)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +136,7 @@ func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 
 func TestRunWakeCompletesPendingDurableWaits(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
-		_, err := workflow.Timer(ctx, time.Hour).Await(ctx)
+		_, err := workflow.Timer(ctx, time.Hour).Value(ctx)
 		return timerOutput{}, err
 	}))
 	defer world.Close()
@@ -162,7 +167,7 @@ ready:
 	if count != 1 {
 		t.Fatalf("wake count = %d", count)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -181,20 +186,20 @@ func TestStartAndGetCoverRunLifecycle(t *testing.T) {
 	if exists, err := run.Exists(ctx); err != nil || !exists {
 		t.Fatalf("run exists = %t, %v", exists, err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if status, err := run.Status(ctx); err != nil || status != workflow.StatusCompleted {
 		t.Fatalf("run status = %q, %v", status, err)
 	}
-	if done, err := run.Done(ctx); err != nil || !done {
-		t.Fatalf("run done = %t, %v", done, err)
+	if status, err := run.Status(ctx); err != nil || !status.Terminal() {
+		t.Fatalf("run status = %s, %v", status, err)
 	}
 	loaded, err := workflow.Get[pointerWorkflowOutput](ctx, run.ID())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output, err := loaded.Await(ctx); err != nil || output.Value != 42 {
+	if output, err := loaded.Value(ctx); err != nil || output.Value != 42 {
 		t.Fatalf("loaded output = %#v, %v", output, err)
 	}
 	missing, err := workflow.Get[pointerWorkflowOutput](ctx, "wrun_missing")
@@ -232,7 +237,7 @@ func TestUseRejectsInvalidInputAndUnencodableOutput(t *testing.T) {
 
 func TestRunCancelMakesPendingRunsTerminalAndIsIdempotent(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
-		_, err := workflow.Timer(ctx, time.Hour).Await(ctx)
+		_, err := workflow.Timer(ctx, time.Hour).Value(ctx)
 		return wakeOutput{}, err
 	}))
 	defer world.Close()
@@ -248,20 +253,20 @@ func TestRunCancelMakesPendingRunsTerminalAndIsIdempotent(t *testing.T) {
 	if err := run.Cancel(ctx); err != nil {
 		t.Fatalf("second cancel = %v", err)
 	}
-	if _, err := run.Await(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
 		t.Fatalf("cancelled run error = %v", err)
 	}
 	if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {
 		t.Fatalf("cancelled status = %q, %v", status, err)
 	}
-	if done, err := run.Done(ctx); err != nil || !done {
-		t.Fatalf("cancelled run done = %t, %v", done, err)
+	if status, err := run.Status(ctx); err != nil || !status.Terminal() {
+		t.Fatalf("cancelled run status = %s, %v", status, err)
 	}
 }
 
 func TestRunWakeUpFiltersWaitCorrelationIDs(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
-		_, err := workflow.Join(ctx, workflow.Timer(ctx, time.Hour), workflow.Timer(ctx, time.Hour))
+		err := workflow.Join(ctx, workflow.Timer(ctx, time.Hour), workflow.Timer(ctx, time.Hour))
 		return wakeOutput{}, err
 	}))
 	defer world.Close()
@@ -293,13 +298,13 @@ func TestRunWakeUpFiltersWaitCorrelationIDs(t *testing.T) {
 	if count, err := run.WakeUp(ctx, workflow.WakeOptions{CorrelationIDs: waitIDs[:1]}); err != nil || count != 1 {
 		t.Fatalf("filtered wake count = %d, %v", count, err)
 	}
-	if done, err := run.Done(ctx); err != nil || done {
-		t.Fatalf("run done after one wake = %t, %v", done, err)
+	if status, err := run.Status(ctx); err != nil || status.Terminal() {
+		t.Fatalf("run status after one wake = %s, %v", status, err)
 	}
 	if count, err := run.WakeUp(ctx); err != nil || count != 1 {
 		t.Fatalf("remaining wake count = %d, %v", count, err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -343,7 +348,7 @@ func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +487,7 @@ func monthly(ctx context.Context, _ monthlyInput) (monthlyOutput, error) {
 
 // TestSleepUnderSynctest checks that the in-memory World blocks instead of
 // polling, so testing/synctest advances its fake clock straight to a timer's
-// due time. A poll in Run.Await, stream readers, or the World would step the
+// due time. A poll in Run.Value, stream readers, or the World would step the
 // clock in small increments and time out on a 30-day sleep.
 func TestSleepUnderSynctest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -509,7 +514,7 @@ func TestSleepUnderSynctest(t *testing.T) {
 			t.Fatalf("stream = %q", streamed)
 		}
 
-		output, err := run.Await(ctx)
+		output, err := run.Value(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -564,7 +569,7 @@ func TestRunWakeUpInWorkflowWakesAChildTimer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil || output.Woken != 1 {
 		t.Fatalf("output = %#v, err = %v, want one timer woken", output, err)
 	}
@@ -572,7 +577,106 @@ func TestRunWakeUpInWorkflowWakesAChildTimer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := child.Await(ctx); err != nil {
+	if _, err := child.Value(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunCancellationLetsRunningStepFinish(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		inline bool
+	}{{"step", false}, {"inline", true}} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				started, release := make(chan struct{}), make(chan struct{})
+				world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
+					step := workflow.Step[struct{}, struct{}]
+					if test.inline {
+						step = workflow.InlineStep[struct{}, struct{}]
+					}
+					_, err := step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
+						close(started)
+						select {
+						case <-release:
+							return struct{}{}, nil
+						case <-ctx.Done():
+							return struct{}{}, errors.New("run cancelled active step")
+						}
+					}, struct{}{})
+					return timerOutput{}, err
+				}))
+				defer world.Close()
+				ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
+				defer cancel()
+				run, err := workflow.Start(ctx, timerInput{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-started:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				if err := run.Cancel(ctx); err != nil {
+					t.Fatal(err)
+				}
+				// Allow live cancellation watchers to react before releasing the attempt.
+				time.Sleep(time.Second)
+				close(release)
+				for {
+					steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(steps.Data) == 1 && steps.Data[0].Status.Terminal() {
+						if steps.Data[0].Status != worlds.StatusCompleted {
+							t.Fatalf("step status=%s error=%s", steps.Data[0].Status, steps.Data[0].Error)
+						}
+						break
+					}
+					if ctx.Err() != nil {
+						t.Fatal(ctx.Err())
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {
+					t.Fatalf("run status=%s err=%v", status, err)
+				}
+			})
+		})
+	}
+}
+
+func TestRunCanCancelItselfThroughAnInlineStep(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
+		run, err := workflow.Get[timerOutput](ctx, workflow.GetWorkflowMetadata(ctx).RunID)
+		if err != nil {
+			return timerOutput{}, err
+		}
+		return timerOutput{}, run.Cancel(ctx)
+	}))
+	defer world.Close()
+	ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
+	defer stop()
+	run, err := workflow.Start(ctx, timerInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
+		t.Fatalf("run error=%v", err)
+	}
+	for {
+		steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(steps.Data) == 1 && steps.Data[0].Status == worlds.StatusCompleted {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("inline cancel did not finish: %v steps=%#v", ctx.Err(), steps.Data)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

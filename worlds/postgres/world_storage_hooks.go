@@ -34,7 +34,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	// An expired retention counts as released without writing. The row itself
 	// is removed by the next claim of the token.
 	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns("h.", input.ResolveData)+` FROM go_workflow_hook_tokens t
-		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1 AND (h.retain_until IS NULL OR h.retain_until > $2)`, input.Token, now()))
+		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id JOIN go_workflow_runs r ON r.run_id = h.run_id WHERE t.token = $1 AND h.disposed_at IS NULL AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`, input.Token, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
@@ -60,20 +60,20 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	return keysetPage(hooks, input.Pagination.Limit, func(hook worlds.Hook) (time.Time, string) { return hook.CreatedAt, string(hook.HookID) }), nil
 }
 
-func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
 	// Lock the claimant run (and, for a forced claim, the current owner's run,
 	// in run ID order to avoid deadlocks), then the token row, and append
 	// hook_disposed, naming the claimant in ForceClaimedBy, to a live owner
 	// before the claimant's hook_created, all in one transaction.
 	if err := ctx.Err(); err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType != worlds.EventTypeHookCreated {
-		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	var created hookCreatedData
+	var created worlds.DataHookCreated
 	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
-		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	for attempt := 1; ; attempt++ {
 		result, err := w.claimToken(ctx, input, created.Token)
@@ -83,12 +83,16 @@ func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (w
 	}
 }
 
-func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, token string) (worlds.HooksClaimResult, error) {
-	var result worlds.HooksClaimResult
+func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, token string) (worlds.EventResult, error) {
+	original := input.Event
+	var result worlds.EventResult
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		result = worlds.HooksClaimResult{}
+		input.Event = original
+		var created worlds.DataHookCreated
+		_ = json.Unmarshal(original.Data, &created)
+		result = worlds.EventResult{}
 		var expectedOwner worlds.RunID
-		if input.Force {
+		if created.Force {
 			err := tx.QueryRow(ctx, `SELECT h.run_id FROM go_workflow_hook_tokens t JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1`, token).Scan(&expectedOwner)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
@@ -111,6 +115,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 			runs[id] = run
 		}
 		claimant := runs[input.RunID]
+		before := claimant.count
 		if claimant.run.Status.Terminal() {
 			return worlds.ErrRunTerminal
 		}
@@ -125,42 +130,50 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 		if err != nil {
 			return err
 		}
+
 		if holder.hookID != "" {
-			if !input.Force {
-				return worlds.ErrHookConflict
-			}
-			owner := runs[holder.runID]
-			if owner == nil {
-				return errClaimRetry
-			}
-			if owner.run.Status.Terminal() {
-				if _, err := tx.Exec(ctx, `DELETE FROM go_workflow_hook_tokens WHERE token = $1`, token); err != nil {
-					return err
-				}
+			if !created.Force {
+				created.ConflictingRunID = holder.runID
+				input.Event.EventType = worlds.EventTypeHookConflict
 			} else {
-				data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
-				if err != nil {
-					return err
+				created.ClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
+				owner := runs[holder.runID]
+				if owner == nil {
+					return errClaimRetry
 				}
-				if _, err := owner.append(ctx, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(holder.hookID), Data: data}); err != nil {
-					return err
+				if owner.run.Status.Terminal() {
+					if _, err := tx.Exec(ctx, `DELETE FROM go_workflow_hook_tokens WHERE token = $1`, token); err != nil {
+						return err
+					}
+				} else {
+					data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+					forced, err := owner.append(ctx, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(holder.hookID), Data: data})
+					if err != nil {
+						return err
+					}
+					if owner == claimant {
+						delta = append(delta, forced)
+					}
 				}
-				result.ForcedRunID = holder.runID
 			}
 		}
+		input.Event.Data, _ = json.Marshal(created)
+
 		event, err := claimant.append(ctx, input.Event)
-		if errors.Is(err, worlds.ErrHookConflict) && input.Force {
+		if errors.Is(err, worlds.ErrHookConflict) {
 			// A claimant inserted the token after lockToken saw none.
 			return errClaimRetry
 		}
 		if err != nil {
 			return err
 		}
-		claimant.advance(input.Options.InBandCount, 1)
-		if result.EventResult, err = claimant.result(ctx, event, true); err != nil {
+		allocated := int(claimant.count - before)
+		claimant.advance(input.Options.InBandCount, allocated)
+		if result, err = claimant.result(ctx, event, true); err != nil {
 			return err
 		}
 		result.Events = delta
+		result.AllocatedEventCount = allocated
 		for _, run := range runs {
 			if err := run.flush(ctx); err != nil {
 				return err
@@ -169,7 +182,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.HooksClaimInput, to
 		return nil
 	})
 	if err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
 	return result, nil
 }
@@ -179,16 +192,26 @@ func hookColumns(prefix string, resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::bytea"
 	}
-	return prefix + "hook_id, " + prefix + "run_id, " + prefix + "token, " + metadata + ", " + prefix + "webhook, " + prefix + "received_event_id, " +
-		prefix + "created_at, " + prefix + "updated_at, " + prefix + "received_at, " + prefix + "min_retention, " + prefix + "retain_until"
+	return prefix + "hook_id, " + prefix + "run_id, " + prefix + "token, " + metadata + ", " + prefix + "webhook, " + prefix + "webhook_event_id, " +
+		prefix + "created_at, " + prefix + "updated_at, " + prefix + "received_at, " + prefix + "min_retention, " + prefix + "token_retention_until, " + prefix + "claimed_from, " + prefix + "force_claimed_by, " + prefix + "disposed_at"
 }
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
-	var webhook []byte
+	var webhook, claimed, taken []byte
 	var retention int64
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &hook.Metadata, &webhook, &hook.ReceivedEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &retention, &hook.RetainUntil); err != nil {
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &hook.Metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &retention, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
 		return worlds.Hook{}, err
+	}
+	if len(claimed) > 0 {
+		if err := json.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
+			return worlds.Hook{}, err
+		}
+	}
+	if len(taken) > 0 {
+		if err := json.Unmarshal(taken, &hook.ForceClaimedBy); err != nil {
+			return worlds.Hook{}, err
+		}
 	}
 	if webhook != nil {
 		hook.Webhook = &worlds.Webhook{}
@@ -198,7 +221,7 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 	}
 	hook.MinRetention = time.Duration(retention)
 	hook.CreatedAt, hook.UpdatedAt = hook.CreatedAt.UTC(), hook.UpdatedAt.UTC()
-	hook.ReceivedAt, hook.RetainUntil = utc(hook.ReceivedAt), utc(hook.RetainUntil)
+	hook.ReceivedAt, hook.TokenRetentionUntil = utc(hook.ReceivedAt), utc(hook.TokenRetentionUntil)
 	return hook, nil
 }
 
@@ -225,22 +248,23 @@ func tokenOwner(ctx context.Context, tx pgx.Tx, token string) (worlds.HookID, er
 func lockToken(ctx context.Context, tx pgx.Tx, token string, at time.Time) (tokenHolder, error) {
 	var holder tokenHolder
 	var retainUntil *time.Time
-	err := tx.QueryRow(ctx, `SELECT t.hook_id, h.run_id, h.retain_until FROM go_workflow_hook_tokens t
-		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1 FOR UPDATE OF t`, token).
-		Scan(&holder.hookID, &holder.runID, &retainUntil)
+	var status worlds.Status
+	err := tx.QueryRow(ctx, `SELECT t.hook_id, h.run_id, h.token_retention_until, r.status FROM go_workflow_hook_tokens t
+		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id JOIN go_workflow_runs r ON r.run_id = h.run_id WHERE t.token = $1 FOR UPDATE OF t`, token).
+		Scan(&holder.hookID, &holder.runID, &retainUntil, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return tokenHolder{}, nil
 	}
 	if err != nil {
 		return tokenHolder{}, err
 	}
-	if retainUntil == nil || retainUntil.After(at) {
+	if !status.Terminal() || retainUntil != nil && retainUntil.After(at) {
 		return holder, nil
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM go_workflow_hook_tokens WHERE token = $1`, token); err != nil {
 		return tokenHolder{}, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE go_workflow_hooks SET retain_until = NULL WHERE hook_id = $1`, holder.hookID)
+	_, err = tx.Exec(ctx, `UPDATE go_workflow_hooks SET token_retention_until = NULL WHERE hook_id = $1`, holder.hookID)
 	return tokenHolder{}, err
 }
 

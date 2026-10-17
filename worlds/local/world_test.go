@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +96,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: "wrun_persist", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"Persist/Token"}`)}}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_persist", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"Persist/Token"}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_persist", Name: "out/1", Chunks: [][]byte{[]byte("x"), []byte("y")}}); err != nil {
@@ -279,7 +280,7 @@ func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
 	}
 	claim := func(runID worlds.RunID, hookID worlds.HookID, force bool) {
 		t.Helper()
-		if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: []byte(`{"token":"shared"}`)}, Force: force}); err != nil {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: []byte(fmt.Sprintf(`{"token":"shared","force":%t}`, force))}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -302,6 +303,67 @@ func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
 	}
 }
 
+func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
+	for phase := range 3 {
+		t.Run([]string{"decision", "victim disposed", "claim committed"}[phase], func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			world := startWorld(t, dir, nil)
+			for _, id := range []worlds.RunID{"wrun_victim", "wrun_claimant"} {
+				if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "handoff"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_old", Data: []byte(`{"token":"handoff"}`)}}); err != nil {
+				t.Fatal(err)
+			}
+			previous := worlds.HookForceClaim{RunID: "wrun_victim", HookID: "hook_old"}
+			data, _ := json.Marshal(worlds.DataHookCreated{Token: "handoff", Force: true, ClaimedFrom: &previous})
+			event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_new", Data: data}
+			if phase >= 1 {
+				disposed, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: "wrun_claimant", HookID: "hook_new"}})
+				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_old", Data: disposed}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			zero := 0
+			if phase == 2 {
+				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_claimant", Event: event, Options: worlds.EventsCreateOptions{InBandCount: &zero}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := world.Close(); err != nil {
+				t.Fatal(err)
+			}
+			writeRecord(t, dir, "hook-handoff.json", map[string]any{"RunID": "wrun_claimant", "Event": event, "InBandCount": 0, "Previous": previous, "At": time.Now().UTC()})
+			for range 2 {
+				reopened := startWorld(t, dir, nil)
+				owner, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "handoff"})
+				if err != nil || owner.HookID != "hook_new" || owner.ClaimedFrom == nil || *owner.ClaimedFrom != previous {
+					t.Fatalf("owner=%#v err=%v", owner, err)
+				}
+				victim, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_old"})
+				if err != nil || victim.DisposedAt == nil || victim.ForceClaimedBy == nil || victim.ForceClaimedBy.HookID != "hook_new" {
+					t.Fatalf("victim=%#v err=%v", victim, err)
+				}
+				for id, count := range map[worlds.RunID]int{"wrun_victim": 3, "wrun_claimant": 2} {
+					page, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: id})
+					if err != nil || len(page.Data) != count {
+						t.Fatalf("run=%s events=%d err=%v", id, len(page.Data), err)
+					}
+				}
+				run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_claimant"})
+				if err != nil || run.InBandCount != 1 {
+					t.Fatalf("in-band count=%d err=%v", run.InBandCount, err)
+				}
+				if err := reopened.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 type doubleInput struct{ Value int }
 type doubleOutput struct{ Value int }
 
@@ -316,7 +378,7 @@ func TestRunsWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

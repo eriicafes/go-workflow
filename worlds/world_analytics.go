@@ -106,10 +106,8 @@ type AnalyticsAttribute struct {
 type AnalyticsWait struct {
 	RunID  RunID
 	WaitID WaitID
-	// DueAt is when a timer fires. It is zero for a child-run wait.
+	// DueAt is when the timer fires.
 	DueAt time.Time
-	// Cancel reports whether the timer cancels the run when it fires.
-	Cancel bool
 	// QueueMessageID is the delivery scheduled for the timer.
 	QueueMessageID string
 	CreatedAt      time.Time

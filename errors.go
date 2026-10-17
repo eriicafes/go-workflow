@@ -21,16 +21,18 @@ var (
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
 	// ErrRunCancelled is returned when awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
-	// ErrRunNotFinished is returned by Run.Await in workflow context when the
+	// ErrRunNotFinished is returned by Run.Value in workflow context when the
 	// run it awaits had not finished.
 	ErrRunNotFinished = errors.New("workflow: run has not finished")
 	// ErrHookNotFound is returned when resuming a hook token that no active
 	// hook has.
 	ErrHookNotFound = worlds.ErrHookNotFound
-	// ErrHookNotRegistered is returned when awaiting a Hook that was not
-	// created in this run, such as one returned by GetHook.
+	// ErrHookNotActive is returned when receiving from a disposed hook.
+	ErrHookNotActive = worlds.ErrHookNotActive
+	// ErrHookNotRegistered is returned when receiving or selecting an unbound
+	// hook, or when GetConflict or Dispose uses a handle from another execution.
 	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
-	// ErrHookConflict is returned when creating a hook whose token another
+	// ErrHookConflict is returned when claiming a hook whose token another
 	// active hook already has. Hook.GetConflict reports the run that owns it.
 	ErrHookConflict = worlds.ErrHookConflict
 	// ErrHookForceClaimed is returned when awaiting a hook whose token
@@ -38,16 +40,11 @@ var (
 	ErrHookForceClaimed = worlds.ErrHookForceClaimed
 )
 
-// Error is the error Step returns for a failed step, and Run.Await and
-// Run.Done return for a failed run. It keeps the type, message, and exported
+// Error is the error Step returns for a failed step and Run.Value returns
+// for a failed run. It keeps the type, message, and exported
 // fields of each error in the original chain, so errors.Is matches sentinel
 // errors and errors.As decodes error types after replay.
 type Error = worlds.Error
-
-type fatalError struct{ cause error }
-
-func (e fatalError) Error() string { return e.cause.Error() }
-func (e fatalError) Unwrap() error { return e.cause }
 
 // FatalError wraps cause so that a step returning it fails without retrying.
 // It returns nil when cause is nil.
@@ -55,16 +52,8 @@ func FatalError(cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return fatalError{cause: cause}
+	return worlds.FatalError{Cause: cause}
 }
-
-type retryableError struct {
-	cause error
-	after time.Duration
-}
-
-func (e retryableError) Error() string { return e.cause.Error() }
-func (e retryableError) Unwrap() error { return e.cause }
 
 // RetryableError wraps cause so that a step returning it is retried no sooner
 // than after, while StepOptions.MaxRetries allows another retry. It returns
@@ -73,5 +62,5 @@ func RetryableError(cause error, after time.Duration) error {
 	if cause == nil {
 		return nil
 	}
-	return retryableError{cause: cause, after: after}
+	return worlds.RetryableError{Cause: cause, After: after}
 }

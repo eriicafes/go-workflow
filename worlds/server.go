@@ -111,17 +111,37 @@ func WebhookHandler(world World) http.Handler {
 		}
 		result, err := ResumeHook(r.Context(), world, hook, payload)
 		if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrHookNotActive) {
+			owner, lookupErr := world.HooksGetByToken(r.Context(), HooksGetByTokenInput{Token: token})
+			if lookupErr == nil && owner.HookID != hook.HookID {
+				http.Error(w, ErrHookForceClaimed.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			if lookupErr != nil && !errors.Is(lookupErr, ErrHookNotFound) {
+				http.Error(w, lookupErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
 			return
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if errors.Is(err, ErrHookForceClaimed) {
+				status = http.StatusServiceUnavailable
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		if hook.Webhook.Manual {
 			response, err := waitWebhookResponse(r.Context(), world, hook.RunID, hook.HookID, result.EventID)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusGatewayTimeout)
+				status := http.StatusInternalServerError
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					status = http.StatusGatewayTimeout
+				}
+				if errors.Is(err, ErrHookNotActive) || errors.Is(err, ErrRunTerminal) {
+					status = http.StatusGone
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 			writeWebhookResponse(w, response)
@@ -150,6 +170,12 @@ func waitWebhookResponse(ctx context.Context, world World, runID RunID, hookID H
 			return WebhookResponse{}, err
 		}
 		for _, event := range result.Data {
+			if event.EventType == EventTypeRunCompleted || event.EventType == EventTypeRunFailed || event.EventType == EventTypeRunCancelled {
+				return WebhookResponse{}, ErrRunTerminal
+			}
+			if event.EventType == EventTypeHookDisposed && event.CorrelationID == string(hookID) {
+				return WebhookResponse{}, ErrHookNotActive
+			}
 			if event.EventType != EventTypeHookReceived || event.CorrelationID != string(hookID) {
 				continue
 			}

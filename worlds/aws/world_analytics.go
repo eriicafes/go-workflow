@@ -126,9 +126,9 @@ func (w *World) waits(ctx context.Context, runID worlds.RunID) ([]worlds.Analyti
 		id := worlds.WaitID(event.CorrelationID)
 		switch event.EventType {
 		case worlds.EventTypeWaitCreated:
-			var data waitCreatedData
+			var data worlds.DataWaitCreated
 			if json.Unmarshal(event.Data, &data) == nil {
-				waits[id] = &worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, Cancel: data.Cancel, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				waits[id] = &worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			}
 		case worlds.EventTypeWaitCompleted:
 			if wait := waits[id]; wait != nil && wait.CompletedAt == nil {

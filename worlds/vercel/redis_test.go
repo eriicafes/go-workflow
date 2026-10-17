@@ -312,7 +312,7 @@ func TestKeysAndCursors(t *testing.T) {
 }
 
 func TestDescribeEvent(t *testing.T) {
-	data, _ := json.Marshal(map[string]any{"token": "tok", "metadata": []byte{0xff}, "webhook": worlds.Webhook{Manual: true}, "minRetention": 1500})
+	data, _ := json.Marshal(worlds.DataHookCreated{Token: "tok", Metadata: []byte{0xff}, Webhook: &worlds.Webhook{Manual: true}, MinRetention: 1500})
 	raw, err := describeEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_1", Data: data}, parseMicros("1700000000000000"))
 	if err != nil {
 		t.Fatal(err)

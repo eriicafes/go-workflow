@@ -67,8 +67,11 @@ type Client interface {
 	// stream.
 	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
 
-	// HooksGetByToken returns the active hook with a hook token. It returns
-	// ErrHookNotFound when no active hook has the token.
+	// HooksGet returns hook metadata by ID. It returns ErrHookNotFound when
+	// the hook does not exist.
+	HooksGet(context.Context, HooksGetInput) (Hook, error)
+	// HooksGetByToken returns the active or retained hook with a hook token.
+	// It returns ErrHookNotFound when no hook owns the token.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 
 	// Analytics returns the World's analytics API. It may be nil when the
@@ -153,6 +156,10 @@ func (c worldClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 
 func (c worldClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
 	return c.world.StreamsCreateWriteSession(ctx, input)
+}
+
+func (c worldClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
+	return c.world.HooksGet(ctx, input)
 }
 
 func (c worldClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenInput) (Hook, error) {
@@ -363,6 +370,12 @@ func (s httpStreamWriteSession) Close(ctx context.Context) error {
 }
 func (s httpStreamWriteSession) Release(ctx context.Context) error {
 	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
+}
+
+func (c *httpClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
+	var hook Hook
+	err := c.call(ctx, "hooks.get", input, &hook)
+	return hook, err
 }
 
 func (c *httpClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenInput) (Hook, error) {

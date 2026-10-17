@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -47,27 +48,32 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 // several promises settles first, is the same on every replay.
 type Execution struct {
 	world     World
+	ctx       context.Context
 	run       Run
 	events    []Event
 	index     map[int]int
 	target    *StepID
-	result    *stepResultData
+	result    *DataStepResult
 	rollbacks []func(context.Context, *Execution) error
 	next      int
 	// horizon is the number of events the walk has passed. A result at a
 	// smaller index is visible to the runner.
 	horizon int
-	// settles maps a step, wait, or hook ID to the index of the event that
-	// settled it.
+	// settles maps operation IDs to their settlement event's index, and exact
+	// event IDs to their own index for ordering and replay visibility.
 	settles map[string]int
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
-	inBand int
+	inBand        int
+	continuations []func()
+	registrations []func()
+	prematureExit bool
 }
 
-func newExecution(world World, run Run, events []Event, target *StepID) *Execution {
+func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) *Execution {
 	execution := &Execution{
 		world:   world,
+		ctx:     ctx,
 		run:     run,
 		events:  events,
 		index:   make(map[int]int),
@@ -82,13 +88,19 @@ func newExecution(world World, run Run, events []Event, target *StepID) *Executi
 }
 
 func (e *Execution) trackEvent(index int, event Event) {
+	// Indexing an event ID does not settle its correlated operation. The
+	// cases below index operation IDs only when their outcome is recorded.
+	e.settles[string(event.EventID)] = index
 	switch event.EventType {
-	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepCancelled, EventTypeWaitCompleted, EventTypeHookReceived, EventTypeHookDisposed:
+	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeWaitCompleted, EventTypeHookReceived, EventTypeHookDisposed:
 		if _, settled := e.settles[event.CorrelationID]; !settled && event.CorrelationID != "" {
 			e.settles[event.CorrelationID] = index
 		}
 		return
-	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeHookConflict:
+	case EventTypeHookConflict:
+		e.settles[event.CorrelationID] = index
+		// A conflict also records the declaration, so index its position below.
+	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated:
 	default:
 		return
 	}
@@ -103,6 +115,22 @@ func (e *Execution) trackEvent(index int, event Event) {
 // World returns the World the run is recorded in.
 func (e *Execution) World() World {
 	return e.world
+}
+
+// Context returns the delivery context with execution metadata, without a
+// workflow cancellation context. Internal control steps use it to record outcomes.
+func (e *Execution) Context() context.Context {
+	return context.WithValue(e.ctx, executionContextKey{}, e)
+}
+
+// IsPrematureExit reports whether runtime control flow is ending this delivery
+// before the workflow body has finished. Deferred cleanup should be
+// skipped in that case.
+func (e *Execution) IsPrematureExit() bool { return e.prematureExit }
+
+func (e *Execution) exit(cause error) error {
+	e.prematureExit = true
+	return cause
 }
 
 // Run returns the run as loaded at the start of the delivery.
@@ -122,20 +150,20 @@ func (e *Execution) TargetStepID() (StepID, bool) {
 // SetTargetResult records the result of the step a step delivery executes,
 // for the Runtime to append once the replay ends. It is meaningful only during
 // a step delivery.
-func (e *Execution) SetTargetResult(result stepResultData) {
+func (e *Execution) SetTargetResult(result DataStepResult) {
 	var retryAt *time.Time
 	if result.RetryAfter != nil {
 		value := *result.RetryAfter
 		retryAt = &value
 	}
-	e.result = &stepResultData{Output: bytes.Clone(result.Output), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
+	e.result = &DataStepResult{Output: bytes.Clone(result.Output), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
 }
 
 // GetTargetResult returns the step result recorded by SetTargetResult. It
 // reports false when none has been recorded.
-func (e *Execution) GetTargetResult() (stepResultData, bool) {
+func (e *Execution) GetTargetResult() (DataStepResult, bool) {
 	if e.result == nil {
-		return stepResultData{}, false
+		return DataStepResult{}, false
 	}
 	result := *e.result
 	result.Output = bytes.Clone(result.Output)
@@ -197,10 +225,21 @@ func (e *Execution) SettledEvent(id string) (Event, bool) {
 	return e.events[e.settles[id]], true
 }
 
+// DeliveredEventID identifies the last event delivered to workflow code.
+func (e *Execution) DeliveredEventID() EventID {
+	if e.horizon == 0 {
+		return ""
+	}
+	return e.events[e.horizon-1].EventID
+}
+
 // Suspend ends the current replay so the run suspends until a later delivery.
 // It panics with a value the Runtime recovers and does not return. It is for
 // operations that await a promise that is not ready, not for runner code.
-func (e *Execution) Suspend() { panic(errReplaySuspended) }
+func (e *Execution) Suspend() {
+	e.FlushHooks()
+	panic(e.exit(errReplaySuspended))
+}
 
 // AddRollback registers fn to run when this delivery fails the run, or fails
 // the step it executes. Registered functions run in reverse order. They are
@@ -211,12 +250,12 @@ func (e *Execution) AddRollback(fn func(context.Context, *Execution) error) {
 
 // queue queues input for this run, addressed to its deployment. A storage
 // error ends the replay so the queue retries the delivery.
-func (e *Execution) queue(ctx context.Context, input QueueInput) QueueResult {
+func (e *Execution) queue(input QueueInput) QueueResult {
 	input.RunID = e.run.RunID
 	input.DeploymentID = e.run.DeploymentID
-	result, err := e.world.Queue(ctx, input)
+	result, err := e.world.Queue(e.ctx, input)
 	if err != nil {
-		panic(deliveryError{cause: err})
+		panic(e.exit(deliveryError{cause: err}))
 	}
 	return result
 }
@@ -249,9 +288,9 @@ func (e *Execution) merge(result EventResult, latest Event) {
 // mapError, when not nil, sees the World's error first. It may act on it and
 // return it, return another error, or return nil to accept it, and CreateEvent
 // then adds nothing.
-func (e *Execution) CreateEvent(ctx context.Context, event EventsCreateEvent, mapError func(error) error) {
+func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) error) EventResult {
 	eventCount := len(e.events)
-	result, err := e.world.EventsCreate(ctx, EventsCreateInput{
+	result, err := e.world.EventsCreate(e.ctx, EventsCreateInput{
 		RunID:   e.run.RunID,
 		Event:   event,
 		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: e.InBandCount()},
@@ -262,68 +301,74 @@ func (e *Execution) CreateEvent(ctx context.Context, event EventsCreateEvent, ma
 		}
 		switch {
 		case err == nil:
-			return
+			return EventResult{}
 		case errors.Is(err, ErrInBandSuperseded):
-			panic(errReplaySuperseded)
+			panic(e.exit(errReplaySuperseded))
 		default:
-			panic(deliveryError{cause: err})
+			panic(e.exit(deliveryError{cause: err}))
 		}
 	}
-	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: event.EventType, CorrelationID: event.CorrelationID, Data: event.Data})
+	data := event.Data
+	if result.Data != nil {
+		data = result.Data
+	}
+	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data})
+	return result
 }
 
-// ClaimHook claims the token of the hook event declares and appends event, as
-// CreateEvent does. With force it takes the token from another run's active
-// hook, and queues a delivery that wakes that run on its own deployment. The
-// wake is best-effort, since the run reads the takeover on its next delivery.
-// A token another active hook owns without force is ErrHookConflict, which
-// mapError sees like any other error.
-func (e *Execution) ClaimHook(ctx context.Context, event EventsCreateEvent, force bool, mapError func(error) error) {
-	eventCount := len(e.events)
-	claim, err := e.world.HooksClaim(ctx, HooksClaimInput{
-		RunID:   e.run.RunID,
-		Event:   event,
-		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: e.InBandCount()},
-		Force:   force,
-	})
-	if err != nil {
-		if mapError != nil {
-			err = mapError(err)
+// RegisterHook reserves a declaration position and queues its registration
+// for the next workflow wait. Generated tokens are available immediately and
+// recovered from the declaration on replay, without claiming ownership yet.
+func (e *Execution) RegisterHook(token string, fn func(int, string)) (string, error) {
+	position := e.NextPosition()
+	if index, exists := e.index[position]; exists {
+		event := e.events[index]
+		if event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
+			panic(e.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
 		}
-		switch {
-		case err == nil:
-			return
-		case errors.Is(err, ErrInBandSuperseded):
-			panic(errReplaySuperseded)
-		default:
-			panic(deliveryError{cause: err})
+		var created DataHookCreated
+		if err := json.Unmarshal(event.Data, &created); err != nil {
+			return "", fmt.Errorf("workflow: decode hook: %w", err)
 		}
+		if token != "" && created.Token != token {
+			panic(e.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, token)}))
+		}
+		token = created.Token
+	} else if token == "" {
+		// A step can capture the token before registration is committed. Derive
+		// it from the run and declaration so a retry before that commit still
+		// registers the same token the step received.
+		token = NewRunHookToken(e.run, position)
 	}
-	if claim.ForcedRunID != "" {
-		if deploymentID, err := RunDeploymentID(ctx, e.world, claim.ForcedRunID); err == nil {
-			_, _ = e.world.Queue(ctx, QueueInput{RunID: claim.ForcedRunID, IdempotencyKey: "hook-force:" + event.CorrelationID, DeploymentID: deploymentID})
-		}
-	}
-	e.merge(claim.EventResult, Event{RunID: e.run.RunID, EventID: claim.EventID, EventType: event.EventType, CorrelationID: event.CorrelationID, Data: event.Data})
+	e.registrations = append(e.registrations, func() { fn(position, token) })
+	return token, nil
 }
 
-// Select walks the event log until one of ids has settled and returns the
-// one whose settling event comes first in the log. It reports false when the
-// log ends first, and the caller then suspends the run.
-func (e *Execution) Select(ids ...string) (string, bool) {
-	for {
-		winner, winnerIndex := "", -1
-		for _, id := range ids {
-			if e.Settled(id) && (winnerIndex < 0 || e.settles[id] < winnerIndex) {
-				winner, winnerIndex = id, e.settles[id]
-			}
-		}
-		if winnerIndex >= 0 {
-			return winner, true
-		}
-		if e.horizon == len(e.events) {
-			return "", false
-		}
-		e.horizon++
+// FlushHooks commits pending registrations without waiting for payloads.
+// It is used by workflow waits and explicit ownership checks.
+func (e *Execution) FlushHooks() {
+	registrations := e.registrations
+	e.registrations = nil
+	for _, register := range registrations {
+		register()
 	}
+}
+
+// OnAdvance registers workflow work that becomes runnable as results arrive.
+func (e *Execution) OnAdvance(fn func()) {
+	e.continuations = append(e.continuations, fn)
+	fn()
+}
+
+// Advance delivers one recorded event and runs newly ready continuations.
+func (e *Execution) Advance() bool {
+	e.FlushHooks()
+	if e.horizon == len(e.events) {
+		return false
+	}
+	e.horizon++
+	for _, fn := range e.continuations {
+		fn()
+	}
+	return true
 }

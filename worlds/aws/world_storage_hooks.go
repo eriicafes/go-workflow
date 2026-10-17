@@ -43,7 +43,18 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if token.expired(time.Now()) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: token.hookID, ResolveData: input.ResolveData})
+	hook, err := w.HooksGet(ctx, worlds.HooksGetInput{HookID: token.hookID, ResolveData: input.ResolveData})
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: hook.RunID, ResolveData: worlds.ResolveDataNone})
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if hook.DisposedAt != nil || run.Status.Terminal() && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(time.Now())) {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	return hook, nil
 }
 
 // HooksList reads a global secondary index, which is eventually consistent. A

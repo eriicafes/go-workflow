@@ -3,6 +3,7 @@ package workflowtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "steps")
 	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
-	created := conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", map[string]any{"stepName": "fetch", "input": json.RawMessage(`"step-in"`)})
+	created := conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "fetch", Input: json.RawMessage(`"step-in"`)})
 	if created.Step == nil || !created.StepCreated || created.Step.StepID != "step_a" || created.Step.StepName != "fetch" || created.Step.Status != worlds.StatusPending || string(created.Step.Input) != `"step-in"` {
 		t.Fatalf("step_created result = %#v step=%#v", created, created.Step)
 	}
@@ -29,6 +30,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 1 || step.StartedAt == nil {
 		t.Fatalf("running step = %#v err=%v", step, err)
 	}
+	firstStartedAt := *step.StartedAt
 	// Starting a running step records a new attempt, so a delivery can take
 	// over a step whose previous attempt's delivery died.
 	restarted, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"}})
@@ -36,17 +38,17 @@ func conformSteps(t *testing.T, world worlds.World) {
 		t.Fatalf("restarted step = %#v err=%v", restarted, err)
 	}
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
-	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 2 {
+	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 2 || step.StartedAt == nil || !step.StartedAt.Equal(firstStartedAt) {
 		t.Fatalf("restarted step = %#v err=%v", step, err)
 	}
 	retryAt := time.Now().Add(time.Minute).UTC().Truncate(time.Millisecond)
-	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_a", map[string]any{"error": json.RawMessage(`{"message":"transient"}`), "retryAfter": retryAt})
+	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_a", worlds.DataStepResult{Error: json.RawMessage(`{"message":"transient"}`), RetryAfter: &retryAt})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusPending || step.RetryAfter == nil || !step.RetryAfter.Equal(retryAt) || string(step.Error) != `{"message":"transient"}` {
 		t.Fatalf("retrying step = %#v err=%v", step, err)
 	}
 	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
-	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", map[string]any{"output": json.RawMessage(`"step-out"`)})
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Output: json.RawMessage(`"step-out"`)})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusCompleted || step.Attempt != 3 || string(step.Output) != `"step-out"` || step.CompletedAt == nil {
 		t.Fatalf("completed step = %#v err=%v", step, err)
@@ -61,11 +63,21 @@ func conformSteps(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrStepNotFound, "missing step")
 
 	time.Sleep(2 * time.Millisecond)
-	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_b", map[string]any{"stepName": "second"})
-	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_b", map[string]any{"error": json.RawMessage(`{"message":"fatal"}`)})
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "second"})
+	cause := errors.New("fatal")
+	encoded, err := json.Marshal(worlds.NewError(worlds.FatalError{Cause: cause}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_b", worlds.DataStepResult{Error: encoded})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_b"})
-	if err != nil || step.Status != worlds.StatusFailed || string(step.Error) != `{"message":"fatal"}` || step.CompletedAt == nil {
+	if err != nil || step.Status != worlds.StatusFailed || string(step.Error) != string(encoded) || step.CompletedAt == nil {
 		t.Fatalf("failed step = %#v err=%v", step, err)
+	}
+	var fatal worlds.FatalError
+	decoded := worlds.DecodeError(step.Error)
+	if !errors.Is(decoded, cause) || !errors.As(decoded, &fatal) {
+		t.Fatalf("stored step error lost its cause or fatal marker: %s", step.Error)
 	}
 	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID})
 	if err != nil || len(steps.Data) != 2 || steps.Data[0].StepID != "step_a" || steps.Data[1].StepID != "step_b" {
@@ -81,23 +93,18 @@ func conformSteps(t *testing.T, world worlds.World) {
 	}
 }
 
-func conformStepCancel(t *testing.T, world worlds.World) {
+func conformTerminalSteps(t *testing.T, world worlds.World) {
 	ctx := context.Background()
-	runID := conformCreateRun(t, world, "step_cancel")
-	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", map[string]any{"stepName": "a"})
-	cancelled := conformAppend(t, world, runID, worlds.EventTypeStepCancelled, "step_a", nil)
-	replay, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCancelled, CorrelationID: "step_a"}})
-	if err != nil || replay.EventID != cancelled.EventID || replay.AllocatedEventCount != 0 {
-		t.Fatalf("step_cancelled replay = %#v err=%v", replay, err)
-	}
+	runID := conformCreateRun(t, world, "terminal_steps")
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "a"})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "b"})
+	conformAppend(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", nil)
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
-	if err != nil || step.Status != worlds.StatusCancelled {
-		t.Fatalf("cancelled step = %#v err=%v", step, err)
+	if err != nil || step.Status != worlds.StatusCompleted {
+		t.Fatalf("late result = %#v, %v", step, err)
 	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCancelled, CorrelationID: "step_missing"}})
-	conformExpect(t, err, worlds.ErrStepNotStartable, "cancel missing step")
-	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_b", map[string]any{"stepName": "b"})
-	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_b", nil)
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCancelled, CorrelationID: "step_b"}})
-	conformExpect(t, err, worlds.ErrStepNotStartable, "cancel completed step")
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_b"}})
+	conformExpect(t, err, worlds.ErrRunTerminal, "start after terminal run")
 }

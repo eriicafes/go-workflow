@@ -151,11 +151,11 @@ func TestTokenCondition(t *testing.T) {
 	if condition, values := tokenCondition(nil); condition != "attribute_not_exists(pk)" || values != nil {
 		t.Fatalf("absent token condition = %q %v", condition, values)
 	}
-	if condition, values := tokenCondition(&tokenView{hookID: "hook_a"}); !strings.Contains(condition, "attribute_not_exists(retainUntil)") || read(values, ":seenHook") != "hook_a" {
+	if condition, values := tokenCondition(&tokenView{hookID: "hook_a"}); !strings.Contains(condition, "attribute_not_exists(tokenRetentionUntil)") || read(values, ":seenHook") != "hook_a" {
 		t.Fatalf("held token condition = %q %v", condition, values)
 	}
 	until := time.Now()
-	if condition, values := tokenCondition(&tokenView{hookID: "hook_a", retainUntil: &until}); !strings.Contains(condition, "retainUntil = :seenRetain") || read(values, ":seenRetain") != stamp(until) {
+	if condition, values := tokenCondition(&tokenView{hookID: "hook_a", retainUntil: &until}); !strings.Contains(condition, "tokenRetentionUntil = :seenRetain") || read(values, ":seenRetain") != stamp(until) {
 		t.Fatalf("retained token condition = %q %v", condition, values)
 	}
 	past := time.Now().Add(-time.Second)
@@ -184,7 +184,7 @@ func TestViewItems(t *testing.T) {
 	if strings.Join(remove, ",") != "error,startedAt,cancelledEventId" {
 		t.Fatalf("remove = %v", remove)
 	}
-	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), Webhook: &worlds.Webhook{Method: "POST", Manual: true}, CreatedAt: now, UpdatedAt: now, MinRetention: time.Second, RetainUntil: &now}
+	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), Webhook: &worlds.Webhook{Method: "POST", Manual: true}, CreatedAt: now, UpdatedAt: now, MinRetention: time.Second, TokenRetentionUntil: &now}
 	item, err := hookItem(hook)
 	if err != nil {
 		t.Fatal(err)
@@ -193,11 +193,11 @@ func TestViewItems(t *testing.T) {
 		t.Fatalf("hook index keys = %v", item)
 	}
 	back, err := hookFromItem(item)
-	if err != nil || back.Webhook == nil || !back.Webhook.Manual || back.MinRetention != time.Second || !back.RetainUntil.Equal(now) || string(back.Metadata) != "m" {
+	if err != nil || back.Webhook == nil || !back.Webhook.Manual || back.MinRetention != time.Second || !back.TokenRetentionUntil.Equal(now) || string(back.Metadata) != "m" {
 		t.Fatalf("hook = %#v err=%v", back, err)
 	}
-	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}, cancelledEventID: "e"}
-	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || got.cancelledEventID != "e" || !got.RetryAfter.Equal(now) {
+	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}}
+	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || !got.RetryAfter.Equal(now) {
 		t.Fatalf("step = %#v", got)
 	}
 	event := worlds.Event{RunID: "wrun_1", EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: []byte("{}"), CreatedAt: now}

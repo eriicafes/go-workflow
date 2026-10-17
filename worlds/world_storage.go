@@ -96,12 +96,6 @@ type StorageHooks interface {
 	// HooksList returns hooks that match the input filters. It applies Pagination
 	// and ResolveData to the result.
 	HooksList(context.Context, HooksListInput) (Page[Hook], error)
-	// HooksClaim atomically claims the token of the hook_created Event and
-	// appends the event. It returns ErrHookConflict when another hook owns the
-	// token and Force is false. With Force, it takes the token from its owner,
-	// appends hook_disposed with HookDisposedEventData.ForceClaimedBy to the
-	// owner's run, and reports that run in ForcedRunID.
-	HooksClaim(context.Context, HooksClaimInput) (HooksClaimResult, error)
 }
 
 type (
@@ -238,24 +232,6 @@ type (
 		RunID       RunID
 		ResolveData ResolveData
 	}
-	// HooksClaimInput holds the arguments to HooksClaim.
-	HooksClaimInput struct {
-		RunID RunID
-		// Event is the hook_created event whose token is claimed.
-		Event   EventsCreateEvent
-		Options EventsCreateOptions
-		// Force takes the token from the hook that owns it instead of
-		// returning ErrHookConflict.
-		Force bool
-	}
-	// HooksClaimResult is the result of HooksClaim.
-	HooksClaimResult struct {
-		EventResult
-		// ForcedRunID is the run whose hook lost the token to a forced claim,
-		// or empty. The caller queues a delivery for it so its replay observes
-		// ErrHookForceClaimed.
-		ForcedRunID RunID
-	}
 	// WebhookRequest is an HTTP request received by a webhook.
 	WebhookRequest struct {
 		Method string              `json:"method"`
@@ -316,19 +292,22 @@ type Hook struct {
 	Metadata []byte
 	// Webhook is set when the hook is a webhook.
 	Webhook *Webhook
-	// ReceivedEventID is the hook_received event that recorded the webhook
+	// WebhookEventID is the hook_received event that recorded the webhook
 	// request.
-	ReceivedEventID EventID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	ReceivedAt      *time.Time
-	// MinRetention is how long the token stays claimed after the hook is
-	// resolved, so the token cannot be reused immediately. Zero releases the
-	// token when the hook is resolved.
+	WebhookEventID EventID
+	// MinRetention reserves the token until CreatedAt plus this duration.
+	// Active runs keep their tokens beyond that deadline; explicit disposal
+	// always releases them immediately.
 	MinRetention time.Duration
-	// RetainUntil is when the token is released, once the hook has been
-	// resolved with a non-zero MinRetention.
-	RetainUntil *time.Time
+	// TokenRetentionUntil is the earliest time terminal-run cleanup may release
+	// the token, or nil when there is no retention reservation.
+	TokenRetentionUntil *time.Time
+	ClaimedFrom         *HookForceClaim
+	ForceClaimedBy      *HookForceClaim
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ReceivedAt          *time.Time
+	DisposedAt          *time.Time
 }
 
 // EventType names the kind of an event and determines the shape of its Data.
@@ -362,8 +341,6 @@ const (
 	// EventTypeStepRetrying records a failed attempt and when the step is
 	// retried.
 	EventTypeStepRetrying EventType = "step_retrying"
-	// EventTypeStepCancelled records that the step was cancelled.
-	EventTypeStepCancelled EventType = "step_cancelled"
 	// EventTypeHookCreated records a hook and the token it claims.
 	EventTypeHookCreated EventType = "hook_created"
 	// EventTypeHookReceived records a hook's payload, or a webhook's request
@@ -386,7 +363,7 @@ func (t EventType) Valid() bool {
 	switch t {
 	case EventTypeRunCreated, EventTypeRunStarted, EventTypeRunCompleted, EventTypeRunFailed,
 		EventTypeRunCancelled, EventTypeAttrSet, EventTypeStepCreated, EventTypeStepStarted,
-		EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeStepCancelled,
+		EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying,
 		EventTypeHookCreated, EventTypeHookReceived, EventTypeHookDisposed, EventTypeHookConflict,
 		EventTypeWaitCreated, EventTypeWaitCompleted:
 		return true
@@ -419,7 +396,8 @@ type (
 	EventsCreateOptions struct {
 		// EventCount is the number of events the caller already holds. When
 		// set, Events holds every event after that count that was in the log
-		// before this call. The event this call appends is not included. It
+		// before this call, plus an induced same-run disposal on force claim.
+		// The primary returned event is not included. It
 		// takes precedence over SinceCursor.
 		EventCount *int
 		// SinceCursor is the ID of the last event the caller holds. When set
@@ -483,6 +461,8 @@ type (
 		Events []Event
 		// Step is the step created by a step_created event.
 		Step *Step
+		Hook *Hook
+		Data []byte
 		// StepCreated reports whether this call appended the step_created event.
 		StepCreated bool
 		// AllocatedEventCount is the number of events newly appended by this call.

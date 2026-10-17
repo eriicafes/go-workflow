@@ -27,18 +27,17 @@ type runRecord struct {
 
 type stepRecord struct {
 	worlds.Step
-	CancelledEventID worlds.EventID `json:"cancelledEventId,omitempty"`
 }
 
 // tokenRecord is the token uniqueness index. A token is held while its record
-// exists and RetainUntil has not passed.
+// exists and TokenRetentionUntil has not passed.
 type tokenRecord struct {
-	HookID      worlds.HookID `json:"hookId"`
-	RetainUntil *time.Time    `json:"retainUntil,omitempty"`
+	HookID              worlds.HookID `json:"hookId"`
+	TokenRetentionUntil *time.Time    `json:"tokenRetentionUntil,omitempty"`
 }
 
 func (t *tokenRecord) held(now time.Time) bool {
-	return t != nil && (t.RetainUntil == nil || t.RetainUntil.After(now))
+	return t != nil && (t.TokenRetentionUntil == nil || t.TokenRetentionUntil.After(now))
 }
 
 // readOptional reads name into target and reports whether it existed.

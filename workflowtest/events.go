@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -138,9 +139,9 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
 
 	token := "fence:" + string(runID)
-	_, err = world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
-	claimed, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
+	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
 	if err != nil || claimed.InBandCount != 4 || inBandCount() != 4 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
 	}
@@ -155,7 +156,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	}
 	result, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeRunStarted},
-		conformEvent(t, worlds.EventTypeStepCreated, "step_a", map[string]any{"stepName": "a"}),
+		conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "a"}),
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
 	}})
 	if err != nil {
@@ -178,7 +179,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	}
 
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
-		conformEvent(t, worlds.EventTypeStepCreated, "step_b", map[string]any{"stepName": "b"}),
+		conformEvent(t, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "b"}),
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_missing"},
 	}})
 	conformExpect(t, err, worlds.ErrStepNotStartable, "batch with rejected event")
@@ -216,7 +217,7 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "events")
 	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
-	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", []byte(`{"dueAt":"2030-01-01T00:00:00Z"}`))
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{DueAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)})
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_b", nil)
 	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
 

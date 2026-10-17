@@ -43,7 +43,11 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if err != nil {
 		return worlds.Hook{}, err
 	}
-	if hook.Token != input.Token || (hook.RetainUntil != nil && !hook.RetainUntil.After(time.Now())) {
+	run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: hook.RunID, ResolveData: worlds.ResolveDataNone})
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if hook.Token != input.Token || hook.DisposedAt != nil || run.Status.Terminal() && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(time.Now())) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
 	return hook, nil
@@ -90,42 +94,54 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	return page, nil
 }
 
-func (w *World) HooksClaim(ctx context.Context, input worlds.HooksClaimInput) (worlds.HooksClaimResult, error) {
+func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
 	// Token expiry, the conflict check, the optional hook_disposed append to
 	// the owner's run, and the claimant's hook_created append run in one
 	// script, so exactly one concurrent claimant wins.
 	if err := ctx.Err(); err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType != worlds.EventTypeHookCreated {
-		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	var created hookCreatedData
+	var created worlds.DataHookCreated
 	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
-		return worlds.HooksClaimResult{}, worlds.ErrEventInvalid
+		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	now := time.Now().UTC()
 	desc, err := describeEvent(input.Event, now)
 	if err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
 	force := "0"
-	if input.Force {
+	if created.Force {
 		force = "1"
 	}
 	// The script cannot encode event data, so the hook_disposed data that names
 	// this claimant is encoded here.
 	disposed, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
 	if err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
 	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, inBandArg(input.Options.InBandCount), desc, base64.StdEncoding.EncodeToString(disposed)))
 	if err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
-	result, forced, err := decodeAppendReply(input.RunID, input.Event.CorrelationID, values, input.Options.ResolveData)
+	result, _, err := decodeAppendReply(input.RunID, input.Event.CorrelationID, values, input.Options.ResolveData)
 	if err != nil {
-		return worlds.HooksClaimResult{}, err
+		return worlds.EventResult{}, err
 	}
-	return worlds.HooksClaimResult{EventResult: result, ForcedRunID: forced}, nil
+	event, err := w.EventsGet(ctx, worlds.EventsGetInput{RunID: input.RunID, EventID: result.EventID})
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
+	result.Data = event.Data
+	if result.EventType == worlds.EventTypeHookCreated {
+		hook, err := w.HooksGet(ctx, worlds.HooksGetInput{HookID: worlds.HookID(input.Event.CorrelationID)})
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		result.Hook = &hook
+	}
+	return result, nil
 }

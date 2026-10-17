@@ -144,7 +144,7 @@ func startVersioned(t *testing.T, ctx context.Context, world *testworld.World) *
 // message contains want.
 func awaitFailure(t *testing.T, ctx context.Context, world worlds.World, run *workflow.Run[versionedOutput], want string) {
 	t.Helper()
-	_, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world)))
+	_, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world)))
 	var failure *workflow.Error
 	if !errors.As(err, &failure) || !strings.Contains(err.Error(), want) {
 		t.Fatalf("run error = %v, want one containing %q", err, want)
@@ -185,7 +185,7 @@ func TestReplayDivergenceFailsRunWithoutReachingRunnerCode(t *testing.T) {
 	drain(t, ctx, world, v2)
 
 	awaitFailure(t, ctx, world, run, "corrupted event log at position 0 after 3 recovery replays")
-	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world))); !errors.Is(err, worlds.ErrCorruptedEventLog) {
+	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); !errors.Is(err, worlds.ErrCorruptedEventLog) {
 		t.Fatalf("run error = %v, want ErrCorruptedEventLog", err)
 	}
 
@@ -259,8 +259,13 @@ func awaitHook(ctx context.Context, input hookedInput) (hookedOutput, error) {
 	if err != nil {
 		return hookedOutput{}, err
 	}
+	if owner, err := hook.GetConflict(ctx); err != nil {
+		return hookedOutput{}, err
+	} else if owner != nil {
+		return hookedOutput{}, workflow.ErrHookConflict
+	}
 
-	value, err := hook.Await(ctx)
+	value, err := hook.Next(ctx)
 	return hookedOutput{Value: value}, err
 }
 
@@ -341,7 +346,7 @@ func TestDeploymentAffinityReroutesDeliveriesToTheRunsDeployment(t *testing.T) {
 	// dpl_1 finishes the run on its own code.
 	drain(t, ctx, world, v1)
 
-	output, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(d1)))
+	output, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(d1)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +376,7 @@ func TestDeploymentAffinityFailsRunAfterRerouteBudget(t *testing.T) {
 	drain(t, ctx, world, v2)
 
 	awaitFailure(t, ctx, d1, run, `pinned to deployment "dpl_1" but was delivered to "dpl_2" after 3 re-routes`)
-	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(d1))); !errors.Is(err, worlds.ErrDeploymentMismatch) {
+	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(d1))); !errors.Is(err, worlds.ErrDeploymentMismatch) {
 		t.Fatalf("run error = %v, want ErrDeploymentMismatch", err)
 	}
 
@@ -400,7 +405,7 @@ func TestDeploymentAffinityFailsRunWhenDeploymentIsUnavailable(t *testing.T) {
 	deliverNext(t, ctx, world, v2)
 
 	awaitFailure(t, ctx, d1, run, "after 0 re-routes")
-	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(d1))); !errors.Is(err, worlds.ErrDeploymentMismatch) {
+	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(d1))); !errors.Is(err, worlds.ErrDeploymentMismatch) {
 		t.Fatalf("run error = %v, want ErrDeploymentMismatch", err)
 	}
 
@@ -487,7 +492,7 @@ func race(ctx context.Context, _ raceInput) (raceOutput, error) {
 		return raceOutput{}, err
 	}
 
-	value, err := winner.Await(ctx)
+	value, err := winner.(*workflow.Result[string]).Value(ctx)
 	if err != nil {
 		return raceOutput{}, err
 	}
@@ -525,7 +530,7 @@ func TestSelectKeepsTheFirstPromiseToSettleAcrossReplays(t *testing.T) {
 	// although it comes after the first in argument order.
 	drain(t, ctx, world, runtime)
 
-	output, err := run.Await(client)
+	output, err := run.Value(client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,13 +558,20 @@ func awaitWithNudge(ctx context.Context, input nudgeInput) (nudgeOutput, error) 
 	if err != nil {
 		return nudgeOutput{}, err
 	}
+	if owner, err := hook.GetConflict(ctx); err != nil {
+		return nudgeOutput{}, err
+	} else if owner != nil {
+		return nudgeOutput{}, workflow.ErrHookConflict
+	}
 
-	if _, err := workflow.Step(ctx, prepare, struct{}{}); err != nil {
+	preparation := workflow.Background(ctx, prepare, struct{}{})
+	winner, err := workflow.Select(ctx, hook, preparation)
+	if err != nil {
 		return nudgeOutput{}, err
 	}
 
 	var output nudgeOutput
-	if done, _ := hook.Done(ctx); !done {
+	if winner == preparation {
 		if _, err := workflow.Step(ctx, nudge, struct{}{}); err != nil {
 			return nudgeOutput{}, err
 		}
@@ -567,7 +579,7 @@ func awaitWithNudge(ctx context.Context, input nudgeInput) (nudgeOutput, error) 
 		output.Nudged = true
 	}
 
-	output.Value, err = hook.Await(ctx)
+	output.Value, err = hook.Next(ctx)
 	return output, err
 }
 
@@ -599,7 +611,7 @@ func TestDoneGivesTheSameAnswerOnEveryReplay(t *testing.T) {
 
 	drain(t, ctx, world, runtime)
 
-	output, err := run.Await(client)
+	output, err := run.Value(client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +659,7 @@ func TestSupersededFlowReplaysInsteadOfDuplicatingDeclarations(t *testing.T) {
 	run := startVersioned(t, ctx, world)
 	drain(t, ctx, world, runtime)
 
-	output, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world)))
+	output, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +734,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	}
 
 	drain(t, ctx, world, runtime)
-	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
+	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
 		t.Fatal(err)
 	}
 	if alphaCalls.Load() != 1 {
@@ -757,7 +769,7 @@ func TestSupersededFlowQueuesOneFollowUpAndAcknowledges(t *testing.T) {
 	}
 
 	drain(t, ctx, world, runtime)
-	if _, err := run.Await(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
+	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -833,6 +845,46 @@ func failForAnHour(context.Context, struct{}) (struct{}, error) {
 func awaitBackoff(ctx context.Context, _ backoffInput) (backoffOutput, error) {
 	_, err := workflow.Step(ctx, failForAnHour, struct{}{}, workflow.StepOptions{MaxRetries: 1})
 	return backoffOutput{}, err
+}
+
+func TestRuntimeRecordsFailedStepAfterRunCancellationWithoutRetry(t *testing.T) {
+	cause := errors.New("step failed")
+	runner := workflow.Use(func(ctx context.Context, _ backoffInput) (backoffOutput, error) {
+		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
+			run, err := workflow.Get[backoffOutput](ctx, workflow.GetWorkflowMetadata(ctx).RunID)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if err := run.Cancel(ctx); err != nil {
+				return struct{}{}, err
+			}
+			return struct{}{}, workflow.RetryableError(cause, time.Hour)
+		}, struct{}{}, workflow.StepOptions{MaxRetries: 3})
+		return backoffOutput{}, err
+	})
+	world := testworld.NewManual()
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	run, err := workflow.Start(ctx, backoffInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, world, runtime)
+	delivery := deliverNext(t, ctx, world, runtime)
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
+	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeError(step.Error), cause) {
+		t.Fatalf("late failure = %#v, err=%v", step, err)
+	}
+	for _, message := range world.QueuedMessages() {
+		if message.Input.StepID != nil {
+			t.Fatalf("cancelled run queued a retry: %#v", message.Input)
+		}
+	}
+	drain(t, ctx, world, runtime)
+	if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {
+		t.Fatalf("run status=%s, err=%v", status, err)
+	}
 }
 
 func TestSuspendingFlowLeavesARetryThatIsNotDueQueuedOnce(t *testing.T) {

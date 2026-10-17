@@ -75,12 +75,6 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	return worlds.Page[worlds.AnalyticsAttribute]{Data: values, HasMore: true, Cursor: values[len(values)-1].Key}, nil
 }
 
-type waitCreatedData struct {
-	DueAt          time.Time `json:"dueAt"`
-	Cancel         bool      `json:"cancel"`
-	QueueMessageID string    `json:"queueMessageId"`
-}
-
 // waits derives waits from wait_created events, completed by the first
 // wait_completed with the same correlation ID. Unparseable wait_created data
 // is skipped.
@@ -118,12 +112,12 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID, waitID *worlds
 	index := map[worlds.WaitID]int{}
 	waits := []worlds.AnalyticsWait{}
 	for _, value := range values {
-		var data waitCreatedData
+		var data worlds.DataWaitCreated
 		if json.Unmarshal(value.data, &data) != nil {
 			continue
 		}
 		wait := value.wait
-		wait.DueAt, wait.Cancel, wait.QueueMessageID = data.DueAt.UTC(), data.Cancel, data.QueueMessageID
+		wait.DueAt, wait.QueueMessageID = data.DueAt.UTC(), data.QueueMessageID
 		wait.CreatedAt, wait.CompletedAt = wait.CreatedAt.UTC(), utc(wait.CompletedAt)
 		if i, ok := index[wait.WaitID]; ok {
 			waits[i] = wait

@@ -87,9 +87,9 @@ local function expire(token)
   if not id then return end
   local h = hook(id)
   if not h then setOwner(token, nil) return end
-  if h.retainUntil and tonumber(h.retainUntil) <= nowN then
+  if terminal(redis.call('HGET', k('run', h.runId), 'status')) and (not h.tokenRetentionUntil or tonumber(h.tokenRetentionUntil) <= nowN) then
     setOwner(token, nil)
-    h.retainUntil = nil
+    h.tokenRetentionUntil = nil
     hooksDirty[id] = true
   end
 end
@@ -128,31 +128,29 @@ end
 local function admit(c, d)
   local t, corr = d.t, d.c
   local status = c.run.status
-  if terminal(status) then
+  if terminal(status) and not ((t == 'step_completed' or t == 'step_failed') and step(c, corr) and step(c, corr).status == 'running') then
     if t == 'run_cancelled' and status == 'cancelled' then return {replay = last(c, t) or 0} end
     return {err = 'run_terminal'}
   end
   if t == 'run_started' and status == 'running' then return {replay = last(c, t) or 0} end
-  if t == 'step_started' or t == 'step_cancelled' then
+  if t == 'step_started' then
     local s = step(c, corr)
-    if not s then return {err = 'step_not_startable'} end
-    if t == 'step_started' then
-      -- A running step may be started again: its previous attempt's delivery
-      -- may have died, and each start records a new attempt.
-      if s.status ~= 'pending' and s.status ~= 'running' then return {err = 'step_not_startable'} end
-    else
-      if s.status == 'cancelled' then return {replay = last(c, lastField(t, corr)) or 0} end
-      if terminal(s.status) then return {err = 'step_not_startable'} end
-    end
+    if not s or (s.status ~= 'pending' and s.status ~= 'running') then return {err = 'step_not_startable'} end
   end
   if t == 'wait_completed' then
     local slot = last(c, lastField(t, corr))
     if slot then return {replay = slot} end
   end
-  if t == 'hook_received' and type(d.recv) == 'table' then
+  if t == 'hook_received' then
     local h = hook(corr)
-    if d.recv.req and (not h or not h.webhook or h.rid or owner(h.token) ~= corr) then return {err = 'hook_not_active'} end
-    if d.recv.resp and (not h or not h.webhook or not h.rid or h.rid ~= d.recv.to or h.retainUntil or owner(h.token) ~= corr) then return {err = 'hook_not_active'} end
+    if not h or h.runId ~= c.id or h.disposedAt or owner(h.token) ~= corr then
+      if h and h.forceClaimedBy then return {err = 'hook_force_claimed'} end
+      return {err = 'hook_not_active'}
+    end
+    if h.webhook and type(d.recv) == 'table' then
+      if d.recv.req and (not h.webhook or h.rid) then return {err = 'hook_not_active'} end
+      if d.recv.resp and (not h.webhook or not h.manual or not h.rid or h.rid ~= d.recv.to) then return {err = 'hook_not_active'} end
+    end
   end
   if t == 'hook_created' and mode ~= 'claim' and type(d.hook) == 'table' and (d.hook.token or '') ~= '' then
     expire(d.hook.token)
@@ -162,17 +160,11 @@ local function admit(c, d)
 end
 
 local function complete(h, id)
-  local retention = tonumber(h.retentionUs or '0')
-  if retention <= 0 then
-    release(h.token, id)
-    h.retainUntil = nil
-    return
-  end
-  h.retainUntil = fmt(nowN + retention)
-  tokenTTL[h.token] = id
+  release(h.token, id)
+  h.disposedAt = now
 end
 
-local stepStatus = {step_started = 'running', step_completed = 'completed', step_failed = 'failed', step_retrying = 'pending', step_cancelled = 'cancelled'}
+local stepStatus = {step_started = 'running', step_completed = 'completed', step_failed = 'failed', step_retrying = 'pending'}
 
 local function materialize(c, d, slot)
   local t, corr = d.t, d.c
@@ -204,7 +196,7 @@ local function materialize(c, d, slot)
       s.status, s.updatedAt = stepStatus[t], now
       if t == 'step_started' then
         s.attempt = (s.attempt or 0) + 1
-        s.startedAt = now
+        s.startedAt = s.startedAt or now
       elseif t == 'step_completed' or t == 'step_failed' then
         s.completedAt = now
       end
@@ -213,7 +205,8 @@ local function materialize(c, d, slot)
     end
   elseif t == 'hook_created' then
     local data = type(d.hook) == 'table' and d.hook or {}
-    hooks[corr] = {runId = c.id, token = data.token or '', metadata = data.metadata, webhook = data.webhook, manual = data.manual, minRetention = data.minRetention, retentionUs = data.retentionUs, createdAt = now, updatedAt = now}
+    hooks[corr] = {runId = c.id, token = data.token or '', metadata = data.metadata, webhook = data.webhook, manual = data.manual, minRetention = data.minRetention, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
+    if tonumber(data.retentionUs or 0) > 0 then hooks[corr].tokenRetentionUntil = fmt(nowN + tonumber(data.retentionUs)) end
     hooksDirty[corr] = true
     table.insert(hooksNew, {corr, c.id})
     if (data.token or '') ~= '' then setOwner(data.token, corr) end
@@ -222,15 +215,15 @@ local function materialize(c, d, slot)
     if h then
       h.updatedAt, h.receivedAt = now, now
       hooksDirty[corr] = true
-      if type(d.recv) == 'table' then
+      if h.webhook and type(d.recv) == 'table' then
         if d.recv.req then h.rid = slot end
         if d.recv.resp and h.rid and d.recv.to == h.rid then complete(h, corr) end
       end
-      if not h.webhook or (not h.manual and h.rid) then complete(h, corr) end
+      if h.webhook and not h.manual and h.rid then complete(h, corr) end
     end
   elseif t == 'hook_disposed' then
     local h = hook(corr)
-    if h then release(h.token, corr) end
+    if h then release(h.token, corr) h.disposedAt, h.updatedAt, h.forceClaimedBy = now, now, d.taken hooksDirty[corr] = true end
   end
 end
 
@@ -295,7 +288,7 @@ local function flush()
   end
   for token, id in pairs(tokenTTL) do
     local h = hooks[id]
-    if tokens[token] == id and h and h.retainUntil then
+    if tokens[token] == id and h and h.tokenRetentionUntil then
       redis.call('PEXPIRE', k('token', token), math.ceil(tonumber(h.retentionUs) / 1000) + 60000)
     end
   end
@@ -344,16 +337,24 @@ if mode == 'claim' then
   expire(token)
   local id = owner(token)
   if id then
-    if not force then return {'err', 'hook_conflict'} end
     local h = hook(id)
-    local oc = h and load(h.runId)
-    if not oc or terminal(oc.run.status) then
-      setOwner(token, nil)
+    if not force then
+      d.t = 'hook_conflict'
+      d.payload.conflictingRunId = h.runId
     else
-      append(oc, {t = 'hook_disposed', c = id, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[9], at = now})})
-      forced = oc.id
+      d.payload.claimedFrom = {runId = h.runId, hookId = id}
+      d.hook.claimedFrom = d.payload.claimedFrom
+      local oc = load(h.runId)
+      if not oc or terminal(oc.run.status) then setOwner(token, nil) else
+        append(oc, {t = 'hook_disposed', c = id, taken = {runId = c.id, hookId = d.c}, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[9], at = now})})
+        forced = oc.id
+      end
     end
   end
+  local record = cjson.decode(d.r)
+  record.t, record.j, record.d = d.t, d.payload, nil
+  d.r = cjson.encode(record)
+
 else
   start, records = delta(c)
   local admitted = admit(c, d)
@@ -364,10 +365,12 @@ else
     return out
   end
 end
+local allocated = #c.records + 1
+for _, record in ipairs(c.records) do table.insert(records, record) end
 local slot = append(c, d)
-advance(1)
+advance(allocated)
 flush()
-local out = {'ok', slot, d.t, 1, stepResult(c, d), forced, start, inBand}
+local out = {'ok', slot, d.t, allocated, stepResult(c, d), forced, start, inBand}
 for _, record in ipairs(records) do table.insert(out, record) end
 return out
 `)

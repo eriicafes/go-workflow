@@ -56,7 +56,7 @@ func TestWorkflowAndStepMetadataAreAvailableDuringExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

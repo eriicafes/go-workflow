@@ -2,7 +2,6 @@ package workflowtest
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -78,12 +77,12 @@ func conformConcurrentHookClaims(t *testing.T, a, b worlds.World) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			_, err := conformClaim(world, runs[i], worlds.HookID(fmt.Sprintf("hook_race_%d", i)), token, false)
-			if err == nil {
+			result, err := conformClaim(world, runs[i], worlds.HookID(fmt.Sprintf("hook_race_%d", i)), token, false)
+			if err == nil && result.EventType == worlds.EventTypeHookCreated {
 				mu.Lock()
 				winners++
 				mu.Unlock()
-			} else if !errors.Is(err, worlds.ErrHookConflict) {
+			} else if err != nil {
 				t.Errorf("claim error = %v", err)
 			}
 		}()

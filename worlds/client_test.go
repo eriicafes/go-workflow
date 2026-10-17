@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,78 @@ type clientOutput struct{ Value int }
 
 func (clientInput) Workflow(clientOutput) {}
 
+type hookTakeoverWorld struct {
+	worlds.World
+	takeover atomic.Bool
+}
+
+func (w *hookTakeoverWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if input.Event.EventType == worlds.EventTypeHookReceived && input.RunID == "wrun_old" && w.takeover.CompareAndSwap(true, false) {
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_new", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_new", Data: []byte(`{"token":"racing-token","force":true}`)}}); err != nil {
+			return worlds.EventResult{}, err
+		}
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_old", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted}}); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
+	return w.World.EventsCreate(ctx, input)
+}
+
+func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing.T) {
+	for _, mode := range []string{"direct resume", "HTTP resume", "webhook"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			base := testworld.NewManual()
+			defer base.Close()
+			world := &hookTakeoverWorld{World: base}
+			for _, id := range []worlds.RunID{"wrun_old", "wrun_new"} {
+				if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "takeover"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			data := []byte(`{"token":"racing-token"}`)
+			if mode == "webhook" {
+				data = []byte(`{"token":"racing-token","webhook":{"method":"POST"}}`)
+			}
+			if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_old", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_old", Data: data}}); err != nil {
+				t.Fatal(err)
+			}
+			world.takeover.Store(true)
+			if mode == "webhook" {
+				response := httptest.NewRecorder()
+				worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/workflow/webhooks/racing-token", bytes.NewBufferString(`{"value":42}`)))
+				if response.Code != http.StatusServiceUnavailable {
+					t.Fatalf("takeover response=%d body=%s", response.Code, response.Body.String())
+				}
+			} else {
+				client := worlds.NewClient(world)
+				if mode == "HTTP resume" {
+					client = worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+				}
+				if err := client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: "racing-token", Data: []byte(`42`)}); err == nil || !strings.Contains(err.Error(), worlds.ErrRunTerminal.Error()) {
+					t.Fatalf("resume race error=%v", err)
+				}
+			}
+			for _, id := range []worlds.RunID{"wrun_old", "wrun_new"} {
+				page, err := base.EventsList(ctx, worlds.EventsListInput{RunID: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				receives := 0
+				for _, event := range page.Data {
+					if event.EventType == worlds.EventTypeHookReceived {
+						receives++
+					}
+				}
+				want := 0
+				if receives != want {
+					t.Fatalf("run=%s receives=%d want=%d", id, receives, want)
+				}
+			}
+		})
+	}
+}
+
 func TestNewClientExecutesWorkflowAndDurableStep(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input clientInput) (clientOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) { return value + 1, nil }, input.Value)
@@ -33,7 +106,7 @@ func TestNewClientExecutesWorkflowAndDurableStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +127,7 @@ func TestNewHTTPClientExecutesWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := run.Await(ctx)
+	output, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +225,7 @@ func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Await(ctx); err != nil {
+	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
 	writer, release, err := run.Writer(ctx)
@@ -214,7 +287,7 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_resume", WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.HooksClaim(ctx, worlds.HooksClaimInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resume", Data: []byte(`{"token":"resume-token","webhook":{}}`)}}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resume", Data: []byte(`{"token":"resume-token","webhook":{}}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "resume-token"})
