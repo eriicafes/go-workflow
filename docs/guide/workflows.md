@@ -20,25 +20,18 @@ type GenerateReportResult struct {
 func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
 
-- The **workflow name** is the package path and type name of the struct, for
-  example `example.com/app/workflows.GenerateReport`. Runs record this name to
-  select their runner.
-- A **value** of the struct is the input of a run. Inputs and outputs are
-  encoded as JSON, so use exported fields and JSON-friendly types.
-- The workflow type is all an application needs to [start a run](/guide/runs).
-  Keep workflows in their own package, separate from runners, so request
-  handlers can start runs without importing runner code or its dependencies.
+The struct's package path and type name form the **workflow name**, such as
+`example.com/app/workflows.GenerateReport`. Runs record this name to select
+their runner. Each value of the struct supplies a run's input. Inputs and
+outputs use JSON, so give them exported fields and JSON-friendly types.
+
+Keep workflow types in their own package. Request handlers can then
+[start runs](/guide/runs) without importing runners or their dependencies.
 
 ## Runners
 
-A runner executes a workflow. It is a named, package-level function with this
-shape:
-
-```go
-func(ctx context.Context, input In) (Out, error)
-```
-
-where `In` is a workflow whose `Workflow` method takes `Out`.
+A runner is a named, package-level function that executes a workflow. Its
+input and output types match the workflow declaration:
 
 ```go
 package flows
@@ -79,20 +72,6 @@ starts and reads runs needs the workflow types and a [Client](/guide/runs#client
 A run that names a workflow with no registered runner fails with
 `worlds.ErrWorkflowNotFound`.
 
-## Workflow metadata
-
-`workflow.GetWorkflowMetadata` returns information about the run that the
-context belongs to, in both workflow and step context.
-
-```go
-meta := workflow.GetWorkflowMetadata(ctx)
-meta.Name      // workflow name
-meta.RunID     // run ID
-meta.StartedAt // when the run started
-```
-
-Outside a run it returns the zero `WorkflowMetadata`.
-
 ## Suggested layout
 
 ```
@@ -105,3 +84,15 @@ cmd/
   app/             starts runs with a Client
   worker/          opens a World with the runners
 ```
+
+## Workflow metadata
+
+`workflow.GetWorkflowMetadata` returns information about the run that the
+context belongs to, in both workflow and step context.
+
+```go
+meta := workflow.GetWorkflowMetadata(ctx)
+log.Printf("workflow %s, run %s, started %s", meta.Name, meta.RunID, meta.StartedAt)
+```
+
+Outside a run it returns the zero `WorkflowMetadata`.

@@ -71,7 +71,11 @@ request.
 | Body over 128 KiB | `413 Request Entity Too Large` |
 | Default webhook | `202 Accepted` |
 | `WebhookOption.Response` set | that response |
-| `WebhookOption.Manual` | held until a step calls `WebhookRequest.RespondWith`; timeout `504`, disposal/termination `410`, storage failure `500` |
+| `WebhookOption.Manual` | Waits for a step to call `WebhookRequest.RespondWith`. |
+| Manual response times out | `504 Gateway Timeout` |
+| Webhook disposed or run terminated while waiting for a response | `410 Gone` |
+| Storage failure while waiting for a response | `500 Internal Server Error` |
+| Ownership changes during the request | Retryable `503 Service Unavailable`. The request is not forwarded to the new owner. |
 
 The request's method, URL, headers, and body are recorded in a `hook_received`
 event and a delivery is queued so the run resumes.

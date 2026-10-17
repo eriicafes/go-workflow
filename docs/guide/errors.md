@@ -48,14 +48,29 @@ How matching works:
 Durable steps inspect them before encoding the result and record the retry
 time separately. `worlds.Error` records their type markers and underlying
 error chain through its normal encoding. Inspect persisted causes on
-`worlds.Error`; wrapper `Cause` fields are not reconstructed after replay.
+`worlds.Error`. Wrapper `Cause` fields are not reconstructed after replay.
 
 ## Step retries
 
-A step that returns an error is retried up to `StepOptions.MaxRetries` times,
-3 by default. While a retry is scheduled the step's status is `pending` and its
-`RetryAfter` field holds the earliest time of the next attempt. When retries run
-out, the step fails with its last error.
+A failed step gets three retries after its first attempt by default. Set
+`StepOptions.MaxRetries` to change the limit:
+
+```go
+receipt, err := workflow.Step(ctx, chargeCard, order, workflow.StepOptions{
+	MaxRetries: 10,
+})
+if err != nil {
+	return Result{}, err
+}
+```
+
+Omitting options allows three retries. Passing `StepOptions{}` allows none.
+If multiple options are passed, the last one applies.
+
+While a retry is scheduled, the step's status is `pending` and `RetryAfter`
+holds the earliest time of the next attempt. When retries run out, the step
+fails with its last error. [Inline steps](/guide/inline-steps#retrying-failures)
+use the same policy.
 
 | Return from a step | Effect |
 | --- | --- |
@@ -108,7 +123,7 @@ retrying with different input or taking another branch.
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
 | `workflow.ErrHookConflict` | Creating a hook whose token another active hook already has. |
 | `workflow.ErrHookForceClaimed` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
-| `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log; see [Replay divergence](/guide/replay#replay-divergence). |
+| `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log. See [Replay divergence](/guide/replay#replay-divergence). |
 
 The [`worlds` reference](/reference/worlds#errors) lists the errors Worlds
 return, such as `ErrRunNotFound` and `ErrHookNotActive`.

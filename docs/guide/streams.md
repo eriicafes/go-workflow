@@ -18,20 +18,17 @@ func writeProgress(ctx context.Context, count int) (struct{}, error) {
 	if err != nil {
 		return struct{}{}, err
 	}
+
 	defer release()
+
 	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
 	return struct{}{}, err
 }
 ```
 
-`Writer` returns three values:
-
-- an `io.WriteCloser`. **Close** closes the stream for all writers; readers
-  then reach `io.EOF`.
-- a **release** function, which gives up this writer's hold on the stream
-  without closing it, so a retry of this step or another step can continue the
-  stream.
-- an error.
+Call `release` when the step is done writing so a retry or another step can
+continue the stream. Call `writer.Close()` only when the stream is complete.
+Closing it ends the stream for all writers and lets readers reach `io.EOF`.
 
 A stream has **one writer at a time**. `Writer` waits while another writer
 holds the stream name, and continues once the current writer releases or closes
@@ -98,6 +95,7 @@ mux.HandleFunc("GET /reports/{id}/progress", func(w http.ResponseWriter, r *http
 			w.Write(buf[:n])
 			w.(http.Flusher).Flush()
 		}
+
 		if err != nil {
 			return
 		}

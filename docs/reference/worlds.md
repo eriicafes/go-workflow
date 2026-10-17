@@ -27,7 +27,7 @@ builds one from a JSON function, for runners written without the `workflow`
 package.
 
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
-flow; with `StepID` set it executes that step. A delivery for a terminal run or
+flow. With `StepID` set it executes that step. A delivery for a terminal run or
 step returns nil without running code. A non-nil error means the delivery
 should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
 `NewClientContext`, so a run never uses a Client it inherited.
@@ -58,18 +58,18 @@ again if the step hasn't started since it was declared or last scheduled for a
 retry, in case a crash or queue error lost the first one. This covers steps
 started with `Background` that nothing awaits. The re-queue uses the step ID as
 its idempotency key. A step waiting for a retry that isn't due yet is
-left alone, since its own queued retry runs it; once the retry time has passed
+left alone until its queued retry is due. Once that time has passed
 without a start, it is re-queued like any unstarted step. Steps declared in the
 same replay are skipped, and inline steps never need it. If the re-queue fails,
 the flow delivery fails so the queue retries it. Local and Postgres drop the
-duplicate while the original delivery is still queued; AWS and Vercel don't
+duplicate while the original delivery is still queued. AWS and Vercel don't
 deduplicate, so a step waiting to start may be delivered twice, which its
 at-least-once contract already allows. The Workflow SDK re-ensures pending
 steps on replay the same way.
 
 Timers settle the same way: a flow that replays past a timer's declaration
 once it is due completes it. `WithTimeout` and `WithDeadline` use normal timers
-and continuations to cancel contexts; timer events carry no run cancellation flag.
+and continuations to cancel contexts. Timer events carry no run cancellation flag.
 
 ## World
 
@@ -116,7 +116,7 @@ World reports affinity.
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
-| `EventsCreateBatch` | Appends events atomically; none if any is rejected. |
+| `EventsCreateBatch` | Appends events atomically. Rejecting one rejects the batch. |
 | `EventsGet`, `EventsList`, `EventsListByCorrelationID` | Read the event log. |
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
 
@@ -129,7 +129,7 @@ count, advances the count by the events appended, and returns it as
 and they leave the count alone. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
-Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. `MinRetention` is measured from creation; explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt; step metadata describes the current attempt.
+Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. `MinRetention` is measured from creation. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
 Lists take `Pagination{Cursor, Limit, SortOrder}` and return
 `Page[T]{Data, Cursor, HasMore}`. `ResolveData` selects whether payloads
@@ -171,20 +171,20 @@ type Step struct {
 }
 
 type Hook struct {
-	RunID           RunID
-	HookID          HookID
-	Token           string
-	Metadata        []byte
-	Webhook         *Webhook // set for webhooks
-	WebhookEventID  EventID
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	ReceivedAt      *time.Time
-	MinRetention    time.Duration
+	RunID               RunID
+	HookID              HookID
+	Token               string
+	Metadata            []byte
+	Webhook             *Webhook // set for webhooks
+	WebhookEventID      EventID
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	ReceivedAt          *time.Time
+	MinRetention        time.Duration
 	TokenRetentionUntil *time.Time
-	ClaimedFrom     *HookForceClaim
-	ForceClaimedBy  *HookForceClaim
-	DisposedAt      *time.Time
+	ClaimedFrom         *HookForceClaim
+	ForceClaimedBy      *HookForceClaim
+	DisposedAt          *time.Time
 }
 ```
 
@@ -201,7 +201,7 @@ type Queue interface {
 }
 
 type QueueInput struct {
-	QueueName      string     // empty selects the default queue
+	QueueName      string // empty selects the default queue
 	RunID          RunID
 	StepID         *StepID    // nil makes the delivery a flow
 	NotBefore      *time.Time // nil allows immediate delivery
@@ -255,11 +255,11 @@ The rest are the Client's own:
 
 | Method | Description |
 | --- | --- |
-| `RunsCreate` | Starts a run and queues its first delivery; returns the run ID. |
-| `RunsCancel` | Cancels a run; `ErrRunTerminal` if finished. |
+| `RunsCreate` | Starts a run and queues its first delivery. Returns the run ID. |
+| `RunsCancel` | Cancels a run. Returns `ErrRunTerminal` if finished. |
 | `RunsWake` | Settles pending waits early. |
 | `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams without a session. |
-| `HooksResume` | Resolves the token owner once, records a payload, and queues the run; ownership races reach the caller. |
+| `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
 | `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
 
 ```go
@@ -302,13 +302,13 @@ integrations. Operations normally take the runner's next position with
 | --- | --- |
 | `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
 | `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
-| `DurableWait` | Declares a timer; with `Cancel` it cancels the run when it fires. |
+| `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
 | `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
 | `Execution.RegisterHook` | Reserve a hook position and token, queuing registration for a workflow wait. |
 | `Execution.FlushHooks` | Commit pending registrations without waiting for payloads. |
-| `Execution.Advance` | Commit pending hooks, deliver the next recorded event, and run continuations; returns false at the end of the loaded log. |
-| `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued; other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
+| `Execution.Advance` | Commit pending hooks, deliver the next recorded event, and run continuations. Returns false at the end of the loaded log. |
+| `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
 | `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
 | `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |
 | `WakeRun` | Completes pending waits in log order and queues a delivery. |
@@ -344,7 +344,9 @@ integrations. Operations normally take the runner's next position with
 | `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
 
 ```go
-type Error struct{ /* ... */ }
+type Error struct {
+	// Error chain fields omitted.
+}
 
 func NewError(err error) *Error
 func DecodeError(data []byte) *Error

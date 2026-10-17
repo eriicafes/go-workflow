@@ -52,6 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	defer world.Close()
 
 	runners := worlds.Runners(workflow.Use(flows.GenerateReport))
@@ -125,7 +126,7 @@ go run ./cmd/dev
   `WORKFLOW_HTTP_BASE_URL=baseURL`, so the web UI reads runs from the
   application's World.
 - **`workflowdev.Check("./...")`** runs the analyzer before every start or
-  reload (see [below](#4-check-runners-on-every-reload)).
+  reload (see [below](#_4-check-runners-on-every-reload)).
 
 ## 4. Check runners on every reload
 

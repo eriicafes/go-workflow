@@ -19,63 +19,44 @@ if err := workflow.Sleep(ctx, 24*time.Hour); err != nil {
 
 ## Timers
 
-`workflow.Timer` returns a `*Result[struct{}]` that settles after a duration. Race a hook against a timer by comparing the winner:
+Use `workflow.Timer` when the runner needs to do other work during a wait.
+For example, race an approval hook against a reminder timer:
 
 ```go
 approved, err := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 defer approved.Dispose(ctx)
+
 reminder := workflow.Timer(ctx, 48*time.Hour)
+
 winner, err := workflow.Select(ctx, approved, reminder)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 if winner == reminder {
-    if _, err := workflow.Step(ctx, sendReminder, input.OrderID); err != nil {
-        return Output{}, err
-    }
+	if _, err := workflow.Step(ctx, sendReminder, input.OrderID); err != nil {
+		return Output{}, err
+	}
 }
 ```
 
-Timers fire when replay reaches their declaration after the due time, recording `wait_completed`. Recorded event order determines when waiting code sees the result. A managed cancellation context can end a timer wait early with a fatal cancellation error.
+A timer returns a result you can wait on or use in
+[selection](/guide/concurrency#racing-operations). It settles when replay
+reaches its declaration after the due time. Waiting code sees the result in
+recorded event order.
+
+A [cancellation context](/guide/cancellation) can end the wait early.
 
 ## Timeouts and deadlines
 
-`workflow.WithTimeout(ctx, duration)` returns a durable cancellation context, a cancel function, and a creation error. `workflow.WithDeadline(ctx, deadline)` accepts an absolute deadline instead. Both attach a `Then` continuation to a normal timer; expiry cancels the returned context with `context.DeadlineExceeded` as its cause.
-
-`workflow.WithTimeoutCause(ctx, duration, cause)` and `workflow.WithDeadlineCause(ctx, deadline, cause)` use a custom error as the expiry cause. A nil cause uses `context.DeadlineExceeded`. Their cancel functions still use `context.Canceled` for manual cancellation.
-
-Pass the returned context to the work that should stop:
-
-```go
-cancelCtx, cancel, err := workflow.WithTimeout(ctx, time.Hour)
-if err != nil {
-    return Output{}, err
-}
-result, stepErr := workflow.Step(cancelCtx, longRunningJob, input)
-if err := cancel(); err != nil {
-    return Output{}, err
-}
-return result, stepErr
-```
-
-Calling `cancel()` cancels the context early with `context.Canceled` as its cause and disarms the timer. Disarming is durable: a replay after the deadline still sees the recorded cancellation and skips firing. Parent cancellation also stops work using the returned context. The first cancellation cause wins.
-
-For an absolute deadline, derive the time from a durable value such as `workflow.Now`:
-
-```go
-now, err := workflow.Now(ctx)
-if err != nil {
-    return Output{}, err
-}
-cancelCtx, cancel, err := workflow.WithDeadline(ctx, now.Add(72*time.Hour))
-```
-
-The deadline is stored with the timer and does not restart on replay. `context.Cause(cancelCtx)` reports why cancellation happened; `cancelCtx.Err()` reports `context.Canceled`. Cancelled steps and pending timer results fail with fatal cancellation errors. A workflow can handle those errors and continue. Expiry does not cancel the run or any child runs; call `Run.Cancel` explicitly when that is required.
-
-Run cancellation prevents new work and leaves already-running steps to finish naturally. `Run.Value` returns `workflow.ErrRunCancelled`. Ordinary `context.WithTimeout`, `WithDeadline`, and native cancellation constructors are prohibited in workflows; they remain valid inside steps and external handlers.
+To stop work after a duration or at an absolute deadline, pass it a context
+created with `workflow.WithTimeout` or `workflow.WithDeadline`. See
+[Cancellation](/guide/cancellation#timeouts-and-deadlines) for examples and
+expiry behavior.
 
 ## Reading the time
 
@@ -111,7 +92,9 @@ if err != nil {
 n, err := run.WakeUp(ctx)
 ```
 
-`WakeOptions.CorrelationIDs` limits `WakeUp` to specific waits. Waking a timer used by `WithTimeout` or `WithDeadline` also runs its continuation and cancels the returned context.
+Set `WakeOptions.CorrelationIDs` to wake only specific waits. Waking a timer
+used by a [timeout or deadline](/guide/cancellation#timeouts-and-deadlines)
+also triggers its cancellation.
 
 ## Delivery limits
 

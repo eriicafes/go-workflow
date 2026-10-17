@@ -18,6 +18,7 @@ world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
 	return err
 }
+
 defer world.Close()
 
 if err := world.Prepare(ctx); err != nil {
@@ -32,7 +33,7 @@ client := workflow.NewClient(world)
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `Dir` | required by `Open` | Storage directory. Created with `0700` permissions. |
-| `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`; webhook URLs are built from it. |
+| `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
 
 ## Lifecycle
 
@@ -83,7 +84,7 @@ queue-keys/<run+key>.json                  idempotency key -> pending message ID
 
 Run, step, and hook IDs, tokens, stream names, and idempotency keys are
 user-controlled, so their file names are hex-encoded (names longer than 64
-bytes use a SHA-256 digest); each record stores the original value. Hex also
+bytes use a SHA-256 digest). Each record stores the original value. Hex also
 keeps names distinct on case-insensitive file systems.
 
 Development tools should use the client or RPC API rather than reading these
@@ -103,7 +104,7 @@ When `Prepare` finds an event file past a run's `eventCount`, it rebuilds that
 run's steps, hooks, and token claims by replaying the committed events, then
 deletes the uncommitted event files. Batches are therefore all-or-nothing even
 across crashes. If a write fails while the process is running, the same repair
-runs immediately; if the repair also fails, the World refuses further calls
+runs immediately. If that repair also fails, the World refuses further calls
 until it is restarted.
 
 Streams commit through `meta.json`: chunk files at or past `count` are ignored
@@ -116,7 +117,7 @@ ordered by `NotBefore`. Each due delivery runs in its own goroutine, and its
 record is deleted on success. A failed delivery is retried with exponential
 backoff from 100 ms up to 30 s.
 
-`IdempotencyKey` deduplicates per run while the delivery is pending; the key is
+`IdempotencyKey` deduplicates per run while the delivery is pending. The key is
 released when delivery starts, so work queued during a delivery is never
 dropped. `QueueCancel` deletes the record.
 

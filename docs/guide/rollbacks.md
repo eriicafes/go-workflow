@@ -37,21 +37,22 @@ func voidInvoice(ctx context.Context, invoiceID string) error {
 }
 ```
 
-## Behavior
+## When rollbacks run
 
-- A compensation has the shape `func(context.Context, In) error` and receives
-  the input you register it with.
-- When the runner returns an error, the registered compensations run as
-  **steps**, in **reverse registration order**, before the run is marked
-  failed.
-- Compensations retry like other steps. Pass `StepOptions` to change their
-  retries:
+A compensation receives the input it was registered with and has the shape
+`func(context.Context, In) error`. When the runner returns an error,
+compensations execute as steps in reverse registration order before the run
+is marked failed. A successful run never executes them.
 
-  ```go
-  workflow.OnRollback(ctx, voidInvoice, invoice.ID, workflow.StepOptions{MaxRetries: 10})
-  ```
+Compensations should be idempotent because they retry like other steps.
+Override their retry limit when needed:
 
-- A run that completes never runs its compensations.
-- Compensations should be idempotent, like every step.
+```go
+if err := workflow.OnRollback(ctx, voidInvoice, invoice.ID, workflow.StepOptions{
+	MaxRetries: 10,
+}); err != nil {
+	return workflows.PlaceOrderResult{}, err
+}
+```
 
-`OnRollback` returns `ErrNoWorkflow` when the context does not belong to a run.
+`OnRollback` requires workflow context and returns `ErrNoWorkflow` elsewhere.

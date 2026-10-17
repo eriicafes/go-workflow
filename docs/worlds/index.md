@@ -93,10 +93,16 @@ func requireToken(next http.Handler, token string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }
 
+```
+
+Wrap the handler when starting the server:
+
+```go
 handler := requireToken(postgresworld.HTTP(world), os.Getenv("WORKFLOW_RPC_TOKEN"))
 log.Fatal(http.ListenAndServe(":8081", handler))
 ```
@@ -112,6 +118,11 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
+```
+
+Use the transport with the workflow client:
+
+```go
 client := workflow.NewHTTPClient(
 	"http://workflow-worker:8081/v1/workflow",
 	&http.Client{Transport: bearer{os.Getenv("WORKFLOW_RPC_TOKEN")}},

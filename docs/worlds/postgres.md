@@ -17,6 +17,7 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
+
 defer world.Close()
 
 runners := worlds.Runners(workflow.Use(flows.GenerateReport))
@@ -62,22 +63,22 @@ database from both.
 applied versions are recorded in `go_workflow_schema_version`. A database with a
 newer version than the library knows is rejected.
 
-Tables are created in the connection's `search_path`; set `search_path` in the
+Tables are created in the connection's `search_path`. Set `search_path` in the
 connection string or pool config to use a dedicated schema.
 
 | Table | Contents |
 | --- | --- |
-| `go_workflow_runs` | Run view plus `event_count`; the next slot is `event_count + 1`. |
+| `go_workflow_runs` | Run view plus `event_count`. The next slot is `event_count + 1`. |
 | `go_workflow_events` | Event log keyed by `(run_id, slot)`. |
 | `go_workflow_steps` | Step view keyed by `(run_id, step_id)`. |
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
-| `go_workflow_hook_tokens` | Token ownership; the primary key makes a token single-owner. |
+| `go_workflow_hook_tokens` | Token ownership. The primary key makes a token single-owner. |
 | `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
 | `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
 Payloads are `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`
-at microsecond precision; times returned by the World are UTC.
+at microsecond precision. Times returned by the World are UTC.
 
 ## Consistency
 
@@ -95,15 +96,15 @@ serialization failures and deadlocks.
 
 `Queue` inserts a row and sends `NOTIFY go_workflow_queue` in the same
 transaction. An `IdempotencyKey` deduplicates against a pending row of the same
-run; once a worker claims the row the key is released, so a message queued
+run. Claiming the row releases the key, so a message queued
 during execution is never dropped.
 
 `Worker` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`,
 increments `attempts`, and executes each:
 
-- success deletes the row;
+- success deletes the row.
 - failure keeps it and sets `not_before` to now plus a capped exponential
-  backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error;
+  backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
 
 ## LISTEN/NOTIFY
@@ -121,7 +122,7 @@ the World at Postgres directly or use session pooling.
 
 ## Scaling
 
-Run as many `Worker` loops, in as many processes, as you like; `SKIP LOCKED`
+Run `Worker` loops across as many processes as needed. `SKIP LOCKED`
 gives each row to one worker at a time. Size `Concurrency` to the work your
 runners do, and the pool to roughly `Concurrency` plus your API traffic. Each
 World uses one extra connection for `LISTEN`.

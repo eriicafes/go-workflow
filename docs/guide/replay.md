@@ -91,9 +91,9 @@ A replay **diverges** when the runner doesn't reach the operations its log
 records. The runtime detects:
 
 - an operation of another kind at a recorded position, such as a step where a
-  timer was recorded;
-- a step that calls a different step function than the one recorded;
-- a hook with a different token than the one recorded;
+  timer was recorded.
+- a step that calls a different step function than the one recorded.
+- a hook with a different token than the one recorded.
 - a runner that returns without reaching a recorded operation, for example
   after a step was removed.
 
@@ -132,10 +132,10 @@ context must make the same decisions every time.
 - **Read time only through `workflow.Now`.** It records the time the first time
   it runs, so replay returns the same value. `time.Now` is fine inside steps.
 - **Don't use randomness directly.** Generate IDs and random choices in a step,
-  or with [`workflow.InlineStep`](/guide/steps#inline-steps).
+  or with [`workflow.InlineStep`](/guide/inline-steps).
 - **Don't start goroutines or `select` on channels.** Use
   [`workflow.Background`](/guide/concurrency) and the `Select` functions.
-- **Don't range over maps** in a way that changes the order of operations; Go
+- **Don't range over maps** in a way that changes the order of operations. Go
   randomizes map iteration order.
 - **Pass state to steps as input.** A step function that captures variables
   from the runner hides its real input from the recorded log.

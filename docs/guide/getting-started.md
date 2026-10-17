@@ -49,8 +49,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/eriicafes/go-workflow"
 	"example.com/app/workflows"
+	"github.com/eriicafes/go-workflow"
 )
 
 func GenerateReport(ctx context.Context, input workflows.GenerateReport) (workflows.GenerateReportResult, error) {
@@ -105,7 +105,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	defer world.Close()
+
 	if err := world.Prepare(ctx); err != nil {
 		log.Fatal(err)
 	}

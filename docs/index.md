@@ -86,7 +86,9 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	defer rows.Close()
+
 	var sources []string
 	for rows.Next() {
 		var url string
@@ -96,6 +98,7 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 
 		sources = append(sources, url)
 	}
+
 	return sources, rows.Err()
 }
 ```

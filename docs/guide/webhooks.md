@@ -1,28 +1,40 @@
 # Webhooks
 
-A webhook is a [hook](/guide/hooks) resumed once by an HTTP request. `Request(ctx)` waits for a `*WebhookRequest[T]`, which embeds `*http.Request` and preserves method, URL, headers, raw body, and response origin across step serialization.
+A webhook lets a workflow wait for an HTTP request. Create it, share its URL
+with the producer, and wait for the recorded request:
 
 ```go
 webhook, err := workflow.CreateWebhook[Payment](ctx)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 defer webhook.Dispose(ctx)
+
 if _, err := workflow.Step(ctx, registerCallback, webhook.URL()); err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 request, err := webhook.Request(ctx)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 payment, err := request.JSON()
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 return Output{PaymentID: payment.ID}, nil
 ```
 
-`JSON() (T, error)` decodes the recorded raw body without consuming `Request.Body`. You can call it repeatedly. Headers and body reads from the recorded request are deterministic; signature verification or other external work belongs in a step.
+`Request` returns a `*WebhookRequest[T]` that embeds `*http.Request`. The
+request survives step serialization, including its raw body and response
+origin. Call `JSON` to decode the recorded body without consuming
+`Request.Body`.
+
+Reads of the recorded request are deterministic. Put signature verification
+and other external work in a step.
 
 The reconstructed HTTP request uses `context.Background()`. Use the step handler's `ctx` for cancellation and step operations. If you need the HTTP request itself to carry that context, bind it explicitly inside the step with `request.Request = request.Request.WithContext(ctx)`.
 
@@ -30,13 +42,8 @@ The reconstructed HTTP request uses `context.Background()`. Use the step handler
 
 The URL is `<BaseURL>/webhooks/<random-token>`. Set the World's `Config.BaseURL` to the public location of its HTTP handler. A webhook always gets a random token.
 
-```go
-type WebhookOption struct {
-    Method string          // empty accepts any method
-    Response *http.Response // static response; body at most 128 KiB
-    Manual bool            // wait for a step to respond
-}
-```
+Set `WebhookOption.Method` to restrict the HTTP method. An empty method
+accepts any request method.
 
 | Configuration | Response |
 | --- | --- |
@@ -44,7 +51,8 @@ type WebhookOption struct {
 | `Response` | Static response, then endpoint deactivation. |
 | `Manual: true` | Waits for the receiving step's recorded response. |
 
-Wrong methods return `405`; unknown or disposed tokens return `404`; bodies over 128 KiB return `413`. A manual response wait that times out returns `504`, disposal or run termination while waiting returns `410`, and a storage failure returns `500`. A takeover race returns retryable `503` without forwarding the request body to the new owner.
+Request and static response bodies are limited to 128 KiB. See
+[HTTP Endpoints](/reference/http#webhooks) for response codes and failure cases.
 
 ## Responding inside a step
 
@@ -52,38 +60,52 @@ Pass the serialized request as the step input. `RespondWith` is callable only in
 
 ```go
 webhook, err := workflow.CreateWebhook[Command](ctx, workflow.WebhookOption{
-    Method: http.MethodPost,
-    Manual: true,
+	Method: http.MethodPost,
+	Manual: true,
 })
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 defer webhook.Dispose(ctx)
+
 request, err := webhook.Request(ctx)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 command, err := workflow.Step(ctx, respondToCommand, request)
 return Output{Command: command}, err
+```
 
-// Step function:
+The step decodes the command and records the response:
+
+```go
 func respondToCommand(ctx context.Context, request *workflow.WebhookRequest[Command]) (Command, error) {
-    command, err := request.JSON()
-    if err != nil {
-        return Command{}, workflow.FatalError(err)
-    }
-    response := &http.Response{
-        StatusCode: http.StatusOK,
-        Header: http.Header{"Content-Type": {"application/json"}},
-        Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
-    }
-    return command, request.RespondWith(ctx, response)
+	command, err := request.JSON()
+	if err != nil {
+		return Command{}, workflow.FatalError(err)
+	}
+
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+	}
+
+	return command, request.RespondWith(ctx, response)
 }
 ```
 
-A retry that records the same response succeeds without another response event. A different response for that request fails with a fatal error. Invalid origin, non-manual responses, and oversized response bodies fail without retrying; transient storage failures remain retryable. A request must be answered by a step in the receiving run.
+A retry that records the same response succeeds without another response
+event. Recording a different response fails with a fatal error.
 
-`Webhook` supports selection and durable `Dispose`, while its received `WebhookRequest` owns `JSON` and `RespondWith`. Token conflict inspection is a `Hook` method.
+The responding step must belong to the receiving run, and the webhook must
+use manual responses. Invalid or oversized responses fail without retrying.
+Transient storage failures remain retryable.
+
+A webhook can participate in [selection](/guide/concurrency#racing-operations).
+Dispose it when the endpoint is no longer needed.
 
 ## Security
 

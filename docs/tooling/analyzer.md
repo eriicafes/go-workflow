@@ -40,7 +40,10 @@ Every function passed to `workflow.Use` must be a valid runner.
 | `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O and randomness into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, `crypto/rand`, `math/rand`, and packages whose path contains `uuid`. |
 | `workflow stream access and webhook responses require a durable step` | Move [stream](/guide/streams) access into a step. |
 
-The analyzer also rejects the `context` package's cancellation and deadline constructors in workflow bodies, including their Cause variants. Use `workflow.WithCancel`, `WithCancelCause`, and durable timers. These constructors remain valid inside steps. `Then` callbacks follow the same workflow restrictions.
+The analyzer also rejects the `context` package's cancellation and deadline
+constructors in workflow bodies. Use [durable cancellation](/guide/cancellation)
+instead. Standard context constructors remain valid inside steps. `Then`
+callbacks follow the same workflow restrictions.
 
 ### Steps
 
@@ -53,14 +56,15 @@ The analyzer also rejects the `context` package's cancellation and deadline cons
 
 ```go
 func Bad(ctx context.Context, input workflows.Report) (workflows.ReportResult, error) {
-	started := time.Now()                    // use workflow.Now
-	go notify(input)                         // use workflow.Background
-	for k := range input.Tags {              // map iteration
+	started := time.Now()       // use workflow.Now
+	go notify(input)            // use workflow.Background
+	for k := range input.Tags { // map iteration
 		_ = k
 	}
-	body, _ := os.ReadFile("template.txt")   // I/O outside a step
+
+	body, _ := os.ReadFile("template.txt") // I/O outside a step
 	out, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (string, error) {
-		return render(body, started), nil    // captures body and started
+		return render(body, started), nil // captures body and started
 	}, struct{}{})
 	return workflows.ReportResult{Text: out}, err
 }

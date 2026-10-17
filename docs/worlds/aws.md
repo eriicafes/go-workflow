@@ -79,13 +79,13 @@ lambdaurl.Start(awsworld.HTTP(world))
 `Queue` writes a `QUEUE#<id>` record holding the delivery, then publishes the
 message ID:
 
-- due within 15 minutes: `SendMessage` with `DelaySeconds`;
+- due within 15 minutes: `SendMessage` with `DelaySeconds`.
 - due later: a one-time EventBridge schedule named `go-workflow-<id>` that sends
   the same body to the queue and is deleted after it runs.
 
 Without `Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
-error. SQS standard queues do not deduplicate, so `IdempotencyKey` is not used;
-delivery is at least once and the runtime is idempotent.
+error. SQS standard queues do not deduplicate, so `IdempotencyKey` is not used.
+Delivery is at least once and the runtime is idempotent.
 
 The `Queue` handler loads the record for each SQS message. A missing record is
 acknowledged. A message that arrives early is sent again with the remaining
@@ -138,11 +138,11 @@ Create the table with the [Terraform module](#terraform), or with
 provisions:
 
 - the DynamoDB table with its indexes (on-demand, encrypted, point-in-time
-  recovery and deletion protection on by default);
-- the task queue and its dead-letter queue;
+  recovery and deletion protection on by default).
+- the task queue and its dead-letter queue.
 - optionally, the SQS event source mapping for the worker, with
-  `ReportBatchItemFailures`;
-- the EventBridge Scheduler group and the role Scheduler assumes;
+  `ReportBatchItemFailures`.
+- the EventBridge Scheduler group and the role Scheduler assumes.
 - least-privilege managed policies for the worker and the API, optionally
   attached to their roles.
 
@@ -186,7 +186,7 @@ the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
 | `message_retention_seconds` | `1209600` | Queue and dead-letter retention (14 days). |
 | `max_receive_count` | `10` | Deliveries before a message moves to the dead-letter queue. |
 | `enable_scheduler` | `true` | Create the schedule group and Scheduler role. |
-| `worker_function_name` | `null` | Worker Lambda; creates the event source mapping when set. |
+| `worker_function_name` | `null` | Worker Lambda. Setting it creates the event source mapping. |
 | `batch_size` | `10` | Messages per worker invocation. |
 | `maximum_concurrency` | `null` | Cap on concurrent worker invocations (2–1000). |
 | `worker_role_name` | `null` | Attach the worker policy to this role. |

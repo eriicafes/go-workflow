@@ -1,141 +1,175 @@
 # Concurrency
 
-Start several operations before waiting on them. Background steps run as separate deliveries and can execute in parallel across workers. Workflow code itself follows recorded event order; it must not start goroutines.
+Start work before waiting for its result to let steps run in parallel across
+workers. Keep the runner itself sequential so replay follows recorded event
+order.
 
 ## Starting work
 
-`Background` returns `*workflow.Result[T]` immediately. `result.Value(ctx)` waits and returns `(T, error)`; `result.Unwrap(ctx)` waits and panics on failure. `Step` is `Background` followed by `Value`.
-
-Typed results are `*Result[T]`, which exposes `Value` and `Unwrap`. The settlement contract is private to the SDK. Hooks, webhooks, results, timers, and chains can participate in `Join` and `Select`, including inputs with different value types. Runs use `Status` and do not participate in these combinators.
-
-Results become visible in recorded order at waiting calls. See [Delivering results in order](/guide/replay#delivering-results-in-order).
-
-## Waiting
-
-### Join
-
-`Join(ctx, a, b)` waits for all inputs to settle. It ignores their operation errors; read each result or hook to handle those errors. It returns an error if settlement cannot be inspected or awaited.
-
-```go
-email := workflow.Background(ctx, sendEmail, input)
-sms := workflow.Background(ctx, sendSMS, input)
-if err := workflow.Join(ctx, email, sms); err != nil {
-    return Output{}, err
-}
-_, emailErr := email.Value(ctx)
-_, smsErr := sms.Value(ctx)
-return Output{EmailSent: emailErr == nil, SMSSent: smsErr == nil}, nil
-```
-
-### JoinOk
-
-`JoinOk(ctx, a, b)` waits for every input to succeed and returns as soon as any input fails, using recorded settlement order. It leaves the remaining inputs running. Both functions return only an error; neither collects values.
+`workflow.Background` starts a step without waiting. Read its result when you
+need it:
 
 ```go
 profile := workflow.Background(ctx, fetchProfile, userID)
 orders := workflow.Background(ctx, fetchOrders, userID)
-if err := workflow.JoinOk(ctx, profile, orders); err != nil {
-    return Output{}, err
+
+// Both steps can run while the runner waits for the profile.
+profileValue, err := profile.Value(ctx)
+if err != nil {
+	return Output{}, err
 }
+
+orderValues, err := orders.Value(ctx)
+if err != nil {
+	return Output{}, err
+}
+
+return Output{Profile: profileValue, Orders: orderValues}, nil
+```
+
+A result's `Unwrap(ctx)` method also waits, but panics on failure. Use `Value`
+when you need to handle the error. `workflow.Step` combines `Background` and
+`Value` in one call.
+
+## Waiting for a group
+
+### Wait for every outcome
+
+Use `Join` to wait for work to settle, even if some operations fail. Read each
+result afterward to handle its error:
+
+```go
+email := workflow.Background(ctx, sendEmail, input)
+sms := workflow.Background(ctx, sendSMS, input)
+
+if err := workflow.Join(ctx, email, sms); err != nil {
+	return Output{}, err
+}
+
+_, emailErr := email.Value(ctx)
+_, smsErr := sms.Value(ctx)
+
+return Output{EmailSent: emailErr == nil, SMSSent: smsErr == nil}, nil
+```
+
+`Join` only returns an error if it cannot inspect or await settlement.
+
+### Require every operation to succeed
+
+Use `JoinOk` when a failed operation should end the wait immediately:
+
+```go
+profile := workflow.Background(ctx, fetchProfile, userID)
+orders := workflow.Background(ctx, fetchOrders, userID)
+
+if err := workflow.JoinOk(ctx, profile, orders); err != nil {
+	return Output{}, err
+}
+
+// JoinOk succeeded, so both values are available.
 return Output{Profile: profile.Unwrap(ctx), Orders: orders.Unwrap(ctx)}, nil
 ```
 
-### All
+The first failure in recorded order ends the wait. Other inputs keep running.
 
-`All(ctx, fn, inputs)` starts one step per input and collects their values in input order. If any step fails, `All` cancels the remaining steps and returns that failure, even when an earlier input is still running. Steps must observe their context to stop cooperatively.
+### Apply a step to a slice
+
+Use `All` to run a step for each input and collect values in input order:
 
 ```go
 thumbnails, err := workflow.All(ctx, resizeImage, input.Images)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 return Output{Thumbnails: thumbnails}, nil
 ```
 
-When you need individual result handles, `Map(ctx, fn, inputs)` starts one step per input and returns `[]*Result[T]` in input order. Read individual results with `Value`. Go does not allow spreading this typed slice into the combinators' private interface parameter.
+If any step fails, `All` cancels the remaining steps and returns that failure
+without waiting for earlier inputs. Steps must observe their context to stop.
 
-## Racing
+For individual result handles, use `Map` and read each result with `Value`.
+The returned typed slice cannot be spread directly into `Join` or `Select`.
 
-`Select` returns the first input to settle and its error. `SelectOk` waits for the first success; if all inputs fail, it returns a nil winner and the first error in argument order. They each return only `(winner, error)`.
+## Racing operations
 
-The winner is the exact input handle. Compare it by identity, then read that handle's typed value:
+`Select` returns the first input to settle and its error. Compare the winning
+handle with the inputs, then read its value:
 
 ```go
 primary := workflow.Background(ctx, lookupPrimary, query)
 replica := workflow.Background(ctx, lookupReplica, query)
+
 winner, err := workflow.Select(ctx, primary, replica)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
-switch winner {
-case primary:
-    return Output{Answer: primary.Unwrap(ctx)}, nil
-case replica:
-    return Output{Answer: replica.Unwrap(ctx)}, nil
+
+if winner == primary {
+	return Output{Answer: primary.Unwrap(ctx)}, nil
 }
+
+return Output{Answer: replica.Unwrap(ctx)}, nil
 ```
 
-A selected hook's payload remains available for `Next`; selection does not consume it. Other inputs keep running. When several inputs are ready, the earliest recorded settlement wins, with argument order breaking ties. Empty joins succeed; an empty selection returns a nil winner and no error.
+Use `SelectOk` to wait for the first success instead. If every input fails, it
+returns a nil winner and the first error in argument order.
 
-## Chaining
+Other inputs keep running after a selection. When several inputs are ready,
+the earliest recorded settlement wins, with argument order breaking ties.
+See [Delivering results in order](/guide/replay#delivering-results-in-order).
 
-`Then` receives both the source value and its error. Its callback returns only a `*Result[U]`, and the chain follows that result's value or error. Use `NewResult(value, err)` for an immediately settled value or failure:
+Hooks and webhooks can also participate in waits, alongside results with
+different value types. Selecting or joining a hook leaves its payload
+available for `Next`. Runs have an independent lifetime and use
+[`Status`](/guide/runs#the-run-handle) to report readiness.
+
+## Chaining work
+
+Use `Then` to choose follow-up work after a result settles. Its callback can
+handle the source error and return another result:
 
 ```go
 user := workflow.Background(ctx, fetchUser, userID)
-name := workflow.Then(ctx, user, func(value User, err error) *workflow.Result[string] {
-    if err != nil {
-        return workflow.NewResult("Guest", nil)
-    }
-    return workflow.NewResult(value.Name, nil)
-}) // *workflow.Result[string]
+welcome := workflow.Then(ctx, user, func(value User, err error) *workflow.Result[Receipt] {
+	if err != nil {
+		return workflow.NewResult(Receipt{}, err)
+	}
 
-welcome := workflow.Then(ctx, name, func(value string, err error) *workflow.Result[Receipt] {
-    if err != nil {
-        return workflow.NewResult(Receipt{}, err)
-    }
-    return workflow.Background(ctx, sendWelcome, value)
-}) // *workflow.Result[Receipt]
-```
+	return workflow.Background(ctx, sendWelcome, value.Name)
+})
 
-A chain stays pending while its source or the returned result is pending. Returning `Background`, `Timer`, or another `Then` lets other `Select` candidates continue to compete. `Value` returns `U` directly, with no nested result to unwrap:
-
-```go
+// The chain can race while either step is pending.
 timer := workflow.Timer(ctx, time.Minute)
 winner, err := workflow.Select(ctx, welcome, timer)
 if err != nil {
-    return Output{}, err
+	return Output{}, err
 }
+
 if winner == welcome {
-    receipt := welcome.Unwrap(ctx)
-    // Use receipt.
+	return Output{Receipt: welcome.Unwrap(ctx)}, nil
 }
+
+return Output{TimedOut: true}, nil
 ```
 
-Callbacks execute synchronously in workflow context during replay. Put side effects in steps, and return pending work without calling `Step` or `Value` inside the callback when the chain needs to participate in a race. Those blocking calls can suspend replay before the outer `Select` resumes. Repeated reads reuse the completed outcome within that replay. Read or join the chain when the workflow must wait for it before returning.
+The chain follows the returned result and yields its value directly. Use
+`NewResult` when the callback can provide an immediate value or error.
 
-Recorded settlement order accounts for both the callback and its returned result. Returning an already-settled result cannot make the chain win before its callback ran.
+Callbacks run in workflow context during replay. Put side effects in steps
+and return their pending results. Calling `Step` or `Value` inside a callback
+can suspend replay before an outer `Select` gets to consider other inputs.
 
-## Cancellation
+Repeated reads reuse the completed outcome within that replay. Read or join
+the chain before returning if the workflow must wait for it. The chain's
+recorded order accounts for both the callback and its returned result, so an
+immediate result cannot win before the callback ran.
 
-Attach a durable cancellation context to work and invoke its cancellation function yourself:
+## Cancelling remaining work
 
-```go
-workCtx, cancel, err := workflow.WithCancel(ctx)
-if err != nil {
-    return Output{}, err
-}
-primary := workflow.Background(workCtx, lookupPrimary, query)
-replica := workflow.Background(workCtx, lookupReplica, query)
-winner, err := workflow.Select(ctx, primary, replica)
-if cancelErr := cancel(); cancelErr != nil {
-    return Output{}, cancelErr
-}
-if err != nil {
-    return Output{}, err
-}
-// Compare winner and read primary or replica as above.
-_ = winner
-```
+`Select` and `JoinOk` leave other inputs running. To stop them, start the work
+with a shared cancellation context and cancel it after the wait. See
+[Cancellation](/guide/cancellation#cancelling-work) for a complete race example.
 
-Cancellation preserves a result already committed by the winner. Pending work observes cancellation through its context. See [Cancellation](/guide/steps#cancellation) for causes, combined contexts, and child runs. Use separate cancellation contexts when branches need independent cancellation.
+`All` already cancels remaining steps when one fails. In either case, steps
+must observe their context to stop cooperatively.

@@ -1,8 +1,12 @@
 # Steps
 
-A step is a function that does real work: calling APIs, querying databases,
-sending email. Its input and result are recorded in the run's event log, so
-once a step completes it never runs again for that run.
+A step does work such as calling an API or querying a database. Its input and
+result are recorded in the run's event log. Once it completes, replay returns
+the recorded result.
+
+## Calling a step
+
+Write a named function and call it from a runner with `workflow.Step`:
 
 ```go
 func findSources(ctx context.Context, topic string) ([]string, error) {
@@ -10,187 +14,89 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 }
 ```
 
-A step function has the shape `func(context.Context, In) (Out, error)`. `In`
-and `Out` are encoded as JSON. Use `struct{}` for a step with no meaningful
-input or output.
-
-## Calling a step
-
-`workflow.Step` calls a step from a runner and returns its result, suspending
-the run until the step has settled.
-
 ```go
 sources, err := workflow.Step(ctx, findSources, input.Topic)
 if err != nil {
 	return Result{}, err
 }
+
+return Result{Sources: sources}, nil
 ```
 
-The first time the runner reaches this call, the step is recorded and queued
-as its own delivery. Once the step completes, the next replay returns its
-recorded output immediately.
+A step function has the shape `func(context.Context, In) (Out, error)`. Its
+input and output must be JSON-encodable. Use `struct{}` when either is empty.
 
-`Step` is `Background` followed by `Value`. To start a step without waiting for
-it, see [Concurrency](/guide/concurrency).
+The first call queues a separate step delivery and suspends the runner. Once
+the step finishes, replay continues with its recorded output. To start work
+without waiting, use `workflow.Background`. See [Concurrency](/guide/concurrency).
 
-### Rules
+## Writing reliable steps
 
-- **Pass everything the step needs as its input.** Steps should be named
-  functions. A step that captures runner variables in a closure hides its real
-  input from the log; the [analyzer](/tooling/analyzer) reports it.
-- **Call steps only from workflow context.** Inside a step function, `Step`,
-  `Background`, and other workflow-context functions return
-  `workflow.ErrNoWorkflow`. A step does its work directly.
-- **Make step functions idempotent.** A step runs at least once: it retries
-  on error, and a step whose process dies before its result is recorded runs
-  again.
+Pass the state a step needs through its input. Capturing runner variables in a
+closure hides that state from the event log. The [analyzer](/tooling/analyzer)
+reports these captures.
+
+Keep workflow operations in the runner. Calling `Step` from inside a step
+returns `workflow.ErrNoWorkflow`. A step should call services and other Go
+functions directly.
+
+Make steps idempotent. A failed attempt can retry, and a process can stop
+before its result is recorded. Use `workflow.StepID(ctx)` as an idempotency key
+when the service supports one.
 
 ## Retries
 
-A step that returns an error is retried. By default it gets **3 retries** after
-the first attempt. Set `StepOptions` to change that:
+A failed step gets three retries by default. Override that limit when needed:
 
 ```go
-// Up to 10 retries.
-out, err := workflow.Step(ctx, callFlakyAPI, req, workflow.StepOptions{MaxRetries: 10})
-
-// No retries.
-out, err := workflow.Step(ctx, chargeCard, order, workflow.StepOptions{MaxRetries: 0})
-```
-
-Omitting `StepOptions` allows 3 retries, while the zero value of `StepOptions`
-allows none. When several options are passed, the last one applies.
-
-A step function controls its own retries with two error wrappers:
-
-```go
-func chargeCard(ctx context.Context, order Order) (Receipt, error) {
-	receipt, err := payments.Charge(ctx, order, workflow.StepID(ctx))
-	var declined *payments.DeclinedError
-	switch {
-	case errors.As(err, &declined):
-		// Never retried.
-		return Receipt{}, workflow.FatalError(err)
-	case errors.Is(err, payments.ErrRateLimited):
-		// Retried no sooner than 30 seconds from now.
-		return Receipt{}, workflow.RetryableError(err, 30*time.Second)
-	}
-	return receipt, err
+receipt, err := workflow.Step(ctx, chargeCard, order, workflow.StepOptions{
+	MaxRetries: 0, // Do not retry a failed charge.
+})
+if err != nil {
+	return Result{}, err
 }
 ```
 
-See [Errors and Retries](/guide/errors) for how failed steps are reported.
-
-## Step metadata
-
-Inside a step, `workflow.GetStepMetadata` describes the current attempt:
-
-```go
-meta := workflow.GetStepMetadata(ctx)
-meta.ID        // step ID, stable across attempts
-meta.Name      // step function name
-meta.StartedAt // when this attempt started
-meta.Attempt   // attempt number, starting at 1
-```
-
-`workflow.StepID(ctx)` is shorthand for `GetStepMetadata(ctx).ID`. It is a
-good **idempotency key** for the services a step calls, because it is the same
-on every attempt of the step.
-
-Outside step context both return zero values.
-
-## Step context
-
-Inside a step function, the context belongs to the step:
-
-- `time.Now`, I/O, and randomness are safe.
-- [Streams](/guide/streams) can be written and read.
-- [`workflow.Start`](/guide/runs), [`workflow.Get`](/guide/runs), and
-  [`workflow.ResumeHook`](/guide/hooks) work, using the World that records the
-  run, or a Client put in the context with `workflow.NewContext`.
-- A managed cancellation context cancels the step context. Cancelling the run itself lets running steps finish naturally.
+[Errors and Retries](/guide/errors) covers retry delays, fatal errors, and
+handling errors after replay.
 
 ## Inline steps
 
-`workflow.InlineStep` runs a short function as a step **inside the flow**,
-without a separate step delivery, and records its result. Use it for quick work
-such as generating an ID or reading another run. Its result is available right
-where you call it, with no extra delivery round trip.
-
-`InlineStep` takes the same arguments as `Step`: a named step function, its
-input, and optional `StepOptions`. The input is recorded, and every attempt runs
-with the recorded input.
-
-This generates an order ID once; every replay returns the recorded ID:
+Use `workflow.InlineStep` for short work that should finish in the current
+flow delivery:
 
 ```go
 orderID, err := workflow.InlineStep(ctx, newOrderID, struct{}{})
 if err != nil {
 	return Result{}, err
 }
-
-func newOrderID(ctx context.Context, _ struct{}) (string, error) {
-	return ulid.Make().String(), nil
-}
 ```
 
-`fn` can fail, and failures are retried like a step's: three retries by
-default, `StepOptions` to change that, `FatalError` to fail at once, and
-`RetryableError` to delay the next attempt. A failed attempt is recorded and
-suspends the run, and a flow delivery is queued for when the retry is due; that
-replay starts the next attempt. Retries never run back to back in the same
-delivery. When retries run out, `InlineStep` returns
-the error as a [`*workflow.Error`](/guide/errors).
+The result is recorded without a separate step delivery. See
+[Inline Steps](/guide/inline-steps) for choosing suitable work and how retries
+behave.
 
-This reads a price that may be briefly unavailable, retrying up to five times:
+## Step metadata
+
+Read the current attempt's metadata inside a step:
 
 ```go
-price, err := workflow.InlineStep(ctx, currentPrice, input.SKU, workflow.StepOptions{MaxRetries: 5})
-if err != nil {
-	return Result{}, err
-}
-
-func currentPrice(ctx context.Context, sku string) (int, error) {
-	return pricing.Current(ctx, sku)
-}
+meta := workflow.GetStepMetadata(ctx)
+log.Printf("step %s (%s), attempt %d, started %s",
+	meta.ID, meta.Name, meta.Attempt, meta.StartedAt)
 ```
 
-Inline steps suit work that is short, rarely fails, and is idempotent or free
-of side effects, like reading the time or another run. If a delivery stops
-before an attempt's result is recorded, the next replay simply starts another
-attempt, and if two flows run it at once, the first to record a result wins. Use `Step`
-for anything long, failure-prone, or with side effects that must not repeat. If
-the World fails to record the step, the whole delivery is retried.
+`workflow.StepID(ctx)` is shorthand for `GetStepMetadata(ctx).ID`. The ID stays
+the same across attempts. Outside step context, these functions return zero
+values.
 
-Each attempt records `step_started` and then its outcome: `step_completed`,
-`step_retrying`, or `step_failed`. On the happy path an inline step writes
-`step_created`, `step_started`, and `step_completed`. `workflow.Now` is an inline
-step too, with one attempt. A step delivery never runs
-an inline step: if it reaches one that hasn't settled, it suspends.
+## Step context
 
-In step context, `InlineStep` calls `fn` without recording it.
+A step can use ordinary Go I/O, `time.Now`, and randomness. It can also access
+[streams](/guide/streams) and use [Client operations](/guide/runs), such as
+starting a run or [resuming a hook](/guide/hooks). These operations use the
+World recording the run unless `workflow.NewContext` supplies another Client.
 
-## Cancellation
-
-Create a durable cancellation context inside workflow context with `WithCancel(ctx)` or `WithCancelCause(ctx)`. Both constructors return `(context, cancel, error)`. Handle the creation error before using the context or cancel function. The cancellation functions also return errors so notification failures can be handled or retried. Cancellation records hook state for replay and closes a stream for immediate delivery to running steps. The first committed cause wins, including concurrent requests and retries.
-
-```go
-cancelCtx, cancel, err := workflow.WithCancelCause(ctx)
-if err != nil {
-    return Output{}, err
-}
-result := workflow.Background(cancelCtx, performWork, input)
-// ...wait for some application condition...
-if err := cancel(errors.New("superseded")); err != nil {
-    return Output{}, err
-}
-_, err = result.Value(ctx)
-```
-
-A step can call `cancel, ok := workflow.CancelFunc(ctx)` and invoke `cancel()` to cancel its context. Step code should pass its context to I/O and observe `ctx.Done()`. A cancelled attempt records `step_failed` with `FatalError` wrapping `context.Canceled`, and is never retried, even if the body returns nil after cancellation. Cancellation cannot forcibly stop a Go goroutine.
-
-`CancelAny(ctx, sources...)` preserves the explicit base context's values and execution metadata. It cancels when the base or any supplied context cancels; it does not cancel its sources or merge their values. With no sources it returns the base context. Use managed workflow cancellation contexts as sources.
-
-A run does not inherit context cancellation from `Start`. To cancel a child, check the cancellation context and call `child.Cancel(ctx)` explicitly. `Run.Cancel` records `run_cancelled` and executes as a durable inline step when called from workflow context; admitted running steps can still record their final outcome.
-
-Do not use `context.WithCancel`, `WithCancelCause`, `WithTimeout`, or `WithDeadline` in workflow bodies. The workflow analyzer enforces this restriction; these context operations remain available inside steps and external handlers.
+Pass the step's context to I/O so work can stop cooperatively. See
+[Cancellation](/guide/cancellation) for cancelling steps and how that differs
+from cancelling a run.

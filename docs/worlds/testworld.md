@@ -58,6 +58,6 @@ for len(world.QueuedMessages()) > 0 {
 | --- | --- |
 | `QueuedMessages()` | Deliveries not yet acknowledged, in queue order, with their IDs. |
 | `Queued()` | Just the `QueueInput` of each pending delivery. |
-| `Close()` | Stops delivering; running deliveries see their context cancelled. State stays readable. |
+| `Close()` | Stops delivering. Running deliveries see their context cancelled. State stays readable. |
 
 See [Testing](/guide/testing) for more patterns.

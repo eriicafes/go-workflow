@@ -11,7 +11,7 @@ seven days.
 | Service | Role |
 | --- | --- |
 | Redis (Upstash, TCP or REST) | Event log, run/step/hook views, hook tokens, streams, queue records |
-| Vercel Queues | Delivery of every queued item; delays up to 7 days |
+| Vercel Queues | Delivers queued items with delays up to 7 days |
 | QStash (optional) | Timers longer than 7 days, handed back to Vercel Queues when due |
 
 ## Usage
@@ -54,29 +54,29 @@ Give the consumer a `queue/v2beta` trigger for the topic:
 ```
 
 When the code that starts workflows has the World in process, pass it to
-`workflow.NewClient`; no HTTP function is needed.
+`workflow.NewClient`. This setup needs no HTTP function.
 
 ## Configuration
 
 | Field | Meaning |
 | --- | --- |
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
-| `RedisURL` | TCP transport. `rediss://` uses TLS (minimum TLS 1.2); `redis://` is plain TCP. |
+| `RedisURL` | TCP transport. `rediss://` uses TLS (minimum TLS 1.2). `redis://` is plain TCP. |
 | `RedisRESTURL`, `RedisRESTToken` | Upstash REST transport, used when `RedisURL` is empty. |
 | `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
 | `Topic` | Required. Topic the consumer is subscribed to. |
-| `OIDCToken` | Returns the Vercel OIDC token; called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
+| `OIDCToken` | Returns the Vercel OIDC token for each Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `Prefix` | Redis key prefix. Default `go-workflow`. |
 | `QStash` | Optional long-timer configuration. |
 | `HTTPClient` | Client for Redis REST, Vercel Queues, and QStash. Default `http.DefaultClient`. |
-| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them and always delivered there; see [pinning](/guide/replay#pinning-runs-to-a-deployment). |
+| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them and always delivered there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
 
 `New` does not contact Redis or Vercel. `Close` closes the Redis TCP pool and
 does nothing with the REST transport.
 
 Vercel rotates OIDC tokens, so `OIDCToken` is called for every Queues request.
 `vercelworld.OIDCTokenFromEnv(name)` reads the environment variable `name` on
-each call; the default reads `VERCEL_OIDC_TOKEN`.
+each call. The default reads `VERCEL_OIDC_TOKEN`.
 
 When `VERCEL_DEPLOYMENT_ID` is set, Queues requests send it as
 `Vqs-Deployment-Id`, so push deliveries return to the deployment that
@@ -95,14 +95,14 @@ published them.
 ## Long timers with QStash
 
 Vercel Queues delays deliveries by at most seven days. Without QStash, queueing
-a delivery due later returns an error.
+a delivery due later returns an error. Configure QStash before opening the World:
 
 ```go
-QStash: &vercelworld.QStashConfig{
+config.QStash = &vercelworld.QStashConfig{
 	Token:             os.Getenv("QSTASH_TOKEN"),
 	CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
 	NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
-},
+}
 ```
 
 The timer is published to `<Config.BaseURL>/callbacks/qstash` with
@@ -130,15 +130,15 @@ Cluster. Upstash regional and global databases are fine.
 | --- | --- | --- |
 | `p:run:<run>` | hash | Run view, event count, creation score |
 | `p:attrs:<run>` | hash | Run attributes |
-| `p:events:<run>` | list | Event records; index = slot − 1 |
+| `p:events:<run>` | list | Event records at index = slot − 1 |
 | `p:last:<run>` | hash | Last slot per event type, for idempotent replays |
 | `p:corr:<run>:<hex(cid)>` | zset | Slots of one correlation ID |
-| `p:steps:<run>`, `p:steporder:<run>` | hash, zset | Step JSON; step IDs by creation |
-| `p:hook:<hook>`, `p:token:<token>` | string | Hook JSON; owning hook of a token |
+| `p:steps:<run>`, `p:steporder:<run>` | hash, zset | Step JSON and step IDs by creation |
+| `p:hook:<hook>`, `p:token:<token>` | string | Hook JSON and token ownership |
 | `p:hooks`, `p:runhooks:<run>` | zset | Hook IDs by creation |
 | `p:runs`, `p:runs:wf:<name>`, `p:runs:status:<s>`, `p:runs:wfstatus:<s>:<name>` | zset | Run IDs by creation |
 | `p:streams:<run>` | set | Stream names |
-| `p:stream:<run>:<hex(name)>`, `p:chunks:<run>:<hex(name)>` | hash, list | Stream session state; chunks |
+| `p:stream:<run>:<hex(name)>`, `p:chunks:<run>:<hex(name)>` | hash, list | Stream session state and chunks |
 | `p:queue:<id>` | string | Queue record |
 
 Binary payloads are stored as base64 so every value is valid UTF-8 for the REST
@@ -166,7 +166,7 @@ The consumer handles each delivery as follows:
    `500`, so Vercel redelivers.
 
 `QueueCancel` deletes the record and any pending QStash message. A Vercel Queues
-message cannot be recalled; its delivery finds no record and is acknowledged.
+message cannot be recalled. Its delivery finds no record and is acknowledged.
 
 ## Security
 

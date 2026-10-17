@@ -24,8 +24,8 @@ The **Context** column says where a function can be called:
 | `Step(ctx, fn, input, ...StepOptions) (Out, error)` | W | Calls a step and waits for it. `Background` + `Value`. |
 | `Background(ctx, fn, input, ...StepOptions) *Result[Out]` | W | Starts a step without waiting. |
 | `Map(ctx, fn, inputs) []*Result[Out]` | W | Starts one step per input. |
-| `All(ctx, fn, inputs) ([]Out, error)` | W | Collects values in input order; cancels remaining steps on any failure. |
-| `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Runs the step `fn` with `input` in the flow, without a step delivery, retrying failed attempts like a step. In step context calls `fn` without recording. |
+| `All(ctx, fn, inputs) ([]Out, error)` | W | Collects values in input order. Cancels remaining steps on any failure. |
+| `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Records work in the flow delivery. See [Inline Steps](/guide/inline-steps). In step context calls `fn` directly. |
 | `OnRollback(ctx, fn func(context.Context, In) error, input, ...StepOptions) error` | W | Registers a compensation that runs if the run fails. |
 | `FatalError(err) error` | S | Wraps an error so the step fails without retrying. |
 | `RetryableError(err, after) error` | S | Wraps an error so the step retries no sooner than `after`. |
@@ -56,16 +56,18 @@ type WorkflowMetadata struct {
 
 `Background`, timers, `NewResult`, and `Then` return `*Result[T]`, which exposes `Value(ctx) (T, error)` and `Unwrap(ctx) T`. The settlement method is private to the SDK and cannot be implemented independently by application types. There is no public readiness or cancellation method.
 
-The combinators accept SDK waiting handles with mixed value types, including hooks and webhooks. Their unexported parameter and winner interface is shown as `promise` below; callers pass handles directly and compare the winner by identity.
+The combinators accept SDK waiting handles with mixed value types, including hooks and webhooks. Their unexported parameter and winner interface is shown as `promise` below. Callers pass handles directly and compare the winner by identity.
 
 | Function | Context | Description |
 | --- | --- | --- |
 | `Join(ctx, ...promise) error` | W | Waits for all settlement, ignoring operation failures. |
-| `JoinOk(ctx, ...promise) error` | W | Waits for all successes; returns the first recorded failure without cancelling other inputs. |
+| `JoinOk(ctx, ...promise) error` | W | Waits for all successes. Returns the first recorded failure without cancelling other inputs. |
 | `Select(ctx, ...promise) (promise, error)` | W | First settlement and its error, in recorded order. |
-| `SelectOk(ctx, ...promise) (promise, error)` | W | First success; nil winner if all fail. |
-| `NewResult[T any](value T, err error) *Result[T]` | W, S, O | Creates an already-settled result; reading it requires workflow context. |
+| `SelectOk(ctx, ...promise) (promise, error)` | W | First success, or a nil winner if all fail. |
+| `NewResult[T any](value T, err error) *Result[T]` | W, S, O | Creates an already-settled result. Reading it requires workflow context. |
 | `Then[T, U any](ctx, source *Result[T], fn func(T, error) *Result[U]) *Result[U]` | W | Follows the callback's returned result without waiting inside the callback. |
+
+An empty join succeeds. An empty selection returns a nil winner and no error.
 
 ## Cancellation
 
@@ -80,7 +82,9 @@ The combinators accept SDK waiting handles with mixed value types, including hoo
 | `CancelAny(ctx, sources ...context.Context) context.Context` | W, S, O | Preserves base values and cancels when base or any source cancels. Returns ctx unchanged outside workflow context. |
 | `CancelFunc(ctx) (func() error, bool)` | S | Finds the current context's controller for manual cancellation. |
 
-Cancellation uses a durable hook and a stream to notify steps across processes. A cancelled step fails without retrying with `FatalError` wrapping `context.Canceled`. Deadline expiry sets `context.Cause` to `context.DeadlineExceeded`, or the custom cause supplied to `WithTimeoutCause` or `WithDeadlineCause`. A nil expiry cause uses `context.DeadlineExceeded`; manual cancellation uses `context.Canceled`. Cancelled contexts do not cancel runs. A cancelled run stops new work and lets admitted steps finish naturally. Ordinary context cancellation and deadline constructors are prohibited in workflow bodies.
+See [Cancellation](/guide/cancellation) for cooperative step cancellation,
+expiry causes, and cancelling entire runs. Standard context cancellation
+constructors belong in steps or external code.
 
 ## Time
 
@@ -102,8 +106,8 @@ Cancellation uses a durable hook and a stream to notify steps across processes. 
 | Method | Description |
 | --- | --- |
 | `ID() string` | Run ID. |
-| `Value(ctx) (Out, error)` | Output once finished. Blocks outside a run; returns `ErrRunNotFinished` inside one. |
-| `Cancel(ctx) error` | Cancels the run; durable inline step in workflow context. |
+| `Value(ctx) (Out, error)` | Output once finished. Blocks outside a run. Returns `ErrRunNotFinished` inside one. |
+| `Cancel(ctx) error` | Cancels the run. Uses an inline step in workflow context. |
 | `Status(ctx) (Status, error)` | Current status. |
 | `Exists(ctx) (bool, error)` | Whether the run is recorded. |
 | `WorkflowName(ctx) (string, error)` | Workflow name. |
@@ -134,12 +138,12 @@ type WakeOptions struct {
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `CreateHook[T](ctx, ...HookOption) (*Hook[T], error)` | W | Creates a local handle. Pending hooks register at workflow waits; `GetConflict` commits ownership without awaiting payloads. |
-| `DefineHook[T](...HookOption) HookDefinition[T]` | — | Declares a reusable hook; an empty token is generated when a handle is created. |
+| `CreateHook[T](ctx, ...HookOption) (*Hook[T], error)` | W | Creates a local handle. Pending hooks register at workflow waits. `GetConflict` commits ownership without awaiting payloads. |
+| `DefineHook[T](...HookOption) HookDefinition[T]` | — | Declares a reusable hook. An empty token is generated when a handle is created. |
 | `(HookDefinition[T]) Create(ctx) (*Hook[T], error)` | W | Creates an unregistered handle for the declared hook. |
 | `ResumeHook[T](ctx, token, value) error` | S, O | Resumes the active hook with `token`. |
 | `ResumeHookWithRetries[T](ctx, token, value, attempts, interval) error` | S, O | Attempts resume immediately, then at fixed intervals while the hook is not found. |
-| `GetHook[T](ctx, token) (*Hook[T], bool, error)` | S, O | Looks up an active hook; the result cannot be awaited. |
+| `GetHook[T](ctx, token) (*Hook[T], bool, error)` | S, O | Looks up an active hook. The result cannot be awaited. |
 | `NewHookToken() string` | — | Random 21-character token. |
 
 ```go
@@ -154,11 +158,11 @@ type HookOption struct {
 
 | Method | Context | Description |
 | --- | --- | --- |
-| `Next(ctx) (T, error)` | W | Registers automatically when waiting, then consumes the next payload; conflicts return `ErrHookConflict`. |
-| `Values(ctx) iter.Seq2[T, error]` | W | Iterates with the same receive cursor; stops after an error. |
-| `Dispose(ctx) error` | W | Durable inline disposal; releases the token immediately. |
-| `GetConflict(ctx) (*Run[any], error)` | W | Registers and claims the token; returns the conflicting owner, or nil. Repeated calls use the recorded result. |
-| `ID() string`, `Token() string` | W, S, O | Reads identity without registering; an unregistered handle has an empty ID. |
+| `Next(ctx) (T, error)` | W | Registers automatically when waiting, then consumes the next payload. Conflicts return `ErrHookConflict`. |
+| `Values(ctx) iter.Seq2[T, error]` | W | Iterates with the same receive cursor. Stops after an error. |
+| `Dispose(ctx) error` | W | Disposes durably and releases the token immediately. |
+| `GetConflict(ctx) (*Run[any], error)` | W | Registers and claims the token. Returns the conflicting owner, or nil. Repeated calls use the recorded result. |
+| `ID() string`, `Token() string` | W, S, O | Reads identity without registering. An unregistered handle has an empty ID. |
 
 `ClaimedFrom *worlds.HookForceClaim` identifies the previous token owner through `RunID` and `HookID`. Reusable definitions belong beside workflow structs in a shared package. Directly defer `Dispose` unless relying on `MinRetention` after workflow completion.
 
@@ -200,7 +204,7 @@ Embeds `*http.Request` and implements JSON serialization for step input, preserv
 | --- | --- | --- |
 | `Writer(ctx, ...WriterOption) (io.WriteCloser, func() error, error)` | S | Writer for a stream of the current run, plus a release function. |
 | `Reader(ctx, ...ReaderOption) (io.Reader, error)` | S | Reader from the beginning. |
-| `ReaderAt(ctx, offset, ...ReaderOption) (io.Reader, error)` | S | Reader from `offset`; negative counts from the end. |
+| `ReaderAt(ctx, offset, ...ReaderOption) (io.Reader, error)` | S | Reader from `offset`. Negative offsets count from the end. |
 
 ```go
 type WriterOption struct{ Name string } // empty is the default stream
@@ -212,7 +216,7 @@ type ReaderOption struct{ Name string }
 | Function | Description |
 | --- | --- |
 | `NewClient(world World) Client` | Client that calls a World in the same process. |
-| `NewHTTPClient(endpoint string, ...*http.Client) Client` | Client for a World served by `worlds.HTTPHandler`; `endpoint` includes `/v1/workflow`. |
+| `NewHTTPClient(endpoint string, ...*http.Client) Client` | Client for a World served by `worlds.HTTPHandler`. `endpoint` includes `/v1/workflow`. |
 | `NewContext(ctx, client) context.Context` | Context carrying `client`. |
 | `Middleware(handler, client) http.Handler` | Adds `client` to every request context. |
 
@@ -234,5 +238,5 @@ type ReaderOption struct{ Name string }
 | `ErrHookConflict` | Another active hook owns the token. |
 | `ErrHookForceClaimed` | Another run took the token with `Force`. |
 
-`*Error` (alias of `worlds.Error`) is the type of failed step and run errors;
-see [Errors and Retries](/guide/errors).
+`*Error` (alias of `worlds.Error`) is the type of failed step and run errors.
+See [Errors and Retries](/guide/errors).

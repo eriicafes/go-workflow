@@ -22,7 +22,9 @@ world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
 	log.Fatal(err)
 }
+
 defer world.Close()
+
 if err := world.Prepare(ctx); err != nil {
 	log.Fatal(err)
 }
@@ -45,6 +47,7 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
+
 defer world.Close()
 
 runners := worlds.Runners(
@@ -95,6 +98,7 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
+
 defer world.Close()
 
 mux := http.NewServeMux()
@@ -106,7 +110,7 @@ log.Fatal(http.ListenAndServe(":8080", workflow.Middleware(mux, workflow.NewClie
 
 The worker then only runs `postgresworld.Worker` with the runners and doesn't
 need to serve HTTP at all. Protect the mounted RPC path if the application is
-public; see [Protecting the RPC path](/worlds/#protecting-the-rpc-path).
+public. See [Protecting the RPC path](/worlds/#protecting-the-rpc-path).
 
 ## Serverless
 

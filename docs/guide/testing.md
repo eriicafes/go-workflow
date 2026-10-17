@@ -207,7 +207,7 @@ for _, message := range world.QueuedMessages() {
 
 `world.Queued()` returns just the inputs of pending deliveries. A timer's
 delivery still checks its due time on replay, so executing it early does not
-skip the wait; use synctest for that.
+skip the wait. Use synctest for that.
 
 ## Testing step functions
 

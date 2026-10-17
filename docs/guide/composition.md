@@ -1,6 +1,7 @@
 # Composing Workflows
 
-A runner can use another workflow in two ways, as in the Workflow SDK.
+Call another runner to share the current run, or start a child workflow
+when it needs an independent lifetime.
 
 ## Calling a runner directly
 
@@ -23,12 +24,12 @@ func PublishReport(ctx context.Context, input workflows.PublishReport) (workflow
 }
 ```
 
-This is the simplest option: one run, one event log, one result.
+Use a direct call when the work should share the current run and event log.
 
 ## Starting a child run
 
 `workflow.Start` in workflow context starts a **child run**. The child is
-started in an [inline step](/guide/steps#inline-steps), so replay returns the
+started in an [inline step](/guide/inline-steps), so replay returns the
 same run. Its ID is derived from that recorded step, so calling it again never
 starts a second child. It is pinned to the deployment executing the parent, and
 it carries two attributes:
@@ -56,6 +57,7 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if err != nil {
 		return workflows.ParentResult{}, err
 	}
+
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return workflows.ParentResult{}, err
 	} else if owner != nil {
@@ -67,6 +69,7 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	}
 
 	defer hook.Dispose(ctx)
+
 	value, err := hook.Next(ctx)
 	return workflows.ParentResult{Value: value}, err
 }
@@ -98,28 +101,34 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 ```go
 hooks := make([]*workflow.Hook[string], len(input.Items))
 for i, item := range input.Items {
-    hook, err := workflow.CreateHook[string](ctx)
-    if err != nil {
-        return Output{}, err
-    }
-    defer hook.Dispose(ctx)
-    if owner, err := hook.GetConflict(ctx); err != nil {
-        return Output{}, err
-    } else if owner != nil {
-        return Output{}, workflow.ErrHookConflict
-    }
-    if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {
-        return Output{}, err
-    }
-    hooks[i] = hook
+	hook, err := workflow.CreateHook[string](ctx)
+	if err != nil {
+		return Output{}, err
+	}
+
+	defer hook.Dispose(ctx)
+
+	if owner, err := hook.GetConflict(ctx); err != nil {
+		return Output{}, err
+	} else if owner != nil {
+		return Output{}, workflow.ErrHookConflict
+	}
+
+	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {
+		return Output{}, err
+	}
+
+	hooks[i] = hook
 }
+
 values := make([]string, len(hooks))
 for i, hook := range hooks {
-    value, err := hook.Next(ctx)
-    if err != nil {
-        return Output{}, err
-    }
-    values[i] = value
+	value, err := hook.Next(ctx)
+	if err != nil {
+		return Output{}, err
+	}
+
+	values[i] = value
 }
 ```
 
@@ -143,10 +152,12 @@ A child run has an independent lifetime, even when `Start` receives a cancelled 
 
 ```go
 if cancelCtx.Err() != nil {
-    if err := child.Cancel(ctx); err != nil {
-        return Result{}, err
-    }
+	if err := child.Cancel(ctx); err != nil {
+		return Result{}, err
+	}
 }
 ```
 
-This check runs when the workflow reaches it; it does not watch for future cancellation. Steps and timers observe a cancellation context passed to them. The base context and cancellation sources for `CancelAny` are explicit; no context values are merged.
+This check only runs when the workflow reaches it and does not watch for
+future cancellation. See [Cancellation](/guide/cancellation#cancelling-a-run)
+for how run and context cancellation differ.
