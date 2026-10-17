@@ -86,7 +86,7 @@ Every event append is one transaction. It locks the run row with
 next slots, and updates the views. Writers to one run are serialized across
 processes, slots are contiguous, and a batch is all-or-nothing.
 
-`HooksClaim` locks the token row. A forced claim over a live owner also locks
+`EventsCreate(hook_created)` locks the token row. A forced claim over a live owner also locks
 the owner's run, taking run locks in run ID order to avoid deadlocks. Exactly
 one concurrent claimant wins a free token. Transactions are retried on
 serialization failures and deadlocks.

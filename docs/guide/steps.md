@@ -30,7 +30,7 @@ The first time the runner reaches this call, the step is recorded and queued
 as its own delivery. Once the step completes, the next replay returns its
 recorded output immediately.
 
-`Step` is `Background` followed by `Await`. To start a step without waiting for
+`Step` is `Background` followed by `Value`. To start a step without waiting for
 it, see [Concurrency](/guide/concurrency).
 
 ### Rules
@@ -108,8 +108,7 @@ Inside a step function, the context belongs to the step:
 - [`workflow.Start`](/guide/runs), [`workflow.Get`](/guide/runs), and
   [`workflow.ResumeHook`](/guide/hooks) work, using the World that records the
   run, or a Client put in the context with `workflow.NewContext`.
-- When the step or its run is cancelled, the context is cancelled with
-  `worlds.ErrStepCancelled` or `worlds.ErrRunCancelled` as its cause.
+- A managed cancellation context cancels the step context. Cancelling the run itself lets running steps finish naturally.
 
 ## Inline steps
 
@@ -170,3 +169,28 @@ step too, with one attempt. A step delivery never runs
 an inline step: if it reaches one that hasn't settled, it suspends.
 
 In step context, `InlineStep` calls `fn` without recording it.
+
+## Cancellation
+
+Create a durable cancellation context inside workflow context with `WithCancel(ctx)` or `WithCancelCause(ctx)`. Both constructors return `(context, cancel, error)`. Handle the creation error before using the context or cancel function. The cancellation functions also return errors so notification failures can be handled or retried. Cancellation records hook state for replay and closes a stream for immediate delivery to running steps. The first committed cause wins, including concurrent requests and retries.
+
+```go
+cancelCtx, cancel, err := workflow.WithCancelCause(ctx)
+if err != nil {
+    return Output{}, err
+}
+result := workflow.Background(cancelCtx, performWork, input)
+// ...wait for some application condition...
+if err := cancel(errors.New("superseded")); err != nil {
+    return Output{}, err
+}
+_, err = result.Value(ctx)
+```
+
+A step can call `cancel, ok := workflow.CancelFunc(ctx)` and invoke `cancel()` to cancel its context. Step code should pass its context to I/O and observe `ctx.Done()`. A cancelled attempt records `step_failed` with `FatalError` wrapping `context.Canceled`, and is never retried, even if the body returns nil after cancellation. Cancellation cannot forcibly stop a Go goroutine.
+
+`CancelAny(ctx, sources...)` preserves the explicit base context's values and execution metadata. It cancels when the base or any supplied context cancels; it does not cancel its sources or merge their values. With no sources it returns the base context. Use managed workflow cancellation contexts as sources.
+
+A run does not inherit context cancellation from `Start`. To cancel a child, check the cancellation context and call `child.Cancel(ctx)` explicitly. `Run.Cancel` records `run_cancelled` and executes as a durable inline step when called from workflow context; admitted running steps can still record their final outcome.
+
+Do not use `context.WithCancel`, `WithCancelCause`, `WithTimeout`, or `WithDeadline` in workflow bodies. The workflow analyzer enforces this restriction; these context operations remain available inside steps and external handlers.

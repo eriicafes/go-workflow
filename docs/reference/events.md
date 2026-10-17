@@ -18,6 +18,20 @@ type Event struct {
 Event IDs encode the event's **slot**, its 1-based position in the log.
 `worlds.EventSlot(id)` and `worlds.EventIDForSlot(slot)` convert between them.
 
+The runtime and Worlds share these JSON payload types from `worlds`:
+
+| Type | Events |
+| --- | --- |
+| `DataStepCreated` | `step_created` |
+| `DataStepResult` | `step_completed`, `step_retrying`, `step_failed` |
+| `DataWaitCreated` | `wait_created` |
+| `DataHookCreated` | `hook_created`, `hook_conflict` |
+
+`DataStepResult.Output` and `DataStepResult.Error` are `json.RawMessage`.
+An error is embedded as a JSON object containing its message and recorded
+chain. `worlds.DecodeError` decodes the bytes in `DataStepResult.Error` or
+the materialized `Step.Error` field.
+
 ## Event types
 
 ### Runs
@@ -40,7 +54,6 @@ Event IDs encode the event's **slot**, its 1-based position in the log.
 | `step_completed` | The step's output. |
 | `step_retrying` | A failed attempt and when the step is retried. |
 | `step_failed` | The step's final error. |
-| `step_cancelled` | The step was cancelled. |
 
 ### Hooks
 
@@ -63,23 +76,22 @@ Event IDs encode the event's **slot**, its 1-based position in the log.
 Appending is how the runtime decides what may happen, so Worlds enforce these
 rules atomically:
 
-- No event is appended to a terminal run (`ErrRunTerminal`).
+- Terminal runs reject new work (`ErrRunTerminal`). A running step may still record its final completion or failure without reviving the run or scheduling a retry.
 - A step can only be started while pending or running (`ErrStepNotStartable`).
   Starting a running step appends a new attempt, so a delivery can take over a
   step whose previous delivery died.
 - A webhook's `hook_received` only targets an active webhook that still owns
-  its token (`ErrHookNotActive`). A plain hook may receive more payloads after
-  it settles, but its run keeps the first.
+  its token (`ErrHookNotActive`). A plain hook receives repeated payloads, consumed in order with `Next`.
 - A `hook_received` that carries a webhook's response is refused with
-  `ErrHookNotActive` once that webhook has responded, even while
-  `MinRetention` keeps its token: one response per request.
-- A `hook_created` whose token another active hook owns is rejected
-  (`ErrHookConflict`) unless the claim is forced.
+  `ErrHookNotActive` once that webhook has responded, because each webhook request has one response.
+- `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `claimedFrom` on the new hook.
 - An event that repeats an admitted transition, such as a second
   `run_started`, returns the earlier event without appending.
 - A flow's writes are in-band: each is fenced by the run's `InBandCount` and
   refused with `ErrInBandSuperseded` when another flow has written since. See
   [Concurrent flows](/guide/replay#concurrent-flows).
+
+Managed cancellation records its cause as hook payload data and uses a stream for live notification. Cancelled attempts record `step_failed` with `FatalError` wrapping `context.Canceled`. The first committed cancellation cause wins.
 
 ## A sample run
 

@@ -71,7 +71,7 @@ request.
 | Body over 128 KiB | `413 Request Entity Too Large` |
 | Default webhook | `202 Accepted` |
 | `WebhookOption.Response` set | that response |
-| `WebhookOption.Manual` | held until the runner calls `RespondWith`; `504` if waiting fails |
+| `WebhookOption.Manual` | held until a step calls `WebhookRequest.RespondWith`; timeout `504`, disposal/termination `410`, storage failure `500` |
 
 The request's method, URL, headers, and body are recorded in a `hook_received`
 event and a delivery is queued so the run resumes.

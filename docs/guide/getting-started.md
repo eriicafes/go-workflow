@@ -116,7 +116,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	result, err := run.Await(ctx)
+	result, err := run.Value(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func main() {
 ```
 
 `workflow.Start` needs only the workflow type and a Client in the context. It
-returns a [`Run`](/guide/runs) handle without waiting, and `Await` blocks until
+returns a [`Run`](/guide/runs) handle without waiting, and `Value` blocks until
 the run finishes.
 
 ## 5. Check your runners

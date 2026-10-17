@@ -23,7 +23,7 @@ func TestGenerateReport(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result, err := run.Await(ctx)
+		result, err := run.Value(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,7 +78,7 @@ func TestMonthly(t *testing.T) {
 		}
 
 		start := time.Now()
-		result, err := run.Await(ctx) // returns at once in real time
+		result, err := run.Value(ctx) // returns at once in real time
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -95,7 +95,7 @@ func TestMonthly(t *testing.T) {
 ```
 
 `time.Now` in steps and in the test reads the same fake clock, so you can assert
-on durations. `Timeout`, `Timer`, and `RetryableError` delays behave the same
+on durations. `WithTimeout`, `WithDeadline`, `Timer`, and `RetryableError` delays behave the same
 way.
 
 To check what a run does at a point in time, sleep the test itself. The fake
@@ -133,7 +133,7 @@ synctest.Test(t, func(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := run.Await(ctx)
+	result, err := run.Value(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

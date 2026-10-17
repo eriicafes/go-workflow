@@ -21,10 +21,10 @@ The **Context** column says where a function can be called:
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Step(ctx, fn, input, ...StepOptions) (Out, error)` | W | Calls a step and waits for it. `Background` + `Await`. |
-| `Background(ctx, fn, input, ...StepOptions) Promise[Out]` | W | Starts a step without waiting. |
-| `Map(ctx, fn, inputs) []Promise[Out]` | W | Starts one step per input. |
-| `All(ctx, fn, inputs) ([]Out, error)` | W | `Map` + `Join`. |
+| `Step(ctx, fn, input, ...StepOptions) (Out, error)` | W | Calls a step and waits for it. `Background` + `Value`. |
+| `Background(ctx, fn, input, ...StepOptions) *Result[Out]` | W | Starts a step without waiting. |
+| `Map(ctx, fn, inputs) []*Result[Out]` | W | Starts one step per input. |
+| `All(ctx, fn, inputs) ([]Out, error)` | W | Collects values in input order; cancels remaining steps on any failure. |
 | `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Runs the step `fn` with `input` in the flow, without a step delivery, retrying failed attempts like a step. In step context calls `fn` without recording. |
 | `OnRollback(ctx, fn func(context.Context, In) error, input, ...StepOptions) error` | W | Registers a compensation that runs if the run fails. |
 | `FatalError(err) error` | S | Wraps an error so the step fails without retrying. |
@@ -52,26 +52,35 @@ type WorkflowMetadata struct {
 }
 ```
 
-## Promises
+## Results and promises
 
-```go
-type Promise[T any] interface {
-	Done(context.Context) (bool, error) // settled as of delivered results; never the promise's error
-	Await(context.Context) (T, error)
-	Unwrap(context.Context) T
-	Cancel(context.Context) error
-}
-```
+`Background`, timers, `NewResult`, and `Then` return `*Result[T]`, which exposes `Value(ctx) (T, error)` and `Unwrap(ctx) T`. The settlement method is private to the SDK and cannot be implemented independently by application types. There is no public readiness or cancellation method.
+
+The combinators accept SDK waiting handles with mixed value types, including hooks and webhooks. Their unexported parameter and winner interface is shown as `promise` below; callers pass handles directly and compare the winner by identity.
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Join(ctx, ...Promise[T]) ([]T, error)` | W | Waits for all; first error in argument order. |
-| `JoinSettled(ctx, ...Promise[T]) ([]T, error)` | W | Waits for all to settle; zero values for failures. |
-| `Select(ctx, ...Promise[T]) (Promise[T], error)` | W | First to settle, by the order results were recorded. |
-| `SelectWithCancel(ctx, ...Promise[T]) (Promise[T], error)` | W | `Select`, cancelling the rest. |
-| `SelectOk(ctx, ...Promise[T]) (Promise[T], error)` | W | First to succeed, by the order results were recorded. |
-| `SelectOkWithCancel(ctx, ...Promise[T]) (Promise[T], error)` | W | `SelectOk`, cancelling the rest. |
-| `Cancel(ctx, ...Promise[T]) error` | W | Cancels each promise in order. |
+| `Join(ctx, ...promise) error` | W | Waits for all settlement, ignoring operation failures. |
+| `JoinOk(ctx, ...promise) error` | W | Waits for all successes; returns the first recorded failure without cancelling other inputs. |
+| `Select(ctx, ...promise) (promise, error)` | W | First settlement and its error, in recorded order. |
+| `SelectOk(ctx, ...promise) (promise, error)` | W | First success; nil winner if all fail. |
+| `NewResult[T any](value T, err error) *Result[T]` | W, S, O | Creates an already-settled result; reading it requires workflow context. |
+| `Then[T, U any](ctx, source *Result[T], fn func(T, error) *Result[U]) *Result[U]` | W | Follows the callback's returned result without waiting inside the callback. |
+
+## Cancellation
+
+| Function | Context | Description |
+| --- | --- | --- |
+| `WithCancel(ctx) (context.Context, func() error, error)` | W | Creates a durable cancellation context. |
+| `WithCancelCause(ctx) (context.Context, func(error) error, error)` | W | Creates a cancellation context whose first committed cause wins. |
+| `WithTimeout(ctx, d) (context.Context, func() error, error)` | W | Cancels the returned context after a duration using a timer and `Then`. |
+| `WithDeadline(ctx, deadline) (context.Context, func() error, error)` | W | Cancels the returned context at an absolute deadline. |
+| `WithTimeoutCause(ctx, d, cause) (context.Context, func() error, error)` | W | Like `WithTimeout`, with a custom expiry cause. |
+| `WithDeadlineCause(ctx, deadline, cause) (context.Context, func() error, error)` | W | Like `WithDeadline`, with a custom expiry cause. |
+| `CancelAny(ctx, sources ...context.Context) context.Context` | W, S, O | Preserves base values and cancels when base or any source cancels. Returns ctx unchanged outside workflow context. |
+| `CancelFunc(ctx) (func() error, bool)` | S | Finds the current context's controller for manual cancellation. |
+
+Cancellation uses a durable hook and a stream to notify steps across processes. A cancelled step fails without retrying with `FatalError` wrapping `context.Canceled`. Deadline expiry sets `context.Cause` to `context.DeadlineExceeded`, or the custom cause supplied to `WithTimeoutCause` or `WithDeadlineCause`. A nil expiry cause uses `context.DeadlineExceeded`; manual cancellation uses `context.Canceled`. Cancelled contexts do not cancel runs. A cancelled run stops new work and lets admitted steps finish naturally. Ordinary context cancellation and deadline constructors are prohibited in workflow bodies.
 
 ## Time
 
@@ -79,8 +88,7 @@ type Promise[T any] interface {
 | --- | --- | --- |
 | `Now(ctx) (time.Time, error)` | W | Recorded current time in UTC. |
 | `Sleep(ctx, d) error` | W | Suspends the run for `d`. |
-| `Timer(ctx, d) Promise[struct{}]` | W | Promise that settles after `d`. |
-| `Timeout(ctx, d) Promise[struct{}]` | W | Timer that cancels the run when it fires. |
+| `Timer(ctx, d) *Result[struct{}]` | W | Promise that settles after `d`. |
 
 ## Runs
 
@@ -94,10 +102,8 @@ type Promise[T any] interface {
 | Method | Description |
 | --- | --- |
 | `ID() string` | Run ID. |
-| `Await(ctx) (Out, error)` | Output once finished. Blocks outside a run; returns `ErrRunNotFinished` inside one. |
-| `Done(ctx) (bool, error)` | Whether finished, without blocking. Does not return the run's error. |
-| `Unwrap(ctx) Out` | `Await`, panicking on error. |
-| `Cancel(ctx) error` | Cancels the run. |
+| `Value(ctx) (Out, error)` | Output once finished. Blocks outside a run; returns `ErrRunNotFinished` inside one. |
+| `Cancel(ctx) error` | Cancels the run; durable inline step in workflow context. |
 | `Status(ctx) (Status, error)` | Current status. |
 | `Exists(ctx) (bool, error)` | Whether the run is recorded. |
 | `WorkflowName(ctx) (string, error)` | Workflow name. |
@@ -128,26 +134,33 @@ type WakeOptions struct {
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `CreateHook[T](ctx, ...HookOption) (*Hook[T], error)` | W | Creates a hook. `DefineHook` + `Create`. |
-| `DefineHook[T](...HookOption) HookDefinition[T]` | — | Declares a hook; its token is fixed now. |
-| `(HookDefinition[T]) Create(ctx) (*Hook[T], error)` | W | Creates the declared hook. |
+| `CreateHook[T](ctx, ...HookOption) (*Hook[T], error)` | W | Creates a local handle. Pending hooks register at workflow waits; `GetConflict` commits ownership without awaiting payloads. |
+| `DefineHook[T](...HookOption) HookDefinition[T]` | — | Declares a reusable hook; an empty token is generated when a handle is created. |
+| `(HookDefinition[T]) Create(ctx) (*Hook[T], error)` | W | Creates an unregistered handle for the declared hook. |
 | `ResumeHook[T](ctx, token, value) error` | S, O | Resumes the active hook with `token`. |
-| `ResumeHookWithRetries[T](ctx, token, value, attempts) error` | S, O | Retries while the hook is not found. |
+| `ResumeHookWithRetries[T](ctx, token, value, attempts, interval) error` | S, O | Attempts resume immediately, then at fixed intervals while the hook is not found. |
 | `GetHook[T](ctx, token) (*Hook[T], bool, error)` | S, O | Looks up an active hook; the result cannot be awaited. |
 | `NewHookToken() string` | — | Random 21-character token. |
 
 ```go
 type HookOption struct {
-	Token        string        // empty generates a random token
-	MinRetention time.Duration // keep the token reserved after the hook settles
+	Token        string        // empty generates a replay-stable token
+	MinRetention time.Duration // reserve until creation plus duration; Dispose releases immediately
 	Force        bool          // take the token over from another run
 }
 ```
 
 ### `Hook[T]`
 
-`Await`, `Done`, `Unwrap`, `Cancel` (the `Promise[T]` methods), plus `ID()`,
-`Token()`, and `GetConflict(ctx) (worlds.RunID, bool, error)`.
+| Method | Context | Description |
+| --- | --- | --- |
+| `Next(ctx) (T, error)` | W | Registers automatically when waiting, then consumes the next payload; conflicts return `ErrHookConflict`. |
+| `Values(ctx) iter.Seq2[T, error]` | W | Iterates with the same receive cursor; stops after an error. |
+| `Dispose(ctx) error` | W | Durable inline disposal; releases the token immediately. |
+| `GetConflict(ctx) (*Run[any], error)` | W | Registers and claims the token; returns the conflicting owner, or nil. Repeated calls use the recorded result. |
+| `ID() string`, `Token() string` | W, S, O | Reads identity without registering; an unregistered handle has an empty ID. |
+
+`ClaimedFrom *worlds.HookForceClaim` identifies the previous token owner through `RunID` and `HookID`. Reusable definitions belong beside workflow structs in a shared package. Directly defer `Dispose` unless relying on `MinRetention` after workflow completion.
 
 ## Webhooks
 
@@ -165,15 +178,21 @@ type WebhookOption struct {
 
 ### `Webhook[T]`
 
-| Method | Description |
-| --- | --- |
-| `URL() string` | Absolute URL under the World's base URL. |
-| `Token() string`, `ID() string` | Hook token and ID. |
-| `Await(ctx) (T, error)` | JSON body decoded as `T`. |
-| `Request(ctx) (*http.Request, error)` | The request that resumed the webhook. |
-| `RespondWith(ctx, *http.Response) error` | Responds to a manual webhook's request. |
-| `Done`, `Unwrap`, `Cancel`, `GetConflict` | As on `Hook`. |
-| `MarshalJSON`, `UnmarshalJSON` | Pass a webhook to or from a step. |
+| Method | Context | Description |
+| --- | --- | --- |
+| `URL() string` | W | Absolute endpoint URL. |
+| `Token() string`, `ID() string` | W | Hook identity. |
+| `Request(ctx) (*WebhookRequest[T], error)` | W | Waits for the request. |
+| `Dispose(ctx) error` | W | Durable disposal, deactivating the endpoint. |
+
+### `WebhookRequest[T]`
+
+Embeds `*http.Request` and implements JSON serialization for step input, preserving raw body and response origin.
+
+| Method | Context | Description |
+| --- | --- | --- |
+| `JSON() (T, error)` | W, S | Parses the recorded body without consuming it. |
+| `RespondWith(ctx, *http.Response) error` | S | Records a manual response, idempotently for the same content. |
 
 ## Streams
 
@@ -208,9 +227,10 @@ type ReaderOption struct{ Name string }
 | `ErrNoWorkflow` | Workflow-context function called elsewhere, or stream function outside a run. |
 | `ErrNotInStep` | I/O function called in workflow context. |
 | `ErrRunCancelled` | Run was cancelled. |
-| `ErrRunNotFinished` | `Run.Await` inside a run on an unfinished run. |
+| `ErrRunNotFinished` | `Run.Value` inside a run on an unfinished run. |
+| `ErrHookNotActive` | Hook was disposed and no longer receives. |
 | `ErrHookNotFound` | No active hook has the token. |
-| `ErrHookNotRegistered` | Awaiting a hook not created in this run. |
+| `ErrHookNotRegistered` | Receiving from a hook not created in this run. |
 | `ErrHookConflict` | Another active hook owns the token. |
 | `ErrHookForceClaimed` | Another run took the token with `Force`. |
 

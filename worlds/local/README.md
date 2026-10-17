@@ -114,3 +114,5 @@ The current format is version 2. `Prepare` rejects directories written by older
 versions (the version 1 command store, or the unversioned `world.json`
 snapshot) and any non-empty directory without `version.json`. Remove the
 directory to start over.
+
+Forced hook takeover across runs first records a `hook-handoff.json` write-ahead decision. Recovery completes the victim disposal and claimant registration before serving reads, including a crash between their commit points. Same-run takeover uses one run commit.

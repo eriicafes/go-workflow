@@ -15,60 +15,67 @@ if err := workflow.Sleep(ctx, 24*time.Hour); err != nil {
 }
 ```
 
-`Sleep` is `Timer` followed by `Await`.
+`Sleep` is `Timer` followed by `Value`.
 
 ## Timers
 
-`workflow.Timer` returns a `Promise[struct{}]` that settles after a duration.
-Combine it with other promises to wait for whichever comes first.
+`workflow.Timer` returns a `*Result[struct{}]` that settles after a duration. Race a hook against a timer by comparing the winner:
 
 ```go
 approved, err := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: "approve:" + input.OrderID})
 if err != nil {
-	return Result{}, err
+    return Output{}, err
 }
-
+defer approved.Dispose(ctx)
 reminder := workflow.Timer(ctx, 48*time.Hour)
-
-// Suspend until the order is approved or 48 hours pass.
-if _, err := workflow.Select(ctx, workflow.Promise[struct{}](approved), reminder); err != nil {
-	return Result{}, err
+winner, err := workflow.Select(ctx, approved, reminder)
+if err != nil {
+    return Output{}, err
 }
-
-if done, _ := approved.Done(ctx); !done {
-	if _, err := workflow.Step(ctx, sendReminder, input.OrderID); err != nil {
-		return Result{}, err
-	}
+if winner == reminder {
+    if _, err := workflow.Step(ctx, sendReminder, input.OrderID); err != nil {
+        return Output{}, err
+    }
 }
 ```
 
-A timer fires when a flow replays past its declaration after it is due: the
-flow records `wait_completed` there. Like any result, the runner sees it only
-once the replay reaches it where the runner waits, so `Done` on a timer gives
-the same answer at the same point of every replay.
-Cancelling a timer settles it immediately.
+Timers fire when replay reaches their declaration after the due time, recording `wait_completed`. Recorded event order determines when waiting code sees the result. A managed cancellation context can end a timer wait early with a fatal cancellation error.
 
-## Timeouts
+## Timeouts and deadlines
 
-`workflow.Timeout` returns a timer that **cancels the run** when it fires.
-Cancel the returned promise to disarm it.
+`workflow.WithTimeout(ctx, duration)` returns a durable cancellation context, a cancel function, and a creation error. `workflow.WithDeadline(ctx, deadline)` accepts an absolute deadline instead. Both attach a `Then` continuation to a normal timer; expiry cancels the returned context with `context.DeadlineExceeded` as its cause.
+
+`workflow.WithTimeoutCause(ctx, duration, cause)` and `workflow.WithDeadlineCause(ctx, deadline, cause)` use a custom error as the expiry cause. A nil cause uses `context.DeadlineExceeded`. Their cancel functions still use `context.Canceled` for manual cancellation.
+
+Pass the returned context to the work that should stop:
 
 ```go
-timeout := workflow.Timeout(ctx, time.Hour)
-
-result, err := workflow.Step(ctx, longRunningJob, input)
+cancelCtx, cancel, err := workflow.WithTimeout(ctx, time.Hour)
 if err != nil {
-	return Result{}, err
+    return Output{}, err
 }
-
-if err := timeout.Cancel(ctx); err != nil {
-	return Result{}, err
+result, stepErr := workflow.Step(cancelCtx, longRunningJob, input)
+if err := cancel(); err != nil {
+    return Output{}, err
 }
+return result, stepErr
 ```
 
-When the run is cancelled, its pending work is cancelled too: the contexts of
-running steps are cancelled with `worlds.ErrRunCancelled` as the cause, and
-`Run.Await` returns `workflow.ErrRunCancelled`.
+Calling `cancel()` cancels the context early with `context.Canceled` as its cause and disarms the timer. Disarming is durable: a replay after the deadline still sees the recorded cancellation and skips firing. Parent cancellation also stops work using the returned context. The first cancellation cause wins.
+
+For an absolute deadline, derive the time from a durable value such as `workflow.Now`:
+
+```go
+now, err := workflow.Now(ctx)
+if err != nil {
+    return Output{}, err
+}
+cancelCtx, cancel, err := workflow.WithDeadline(ctx, now.Add(72*time.Hour))
+```
+
+The deadline is stored with the timer and does not restart on replay. `context.Cause(cancelCtx)` reports why cancellation happened; `cancelCtx.Err()` reports `context.Canceled`. Cancelled steps and pending timer results fail with fatal cancellation errors. A workflow can handle those errors and continue. Expiry does not cancel the run or any child runs; call `Run.Cancel` explicitly when that is required.
+
+Run cancellation prevents new work and leaves already-running steps to finish naturally. `Run.Value` returns `workflow.ErrRunCancelled`. Ordinary `context.WithTimeout`, `WithDeadline`, and native cancellation constructors are prohibited in workflows; they remain valid inside steps and external handlers.
 
 ## Reading the time
 
@@ -104,8 +111,7 @@ if err != nil {
 n, err := run.WakeUp(ctx)
 ```
 
-`WakeOptions.CorrelationIDs` limits `WakeUp` to specific waits. A `Timeout`
-settled by `WakeUp` does **not** cancel the run.
+`WakeOptions.CorrelationIDs` limits `WakeUp` to specific waits. Waking a timer used by `WithTimeout` or `WithDeadline` also runs its continuation and cancels the returned context.
 
 ## Delivery limits
 

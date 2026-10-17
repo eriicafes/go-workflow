@@ -40,7 +40,7 @@ type World interface {
   a second `run_started`, returns the earlier event with
   `AllocatedEventCount` zero instead of appending. A `step_started` for a
   running step is not a repeat: it appends a new attempt.
-- **Exclusive hook tokens.** `HooksClaim` must give a token to exactly one
+- **Exclusive hook tokens.** `EventsCreate(hook_created)` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run.
 - **One webhook response.** Refuse a `hook_received` carrying a response with

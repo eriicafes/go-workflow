@@ -83,7 +83,7 @@ the transaction, inserts the events at the next slots, and updates the views.
 Writers to one run are therefore serialized across processes, slots are
 contiguous, and a batch is all-or-nothing.
 
-`HooksClaim` locks the token row. A forced claim over a live owner also locks
+`EventsCreate(hook_created)` locks the token row. A forced claim over a live owner also locks
 the owner's run, taking run locks in run ID order to avoid deadlocks, and
 appends `hook_disposed` with `forceClaimedBy` to that run in the same transaction. Exactly one
 concurrent claimant wins a free token. Transactions are retried on

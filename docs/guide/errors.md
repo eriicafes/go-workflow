@@ -8,7 +8,7 @@ message: it keeps the **type, message, and JSON encoding of every error in the
 original chain**.
 
 `workflow.Step` returns a failed step's error as a `*workflow.Error`, and
-`Run.Await` returns a failed run's error the same way. Because the
+`Run.Value` returns a failed run's error the same way. Because the
 chain is preserved, `errors.Is` and `errors.As` keep working after replay and
 across child runs.
 
@@ -43,6 +43,12 @@ How matching works:
 `worlds.NewError(err)` builds an `*Error` from any error, and
 `worlds.DecodeError(data)` decodes the JSON stored in a run's or step's
 `Error` field.
+
+`worlds.FatalError` and `worlds.RetryableError` are plain Go error wrappers.
+Durable steps inspect them before encoding the result and record the retry
+time separately. `worlds.Error` records their type markers and underlying
+error chain through its normal encoding. Inspect persisted causes on
+`worlds.Error`; wrapper `Cause` fields are not reconstructed after replay.
 
 ## Step retries
 
@@ -80,7 +86,7 @@ is recorded as a `*workflow.Error`, so callers can inspect it with `errors.Is`
 and `errors.As`:
 
 ```go
-_, err := run.Await(ctx)
+_, err := run.Value(ctx)
 if errors.Is(err, ErrCardDeclined) {
 	// ...
 }
@@ -96,13 +102,13 @@ retrying with different input or taking another branch.
 | `workflow.ErrNoClient` | `Start`, `Get`, `GetHook`, or `ResumeHook` is called with no Client in the context and outside a run. |
 | `workflow.ErrNoWorkflow` | A workflow-context function such as `Step`, `Join`, or `CreateHook` is called outside workflow context (including in step context), or a stream function is called outside a run. |
 | `workflow.ErrNotInStep` | A function that does I/O, such as `Writer` or `Run.Reader`, is called in workflow context. |
-| `workflow.ErrRunCancelled` | Awaiting a run that was cancelled. It is also the cause of the context of a cancelled run's runner and steps. |
-| `workflow.ErrRunNotFinished` | `Run.Await` inside a run, when the awaited run had not finished. |
+| `workflow.ErrRunCancelled` | Reading a cancelled run. Running steps keep their contexts unless they use an explicitly cancelled context. |
+| `workflow.ErrRunNotFinished` | `Run.Value` inside a run, when the awaited run had not finished. |
 | `workflow.ErrHookNotFound` | Resuming a token that no active hook has. |
-| `workflow.ErrHookNotRegistered` | Awaiting a hook that was not created in this run, such as one from `GetHook`. |
+| `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
 | `workflow.ErrHookConflict` | Creating a hook whose token another active hook already has. |
-| `workflow.ErrHookForceClaimed` | Awaiting a hook whose token another run took over with `HookOption.Force`. |
-| `worlds.ErrCorruptedEventLog` | `Run.Await` on a run whose replay kept diverging from its event log; see [Replay divergence](/guide/replay#replay-divergence). |
+| `workflow.ErrHookForceClaimed` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
+| `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log; see [Replay divergence](/guide/replay#replay-divergence). |
 
 The [`worlds` reference](/reference/worlds#errors) lists the errors Worlds
-return, such as `ErrRunNotFound` and `ErrStepCancelled`.
+return, such as `ErrRunNotFound` and `ErrHookNotActive`.

@@ -104,11 +104,11 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"})
 if err != nil {
 	log.Fatal(err)
 }
-result, err := run.Await(ctx)
+result, err := run.Value(ctx)
 ```
 
 `workflow.Start` needs only the workflow type and a Client in ctx. A `Run`
-handle reads and controls the run with `Await`, `Done`, `Status`, `Cancel`, and
+handle reads and controls the run with `Value`, `Status`, `Cancel`, and
 `WakeUp`, and `workflow.Get` returns the handle of an existing run by ID.
 
 ## Worlds
@@ -226,23 +226,21 @@ each World.
 
 ## Concurrency and time
 
-`workflow.Background` starts a step without waiting and returns a `Promise`.
-`Map` starts one step per input, `All` waits for all of them, and `Join`,
-`JoinSettled`, and the `Select` functions wait on several promises at once.
+`workflow.Background` starts a step without waiting and returns a `*Result[T]`.
+`Map` starts one step per input. `All` collects outputs in input order and cancels the remaining steps if any fails. `Join`,
+`JoinOk`, and the `Select` functions wait on several promises at once.
 
 ```go
-promises := workflow.Map(ctx, findSources, []string{"go", "rust"})
-results, err := workflow.Join(ctx, promises...)
+results, err := workflow.All(ctx, findSources, []string{"go", "rust"})
 ```
 
 `workflow.Sleep` suspends the run for a duration, `Timer` returns a promise that
-settles after one, and `Timeout` returns a timer that cancels the run when it
-fires. A sleeping run consumes no resources, so it can sleep for days or months.
+settles after one, and `WithTimeout` and `WithDeadline` return a cancellation context and cancel function, using a timer to cancel work that uses that context. A sleeping run consumes no resources, so it can sleep for days or months.
 
 ## Errors
 
 A failed step's error is persisted with the step and comes back as a
-`*workflow.Error`, and so does a failed run's error from `Run.Await`. It keeps
+`*workflow.Error`, and so does a failed run's error from `Run.Value`. It keeps
 the message, type, and exported fields of every error in the original chain, so
 `errors.Is` and `errors.As` work on it in the runner and across child runs.
 
@@ -306,7 +304,7 @@ reader, err := run.ReaderAt(ctx, -128, workflow.ReaderOption{Name: "progress"})
 
 ## Hooks and webhooks
 
-A hook suspends a run until something outside resumes it with a typed payload.
+A hook receives repeated typed payloads. Declare reusable hook definitions beside workflow structs in a shared package.
 Pass a token when the caller must know it in advance.
 
 ```go
@@ -314,8 +312,11 @@ hook, err := workflow.CreateHook[Approval](ctx, workflow.HookOption{Token: "appr
 if err != nil {
 	return Result{}, err
 }
-approval, err := hook.Await(ctx)
+defer hook.Dispose(ctx)
+approval, err := hook.Next(ctx) // registers the hook and waits for a payload
 ```
+
+Creation is lazy: pending hooks register when the workflow waits. Use `GetConflict(ctx)` before starting work that requires ownership or exposes the token; it registers without waiting for a payload and returns the conflicting run, or nil.
 
 ```go
 err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
@@ -323,7 +324,7 @@ err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
 
 A webhook is a hook resumed by an HTTP request to its URL, with the JSON body
 decoded as the payload. `WebhookOption` can require a method, set a static
-response, or hold the request until the runner calls `RespondWith`. The token
+response, or hold the request until a step calls `WebhookRequest.RespondWith`. The token
 in the URL is its only authorization, so verify provider signatures before
 trusting the payload.
 
@@ -335,8 +336,14 @@ if err != nil {
 if _, err := workflow.Step(ctx, registerCallback, webhook.URL()); err != nil {
 	return Result{}, err
 }
-payment, err := webhook.Await(ctx)
+request, err := webhook.Request(ctx)
+if err != nil {
+	return Result{}, err
+}
+payment, err := request.JSON()
 ```
+
+`WithCancel` and `WithCancelCause` return a durable cancellation context, a cancel function, and a creation error. Their cancel functions also return errors. Pass cancellation contexts to steps; cancel runs explicitly with `Run.Cancel`; use `CancelAny(ctx, sources...)` to combine cancellation while preserving base values. Cancelled steps fail without retrying; cancelled runs let running steps finish naturally. `Then` follows the result returned by `func(T, error) *Result[U]`; use `NewResult(value, err)` for immediate values and failures.
 
 ## Composing workflows
 
@@ -348,7 +355,7 @@ report, err := GenerateReport(ctx, workflows.GenerateReport{Topic: input.Topic})
 ```
 
 `workflow.Start` in workflow context starts a child run, which carries the
-`$parentRunId` and `$rootRunId` attributes. In workflow context `Run.Await`
+`$parentRunId` and `$rootRunId` attributes. In workflow context `Run.Value`
 returns `workflow.ErrRunNotFinished` instead of waiting, so to wait for a child,
 pass it a hook token and have it resume the hook when it finishes.
 
@@ -358,10 +365,15 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if err != nil {
 		return workflows.ParentResult{}, err
 	}
+	if owner, err := hook.GetConflict(ctx); err != nil {
+		return workflows.ParentResult{}, err
+	} else if owner != nil {
+		return workflows.ParentResult{}, workflow.ErrHookConflict
+	}
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
 		return workflows.ParentResult{}, err
 	}
-	value, err := hook.Await(ctx)
+	value, err := hook.Next(ctx)
 	return workflows.ParentResult{Value: value}, err
 }
 

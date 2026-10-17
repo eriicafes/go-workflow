@@ -44,7 +44,7 @@ workers, and can outlive its parent.
 ### Waiting for a child
 
 In workflow context, `Run` methods read or change the run once in an inline
-step and replay returns the recorded result, so they never wait. `Run.Await` returns
+step and replay returns the recorded result, so they never wait. `Run.Value` returns
 `workflow.ErrRunNotFinished` for a child that had not finished.
 
 To wait for a child, pass it a hook token and have it resume the hook when it
@@ -56,12 +56,18 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if err != nil {
 		return workflows.ParentResult{}, err
 	}
+	if owner, err := hook.GetConflict(ctx); err != nil {
+		return workflows.ParentResult{}, err
+	} else if owner != nil {
+		return workflows.ParentResult{}, workflow.ErrHookConflict
+	}
 
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
 		return workflows.ParentResult{}, err
 	}
 
-	value, err := hook.Await(ctx)
+	defer hook.Dispose(ctx)
+	value, err := hook.Next(ctx)
 	return workflows.ParentResult{Value: value}, err
 }
 
@@ -90,25 +96,36 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 ### Fan-out to child runs
 
 ```go
-hooks := make([]workflow.Promise[string], len(input.Items))
+hooks := make([]*workflow.Hook[string], len(input.Items))
 for i, item := range input.Items {
-	hook, err := workflow.CreateHook[string](ctx)
-	if err != nil {
-		return Result{}, err
-	}
-
-	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {
-		return Result{}, err
-	}
-
-	hooks[i] = hook
+    hook, err := workflow.CreateHook[string](ctx)
+    if err != nil {
+        return Output{}, err
+    }
+    defer hook.Dispose(ctx)
+    if owner, err := hook.GetConflict(ctx); err != nil {
+        return Output{}, err
+    } else if owner != nil {
+        return Output{}, workflow.ErrHookConflict
+    }
+    if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {
+        return Output{}, err
+    }
+    hooks[i] = hook
 }
-values, err := workflow.Join(ctx, hooks...)
+values := make([]string, len(hooks))
+for i, hook := range hooks {
+    value, err := hook.Next(ctx)
+    if err != nil {
+        return Output{}, err
+    }
+    values[i] = value
+}
 ```
 
 ### Cancelling a child
 
-A `Run` implements `Promise`, and cancelling it cancels the child run:
+A `Run` has its own `Cancel` method. Calling it in workflow context records a durable inline step. A cancelled run stops new work and lets admitted steps finish naturally:
 
 ```go
 child, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()})
@@ -121,3 +138,15 @@ if err := child.Cancel(ctx); err != nil {
 	return Result{}, err
 }
 ```
+
+A child run has an independent lifetime, even when `Start` receives a cancelled context. Check the cancellation context and call `Cancel` explicitly when the child should stop:
+
+```go
+if cancelCtx.Err() != nil {
+    if err := child.Cancel(ctx); err != nil {
+        return Result{}, err
+    }
+}
+```
+
+This check runs when the workflow reaches it; it does not watch for future cancellation. Steps and timers observe a cancellation context passed to them. The base context and cancellation sources for `CancelAny` are explicit; no context values are merged.

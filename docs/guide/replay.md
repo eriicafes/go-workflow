@@ -66,20 +66,17 @@ that the runner reaches a matching operation there.
 
 Replay walks the event log in order, and a result (a step finishing, a timer
 firing, a hook receiving its payload) becomes visible to the runner only once
-the walk has passed it. The walk advances only where the runner waits: `Await`,
-`Join`, and the `Select` functions. So:
+the walk has passed it. The walk advances only where the runner waits: `Value`, `Next`,
+`Join`, `JoinOk`, and the `Select` functions. So:
 
-- **`Done` is the same on every replay.** It reports what the walk has
-  delivered so far. A result recorded after the runner checked `Done` stays
-  invisible at that point on later replays too, so a branch taken on `Done`
-  is taken again.
 - **`Select` picks the first promise to settle.** When several promises have
   settled, the one whose result was recorded first wins, not the first in
   argument order. Every replay picks the same winner.
 - **Timers fire where they are declared.** A flow that replays past a timer's
-  declaration once it is due records its `wait_completed`, or cancels the run
-  for a due `Timeout`. The runner sees it when the walk reaches it, like any
-  other result.
+  declaration once it is due records its `wait_completed`. The runner sees it
+  when the walk reaches it, like any other result. `WithTimeout` and
+  `WithDeadline` attach a `Then` continuation that cancels their context when
+  the timer settles.
 
 Inline steps (`InlineStep`, `Now`, and the `Run` methods in workflow context)
 and hook conflicts are the exception: the runner sees them where it declares
@@ -113,7 +110,7 @@ delivery. Compensations registered with `OnRollback` do **not** run,
 because they would replay against the same log.
 
 ```go
-_, err := run.Await(ctx)
+_, err := run.Value(ctx)
 if errors.Is(err, worlds.ErrCorruptedEventLog) {
 	log.Printf("run diverged from its event log: %v", err)
 }
@@ -193,7 +190,7 @@ How it works:
   `worlds.ErrDeploymentMismatch`.
 
 ```go
-_, err := run.Await(ctx)
+_, err := run.Value(ctx)
 if errors.Is(err, worlds.ErrDeploymentMismatch) {
 	// The run's deployment was deleted, or its deliveries could not reach it.
 }

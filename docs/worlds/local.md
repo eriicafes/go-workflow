@@ -74,7 +74,7 @@ runs/<run>.json                            run view + eventCount (commit point)
 events/<run>/<eventID>.json                one file per event; IDs are slot-padded
 steps/<run>/<step>.json                    step views
 hooks/<hook>.json                          hook views
-tokens/<token>.json                        {hookId, retainUntil}: token ownership
+tokens/<token>.json                        {hookId, tokenRetentionUntil}: token ownership
 streams/<run>/<name>/meta.json             {name, closed, session, sequence, count}
 streams/<run>/<name>/<%010d>.json          one file per chunk
 queue/<messageID>.json                     durable delivery (ULID IDs)
@@ -128,3 +128,5 @@ notification instead of polling.
 The current format is version 2. `Prepare` rejects directories written by older
 versions and any non-empty directory without `version.json`. Remove the
 directory to start over.
+
+Forced hook takeover across runs first records a `hook-handoff.json` write-ahead decision. Recovery completes both sides before serving reads, including a crash between their commit points. Same-run takeover uses one run commit.

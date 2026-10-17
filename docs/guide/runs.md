@@ -68,8 +68,7 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | Method | Description |
 | --- | --- |
 | `ID()` | Run ID. |
-| `Await(ctx)` | Output once the run finishes. Blocks outside a run until it finishes or `ctx` is done. |
-| `Done(ctx)` | Whether the run has finished (completed, failed, or cancelled), without blocking. It does not return the run's error. |
+| `Value(ctx)` | Output once the run finishes. Blocks outside a run until it finishes or `ctx` is done. |
 | `Status(ctx)` | Current `Status`. |
 | `Exists(ctx)` | Whether the run is recorded in its World. |
 | `WorkflowName(ctx)` | Name of the workflow the run executes. |
@@ -78,9 +77,8 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | `Reader(ctx, ...ReaderOption)` | Reads a stream from the start; see [Streams](/guide/streams). |
 | `ReaderAt(ctx, offset, ...ReaderOption)` | Reads a stream from an offset. |
 | `Writer(ctx, ...WriterOption)` | Writes a stream from outside the run. |
-| `Unwrap(ctx)` | `Await`, panicking on error. |
 
-`Await` returns a failed run's error as a
+`Value` returns a failed run's error as a
 [`*workflow.Error`](/guide/errors) and a cancelled run's as
 `workflow.ErrRunCancelled`. `Status` and `WorkflowName` return
 `worlds.ErrRunNotFound` for a missing run.
@@ -95,13 +93,13 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | `workflow.StatusFailed` | Finished with an error. |
 | `workflow.StatusCancelled` | Cancelled before it finished. |
 
-Steps use the same statuses.
+Steps use pending, running, completed, and failed statuses; cancellation is a fatal step failure.
 
 ### In workflow context
 
-Inside a runner, `Status`, `Exists`, `WorkflowName`, `Done`, `Await`, `Cancel`,
+Inside a runner, `Status`, `Exists`, `WorkflowName`, `Value`, `Cancel`,
 and `WakeUp` each run once as an [inline step](/guide/steps#inline-steps), and
-replay returns the recorded result. They never wait: `Await` returns
+replay returns the recorded result. They never wait: `Value` returns
 `workflow.ErrRunNotFinished` for a run that hadn't finished. `WakeUp` records
 which waits it will wake before waking them, so a retry never wakes a timer the
 other run created later. `Reader`, `ReaderAt`, and `Writer` are I/O and return
@@ -122,3 +120,5 @@ analytics. See the [`worlds` reference](/reference/worlds#client).
 client := workflow.NewClient(world)
 page, err := client.RunsList(ctx, worlds.RunsListInput{})
 ```
+
+`Run` exposes `Status` for readiness and is not a promise. Its lifetime is independent of managed context cancellation; call `Run.Cancel` explicitly to cancel it. In workflow context, its methods record inline steps without inheriting managed context cancellation. Cancelling a run prevents new work and permits running steps to finish and record their outcomes. It does not cancel their contexts. Managed cancellation contexts passed explicitly to steps control cooperative step cancellation.

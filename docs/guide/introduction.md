@@ -41,8 +41,8 @@ these rules. [How Replay Works](/guide/replay) explains the model in detail.
 - **Steps** with automatic retries, fatal and delayed-retry errors, and stable
   idempotency keys.
 - **Concurrency** with promises: `Background`, `Map`, `All`, `Join`,
-  `JoinSettled`, and the `Select` family.
-- **Durable time**: `Sleep`, `Timer`, and `Timeout` that hold no process, so
+  `JoinOk`, and the `Select` family.
+- **Durable time**: `Sleep`, `Timer`, `WithTimeout`, and `WithDeadline` that hold no process, so
   waiting for days or weeks is fine.
 - **Hooks and webhooks** that suspend a run until an external event or HTTP
   request resumes it with a typed payload.

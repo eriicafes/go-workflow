@@ -29,7 +29,7 @@ package.
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
 flow; with `StepID` set it executes that step. A delivery for a terminal run or
 step returns nil without running code. A non-nil error means the delivery
-should be retried. `Execute` removes any Client put in the context with
+should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
 `NewClientContext`, so a run never uses a Client it inherited.
 
 A replay that diverges from the event log ends the delivery with an error
@@ -50,7 +50,7 @@ the same write share that follow-up. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
 A storage error while declaring a step, timer, or hook, or while cancelling a
-promise or hook, ends the delivery so the queue retries it, instead of reaching
+context or disposing a hook, ends the delivery so the queue retries it, instead of reaching
 runner code.
 
 When a flow replays past a step's declaration, it queues the step's delivery
@@ -68,7 +68,8 @@ at-least-once contract already allows. The Workflow SDK re-ensures pending
 steps on replay the same way.
 
 Timers settle the same way: a flow that replays past a timer's declaration
-once it is due completes it, or, for a due `Timeout`, cancels the run.
+once it is due completes it. `WithTimeout` and `WithDeadline` use normal timers
+and continuations to cancel contexts; timer events carry no run cancellation flag.
 
 ## World
 
@@ -114,11 +115,10 @@ World reports affinity.
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
-| `EventsCreate` | Appends one event, enforcing transition rules. Repeats return the earlier event. |
+| `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
 | `EventsCreateBatch` | Appends events atomically; none if any is rejected. |
 | `EventsGet`, `EventsList`, `EventsListByCorrelationID` | Read the event log. |
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
-| `HooksClaim` | Atomically claims a token and appends `hook_created`, optionally forcing. |
 
 **In-band fence.** An append whose `EventsCreateOptions.InBandCount` (or
 `EventsCreateBatchInput.InBandCount`) is set is an in-band write by the run's
@@ -128,6 +128,8 @@ count, advances the count by the events appended, and returns it as
 `ErrInBandSuperseded`. Appends without a count are out-of-band: never refused,
 and they leave the count alone. See
 [Concurrent flows](/guide/replay#concurrent-flows).
+
+Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. `MinRetention` is measured from creation; explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt; step metadata describes the current attempt.
 
 Lists take `Pagination{Cursor, Limit, SortOrder}` and return
 `Page[T]{Data, Cursor, HasMore}`. `ResolveData` selects whether payloads
@@ -174,12 +176,15 @@ type Hook struct {
 	Token           string
 	Metadata        []byte
 	Webhook         *Webhook // set for webhooks
-	ReceivedEventID EventID
+	WebhookEventID  EventID
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	ReceivedAt      *time.Time
 	MinRetention    time.Duration
-	RetainUntil     *time.Time
+	TokenRetentionUntil *time.Time
+	ClaimedFrom     *HookForceClaim
+	ForceClaimedBy  *HookForceClaim
+	DisposedAt      *time.Time
 }
 ```
 
@@ -243,7 +248,7 @@ methods are shared with the World:
 | `StepsGet`, `StepsList` | Read steps. |
 | `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
 | `StreamsCreateWriteSession` | Open an exclusive writer session. |
-| `HooksGetByToken` | Look up an active hook. |
+| `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID or active token. |
 | `Analytics` | As on World. |
 
 The rest are the Client's own:
@@ -254,7 +259,7 @@ The rest are the Client's own:
 | `RunsCancel` | Cancels a run; `ErrRunTerminal` if finished. |
 | `RunsWake` | Settles pending waits early. |
 | `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams without a session. |
-| `HooksResume` | Resumes the hook that owns a token. |
+| `HooksResume` | Resolves the token owner once, records a payload, and queues the run; ownership races reach the caller. |
 | `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
 
 ```go
@@ -289,26 +294,28 @@ See [HTTP Endpoints](/reference/http).
 
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced
-integrations. Each takes the runner's next position itself, with
-`Execution.NextPosition`, so callers declare operations in order without passing
-positions.
+integrations. Operations normally take the runner's next position with
+`Execution.NextPosition`. Lazy hooks reserve their position through
+`Execution.RegisterHook` and pass it to `DurableHook` when registration commits.
 
 | Function | Description |
 | --- | --- |
 | `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
 | `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
 | `DurableWait` | Declares a timer; with `Cancel` it cancels the run when it fires. |
-| `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. |
+| `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
 | `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
-| `Execution.Select` | Walk the log until one of several operations has settled, or the log ends; reports which. |
+| `Execution.RegisterHook` | Reserve a hook position and token, queuing registration for a workflow wait. |
+| `Execution.FlushHooks` | Commit pending registrations without waiting for payloads. |
+| `Execution.Advance` | Commit pending hooks, deliver the next recorded event, and run continuations; returns false at the end of the loaded log. |
 | `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued; other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
-| `Execution.ClaimHook` | Claim a hook's token and append `hook_created`, fenced and handled like `CreateEvent`. A forced claim also queues a delivery that wakes the displaced run on its deployment. `ErrHookConflict` reaches `mapError`. |
 | `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
 | `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |
 | `WakeRun` | Completes pending waits in log order and queues a delivery. |
 | `PendingWaits` | The IDs of a run's pending waits, in creation order. |
 | `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
 | `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
+| `NewRunHookToken` | Derives a stable token from a run and hook declaration position. |
 | `ExecutionFromContext` | The replay state of the current delivery. |
 
 ## Errors
@@ -321,7 +328,6 @@ positions.
 | `ErrRunTerminal` | Appending to or writing a stream of a finished run. |
 | `ErrRunCancelled` | The run was cancelled. |
 | `ErrStepNotFound` | No step has the ID. |
-| `ErrStepCancelled` | The step was cancelled. |
 | `ErrStepNotStartable` | Step transition not allowed. |
 | `ErrEventNotFound` | No event (or wait) has the ID. |
 | `ErrEventInvalid` | Malformed event, ID, or cursor, or an item over a backend limit. |
