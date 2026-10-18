@@ -166,7 +166,7 @@ func HTTPPrefix(world *World, prefix string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", worlds.HTTPHandler(world, prefix))
 	if world.config.QStash != nil {
-		mux.Handle("POST "+prefix+qstashRouteSuffix, qstashHandler(world))
+		mux.Handle("POST "+prefix+qstashRouteSuffix, QStash(world))
 	}
 	return mux
 }

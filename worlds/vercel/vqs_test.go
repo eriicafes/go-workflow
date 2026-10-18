@@ -306,7 +306,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 	due := time.Now().Add(time.Hour)
 	data, _ := json.Marshal(queueRecord{RunID: "wrun_1", NotBefore: &due, QStashMessageID: "msg_q"})
 	store.values["p:queue:01ID"] = string(data)
-	handler := HTTP(world)
+	handler := QStash(world)
 
 	body := []byte(`{"id":"01ID"}`)
 	request := httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(body)))

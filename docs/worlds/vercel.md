@@ -91,6 +91,8 @@ published them.
 - **`HTTPPrefix(world, prefix)`**: the same routes, including the QStash
   callback, under `prefix`.
 - **`RPC(world)`** and **`Webhook(world)`**: each endpoint alone.
+- **`QStash(world)`**: the signed timer callback alone. Requires `Config.QStash`;
+  mount it at `POST <Config.BaseURL>/callbacks/qstash`.
 
 ## Long timers with QStash
 

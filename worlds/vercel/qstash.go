@@ -107,9 +107,10 @@ func qstashDestination(baseURL string) (string, error) {
 	return baseURL + qstashRouteSuffix, nil
 }
 
-// qstashHandler verifies a QStash delivery and moves the named queue record
+// QStash verifies a QStash delivery and moves the named queue record
 // onto Vercel Queues. A cancelled record is acknowledged without publishing.
-func qstashHandler(world *World) http.Handler {
+// Config.QStash must be set. Mount it at POST <Config.BaseURL>/callbacks/qstash.
+func QStash(world *World) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
 		body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 1<<20))

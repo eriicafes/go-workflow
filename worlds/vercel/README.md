@@ -12,8 +12,6 @@ than seven days.
 
 ## Entrypoints
 
-All are in `world.go`:
-
 - `vercelworld.Queue(world, runners)`: the Vercel Queues push consumer. It
   executes workflows and steps.
 - `vercelworld.HTTP(world)`: the RPC endpoint (`/v1/workflow/rpc`), token
@@ -23,6 +21,8 @@ All are in `world.go`:
   `Config.BaseURL` must end with the same prefix.
 - `vercelworld.RPC(world)` and `vercelworld.Webhook(world)`: the RPC or webhook
   endpoint alone, for callers that mount their own routes.
+- `vercelworld.QStash(world)`: the signed timer callback alone. Requires
+  `Config.QStash`; mount it at `POST <Config.BaseURL>/callbacks/qstash`.
 
 The basic example deploys `cmd/worker/vercel/queue` (consumer) and
 `cmd/worker/vercel/api` (HTTP). When the code that starts workflows has the

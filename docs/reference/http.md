@@ -10,8 +10,9 @@ It does not execute deliveries.
 | `<prefix>/webhooks/{token}` | `worlds.WebhookHandler` | webhook requests |
 
 The Vercel World adds `POST <prefix>/callbacks/qstash` when QStash is
-configured. Callback routes under `<prefix>/callbacks/` are where a World mounts
-endpoints specific to it.
+configured. `vercelworld.QStash(world)` exposes that callback separately.
+Callback routes under `<prefix>/callbacks/` are where a World mounts endpoints
+specific to it.
 
 ## RPC
 
