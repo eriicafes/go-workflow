@@ -30,7 +30,7 @@ type (
 // timer is due completes it. The timer settles when the walk reaches its
 // wait_completed, which Execution.Settled reports. When the operation recorded
 // at the position is not a timer, it ends the replay with a panic carrying a
-// *replayDivergenceError.
+// replayDivergenceError.
 func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitResult {
 	position := options.Execution.NextPosition()
 	creationIndex, exists := options.Execution.index[position]
@@ -59,7 +59,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeWaitCreated {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)}))
 	}
 	var data DataWaitCreated
 	if err := json.Unmarshal(event.Data, &data); err != nil {

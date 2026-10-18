@@ -238,7 +238,7 @@ func isSDKCall(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 }
 
 func isDurableOperation(pass *analysis.Pass, call *ast.CallExpr) bool {
-	for _, name := range []string{"Step", "InlineStep", "Background", "Map", "All", "OnRollback"} {
+	for _, name := range []string{"Step", "InlineStep", "Background", "Map", "All", "Rollback"} {
 		if isSDKCall(pass, call, name) {
 			return true
 		}

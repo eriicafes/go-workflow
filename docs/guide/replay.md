@@ -106,7 +106,7 @@ carries a count in `QueueInput.ReplayDivergenceCount`. After three recovery
 deliveries diverge too, the runtime fails the run with an error matching
 `worlds.ErrCorruptedEventLog`, whose message names the position and the
 mismatch. A step that diverges records a new attempt on each recovery
-delivery. Compensations registered with `OnRollback` do **not** run,
+delivery. Compensations registered with `Rollback` do **not** run,
 because they would replay against the same log.
 
 ```go

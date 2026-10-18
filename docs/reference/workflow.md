@@ -26,7 +26,7 @@ The **Context** column says where a function can be called:
 | `Map(ctx, fn, inputs) []*Result[Out]` | W | Starts one step per input. |
 | `All(ctx, fn, inputs) ([]Out, error)` | W | Collects values in input order. Cancels remaining steps on any failure. |
 | `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Records work in the flow delivery. See [Inline Steps](/guide/inline-steps). In step context calls `fn` directly. |
-| `OnRollback(ctx, fn func(context.Context, In) error, input, ...StepOptions) error` | W | Registers a compensation that runs if the run fails. |
+| `Rollback(ctx, fn func(context.Context, In) error, input, ...StepOptions)` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
 | `FatalError(err) error` | S | Wraps an error so the step fails without retrying. |
 | `RetryableError(err, after) error` | S | Wraps an error so the step retries no sooner than `after`. |
 | `StepID(ctx) string` | S | Stable step ID, usable as an idempotency key. |

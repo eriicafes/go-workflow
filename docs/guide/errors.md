@@ -95,8 +95,10 @@ func sendInvoice(ctx context.Context, invoice Invoice) (struct{}, error) {
 
 ## Failing a run
 
-A runner fails its run by returning an error. Before the run is marked failed,
-registered [rollbacks](/guide/rollbacks) run in reverse order. The run's error
+A runner fails its run by returning an error or panicking. Error panics preserve
+the original error; other panic values become `workflow: panic: <value>` errors.
+Before the run is marked failed, deferred [rollbacks](/guide/rollbacks) run in
+Go's defer order, with the last defer first. The run's error
 is recorded as a `*workflow.Error`, so callers can inspect it with `errors.Is`
 and `errors.As`:
 

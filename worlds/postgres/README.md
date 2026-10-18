@@ -7,19 +7,19 @@ many processes at once: API servers, workers, or both in one binary.
 
 ```go
 world, err := postgresworld.Open(ctx, postgresworld.Config{
-    BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
-    URL:     os.Getenv("DATABASE_URL"),
+	BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
+	URL:     os.Getenv("DATABASE_URL"),
 })
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
 defer world.Close()
 
 runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 go func() {
-    if err := postgresworld.Worker(ctx, world, runners); err != nil && !errors.Is(err, context.Canceled) {
-        log.Printf("workflow worker stopped: %v", err)
-    }
+	if err := postgresworld.Worker(ctx, world, runners); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("workflow worker stopped: %v", err)
+	}
 }()
 log.Fatal(http.ListenAndServe(":8081", postgresworld.HTTP(world)))
 ```

@@ -250,7 +250,11 @@ var ErrCardDeclined = errors.New("card declined")
 type LimitError struct{ Limit int }
 
 func (e *LimitError) Error() string { return fmt.Sprintf("over limit %d", e.Limit) }
+```
 
+Inspect the recorded error in the runner:
+
+```go
 _, err := workflow.Step(ctx, charge, order)
 var limit *LimitError
 switch {
@@ -263,17 +267,15 @@ case errors.As(err, &limit):
 
 ## Rollbacks
 
-Register a compensation after the work it reverses. If the run later fails, the
-registered compensations run as steps in reverse registration order.
+Defer a compensation after the work it reverses. If the run later fails, the
+compensations run as durable steps in Go's defer order, with the last defer first.
 
 ```go
 invoice, err := workflow.Step(ctx, createInvoice, input)
 if err != nil {
 	return Report{}, err
 }
-if err := workflow.OnRollback(ctx, voidInvoice, invoice.ID); err != nil {
-	return Report{}, err
-}
+defer workflow.Rollback(ctx, voidInvoice, invoice.ID)
 ```
 
 ## Streams

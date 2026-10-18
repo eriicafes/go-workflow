@@ -48,7 +48,7 @@ these rules. [How Replay Works](/guide/replay) explains the model in detail.
   request resumes it with a typed payload.
 - **Streams** of bytes that steps write and readers consume while the run is
   still going.
-- **Rollbacks**: compensations that run in reverse order when a run fails.
+- **Rollbacks**: deferred compensations that run in Go's defer order when a run fails.
 - **Typed errors** that survive replay, so `errors.Is` and `errors.As` work on a
   failed step or run.
 - **Child runs** and direct composition of runners.

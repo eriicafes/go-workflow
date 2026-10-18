@@ -40,14 +40,13 @@ type RPCError struct {
 	Message string `cbor:"message"`
 }
 
-// specVersionMismatchError is private because a client can only act on the
-// invalid_argument RPC response, and it is not a storage or runtime condition.
+// specVersionMismatchError reports incompatible RPC protocol versions.
 type specVersionMismatchError struct {
 	client int
 	server int
 }
 
-func (e *specVersionMismatchError) Error() string {
+func (e specVersionMismatchError) Error() string {
 	return fmt.Sprintf("workflow: RPC spec version does not match world: client=%d server=%d", e.client, e.server)
 }
 
@@ -91,7 +90,7 @@ func writeRPC(writer http.ResponseWriter, response RPCResponse) {
 
 func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.RawMessage, error) {
 	if request.SpecVersion != nil && *request.SpecVersion != world.SpecVersion() {
-		return nil, &specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
+		return nil, specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
 	}
 	switch request.Method {
 	case "world.deploymentId":
@@ -625,7 +624,7 @@ type (
 )
 
 func newRPCError(err error) *RPCError {
-	var specVersionMismatch *specVersionMismatchError
+	var specVersionMismatch specVersionMismatchError
 	code := "internal"
 	switch {
 	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrEventNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):

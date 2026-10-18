@@ -18,7 +18,6 @@ func writeProgress(ctx context.Context, count int) (struct{}, error) {
 	if err != nil {
 		return struct{}{}, err
 	}
-
 	defer release()
 
 	_, err = fmt.Fprintf(writer, "found %d sources\n", count)

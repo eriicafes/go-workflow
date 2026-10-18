@@ -98,8 +98,7 @@ func (w *Webhook[T]) Request(ctx context.Context) (*WebhookRequest[T], error) {
 	return &WebhookRequest[T]{Request: request, data: webhookRequestData{Request: *payload.Request, RunID: w.hook.executionState.Run().RunID, HookID: w.hook.id, WebhookEventID: w.hook.received, Manual: w.hook.webhook.Manual}}, nil
 }
 
-// Dispose deactivates the webhook endpoint as a durable inline step.
-// Errors panic so a deferred disposal failure reaches the workflow runtime.
+// Dispose durably deactivates the webhook endpoint and panics on failure.
 func (w *Webhook[T]) Dispose(ctx context.Context) {
 	w.hook.Dispose(ctx)
 }

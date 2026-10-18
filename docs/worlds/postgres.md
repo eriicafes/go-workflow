@@ -17,7 +17,6 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
-
 defer world.Close()
 
 runners := worlds.Runners(workflow.Use(flows.GenerateReport))

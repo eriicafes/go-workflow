@@ -35,26 +35,24 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 	return execution, ok && execution != nil
 }
 
-// Execution is the replay state of one delivery. It holds the run, the events
-// loaded for it, and the step the delivery executes, if any. The Durable*
-// functions read recorded results from it instead of reading storage for each
-// operation the runner replays, and add the events they append to it.
-//
-// Operations are matched to their declarations by position. Their results are
-// delivered in log order: the replay walks the event log, and a result is
-// visible only once the walk has passed it. The walk advances only where the
-// runner waits, so what the runner can observe between two waits, and which of
-// several promises settles first, is the same on every replay.
+// Execution holds a delivery's run, event log, and target step. Durable operations
+// match declarations by position and read recorded outcomes. Results become
+// visible as Advance walks the event log.
 type Execution struct {
-	world     World
-	ctx       context.Context
-	run       Run
-	events    []Event
-	index     map[int]int
-	target    *StepID
-	result    *DataStepResult
+	world  World
+	ctx    context.Context
+	run    Run
+	events []Event
+	// target identifies the step this delivery executes; nil marks a flow delivery.
+	target *StepID
+	// result holds the target step's outcome for the runtime to persist.
+	result *DataStepResult
+	// index maps declaration positions to indexes in events.
+	index map[int]int
+	// rollbacks holds compensations in registration order.
 	rollbacks []func(context.Context, *Execution) error
-	next      int
+	// next is the next declaration position to reserve.
+	next int
 	// horizon is the number of events the walk has passed. A result at a
 	// smaller index is visible to the runner.
 	horizon int
@@ -63,9 +61,11 @@ type Execution struct {
 	settles map[string]int
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
-	inBand        int
+	inBand int
+	// continuations holds callbacks that react as replay delivers events.
 	continuations []func()
-	prematureExit bool
+	// suspended marks a runtime exit before the workflow body finishes.
+	suspended bool
 }
 
 func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) *Execution {
@@ -74,9 +74,9 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 		ctx:     ctx,
 		run:     run,
 		events:  events,
+		target:  target,
 		index:   make(map[int]int),
 		settles: make(map[string]int),
-		target:  target,
 		inBand:  run.InBandCount,
 	}
 	for index, event := range events {
@@ -119,16 +119,6 @@ func (e *Execution) World() World {
 // workflow cancellation context. Internal control steps use it to record outcomes.
 func (e *Execution) Context() context.Context {
 	return context.WithValue(e.ctx, executionContextKey{}, e)
-}
-
-// IsPrematureExit reports whether runtime control flow is ending this delivery
-// before the workflow body has finished. Deferred cleanup should be
-// skipped in that case.
-func (e *Execution) IsPrematureExit() bool { return e.prematureExit }
-
-func (e *Execution) exit(cause error) error {
-	e.prematureExit = true
-	return cause
 }
 
 // Run returns the run as loaded at the start of the delivery.
@@ -231,16 +221,23 @@ func (e *Execution) DeliveredEventID() EventID {
 	return e.events[e.horizon-1].EventID
 }
 
-// Suspend ends the current replay so the run suspends until a later delivery.
-// It panics with a value the Runtime recovers and does not return. It is for
-// operations that await a promise that is not ready, not for runner code.
+// exit marks replay as suspended and returns cause for the caller to panic with.
+func (e *Execution) exit(cause error) error {
+	e.suspended = true
+	return cause
+}
+
+// Suspend marks replay as suspended and panics to return control to the runtime.
 func (e *Execution) Suspend() {
 	panic(e.exit(errReplaySuspended))
 }
 
-// AddRollback registers fn to run when this delivery fails the run, or fails
-// the step it executes. Registered functions run in reverse order. They are
-// not recorded, so the runner registers them again on each replay.
+// IsSuspended reports whether the runtime stopped this replay before
+// the workflow body finished. Deferred cleanup should be skipped.
+func (e *Execution) IsSuspended() bool { return e.suspended }
+
+// AddRollback registers fn for workflow failure. Callbacks run in registration
+// order, and registrations are rebuilt on every replay.
 func (e *Execution) AddRollback(fn func(context.Context, *Execution) error) {
 	e.rollbacks = append(e.rollbacks, fn)
 }

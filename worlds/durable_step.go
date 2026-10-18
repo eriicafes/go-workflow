@@ -49,7 +49,7 @@ type (
 // ends the replay with a panic the Runtime recovers, so it does not return.
 // fn is executed at least once. When the operation recorded at the position is
 // not a step with options.Name, it ends the replay with a panic carrying a
-// *replayDivergenceError.
+// replayDivergenceError.
 func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
 	position := options.Execution.NextPosition()
 	creationIndex, exists := options.Execution.index[position]
@@ -79,14 +79,14 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
 	var createdData DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode step: %w", err)}
 	}
 	if createdData.StepName != options.Name {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
 	}
 	stepID := StepID(event.CorrelationID)
 
@@ -132,7 +132,20 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
 	stepCtx, stop := StepCancelContext(ctx, options.Execution, createdData.Cancellation)
 	defer stop()
-	value, callErr := fn(stepCtx, input)
+	value, callErr := func() (value Out, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if options.Execution.IsSuspended() {
+					panic(recovered)
+				}
+				var ok bool
+				if err, ok = recovered.(error); !ok {
+					err = fmt.Errorf("workflow: panic: %v", recovered)
+				}
+			}
+		}()
+		return fn(stepCtx, input)
+	}()
 	if stepCtx.Err() != nil && options.Execution.ctx.Err() == nil {
 		callErr = FatalError{Cause: context.Canceled}
 	}
@@ -178,7 +191,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 	if !exists {
 		// First execution persists the declaration and calls fn.
 		if options.Execution.target != nil {
-			options.Execution.Suspend()
+			panic(options.Execution.exit(errReplaySuspended))
 		}
 		stepID := NewStepID()
 		encoded, err := json.Marshal(input)
@@ -196,14 +209,14 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 	// Replay the declaration at this logical workflow position.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
 	var createdData DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode inline step: %w", err)}
 	}
 	if createdData.StepName != options.Name {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
 	}
 	stepID := StepID(event.CorrelationID)
 
@@ -241,13 +254,13 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 		}
 	}
 	if options.Execution.target != nil {
-		options.Execution.Suspend()
+		panic(options.Execution.exit(errReplaySuspended))
 	}
 	// A replay can reach the step before its retry is due, such as one
 	// queued by a hook payload, and leaves the retry to the flow queued for
 	// it.
 	if retryAfter != nil && time.Now().Before(*retryAfter) {
-		options.Execution.Suspend()
+		panic(options.Execution.exit(errReplaySuspended))
 	}
 
 	// Later attempts always use the input captured by step_created.
@@ -264,7 +277,20 @@ func inlineStepAttempt[In, Out any](ctx context.Context, options DurableInlineSt
 	stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
 	cancelCtx, stop := StepCancelContext(stepCtx, options.Execution, CancellationReferences(ctx))
 	defer stop()
-	value, callErr := fn(cancelCtx, input)
+	value, callErr := func() (value Out, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if options.Execution.IsSuspended() {
+					panic(recovered)
+				}
+				var ok bool
+				if err, ok = recovered.(error); !ok {
+					err = fmt.Errorf("workflow: panic: %v", recovered)
+				}
+			}
+		}()
+		return fn(cancelCtx, input)
+	}()
 	if cancelCtx.Err() != nil && options.Execution.ctx.Err() == nil {
 		callErr = FatalError{Cause: context.Canceled}
 	}
@@ -290,7 +316,7 @@ func inlineStepAttempt[In, Out any](ctx context.Context, options DurableInlineSt
 		// and starts another attempt.
 		options.Execution.queue(QueueInput{NotBefore: retryAfter, IdempotencyKey: fmt.Sprintf("retry:%s:%d", stepID, attempt)})
 		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeStepRetrying, CorrelationID: string(stepID), Data: data}, nil)
-		options.Execution.Suspend()
+		panic(options.Execution.exit(errReplaySuspended))
 	}
 	return inlineStepFail[Out](options.Execution, stepID, callErr)
 }

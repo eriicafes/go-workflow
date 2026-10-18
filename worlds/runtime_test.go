@@ -40,6 +40,103 @@ func TestRuntimeMarksRunsWithUnknownWorkflowsAsFailed(t *testing.T) {
 	t.Fatal("unknown workflow did not fail")
 }
 
+type compensationFailureWorld struct {
+	*testworld.World
+	eventType worlds.EventType
+	cause     error
+	queue     bool
+	terminal  bool
+	armed     bool
+}
+
+func (w *compensationFailureWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if w.armed && input.Event.EventType == w.eventType {
+		w.armed = false
+		if !w.terminal {
+			return worlds.EventResult{}, w.cause
+		}
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
+	return w.World.EventsCreate(ctx, input)
+}
+
+func (w *compensationFailureWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	if w.armed && w.queue && input.StepID != nil {
+		w.armed = false
+		return worlds.QueueResult{}, w.cause
+	}
+	return w.World.Queue(ctx, input)
+}
+
+func TestCompensationDeliveryErrors(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		step     bool
+		queue    bool
+		terminal bool
+	}{
+		{name: "flow storage"},
+		{name: "flow queue", queue: true},
+		{name: "flow terminal", terminal: true},
+		{name: "step storage", step: true},
+		{name: "step terminal", step: true, terminal: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			base := testworld.NewManual()
+			defer base.Close()
+			cause := errors.New("compensation delivery unavailable")
+			world := &compensationFailureWorld{World: base, cause: cause, queue: scenario.queue, terminal: scenario.terminal}
+			world.eventType = worlds.EventTypeStepCreated
+			if scenario.step {
+				world.eventType = worlds.EventTypeAttrSet
+			}
+			failure := errors.New("workflow failure")
+			runner := workflow.Use(func(ctx context.Context, _ versionedInput) (versionedOutput, error) {
+				defer workflow.Rollback(ctx, func(ctx context.Context, _ struct{}) error {
+					execution, _ := worlds.ExecutionFromContext(ctx)
+					execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, Data: []byte(`{"changes":[]}`)}, nil)
+					return nil
+				}, struct{}{})
+				return versionedOutput{}, failure
+			})
+			runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, versionedInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.step {
+				deliverNext(t, ctx, base, runtime)
+			}
+			world.armed = true
+			message := base.QueuedMessages()[0]
+			err = runtime.Execute(ctx, message.Input)
+			if world.armed {
+				t.Fatal("compensation did not reach the injected failure")
+			}
+			if scenario.terminal {
+				if err != nil {
+					t.Fatalf("terminal delivery error = %v", err)
+				}
+				if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {
+					t.Fatalf("status = %v, error = %v", status, err)
+				}
+				return
+			}
+			if err != cause {
+				t.Fatalf("delivery error = %T %v, want the underlying cause", err, err)
+			}
+			drain(t, ctx, base, runtime)
+			if _, err := run.Value(ctx); !errors.Is(err, failure) {
+				t.Fatalf("workflow error = %v", err)
+			}
+		})
+	}
+}
+
 type versionedInput struct{}
 type versionedOutput struct{ Version string }
 
@@ -82,9 +179,7 @@ func alphaThenBeta(ctx context.Context, _ versionedInput) (versionedOutput, erro
 // betaSwallowingErrors replaces alpha with beta and ignores step errors, so a
 // divergence returned to runner code would complete the run with wrong state.
 func betaSwallowingErrors(ctx context.Context, _ versionedInput) (versionedOutput, error) {
-	if err := workflow.OnRollback(ctx, undo, struct{}{}); err != nil {
-		return versionedOutput{}, err
-	}
+	defer workflow.Rollback(ctx, undo, struct{}{})
 
 	_, _ = workflow.Step(ctx, beta, struct{}{})
 	return versionedOutput{Version: "v2"}, nil

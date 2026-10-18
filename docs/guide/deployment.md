@@ -22,7 +22,6 @@ world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
 	log.Fatal(err)
 }
-
 defer world.Close()
 
 if err := world.Prepare(ctx); err != nil {
@@ -47,7 +46,6 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
-
 defer world.Close()
 
 runners := worlds.Runners(
@@ -98,7 +96,6 @@ world, err := postgresworld.Open(ctx, postgresworld.Config{
 if err != nil {
 	log.Fatal(err)
 }
-
 defer world.Close()
 
 mux := http.NewServeMux()

@@ -18,7 +18,6 @@ world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
 	return err
 }
-
 defer world.Close()
 
 if err := world.Prepare(ctx); err != nil {

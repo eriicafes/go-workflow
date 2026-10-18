@@ -86,7 +86,6 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	defer rows.Close()
 
 	var sources []string

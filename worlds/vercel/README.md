@@ -32,10 +32,10 @@ World in process, pass it to `workflow.NewContext`; no HTTP function is needed.
 
 ```go
 world, err := vercelworld.New(vercelworld.Config{
-    BaseURL:  os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
-    RedisURL: os.Getenv("REDIS_URL"),         // rediss://default:password@host:6379
-    QueueURL: os.Getenv("VERCEL_QUEUE_URL"),  // https://iad1.vercel-queue.com/api/v3
-    Topic:    os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+	BaseURL:  os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
+	RedisURL: os.Getenv("REDIS_URL"),         // rediss://default:password@host:6379
+	QueueURL: os.Getenv("VERCEL_QUEUE_URL"),  // https://iad1.vercel-queue.com/api/v3
+	Topic:    os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
 })
 ```
 
@@ -161,11 +161,13 @@ The consumer handles each delivery as follows:
 ### Long timers with QStash
 
 ```go
-QStash: &vercelworld.QStashConfig{
-    Token:             os.Getenv("QSTASH_TOKEN"),
-    CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
-    NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
-},
+config := vercelworld.Config{
+	QStash: &vercelworld.QStashConfig{
+		Token:             os.Getenv("QSTASH_TOKEN"),
+		CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
+		NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
+	},
+}
 ```
 
 The timer is published to `<BaseURL>/callbacks/qstash` with

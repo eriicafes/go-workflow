@@ -128,14 +128,13 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}] {
 	}
 }
 
-// OnRollback registers fn with input as a compensation step that runs if the
-// run later fails. Compensations run in reverse registration order before
-// the run is marked failed, and retry according to options like other steps. It
-// returns ErrNoWorkflow when ctx does not belong to a run.
-func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions) error {
+// Rollback registers fn with input as a durable compensation for workflow failure.
+// Defer it after the work it reverses. Compensations run in registration order
+// and retry according to options. It panics with ErrNoWorkflow outside workflow context.
+func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
-		return ErrNoWorkflow
+		panic(ErrNoWorkflow)
 	}
 	option := stepOptions(options)
 	execution.AddRollback(func(ctx context.Context, execution *worlds.Execution) error {
@@ -145,7 +144,7 @@ func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error,
 			MaxRetries: option.MaxRetries,
 			Rollback:   true,
 		}, func(ctx context.Context, value In) (struct{}, error) {
-			return struct{}{}, fn(ctx, input)
+			return struct{}{}, fn(ctx, value)
 		}, input)
 		if result.Err != nil {
 			return result.Err
@@ -159,7 +158,6 @@ func OnRollback[In any](ctx context.Context, fn func(context.Context, In) error,
 			},
 		})
 	})
-	return nil
 }
 
 // Now returns the current time in UTC, recorded the first time it runs so that

@@ -306,6 +306,7 @@ to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
 | `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
 | `Execution.Advance` | Deliver the next recorded event and run continuations. Returns false at the end of the loaded log. |
+| `Execution.IsSuspended` | Whether the runtime stopped replay before the workflow body finished. Deferred cleanup skips work in this case. |
 | `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
 | `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
 | `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |

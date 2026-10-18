@@ -169,26 +169,22 @@ func TestJoinAndJoinOkBubbleWorkflowContextErrors(t *testing.T) {
 	}
 }
 
-func TestOnRollbackRunsInReverseRegistrationOrder(t *testing.T) {
+func TestRollbackRunsInDeferOrder(t *testing.T) {
 	var calls []string
 	var mutex sync.Mutex
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(_ context.Context, value string) error {
+		defer workflow.Rollback(ctx, func(_ context.Context, value string) error {
 			mutex.Lock()
 			calls = append(calls, value)
 			mutex.Unlock()
 			return nil
-		}, "first"); err != nil {
-			return rollbackOutput{}, err
-		}
-		if err := workflow.OnRollback(ctx, func(_ context.Context, value string) error {
+		}, "first")
+		defer workflow.Rollback(ctx, func(_ context.Context, value string) error {
 			mutex.Lock()
 			calls = append(calls, value)
 			mutex.Unlock()
 			return nil
-		}, "second"); err != nil {
-			return rollbackOutput{}, err
-		}
+		}, "second")
 		return rollbackOutput{}, errors.New("primary failure")
 	}))
 	defer world.Close()
@@ -208,18 +204,16 @@ func TestOnRollbackRunsInReverseRegistrationOrder(t *testing.T) {
 	}
 }
 
-func TestOnRollbackRunsAfterPriorDurableStep(t *testing.T) {
+func TestRollbackRunsAfterPriorDurableStep(t *testing.T) {
 	var calls atomic.Int32
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
 		if _, err := workflow.Step(ctx, increment, 1); err != nil {
 			return rollbackOutput{}, err
 		}
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
+		defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
 			calls.Add(1)
 			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
+		}, struct{}{})
 		return rollbackOutput{}, errors.New("primary failure")
 	}))
 	defer world.Close()
@@ -237,15 +231,146 @@ func TestOnRollbackRunsAfterPriorDurableStep(t *testing.T) {
 	}
 }
 
-func TestOnRollbackDoesNotRunAfterSuccess(t *testing.T) {
+func TestRollbackDirectCallsRegisterWithoutExecuting(t *testing.T) {
+	var calls []string
+	var mutex sync.Mutex
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
+		calledEarly := false
+		workflow.Rollback(ctx, func(context.Context, struct{}) error {
+			calledEarly = true
+			mutex.Lock()
+			calls = append(calls, "first")
+			mutex.Unlock()
+			return nil
+		}, struct{}{})
+		workflow.Rollback(ctx, func(context.Context, struct{}) error {
+			calledEarly = true
+			mutex.Lock()
+			calls = append(calls, "second")
+			mutex.Unlock()
+			return nil
+		}, struct{}{})
+		if calledEarly {
+			return rollbackOutput{}, errors.New("registration executed compensation")
+		}
+		return rollbackOutput{}, errors.New("primary failure")
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, rollbackInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+		t.Fatalf("failure = %v", err)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if !slices.Equal(calls, []string{"first", "second"}) {
+		t.Fatalf("rollback calls = %#v", calls)
+	}
+}
+
+func TestRollbackRunsOnApplicationPanics(t *testing.T) {
+	for _, stringPanic := range []bool{false, true} {
+		t.Run(fmt.Sprint(stringPanic), func(t *testing.T) {
+			var calls atomic.Int32
+			failure := errors.New("application panic")
+			world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
+				defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
+					calls.Add(1)
+					return nil
+				}, struct{}{})
+				if stringPanic {
+					panic("application panic")
+				}
+				panic(failure)
+			}))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, rollbackInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = run.Value(ctx)
+			if stringPanic {
+				if err == nil || err.Error() != "workflow: panic: application panic" {
+					t.Fatalf("panic error=%v", err)
+				}
+			} else if !errors.Is(err, failure) {
+				t.Fatalf("panic error=%v", err)
+			}
+			if calls.Load() == 0 {
+				t.Fatal("application panic did not run compensation")
+			}
+		})
+	}
+}
+
+func TestHandledStepPanicsDoNotRunRollbacks(t *testing.T) {
+	for _, inline := range []bool{false, true} {
+		t.Run(fmt.Sprint(inline), func(t *testing.T) {
+			var calls atomic.Int32
+			world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
+				defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
+					calls.Add(1)
+					return nil
+				}, struct{}{})
+				var err error
+				if inline {
+					_, err = workflow.InlineStep(ctx, func(context.Context, struct{}) (struct{}, error) {
+						panic("step panic")
+					}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+				} else {
+					_, err = workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+						panic("step panic")
+					}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+				}
+				if err == nil || err.Error() != "workflow: panic: step panic" {
+					return rollbackOutput{}, fmt.Errorf("step panic error=%v", err)
+				}
+				return rollbackOutput{}, nil
+			}))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, rollbackInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run.Value(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("handled step panic ran compensation")
+			}
+			steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+			if err != nil || len(steps.Data) != 1 || steps.Data[0].Status != worlds.StatusFailed {
+				t.Fatalf("panic step=%#v error=%v", steps, err)
+			}
+		})
+	}
+}
+
+func TestRollbackPanicsOutsideWorkflowContext(t *testing.T) {
+	defer func() {
+		err, ok := recover().(error)
+		if !ok || !errors.Is(err, workflow.ErrNoWorkflow) {
+			t.Fatalf("Rollback panic=%v", err)
+		}
+	}()
+	workflow.Rollback(context.Background(), func(context.Context, struct{}) error { return nil }, struct{}{})
+}
+
+func TestRollbackDoesNotRunAfterSuccess(t *testing.T) {
 	var calls atomic.Int32
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
+		defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
 			calls.Add(1)
 			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
+		}, struct{}{})
 		return rollbackOutput{}, nil
 	}))
 	defer world.Close()
@@ -263,47 +388,68 @@ func TestOnRollbackDoesNotRunAfterSuccess(t *testing.T) {
 	}
 }
 
-func TestOnRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
-			return errors.New("rollback failure")
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
-		return rollbackOutput{}, errors.New("primary failure")
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, rollbackInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
-		t.Fatalf("failure = %v", err)
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rollbackLogged := false
-	stepFailed := false
-	for _, event := range events.Data {
-		var created worlds.DataStepCreated
-		if event.EventType == worlds.EventTypeStepCreated && json.Unmarshal(event.Data, &created) == nil && created.Rollback {
-			rollbackLogged = true
-		}
-		var result worlds.DataStepResult
-		if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeError(result.Error).Error() == "rollback failure" {
-			stepFailed = true
-		}
-	}
-	if !rollbackLogged || !stepFailed {
-		t.Fatalf("rollback events were not recorded: %#v", events.Data)
+func TestRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
+	for _, mode := range []string{"return", "error panic", "string panic"} {
+		t.Run(mode, func(t *testing.T) {
+			wantFailure := "rollback failure"
+			if mode == "string panic" {
+				wantFailure = "workflow: panic: " + wantFailure
+			}
+			var continued atomic.Int32
+			world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
+				defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
+					continued.Add(1)
+					return nil
+				}, struct{}{})
+				defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
+					switch mode {
+					case "error panic":
+						panic(errors.New("rollback failure"))
+					case "string panic":
+						panic("rollback failure")
+					}
+					return errors.New("rollback failure")
+				}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+				return rollbackOutput{}, errors.New("primary failure")
+			}))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, rollbackInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+				t.Fatalf("failure = %v", err)
+			}
+			events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rollbackLogged := false
+			stepFailed := false
+			for _, event := range events.Data {
+				var created worlds.DataStepCreated
+				if event.EventType == worlds.EventTypeStepCreated && json.Unmarshal(event.Data, &created) == nil && created.Rollback {
+					rollbackLogged = true
+				}
+				var result worlds.DataStepResult
+				if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeError(result.Error).Error() == wantFailure {
+					stepFailed = true
+				}
+			}
+			if !rollbackLogged || !stepFailed {
+				t.Fatalf("rollback events were not recorded: %#v", events.Data)
+			}
+
+			if continued.Load() == 0 {
+				t.Fatal("failed rollback prevented the remaining compensation")
+			}
+		})
 	}
 }
 
-func TestOnRollbackRegistersAroundDurableSteps(t *testing.T) {
+func TestRollbackRegistersAroundDurableSteps(t *testing.T) {
 	var calls []string
 	var mutex sync.Mutex
 	record := func(value string) {
@@ -312,24 +458,20 @@ func TestOnRollbackRegistersAroundDurableSteps(t *testing.T) {
 		mutex.Unlock()
 	}
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ rollbackInput) (rollbackOutput, error) {
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
+		defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
 			record("before step")
 			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
+		}, struct{}{})
 		if _, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			record("step")
 			return struct{}{}, nil
 		}, struct{}{}); err != nil {
 			return rollbackOutput{}, err
 		}
-		if err := workflow.OnRollback(ctx, func(context.Context, struct{}) error {
+		defer workflow.Rollback(ctx, func(context.Context, struct{}) error {
 			record("after step")
 			return nil
-		}, struct{}{}); err != nil {
-			return rollbackOutput{}, err
-		}
+		}, struct{}{})
 		return rollbackOutput{}, errors.New("primary failure")
 	}))
 	defer world.Close()

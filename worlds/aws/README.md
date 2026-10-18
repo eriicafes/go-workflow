@@ -14,17 +14,19 @@ credentials, retry policy, and endpoints.
 
 ```go
 world, err := awsworld.New(awsworld.Config{
-    BaseURL:   os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
-    TableName: os.Getenv("WORKFLOW_TABLE"),
-    QueueURL:  os.Getenv("WORKFLOW_QUEUE_URL"),
-    Scheduler: &awsworld.SchedulerConfig{ // optional, see below
-        Client:    scheduler.NewFromConfig(cfg),
-        Group:     os.Getenv("WORKFLOW_SCHEDULER_GROUP"), // empty uses "default"
-        TargetARN: os.Getenv("WORKFLOW_QUEUE_ARN"),
-        RoleARN:   os.Getenv("WORKFLOW_SCHEDULER_ROLE_ARN"),
-    },
+	BaseURL:   os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
+	TableName: os.Getenv("WORKFLOW_TABLE"),
+	QueueURL:  os.Getenv("WORKFLOW_QUEUE_URL"),
+	Scheduler: &awsworld.SchedulerConfig{ // optional, see below
+		Client:    scheduler.NewFromConfig(cfg),
+		Group:     os.Getenv("WORKFLOW_SCHEDULER_GROUP"), // empty uses "default"
+		TargetARN: os.Getenv("WORKFLOW_QUEUE_ARN"),
+		RoleARN:   os.Getenv("WORKFLOW_SCHEDULER_ROLE_ARN"),
+	},
 }, dynamodb.NewFromConfig(cfg), sqs.NewFromConfig(cfg))
-if err != nil { return err }
+if err != nil {
+	return err
+}
 ```
 
 Entrypoints:

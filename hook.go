@@ -204,9 +204,8 @@ func (h *Hook[T]) GetConflict(ctx context.Context) (*Run[any], error) {
 	return Get[any](ctx, string(h.conflict))
 }
 
-// Dispose deactivates the hook and immediately releases its token. It is a
-// durable inline step and may be deferred directly in workflow code. Errors
-// panic so a deferred disposal failure propagates to the workflow runtime.
+// Dispose durably deactivates the hook and releases its token.
+// It may be deferred and panics on failure.
 func (h *Hook[T]) Dispose(ctx context.Context) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -218,7 +217,7 @@ func (h *Hook[T]) Dispose(ctx context.Context) {
 		}
 		panic(ErrHookNotRegistered)
 	}
-	if execution.IsPrematureExit() || h.disposed {
+	if execution.IsSuspended() || h.disposed {
 		return
 	}
 	if !h.registered {

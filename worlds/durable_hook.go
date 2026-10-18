@@ -45,7 +45,7 @@ type (
 // a hook does not inherit the caller's cancellation context.
 // When the operation recorded at the
 // position is not a hook with the same token, it ends the replay with a panic
-// carrying a *replayDivergenceError.
+// carrying a replayDivergenceError.
 func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	var position int
 	if options.Position != nil {
@@ -68,14 +68,14 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	}
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
 	}
 	var created DataHookCreated
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableHookResult[T]{Err: fmt.Errorf("workflow: decode hook: %w", err)}
 	}
 	if options.Webhook == nil && options.Token != "" && created.Token != options.Token {
-		panic(options.Execution.exit(&replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
+		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
 	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ClaimedFrom}
 	if event.EventType == EventTypeHookConflict {

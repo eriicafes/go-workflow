@@ -105,7 +105,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	defer world.Close()
 
 	if err := world.Prepare(ctx); err != nil {
