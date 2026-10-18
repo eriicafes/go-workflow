@@ -10,6 +10,9 @@ inspected with the Workflow SDK web UI.
 go get github.com/eriicafes/go-workflow
 ```
 
+Agent skills are available for [writing workflows](skills/go-workflow/SKILL.md)
+and [implementing World backends](skills/go-workflow-worlds/SKILL.md).
+
 ## Workflows
 
 A workflow is a struct type whose `Workflow` method declares its output. Its

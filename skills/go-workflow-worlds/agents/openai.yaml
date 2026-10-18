@@ -1,0 +1,4 @@
+interface:
+  display_name: "go-workflow Worlds"
+  short_description: "Implement and verify go-workflow backends"
+  default_prompt: "Use $go-workflow-worlds to implement this backend change and verify the affected World contracts."

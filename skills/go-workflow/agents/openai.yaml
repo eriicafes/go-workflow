@@ -1,0 +1,4 @@
+interface:
+  display_name: "go-workflow"
+  short_description: "Build and test durable Go workflows"
+  default_prompt: "Use $go-workflow to implement this durable workflow with replay-safe steps and appropriate tests."
