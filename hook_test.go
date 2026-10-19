@@ -93,6 +93,14 @@ func TestHookCreatedOutsideWorkflowReportsErrorWhenUsed(t *testing.T) {
 		if _, err := workflow.Select(ctx, hook); !errors.Is(err, workflow.ErrNoWorkflow) {
 			return hookResumeOutput{}, errors.New("invalid hook selection did not report ErrNoWorkflow")
 		}
+		if err := workflow.Join(ctx, hook); !errors.Is(err, workflow.ErrNoWorkflow) {
+			return hookResumeOutput{}, errors.New("invalid hook join did not report ErrNoWorkflow")
+		}
+		var group workflow.WaitGroup
+		group.Add(hook)
+		if err := group.Wait(ctx); !errors.Is(err, workflow.ErrNoWorkflow) {
+			return hookResumeOutput{}, errors.New("invalid hook group did not report ErrNoWorkflow")
+		}
 		_, err := hook.GetConflict(ctx)
 		if !errors.Is(err, workflow.ErrNoWorkflow) {
 			return hookResumeOutput{}, errors.New("invalid hook ownership check did not report ErrNoWorkflow")
@@ -108,6 +116,91 @@ func TestHookCreatedOutsideWorkflowReportsErrorWhenUsed(t *testing.T) {
 	}
 	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHookRejectsOtherExecution(t *testing.T) {
+	methods := []struct {
+		name string
+		use  func(context.Context, *workflow.Hook[string]) error
+	}{
+		{"Next", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			_, err := hook.Next(ctx)
+			return err
+		}},
+		{"Values", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			for _, err := range hook.Values(ctx) {
+				return err
+			}
+			return nil
+		}},
+		{"Select", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			_, err := workflow.Select(ctx, hook)
+			return err
+		}},
+		{"SelectOk", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			_, err := workflow.SelectOk(ctx, hook)
+			return err
+		}},
+		{"Join", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			return workflow.Join(ctx, hook)
+		}},
+		{"JoinOk", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			return workflow.JoinOk(ctx, hook)
+		}},
+		{"WaitGroup", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			var group workflow.WaitGroup
+			group.Add(hook)
+			return group.Wait(ctx)
+		}},
+		{"ErrGroup", func(ctx context.Context, hook *workflow.Hook[string]) error {
+			var group workflow.ErrGroup
+			group.Add(hook)
+			return group.Wait(ctx)
+		}},
+	}
+	for _, registered := range []bool{false, true} {
+		for _, method := range methods {
+			t.Run(map[bool]string{false: "unregistered", true: "registered"}[registered]+"/"+method.name, func(t *testing.T) {
+				var foreign *workflow.Hook[string]
+				runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
+					if input.Token == "owner" {
+						hook := workflow.CreateHook[string](ctx)
+						defer hook.Dispose(ctx)
+						foreign = hook
+						if registered {
+							if _, err := hook.GetConflict(ctx); err != nil {
+								return hookResumeOutput{}, err
+							}
+						}
+						return hookResumeOutput{}, workflow.Sleep(ctx, time.Hour)
+					}
+					return hookResumeOutput{}, method.use(ctx, foreign)
+				})
+				world := testworld.NewManual()
+				defer world.Close()
+				ctx, cancel := context.WithTimeout(workflow.NewContext(t.Context(), workflow.NewClient(world)), time.Second)
+				defer cancel()
+				runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+				owner, err := workflow.Start(ctx, hookResumeInput{Token: "owner"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := runtime.Execute(ctx, worlds.QueueInput{RunID: worlds.RunID(owner.ID())}); err != nil {
+					t.Fatal(err)
+				}
+				other, err := workflow.Start(ctx, hookResumeInput{Token: "other"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := runtime.Execute(ctx, worlds.QueueInput{RunID: worlds.RunID(other.ID())}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := other.Value(ctx); !errors.Is(err, workflow.ErrHookNotRegistered) {
+					t.Fatalf("foreign hook error=%v, want ErrHookNotRegistered", err)
+				}
+			})
+		}
 	}
 }
 

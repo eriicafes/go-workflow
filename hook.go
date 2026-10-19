@@ -123,11 +123,14 @@ func (h *Hook[T]) settlementID() (string, bool) {
 	return string(event.EventID), ok
 }
 
-func (h *Hook[T]) done(context.Context) (bool, error, error) {
-	execution := h.executionState
-	if execution == nil {
+func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return false, nil, ErrNoWorkflow
+	}
+	if h.executionState != execution {
 		if h.err != nil {
-			return true, h.err, nil
+			return false, nil, h.err
 		}
 		return false, nil, ErrHookNotRegistered
 	}
