@@ -47,10 +47,12 @@ steps or external callers, not the workflow body. The retry helper takes
 
 ## Disposal and retention
 
-Place `defer hook.Dispose(ctx)` directly after creation, with no intervening
-blank line. Dispose is a workflow-only durable inline operation; it returns
-nothing and panics on failure. A direct call disposes immediately. It releases
-the token, stops further delivery, and makes a generated webhook endpoint
+Place `defer hook.Dispose(ctx)` in the workflow runner directly after creation.
+This releases the token on successful return
+or failure while preserving the hook across replay suspensions. Dispose is a
+workflow-only durable inline operation; it returns nothing and panics on
+failure. Call it directly to release the hook before the runner exits.
+Disposal stops further delivery and makes a generated webhook endpoint
 inactive. Disposing a local, unregistered hook needs no durable registration.
 
 Do not defer Dispose when relying on `MinRetention` after the workflow exits:
@@ -71,12 +73,31 @@ HTTP request does not automatically carry it.
 For `WebhookOption{Manual: true}`, call `request.RespondWith(ctx, response)`
 inside a step and return its error. Repeating an identical response is
 idempotent; a different second response fails. Static responses and the default
-202 complete at receipt; manual responses complete when recorded. Dispose is
-also available to abandon a webhook before normal completion.
+202 complete at receipt; manual responses complete when recorded.
+
+Defer disposal after checking the creation error so an abandoned webhook is
+also cleaned up when the runner exits:
+
+```go
+webhook, err := workflow.CreateWebhook[Approval](ctx)
+if err != nil {
+	return Approval{}, err
+}
+defer webhook.Dispose(ctx)
+request, err := webhook.Request(ctx)
+if err != nil {
+	return Approval{}, err
+}
+return request.JSON()
+```
+
+Keep this defer in the workflow runner, not in a helper that returns the
+webhook. Call Dispose directly if the endpoint should become inactive earlier.
 
 ## Compensation and deferred cleanup
 
-Register compensation immediately after successful reversible work:
+Defer compensation in the workflow runner immediately after successful
+reversible work and its error check:
 
 ```go
 invoice, err := workflow.Step(ctx, createInvoice, orderID)
@@ -89,14 +110,19 @@ return workflow.Step(ctx, shipOrder, invoice.ID)
 
 The rollback function has signature `func(context.Context, In) error`.
 `Rollback` registers work and returns nothing; it does not execute the callback
-at the call site. Deferred registrations yield reverse acquisition order.
+at the call site. Use `defer workflow.Rollback(...)` directly, so registrations
+yield reverse acquisition order. A direct call registers immediately and
+changes that order.
 Compensations run as durable, retrying steps when the workflow returns an
 error or has an application panic. They do not run after success or run
 cancellation. Exhausted compensation failures are recorded while remaining
 compensations continue, preserving the original workflow failure.
 
-SDK suspension unwinds workflow defers before the workflow is finished.
-Dispose skips work on those internal exits; Rollback still registers callbacks
-so targeted compensation deliveries can reconstruct them. Neither operation
-performs final cleanup merely because replay suspended. Arbitrary Go defers
-have no such protection, so keep their external side effects in durable steps.
+| Runner exit | Deferred Dispose | Deferred Rollback |
+| --- | --- | --- |
+| Success | Releases the hook. | Registers compensation; callbacks do not run. |
+| Error or application panic | Releases the hook. | Registers compensation; callbacks run as durable steps. |
+| Replay suspension | Skips disposal. | Registers compensation for replay; callbacks do not run during suspension. |
+
+Arbitrary Go defers also run during replay suspension. Keep external side
+effects in durable steps rather than plain deferred callbacks.

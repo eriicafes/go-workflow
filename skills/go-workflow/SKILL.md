@@ -7,9 +7,8 @@ description: Build, review, and test durable Go workflows using github.com/eriic
 
 Use the application's installed SDK version as the API authority. Inspect its
 `go.mod`, existing workflow definitions, runners, and World setup before making
-changes. These instructions describe the APIs in the repository containing this
-skill; confirm signatures against the selected version rather than upgrading it
-to match an example.
+changes. Use `go doc github.com/eriicafes/go-workflow.Step` or the relevant
+package symbol to confirm signatures against that version.
 
 ## Structure the workflow
 
@@ -35,9 +34,9 @@ step or external application code. Sort map keys before using their order to
 schedule durable operations.
 
 `Step` waits for its result. `Background` returns `*workflow.Result[T]` without
-waiting; read it with `Value(ctx)` or `Unwrap(ctx)`. `InlineStep` records the
-same step lifecycle while executing short work in the flow delivery. It has
-retries too; it is not an escape from replay or idempotency requirements.
+waiting; read it with `Value(ctx)` or `Unwrap(ctx)`. Use `InlineStep` for short
+recorded operations in the flow delivery. Inline steps follow the same retry
+and idempotency requirements as other steps.
 
 Step attempts are delivered at least once. Use `workflow.StepID(ctx)` as a
 stable external idempotency key where supported. Omitted `StepOptions` allows
@@ -51,6 +50,24 @@ If changing an existing deployed runner, consider its in-flight event logs:
 reordering durable operations can break replay. Use a separate workflow type
 for incompatible changes when old runs still need to execute.
 
+## Deferred cleanup
+
+- In the workflow runner, put `defer hook.Dispose(ctx)` immediately after hook
+  creation. For a webhook, check the creation error first, then put
+  `defer webhook.Dispose(ctx)` directly after the error check.
+- Put `defer workflow.Rollback(ctx, undo, input)` immediately after the
+  successful step it compensates and its error check. Compensations execute on
+  workflow failure, in reverse acquisition order.
+- Keep these defers in the runner so cleanup follows the runner's lifetime.
+  SDK cleanup handles replay suspension. A defer in a helper runs when that
+  helper exits instead.
+
+Dispose releases the token when the workflow exits successfully or fails. Omit
+it when deliberately retaining the token with `MinRetention`. Calling Dispose
+directly releases the hook immediately; calling Rollback directly only
+registers compensation. See the bundled hooks reference for examples and exit
+behavior.
+
 ## Choose the relevant pattern
 
 - For waiting, racing, chaining, deadlines, or child runs, read
@@ -59,26 +76,3 @@ for incompatible changes when old runs still need to execute.
   [hooks and compensation](references/hooks.md).
 - For client/worker setup, streams, deterministic tests, or analyzer checks,
   read [integration and testing](references/testing.md).
-
-Do not invent a public `Promise` interface, `Done`, `Run.Await`, hook `Value`,
-`OnRollback`, `SelectWithCancel`, or `Timeout` API. Current code uses results,
-`Run.Value`, `Hook.Next`, deferred `Rollback`, and `WithTimeout`/`WithDeadline`.
-
-## Find authoritative details
-
-When the SDK checkout is available, inspect the relevant implementation:
-
-| Concern | Source |
-| --- | --- |
-| Step, timer, rollback, and combinators | `steps.go` |
-| Result and Then | `promise.go` |
-| Managed contexts | `cancellation.go` |
-| Hooks and webhooks | `hook.go`, `webhook.go` |
-| Runs and runner registration | `workflow.go` |
-| Client context and middleware | `context.go` |
-| Streams | `stream.go` |
-
-The checkout's `docs/guide/` and `examples/basic/` provide larger examples.
-In a consuming application, resolve the module directory with
-`go list -m -f '{{.Dir}}' github.com/eriicafes/go-workflow`; treat module-cache
-sources as read-only.

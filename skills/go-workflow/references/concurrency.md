@@ -106,9 +106,9 @@ Call Wait after adding the work. Pass groupCtx to work that should stop on
 group failure, including work included through Add.
 
 Groups also participate directly in Select and Join. They settle after all
-members, even on failure. Add ignores new members after settlement. Go still
-starts a step, but the completed group does not track it. Use a new group to
-wait for later work.
+members, even on failure. Completed groups ignore new work: Add does nothing
+and Go returns nil without starting a step. Use a new group to wait for later
+work.
 
 ## Managed contexts
 
@@ -118,6 +118,10 @@ wait for later work.
   `(ctx, func() error, error)`. The `Cause` variants add an expiry cause.
 - These constructors require workflow context. Handle both constructor and
   cancellation errors; the returned cancel functions are durable operations.
+
+Call the cancel function explicitly when work settles, as in the race example,
+and handle its error. A bare `defer cancel()` discards that error and runs during
+replay suspension too; use the explicit call for workflow cancellation.
 
 Pass the returned context to steps and timers that should stop together. Pass
 the step context into external I/O and observe `ctx.Done()` in step code.

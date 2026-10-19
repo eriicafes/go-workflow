@@ -5,35 +5,25 @@ description: Implement, debug, or test go-workflow World backends and delivery a
 
 # go-workflow Worlds
 
-Start from the target SDK version's interfaces and conformance tests. A World
-stores append-only run event logs, derives run/step/hook views, delivers queued
-work, and stores streams. Correctness depends on atomic admission and replay
-contracts, not just matching method signatures.
+Use the application's installed SDK version. A World stores append-only run
+event logs, derives run/step/hook views, delivers queued work, and stores
+streams. Implement the atomic admission and replay contracts described below.
 
 ## Inspect the contract
 
-Resolve the SDK checkout or read-only module directory. Read the relevant
-source before implementing backend behavior:
-
-| Concern | Source |
-| --- | --- |
-| World identity and capabilities | `worlds/world.go` |
-| Storage, lifecycle events, views, and fencing | `worlds/world_storage.go` |
-| Delivery and queue fields | `worlds/world_queue.go` |
-| Ordered streams and writer sessions | `worlds/world_streamer.go` |
-| Runtime replay and admission callers | `worlds/runtime.go`, `worlds/durable_*.go` |
-| Shared backend contract tests | `workflowtest/conformance.go` and the other files in `workflowtest/` |
+Use `go doc github.com/eriicafes/go-workflow/worlds.World` and the relevant
+symbols (`StorageEvents`, `QueueInput`, `Streamer`, or `Runtime`) to inspect the
+installed contract. `go doc github.com/eriicafes/go-workflow/workflowtest`
+describes the public conformance test entry points.
 
 `World` embeds `Storage`, `Queue`, and `Streamer` and exposes BaseURL,
-Analytics, Capabilities, SpecVersion, and DeploymentID. Use the actual
-interface; a documentation excerpt can omit newer methods. Report optional
-capabilities honestly. Unsupported attribute writes are successful no-ops;
+Analytics, Capabilities, SpecVersion, and DeploymentID. Report supported
+optional capabilities. Unsupported attribute writes are successful no-ops;
 unsupported analytics returns nil.
 
 Read [backend contracts](references/contracts.md) for the transaction,
 ownership, delivery, and stream invariants. Reuse the SDK's exported `Data*`
-event payload types instead of recreating them in an adapter. Avoid routing
-backend operations through the higher-level workflow client.
+event payload types when recording or reading events.
 
 ## Validate the implementation
 
@@ -43,8 +33,7 @@ cleanup for every created resource.
 
 For storage shared between processes, also run
 `workflowtest.ConformanceShared` with two independent World instances pointing
-at the same isolated data. Two references to the same in-memory instance do
-not exercise cross-instance coordination.
+at the same isolated data.
 
 Add targeted tests for changed semantics: concurrent fenced appends, contested
 hook claims, stale stream writers, and delivery failures after a committed

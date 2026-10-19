@@ -14,9 +14,9 @@ handler can `Start` a shared workflow type without importing runners.
 
 Mount the World's HTTP handler when providing webhooks or remote RPC, and set
 BaseURL to its absolute public URL including the path prefix. Follow the
-selected adapter's setup for its worker; do not replace it with a homemade
-queue loop. The RPC handler has no built-in application authorization, so
-preserve the application's access controls when mounting it.
+selected adapter's setup for its worker. The RPC handler has no built-in
+application authorization, so preserve the application's access controls when
+mounting it.
 
 ## Streams
 
@@ -73,13 +73,9 @@ assuming a step callback is called exactly once.
 
 Run relevant Go tests and `go vet` for the changed packages. Also run the
 SDK's `workflowcheck` analyzer to catch replay violations. Use a binary built
-from the selected SDK version; in an SDK checkout:
+from the application's selected SDK version. Install
+`github.com/eriicafes/go-workflow/cmd/workflowcheck` at that version, then run:
 
 ```sh
-go build -o /tmp/go-workflow-check ./cmd/workflowcheck
-go vet -vettool=/tmp/go-workflow-check ./...
+go vet -vettool="$(command -v workflowcheck)" ./...
 ```
-
-For a consuming application, build the analyzer from its selected module
-version and run it against the application's packages. Do not install an
-unrelated latest version just to perform validation.
