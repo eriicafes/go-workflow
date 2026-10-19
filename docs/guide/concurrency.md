@@ -151,9 +151,9 @@ created separately and included with Add.
 
 Both group types can participate directly in `Select`, `Join`, and `Add`.
 They settle after their final member settles. An ErrGroup's settled outcome
-includes its first failure. Add ignores new members after settlement. Go still
-starts a step, but the completed group does not track it. Use a new group to
-wait for later work.
+includes its first failure. Completed groups ignore new work: Add does nothing
+and Go returns nil without starting a step. Use a new group to wait for later
+work.
 
 ## Racing operations
 

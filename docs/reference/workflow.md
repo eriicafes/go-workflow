@@ -76,12 +76,12 @@ An empty join succeeds. An empty selection returns a nil winner and no error.
 WaitGroup and ErrGroup wait for all members. Their zero values are ready to
 use. WaitGroup ignores operation failures; ErrGroup returns the first recorded
 failure. Groups begin observing members on their first Wait, Select, or Join.
-Add ignores new members after settlement. Go still starts a step, but the
-completed group does not track it.
+Completed groups ignore new work: Add does nothing and Go returns nil without
+starting a step.
 
 | Function or method | Context | Description |
 | --- | --- | --- |
-| `Go(ctx, group, step, input, ...StepOptions) *Result[Out]` | W | Starts a step and adds its result to either group. |
+| `Go(ctx, group, step, input, ...StepOptions) *Result[Out]` | W | Starts a step and adds its result to either group. Returns nil if the group has completed. |
 | `(*WaitGroup).Add(...promise)`, `(*ErrGroup).Add(...promise)` | W | Tracks existing handles without changing their cancellation contexts. |
 | `(*WaitGroup).Wait(ctx) error` | W | Waits for all members, ignoring operation failures. |
 | `(*ErrGroup).Wait(ctx) error` | W | Waits for all members and returns the first failure. Cancels its associated context on return. |

@@ -8,8 +8,11 @@ import (
 )
 
 // Go starts a background step and adds its result to group.
-// A completed group does not track the new step.
+// It returns nil without starting a step if the group has completed.
 func Go[In, Out any](ctx context.Context, g group, step func(context.Context, In) (Out, error), input In, options ...StepOptions) *Result[Out] {
+	if g.isSettled() {
+		return nil
+	}
 	result := Background(ctx, step, input, options...)
 	g.Add(result)
 	return result
@@ -17,10 +20,11 @@ func Go[In, Out any](ctx context.Context, g group, step func(context.Context, In
 
 type group interface {
 	Add(...promise)
+	isSettled() bool
 }
 
 // WaitGroup waits for all its members, ignoring operation failures.
-// Its zero value is ready to use. After completion, Add ignores new members.
+// Its zero value is ready to use. After completion, new work is ignored.
 // Create a new WaitGroup to wait for more work.
 type WaitGroup struct{ groupState }
 
@@ -37,8 +41,8 @@ func (g *WaitGroup) done(ctx context.Context) (bool, error, error) {
 
 // ErrGroup waits for all its members and returns their first recorded failure.
 // Its zero value is ready to use without cancellation. ErrGroupWithContext
-// enables cancellation. After completion, the outcome stays fixed and Add ignores
-// new members. Create a new ErrGroup to wait for more work.
+// enables cancellation. After completion, the outcome stays fixed and new work
+// is ignored. Create a new ErrGroup to wait for more work.
 type ErrGroup struct{ groupState }
 
 // ErrGroupWithContext returns an ErrGroup and a durable cancellation context.
@@ -46,11 +50,11 @@ type ErrGroup struct{ groupState }
 // cancelled on the first observed failure or when Wait returns.
 // It returns ErrNoWorkflow outside workflow context.
 func ErrGroupWithContext(ctx context.Context) (*ErrGroup, context.Context, error) {
-	groupCtx, cancel, err := WithCancelCause(ctx)
+	ctx, cancel, err := WithCancelCause(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &ErrGroup{groupState: groupState{cancel: cancel}}, groupCtx, nil
+	return &ErrGroup{groupState: groupState{cancel: cancel}}, ctx, nil
 }
 
 // Wait waits for every member, returns the first failure, and cancels the
@@ -80,10 +84,12 @@ type groupState struct {
 // Add includes existing results, hooks, webhooks, or groups in the wait.
 // It does not change their cancellation contexts and ignores new members after settlement.
 func (g *groupState) Add(members ...promise) {
-	if !g.settled {
+	if !g.isSettled() {
 		g.members = append(g.members, members...)
 	}
 }
+
+func (g *groupState) isSettled() bool { return g.settled }
 
 func (g *groupState) settlementID() (string, bool) { return g.id, g.id != "" }
 

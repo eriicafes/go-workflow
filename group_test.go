@@ -349,7 +349,7 @@ func TestGroupObservesFailuresOnlyAfterFirstWait(t *testing.T) {
 	})
 }
 
-func TestSettledGroupsIgnoreNewWorkWhileGoStillStartsSteps(t *testing.T) {
+func TestSettledGroupsIgnoreNewWorkWithoutCreatingSteps(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		failure := errors.New("failed group")
 		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
@@ -372,13 +372,16 @@ func TestSettledGroupsIgnoreNewWorkWhileGoStillStartsSteps(t *testing.T) {
 			}
 			first := workflow.Go(ctx, &wait, increment, 1)
 			second := workflow.Go(ctx, &group, increment, 1)
+			if first != nil || second != nil {
+				return groupOutput{}, errors.New("completed group returned a new result")
+			}
 			if err := wait.Wait(ctx); err != nil {
 				return groupOutput{}, err
 			}
 			if err := group.Wait(ctx); !errors.Is(err, failure) {
 				return groupOutput{}, fmt.Errorf("settled group error changed: %v", err)
 			}
-			return groupOutput{Value: first.Unwrap(ctx) + second.Unwrap(ctx)}, nil
+			return groupOutput{Value: 1}, nil
 		}))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -387,7 +390,7 @@ func TestSettledGroupsIgnoreNewWorkWhileGoStillStartsSteps(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := run.Value(ctx)
-		if err != nil || out.Value != 4 {
+		if err != nil || out.Value != 1 {
 			t.Fatalf("result = %+v, %v", out, err)
 		}
 		events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
@@ -400,8 +403,8 @@ func TestSettledGroupsIgnoreNewWorkWhileGoStillStartsSteps(t *testing.T) {
 				created++
 			}
 		}
-		if created != 2 {
-			t.Fatalf("created %d steps, want 2", created)
+		if created != 0 {
+			t.Fatalf("created %d steps, want none", created)
 		}
 	})
 }
