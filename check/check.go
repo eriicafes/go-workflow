@@ -189,16 +189,20 @@ func isSDKMethod(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 }
 
 func validateStepFunction(pass *analysis.Pass, call *ast.CallExpr) {
-	if len(call.Args) < 2 {
+	index := 1
+	if isSDKCall(pass, call, "Go") {
+		index = 2
+	}
+	if len(call.Args) <= index {
 		return
 	}
-	if closure, ok := call.Args[1].(*ast.FuncLit); ok {
+	if closure, ok := call.Args[index].(*ast.FuncLit); ok {
 		validateClosure(pass, closure)
 		return
 	}
-	function := namedFunction(pass, call.Args[1])
+	function := namedFunction(pass, call.Args[index])
 	if function == nil {
-		pass.Reportf(call.Args[1].Pos(), "durable step must be a named function or inline closure, not a wrapper or factory")
+		pass.Reportf(call.Args[index].Pos(), "durable step must be a named function or inline closure, not a wrapper or factory")
 	}
 }
 
@@ -238,7 +242,7 @@ func isSDKCall(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 }
 
 func isDurableOperation(pass *analysis.Pass, call *ast.CallExpr) bool {
-	for _, name := range []string{"Step", "InlineStep", "Background", "Map", "All", "Rollback"} {
+	for _, name := range []string{"Step", "InlineStep", "Background", "Map", "All", "Rollback", "Go"} {
 		if isSDKCall(pass, call, name) {
 			return true
 		}

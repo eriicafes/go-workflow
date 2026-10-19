@@ -8,7 +8,7 @@ import (
 
 // promise is the private, value-independent settlement contract.
 type promise interface {
-	done() (settled bool, settledErr error, err error)
+	done(context.Context) (settled bool, settledErr error, err error)
 	settlementID() (string, bool)
 }
 
@@ -33,7 +33,7 @@ func (p *Result[T]) settlementID() (string, bool) {
 	return p.id, p.err == nil && p.id != ""
 }
 
-func (p *Result[T]) done() (bool, error, error) {
+func (p *Result[T]) done(context.Context) (bool, error, error) {
 	if p.err != nil {
 		return true, p.err, nil
 	}
@@ -79,7 +79,7 @@ func Then[T, U any](ctx context.Context, source *Result[T], fn func(T, error) *R
 		if started || running {
 			return
 		}
-		settled, _, _ := source.done()
+		settled, _, _ := source.done(ctx)
 		if !settled {
 			return
 		}
@@ -100,7 +100,7 @@ func Then[T, U any](ctx context.Context, source *Result[T], fn func(T, error) *R
 		if !started {
 			return false
 		}
-		settled, settledErr, _ := next.done()
+		settled, settledErr, _ := next.done(ctx)
 		if !settled {
 			return false
 		}

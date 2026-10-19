@@ -79,7 +79,9 @@ func (w *Webhook[T]) URL() string {
 }
 
 func (w *Webhook[T]) settlementID() (string, bool) { return w.hook.settlementID() }
-func (w *Webhook[T]) done() (bool, error, error)   { return w.hook.done() }
+func (w *Webhook[T]) done(ctx context.Context) (bool, error, error) {
+	return w.hook.done(ctx)
+}
 
 // Request waits for the HTTP request and preserves its origin for a step response.
 func (w *Webhook[T]) Request(ctx context.Context) (*WebhookRequest[T], error) {

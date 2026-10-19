@@ -2,9 +2,8 @@
 
 ## Waiting and racing
 
-Combinators accept SDK results, hooks, and webhooks through a private settlement
-contract. Pass concrete handles directly; user-defined implementations cannot
-participate. A `Run` is not a combinator input.
+Pass results, hooks, webhooks, and groups directly to the combinators. Use Run
+methods to inspect child workflows.
 
 | API | Behavior |
 | --- | --- |
@@ -13,14 +12,14 @@ participate. A `Run` is not a combinator input.
 | `Select(ctx, a, b)` | Returns the first recorded settlement and its error. A failed winner is non-nil. |
 | `SelectOk(ctx, a, b)` | Returns the first success; if all fail, returns nil and the first error in argument order. |
 | `Map(ctx, fn, inputs)` | Starts steps and returns `[]*Result[T]` in input order. |
+| `MapResults(results)` | Converts a result slice for combinators or group Add without waiting. |
 | `All(ctx, fn, inputs)` | Returns values in input order, cancelling remaining work on failure. |
 
 Select returns the original input handle, so compare it with `==` or use a
 switch. Event order determines settlement order; argument order breaks ties.
 An empty selection in valid workflow context returns `(nil, nil)`.
-Neither Select variant cancels losers. A typed result slice cannot be spread
-into the private combinator interface; pass individual results or loop over
-the slice when joining manually.
+Neither Select variant cancels losers. Convert a result slice with
+`MapResults`, for example `JoinOk(ctx, MapResults(results)...)`.
 
 This function runs inside a workflow. `fetchPrimary` and `fetchReplica` are
 named step functions with the signature
@@ -73,6 +72,43 @@ Here `storeValue` is a named `func(context.Context, string) (int, error)`.
 The callback executes in workflow context. Return pending work rather than
 calling `Step` or `Value` inside it when the chain must participate in a race.
 Await or join the chain if the workflow must wait for it before returning.
+
+## Groups
+
+Declare `var group workflow.WaitGroup` to collect settlements while ignoring
+operation failures. A zero-value `workflow.ErrGroup` waits for all members and
+returns the first recorded failure, without cancelling other work.
+
+`workflow.Go(ctx, &group, step, input, options...)` starts a step, adds its
+result, and returns that result. Use
+`group.Add(existingResult, timer, hook, otherGroup)` to include work created
+elsewhere, or `group.Add(workflow.MapResults(results)...)` for a slice.
+
+For cancellation on failure:
+
+```go
+group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
+if err != nil {
+	return Output{}, err
+}
+profile := workflow.Go(groupCtx, group, fetchProfile, userID)
+orders := workflow.Go(groupCtx, group, fetchOrders, userID)
+if err := group.Wait(ctx); err != nil {
+	return Output{}, err
+}
+return Output{Profile: profile.Unwrap(ctx), Orders: orders.Unwrap(ctx)}, nil
+```
+
+Groups begin observing members on their first Wait, Select, or Join. The first
+observed failure cancels groupCtx. Wait still waits for every member and
+returns the original failure; it cancels the context on successful return too.
+Call Wait after adding the work. Pass groupCtx to work that should stop on
+group failure, including work included through Add.
+
+Groups also participate directly in Select and Join. They settle after all
+members, even on failure. Add ignores new members after settlement. Go still
+starts a step, but the completed group does not track it. Use a new group to
+wait for later work.
 
 ## Managed contexts
 

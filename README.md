@@ -237,6 +237,12 @@ each World.
 results, err := workflow.All(ctx, findSources, []string{"go", "rust"})
 ```
 
+`MapResults` converts a Map result slice for `Join`, `Select`, or group `Add`.
+`WaitGroup` waits for every outcome; `ErrGroup` waits for every outcome and
+returns the first failure. Use `workflow.Go(ctx, &group, step, input)` to start
+and track steps. `workflow.ErrGroupWithContext(ctx)` returns an
+ErrGroup and a durable context cancelled on failure or when its Wait returns.
+
 `workflow.Sleep` suspends the run for a duration, `Timer` returns a promise that
 settles after one, and `WithTimeout` and `WithDeadline` return a cancellation context and cancel function, using a timer to cancel work that uses that context. A sleeping run consumes no resources, so it can sleep for days or months.
 

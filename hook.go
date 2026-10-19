@@ -123,7 +123,7 @@ func (h *Hook[T]) settlementID() (string, bool) {
 	return string(event.EventID), ok
 }
 
-func (h *Hook[T]) done() (bool, error, error) {
+func (h *Hook[T]) done(context.Context) (bool, error, error) {
 	execution := h.executionState
 	if execution == nil {
 		if h.err != nil {

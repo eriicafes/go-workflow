@@ -89,7 +89,71 @@ If any step fails, `All` cancels the remaining steps and returns that failure
 without waiting for earlier inputs. Steps must observe their context to stop.
 
 For individual result handles, use `Map` and read each result with `Value`.
-The returned typed slice cannot be spread directly into `Join` or `Select`.
+Use `MapResults` to pass the returned slice to a combinator:
+
+```go
+results := workflow.Map(ctx, resizeImage, input.Images)
+if err := workflow.JoinOk(ctx, workflow.MapResults(results)...); err != nil {
+	return Output{}, err
+}
+```
+
+## Grouping work
+
+Use a `WaitGroup` to collect work from several calls and wait for every outcome.
+`workflow.Go` starts a step, adds it to the group, and returns its result.
+`Add` includes existing results, timers, hooks, webhooks, or other groups:
+
+```go
+var group workflow.WaitGroup
+
+email := workflow.Go(ctx, &group, sendEmail, input)
+sms := workflow.Go(ctx, &group, sendSMS, input)
+group.Add(workflow.MapResults(existingResults)...)
+
+if err := group.Wait(ctx); err != nil {
+	return Output{}, err
+}
+
+_, emailErr := email.Value(ctx)
+_, smsErr := sms.Value(ctx)
+return Output{EmailSent: emailErr == nil, SMSSent: smsErr == nil}, nil
+```
+
+Use `ErrGroup` to collect the first recorded failure. It still waits for every
+member to settle. A zero-value ErrGroup does not cancel work. `ErrGroupWithContext`
+creates one with a durable cancellation context:
+
+```go
+group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
+if err != nil {
+	return Output{}, err
+}
+
+profile := workflow.Go(groupCtx, group, fetchProfile, userID)
+orders := workflow.Go(groupCtx, group, fetchOrders, userID)
+
+if err := group.Wait(ctx); err != nil {
+	return Output{}, err
+}
+
+return Output{Profile: profile.Unwrap(ctx), Orders: orders.Unwrap(ctx)}, nil
+```
+
+Groups start observing members when first inspected by Wait, Select, or Join.
+After that, the first member failure cancels `groupCtx`, including when the
+runner is waiting on other work. Steps must observe their context to stop.
+Wait returns the first failure after every member settles and cancels the
+context on return. Call Wait after adding the work.
+
+Pass `groupCtx` to work that should stop on group failure, including work
+created separately and included with Add.
+
+Both group types can participate directly in `Select`, `Join`, and `Add`.
+They settle after their final member settles. An ErrGroup's settled outcome
+includes its first failure. Add ignores new members after settlement. Go still
+starts a step, but the completed group does not track it. Use a new group to
+wait for later work.
 
 ## Racing operations
 
@@ -119,9 +183,8 @@ Other inputs keep running after a selection. When several inputs are ready,
 the earliest recorded settlement wins, with argument order breaking ties.
 See [Delivering results in order](/guide/replay#delivering-results-in-order).
 
-Hooks and webhooks can also participate in waits, alongside results with
-different value types. Selecting or joining a hook leaves its payload
-available for `Next`. Runs have an independent lifetime and use
+Hooks and webhooks can also participate in waits. Selecting or joining a hook
+leaves its payload available for `Next`. Runs have an independent lifetime and use
 [`Status`](/guide/runs#the-run-handle) to report readiness.
 
 ## Chaining work

@@ -24,6 +24,7 @@ The **Context** column says where a function can be called:
 | `Step(ctx, fn, input, ...StepOptions) (Out, error)` | W | Calls a step and waits for it. `Background` + `Value`. |
 | `Background(ctx, fn, input, ...StepOptions) *Result[Out]` | W | Starts a step without waiting. |
 | `Map(ctx, fn, inputs) []*Result[Out]` | W | Starts one step per input. |
+| `MapResults(results []*Result[T]) []promise` | W, S, O | Converts result handles for combinators or group Add, preserving order. |
 | `All(ctx, fn, inputs) ([]Out, error)` | W | Collects values in input order. Cancels remaining steps on any failure. |
 | `InlineStep(ctx, fn func(context.Context, In) (Out, error), input In, ...StepOptions) (Out, error)` | W, S | Records work in the flow delivery. See [Inline Steps](/guide/inline-steps). In step context calls `fn` directly. |
 | `Rollback(ctx, fn func(context.Context, In) error, input, ...StepOptions)` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
@@ -54,9 +55,10 @@ type WorkflowMetadata struct {
 
 ## Results and promises
 
-`Background`, timers, `NewResult`, and `Then` return `*Result[T]`, which exposes `Value(ctx) (T, error)` and `Unwrap(ctx) T`. The settlement method is private to the SDK and cannot be implemented independently by application types. There is no public readiness or cancellation method.
+`Background`, timers, `NewResult`, and `Then` return `*Result[T]`, which exposes `Value(ctx) (T, error)` and `Unwrap(ctx) T`.
 
-The combinators accept SDK waiting handles with mixed value types, including hooks and webhooks. Their unexported parameter and winner interface is shown as `promise` below. Callers pass handles directly and compare the winner by identity.
+The signatures below use `promise` for results, hooks, webhooks, and groups.
+Selection returns the original input handle, which can be compared by identity.
 
 | Function | Context | Description |
 | --- | --- | --- |
@@ -68,6 +70,26 @@ The combinators accept SDK waiting handles with mixed value types, including hoo
 | `Then[T, U any](ctx, source *Result[T], fn func(T, error) *Result[U]) *Result[U]` | W | Follows the callback's returned result without waiting inside the callback. |
 
 An empty join succeeds. An empty selection returns a nil winner and no error.
+
+## Groups
+
+WaitGroup and ErrGroup wait for all members. Their zero values are ready to
+use. WaitGroup ignores operation failures; ErrGroup returns the first recorded
+failure. Groups begin observing members on their first Wait, Select, or Join.
+Add ignores new members after settlement. Go still starts a step, but the
+completed group does not track it.
+
+| Function or method | Context | Description |
+| --- | --- | --- |
+| `Go(ctx, group, step, input, ...StepOptions) *Result[Out]` | W | Starts a step and adds its result to either group. |
+| `(*WaitGroup).Add(...promise)`, `(*ErrGroup).Add(...promise)` | W | Tracks existing handles without changing their cancellation contexts. |
+| `(*WaitGroup).Wait(ctx) error` | W | Waits for all members, ignoring operation failures. |
+| `(*ErrGroup).Wait(ctx) error` | W | Waits for all members and returns the first failure. Cancels its associated context on return. |
+| `ErrGroupWithContext(ctx) (*ErrGroup, context.Context, error)` | W | Creates an ErrGroup whose context cancels on the first failure or when Wait returns. |
+
+A zero-value ErrGroup does not cancel work. Use ErrGroupWithContext and pass
+its context to work that should stop on group failure. Cancellation is
+cooperative.
 
 ## Cancellation
 

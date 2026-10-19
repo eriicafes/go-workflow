@@ -187,6 +187,15 @@ func Map[In, Out any](ctx context.Context, step func(context.Context, In) (Out, 
 	return results
 }
 
+// MapResults converts results to promise inputs, preserving their order.
+func MapResults[T any](results []*Result[T]) []promise {
+	inputs := make([]promise, len(results))
+	for i, result := range results {
+		inputs[i] = result
+	}
+	return inputs
+}
+
 // All starts every step and collects successful values in input order.
 // If any step fails, it cancels the others and returns that failure.
 func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) ([]Out, error) {
@@ -198,10 +207,7 @@ func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, 
 		return nil, err
 	}
 	results := Map(cancelCtx, step, inputs)
-	pending := make([]promise, len(results))
-	for i, result := range results {
-		pending[i] = result
-	}
+	pending := MapResults(results)
 	values := make([]Out, len(results))
 	for len(pending) != 0 {
 		winner, err := Select(ctx, pending...)
@@ -267,7 +273,7 @@ func selectPromise(ctx context.Context, successful bool, results ...promise) (pr
 		var earliest uint64
 		pending := false
 		for _, result := range results {
-			settled, settledErr, err := result.done()
+			settled, settledErr, err := result.done(ctx)
 			if err != nil {
 				return nil, err
 			}
