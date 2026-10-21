@@ -131,8 +131,8 @@ and they leave the count alone. See
 
 Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
-Lists take `Pagination{Cursor, Limit, SortOrder}` and return
-`Page[T]{Data, Cursor, HasMore}`. `ResolveData` selects whether payloads
+Lists take a `Pagination` with `Cursor`, `Limit`, and `SortOrder`, and return
+a `Page` with `Data`, `Cursor`, and `HasMore`. `ResolveData` selects whether payloads
 (inputs, outputs, hook metadata) are returned.
 
 ### Views

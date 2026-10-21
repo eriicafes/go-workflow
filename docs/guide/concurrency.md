@@ -27,7 +27,7 @@ if err != nil {
 return Output{Profile: profileValue, Orders: orderValues}, nil
 ```
 
-A result's `Unwrap(ctx)` method also waits, but panics on failure. Use `Value`
+A result's `Unwrap` method also waits, but panics on failure. Use `Value`
 when you need to handle the error. `workflow.Step` combines `Background` and
 `Value` in one call.
 

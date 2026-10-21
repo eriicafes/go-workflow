@@ -23,8 +23,8 @@ if err != nil {
 return Result{Sources: sources}, nil
 ```
 
-A step function has the shape `func(context.Context, In) (Out, error)`. Its
-input and output must be JSON-encodable. Use `struct{}` when either is empty.
+A step function takes a context and one input, and returns an output and an
+error. Its input and output must be JSON-encodable. Use `struct{}` when either is empty.
 
 The first call queues a separate step delivery and suspends the runner. Once
 the step finishes, replay continues with its recorded output. To start work

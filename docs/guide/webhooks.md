@@ -27,7 +27,7 @@ if err != nil {
 return Output{PaymentID: payment.ID}, nil
 ```
 
-`Request` returns a `*WebhookRequest[T]` that embeds `*http.Request`. The
+`Request` returns a `WebhookRequest` that embeds the incoming HTTP request. The
 request survives step serialization, including its raw body and response
 origin. Call `JSON` to decode the recorded body without consuming
 `Request.Body`.

@@ -33,8 +33,8 @@ func voidInvoice(ctx context.Context, invoiceID string) error {
 
 ## When rollbacks run
 
-A compensation receives the input it was registered with and has the shape
-`func(context.Context, In) error`. When the runner returns an error or panics,
+A compensation takes a context and the input it was registered with, and
+returns only an error. When the runner returns an error or panics,
 compensations execute as durable steps before the run is marked failed. A
 successful run never executes them. An exhausted compensation failure is
 recorded without preventing the remaining compensations or replacing the

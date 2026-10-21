@@ -67,15 +67,15 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 
 | Method | Description |
 | --- | --- |
-| `ID()` | Run ID. |
-| `Value(ctx)` | Output once the run finishes. Blocks outside a run until it finishes or `ctx` is done. |
-| `Status(ctx)` | Current `Status`. |
-| `Exists(ctx)` | Whether the run is recorded in its World. |
-| `WorkflowName(ctx)` | Name of the workflow the run executes. |
-| `Cancel(ctx)` | Cancels the run. No-op if it already finished. |
-| `WakeUp(ctx, ...WakeOptions)` | Settles pending timers early. See [Sleep and Timers](/guide/sleep#waking-a-run-early). |
-| `Reader(ctx, ...ReaderOption)` | Reads a stream from a chunk index. See [Streams](/guide/streams). |
-| `Writer(ctx, ...WriterOption)` | Writes a stream from outside the run. |
+| `ID` | Run ID. |
+| `Value` | Output once the run finishes. Blocks outside a run until it finishes or `ctx` is done. |
+| `Status` | Current `Status`. |
+| `Exists` | Whether the run is recorded in its World. |
+| `WorkflowName` | Name of the workflow the run executes. |
+| `Cancel` | Cancels the run. No-op if it already finished. |
+| `WakeUp` | Settles pending timers early. See [Sleep and Timers](/guide/sleep#waking-a-run-early). |
+| `Reader` | Reads a stream from a chunk index. See [Streams](/guide/streams). |
+| `Writer` | Writes a stream from outside the run. |
 
 `Value` returns a failed run's error as a
 [`*workflow.Error`](/guide/errors) and a cancelled run's as
