@@ -308,3 +308,19 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 		t.Fatalf("queued = %#v, want a flow of the run for each resume", queued)
 	}
 }
+
+func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
+	world := testworld.New()
+	ctx := context.Background()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream", WorkflowName: "stream"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_stream", Name: "s", Chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c")}}); err != nil {
+		t.Fatal(err)
+	}
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+	chunks, err := client.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Name: "s", StartIndex: -2})
+	if err != nil || len(chunks.Data) != 2 || chunks.Data[0].Index != 1 || string(chunks.Data[1].Data) != "c" {
+		t.Fatalf("last two chunks over HTTP = %#v err=%v", chunks, err)
+	}
+}

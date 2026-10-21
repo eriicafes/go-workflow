@@ -334,22 +334,15 @@ func runCancel(ctx context.Context, runID worlds.RunID) (struct{}, error) {
 	return struct{}{}, err
 }
 
-// Reader returns a reader for the run's stream from its beginning. Reads block
-// until data is written and return io.EOF once the stream is closed. Reader is
-// for step context and for use outside a run. It returns ErrNotInStep in
-// workflow context.
-func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (io.Reader, error) {
-	return r.ReaderAt(ctx, 0, options...)
-}
-
-// ReaderAt is like Reader but starts at byte offset. A negative offset is
-// relative to the current end of the stream.
-func (r *Run[Out]) ReaderAt(ctx context.Context, offset int64, options ...ReaderOption) (io.Reader, error) {
+// Reader returns a reader for the run's stream from ReaderOption.StartIndex,
+// for step context and for use outside a run, such as a route handler. Reads
+// block until data is written and return io.EOF once the stream is closed. It
+// returns ErrNotInStep in workflow context.
+func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamReader, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
 		return nil, ErrNotInStep
 	}
-	opts := readerOption(options)
-	return newStreamReader(ctx, r.client, r.id, opts.Name, offset), nil
+	return newStreamReader(ctx, r.client, r.id, readerOption(options)), nil
 }
 
 // Writer returns a writer for the run's stream, for step context and for use

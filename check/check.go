@@ -152,9 +152,8 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 			}
 		case *ast.CallExpr:
 			if isSDKCall(pass, node, "Writer") || isSDKCall(pass, node, "Reader") ||
-				isSDKCall(pass, node, "ReaderAt") ||
 				isSDKMethod(pass, node, "Writer") || isSDKMethod(pass, node, "Reader") ||
-				isSDKMethod(pass, node, "ReaderAt") || isSDKMethod(pass, node, "RespondWith") {
+				isSDKMethod(pass, node, "RespondWith") {
 				pass.Reportf(node.Pos(), "workflow stream access and webhook responses require a durable step")
 			}
 			if banned, ok := bannedCall(pass, node); ok {

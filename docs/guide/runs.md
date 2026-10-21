@@ -74,8 +74,7 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | `WorkflowName(ctx)` | Name of the workflow the run executes. |
 | `Cancel(ctx)` | Cancels the run. No-op if it already finished. |
 | `WakeUp(ctx, ...WakeOptions)` | Settles pending timers early. See [Sleep and Timers](/guide/sleep#waking-a-run-early). |
-| `Reader(ctx, ...ReaderOption)` | Reads a stream from the start. See [Streams](/guide/streams). |
-| `ReaderAt(ctx, offset, ...ReaderOption)` | Reads a stream from an offset. |
+| `Reader(ctx, ...ReaderOption)` | Reads a stream from a chunk index. See [Streams](/guide/streams). |
 | `Writer(ctx, ...WriterOption)` | Writes a stream from outside the run. |
 
 `Value` returns a failed run's error as a
@@ -103,7 +102,7 @@ and `WakeUp` each run once as an [inline step](/guide/inline-steps), and
 replay returns the recorded result. They never wait: `Value` returns
 `workflow.ErrRunNotFinished` for a run that hadn't finished. `WakeUp` records
 which waits it will wake before waking them, so a retry never wakes a timer the
-other run created later. `Reader`, `ReaderAt`, and `Writer` are I/O and return
+other run created later. `Reader` and `Writer` are I/O and return
 `workflow.ErrNotInStep` there. Use them in a step.
 
 ## Cancelling a run

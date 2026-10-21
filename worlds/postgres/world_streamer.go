@@ -183,7 +183,10 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	// Read the stream row before its chunks. Since chunk_count and the chunks
 	// it covers commit together, the page is consistent with Done.
-	start := 0
+	start, err := worlds.StreamsStartIndex(ctx, w, input)
+	if err != nil {
+		return worlds.StreamChunksResult{}, err
+	}
 	if input.Cursor != "" {
 		value, err := strconv.Atoi(input.Cursor)
 		if err != nil || value < 0 {

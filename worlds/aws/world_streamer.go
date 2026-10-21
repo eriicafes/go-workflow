@@ -251,7 +251,10 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	// Poll the stream with backoff from 50ms to 500ms while waiting for chunks
 	// past the cursor.
-	start := 0
+	start, err := worlds.StreamsStartIndex(ctx, w, input)
+	if err != nil {
+		return worlds.StreamChunksResult{}, err
+	}
 	if input.Cursor != "" {
 		value, err := strconv.Atoi(input.Cursor)
 		if err != nil || value < 0 {

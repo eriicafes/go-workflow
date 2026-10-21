@@ -313,3 +313,28 @@ test("writes event data as JSON and shapes event results like the Workflow SDK",
 		{ status: 200, event: { runId: "wrun_01", eventId: "evnt_03", eventType: "wait_created", correlationId: "wait_01" }, run: undefined, step: undefined },
 	]);
 });
+
+test("reads a stream from a chunk index, then follows the cursor", async () => {
+	const inputs: Record<string, unknown>[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+			}
+			const input = envelope.input as Record<string, unknown>;
+			inputs.push(input);
+			return inputs.length === 1
+				? rpcResponse({ Data: [{ Index: 3, Data: new Uint8Array([3]) }], Cursor: "4", HasMore: false, Done: false })
+				: rpcResponse({ Data: [{ Index: 4, Data: new Uint8Array([4]) }], Cursor: "5", HasMore: false, Done: true });
+		},
+	});
+
+	const reader = (await world.streams.get("wrun_01", "strm_progress", -2)).getReader();
+	expect((await reader.read()).value).toEqual(new Uint8Array([3]));
+	expect((await reader.read()).value).toEqual(new Uint8Array([4]));
+	expect((await reader.read()).done).toBe(true);
+	expect(inputs[0]).toMatchObject({ StartIndex: -2, Cursor: "" });
+	expect(inputs[1]).toMatchObject({ Cursor: "4" });
+});

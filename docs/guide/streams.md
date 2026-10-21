@@ -43,8 +43,7 @@ Streams can only be used in step context. `Writer` and `Reader` return
 
 ## Reading inside a run
 
-`workflow.Reader` and `workflow.ReaderAt` read a stream of the run the step
-belongs to:
+`workflow.Reader` reads a stream of the run the step belongs to:
 
 ```go
 reader, err := workflow.Reader(ctx, workflow.ReaderOption{Name: "progress"})
@@ -63,12 +62,22 @@ if err != nil {
 // From the beginning.
 reader, err := run.Reader(ctx, workflow.ReaderOption{Name: "progress"})
 
-// The last 128 bytes onward.
-reader, err = run.ReaderAt(ctx, -128, workflow.ReaderOption{Name: "progress"})
+// The last three writes onward.
+reader, err = run.Reader(ctx, workflow.ReaderOption{Name: "progress", StartIndex: -3})
 ```
 
+Each write is one **chunk**, numbered from zero. As in the Workflow SDK,
+`StartIndex` picks the chunk to start at, and a negative index counts back from
+the end of the stream.
+
+A `StreamReader` is an `io.Reader` that joins chunks into bytes. `Next`
+returns one chunk at a time with its `Index`, so a reader can relay whole writes
+and remember where it stopped, and `TailIndex` reports the index of the last
+chunk, or -1 for an empty stream. A client that reconnects resumes from the
+index after the last chunk it received.
+
 Reads **block** until data is written and return `io.EOF` once the stream is
-closed. A negative offset is relative to the current end of the stream.
+closed.
 
 Streaming to an HTTP response:
 
@@ -80,24 +89,22 @@ mux.HandleFunc("GET /reports/{id}/progress", func(w http.ResponseWriter, r *http
 		return
 	}
 
-	reader, err := run.Reader(r.Context(), workflow.ReaderOption{Name: "progress"})
+	// A reconnecting client passes the index after the last chunk it saw.
+	start, _ := strconv.Atoi(r.URL.Query().Get("startIndex"))
+	reader, err := run.Reader(r.Context(), workflow.ReaderOption{Name: "progress", StartIndex: start})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
-	buf := make([]byte, 4096)
 	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			w.Write(buf[:n])
-			w.(http.Flusher).Flush()
-		}
-
+		chunk, err := reader.Next()
 		if err != nil {
 			return
 		}
+		w.Write(chunk.Data)
+		w.(http.Flusher).Flush()
 	}
 })
 ```

@@ -225,7 +225,7 @@ an unknown message. A World with deployment affinity returns an error wrapping
 | `StreamsCloseWriteSession` | Releases a session, optionally closing the stream. |
 | `StreamsWrite`, `StreamsWriteMulti` | Append when no session owns the stream. |
 | `StreamsClose` | Marks a stream done when no session owns it. |
-| `StreamsGetChunks` | Chunks after a cursor, waiting up to `Wait` for more. |
+| `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
 | `StreamsGetInfo` | Tail index and whether the stream is done. |
 | `StreamsList` | Stream names of a run. |
 

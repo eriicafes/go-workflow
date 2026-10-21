@@ -275,7 +275,7 @@ export class HTTPWorld implements World {
 			close: async (runId, name) => {
 				await client.call<RPC.Empty>("streams.close", { runId, name });
 			},
-			get: async (runId, name, startIndex = 0) => createReadableStream(client, { runId, name, cursor: String(startIndex) }),
+			get: async (runId, name, startIndex = 0) => createReadableStream(client, { runId, name, startIndex }),
 			list: (runId) => client.call<string[]>("streams.list", { runId }),
 			getChunks: async (runId, name, options = {}) => {
 				const result = await getStreamChunks(client, { runId, name, ...options });
@@ -413,6 +413,7 @@ function createReadableStream(client: RPCClient, input: RPC.GetStreamInput): Rea
 					cursor,
 					waitMs: input.pollIntervalMs ?? 100,
 				});
+				// Once a page returns a cursor, it replaces startIndex.
 				if (result.cursor !== null) {
 					cursor = result.cursor;
 				}

@@ -20,7 +20,9 @@ mounting it.
 
 ## Streams
 
-Use `workflow.Writer`, `Reader`, and `ReaderAt` inside steps. A writer's
+Use `workflow.Writer` and `Reader` inside steps. Each write is one chunk;
+`ReaderOption.StartIndex` picks the first chunk, negative from the end, and
+`StreamReader.Next` and `TailIndex` support resuming by chunk index. A writer's
 returned release function relinquishes its exclusive session; `Close` ends
 the stream for all writers. Readers block until data arrives or the closed
 stream reaches EOF. External callers can read or write through a Run handle.

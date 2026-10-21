@@ -2,6 +2,7 @@ package workflowtest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -125,6 +126,50 @@ func conformStreamsDirect(t *testing.T, world worlds.World) {
 	other, err := world.StreamsList(ctx, worlds.StreamsListInput{RunID: conformCreateRun(t, world, "streams_none")})
 	if err != nil || len(other) != 0 {
 		t.Fatalf("stream names of run without streams = %v err=%v", other, err)
+	}
+}
+
+func conformStreamsStartIndex(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "streams_start")
+	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: runID, Name: "s", Chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	read := func(input worlds.StreamsGetChunksInput) string {
+		t.Helper()
+		input.RunID, input.Name = runID, "s"
+		chunks, err := world.StreamsGetChunks(ctx, input)
+		if err != nil {
+			t.Fatalf("StreamsGetChunks(%+v): %v", input, err)
+		}
+		var data, indexes string
+		for _, chunk := range chunks.Data {
+			data += string(chunk.Data)
+			indexes += fmt.Sprint(chunk.Index)
+		}
+		return data + "@" + indexes
+	}
+	for _, test := range []struct {
+		name  string
+		input worlds.StreamsGetChunksInput
+		want  string
+	}{
+		{"start", worlds.StreamsGetChunksInput{StartIndex: 2}, "cd@23"},
+		{"last chunks", worlds.StreamsGetChunksInput{StartIndex: -3}, "bcd@123"},
+		{"before the first chunk", worlds.StreamsGetChunksInput{StartIndex: -10}, "abcd@0123"},
+		{"past the end", worlds.StreamsGetChunksInput{StartIndex: 10}, "@"},
+		{"cursor wins", worlds.StreamsGetChunksInput{StartIndex: -1, Cursor: "1"}, "bcd@123"},
+	} {
+		if got := read(test.input); got != test.want {
+			t.Fatalf("%s: chunks = %q, want %q", test.name, got, test.want)
+		}
+	}
+	empty, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "missing", StartIndex: -2})
+	if err != nil || len(empty.Data) != 0 {
+		t.Fatalf("last chunks of a missing stream = %#v err=%v", empty, err)
 	}
 }
 

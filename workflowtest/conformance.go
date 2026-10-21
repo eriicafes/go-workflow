@@ -45,6 +45,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"Waits", conformWaits},
 		{"Streams", conformStreams},
 		{"StreamsDirect", conformStreamsDirect},
+		{"StreamsStartIndex", conformStreamsStartIndex},
 		{"StreamsWait", conformStreamsWait},
 		{"Queue", conformQueue},
 		{"Analytics", conformAnalytics},

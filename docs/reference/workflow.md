@@ -134,8 +134,7 @@ constructors belong in steps or external code.
 | `Exists(ctx) (bool, error)` | Whether the run is recorded. |
 | `WorkflowName(ctx) (string, error)` | Workflow name. |
 | `WakeUp(ctx, ...WakeOptions) (int, error)` | Settles pending timers early. |
-| `Reader(ctx, ...ReaderOption) (io.Reader, error)` | Reads a stream from the start (S, O). |
-| `ReaderAt(ctx, offset, ...ReaderOption) (io.Reader, error)` | Reads a stream from an offset (S, O). |
+| `Reader(ctx, ...ReaderOption) (StreamReader, error)` | Reads a stream from a chunk index (S, O). |
 | `Writer(ctx, ...WriterOption) (io.WriteCloser, func() error, error)` | Writes a stream (S, O). |
 
 ```go
@@ -225,13 +224,24 @@ Embeds `*http.Request` and implements JSON serialization for step input, preserv
 | Function | Context | Description |
 | --- | --- | --- |
 | `Writer(ctx, ...WriterOption) (io.WriteCloser, func() error, error)` | S | Writer for a stream of the current run, plus a release function. |
-| `Reader(ctx, ...ReaderOption) (io.Reader, error)` | S | Reader from the beginning. |
-| `ReaderAt(ctx, offset, ...ReaderOption) (io.Reader, error)` | S | Reader from `offset`. Negative offsets count from the end. |
+| `Reader(ctx, ...ReaderOption) (StreamReader, error)` | S | Reader from `StartIndex`. Negative indexes count from the end. |
 
 ```go
 type WriterOption struct{ Name string } // empty is the default stream
-type ReaderOption struct{ Name string }
+type ReaderOption struct {
+	Name       string // empty is the default stream
+	StartIndex int    // first chunk; negative counts back from the end
+}
+type StreamChunk struct {
+	Index int // zero-based; each write is one chunk
+	Data  []byte
+}
 ```
+
+`StreamReader` is an interface that embeds `io.Reader`.
+`Next() (StreamChunk, error)` returns one chunk at a time, and
+`TailIndex() (int, error)` returns the index of the last chunk, or -1 for an
+empty stream.
 
 ## Clients
 

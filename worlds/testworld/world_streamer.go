@@ -164,6 +164,13 @@ func (m *World) StreamsClose(_ context.Context, input worlds.StreamsCloseInput) 
 }
 
 func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	start, err := worlds.StreamsStartIndex(ctx, m, input)
+	if err != nil {
+		return worlds.StreamChunksResult{}, err
+	}
+	if input.Cursor != "" {
+		start, _ = strconv.Atoi(input.Cursor)
+	}
 	deadline := time.Now().Add(input.Wait)
 	timer := time.NewTimer(input.Wait)
 	for {
@@ -177,18 +184,15 @@ func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 			closed = stream.closed
 		}
 		m.mu.RUnlock()
-		start := 0
-		if input.Cursor != "" {
-			start, _ = strconv.Atoi(input.Cursor)
-		}
 		if start < len(chunks) || closed || input.Wait <= 0 || !time.Now().Before(deadline) {
 			limit := input.Limit
 			if limit <= 0 {
 				limit = 100
 			}
-			end := min(start+limit, len(chunks))
+			// A start past the end returns no chunks and keeps its cursor.
+			end := max(min(start+limit, len(chunks)), start)
 			result := worlds.StreamChunksResult{Done: closed, HasMore: end < len(chunks), RetryAfter: 50 * time.Millisecond, Cursor: strconv.Itoa(end)}
-			for i, chunk := range chunks[start:end] {
+			for i, chunk := range chunks[min(start, len(chunks)):min(end, len(chunks))] {
 				result.Data = append(result.Data, worlds.StreamChunk{Index: start + i, Data: bytes.Clone(chunk)})
 			}
 			return result, nil

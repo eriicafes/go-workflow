@@ -305,12 +305,14 @@ func writeProgress(ctx context.Context, count int) (struct{}, error) {
 }
 ```
 
-Outside a run, `run.Reader` reads a stream from the start and `run.ReaderAt`
-from an offset, where a negative offset counts from the end. Reads wait for new
-data until the stream closes.
+Outside a run, such as in a route handler, `run.Reader` reads a stream. Each
+write is one chunk, and `ReaderOption.StartIndex` picks the first chunk, where a
+negative index counts from the end. Reads wait for new data until the stream
+closes.
 
 ```go
-reader, err := run.ReaderAt(ctx, -128, workflow.ReaderOption{Name: "progress"})
+// The last three writes onward.
+reader, err := run.Reader(ctx, workflow.ReaderOption{Name: "progress", StartIndex: -3})
 ```
 
 ## Hooks and webhooks

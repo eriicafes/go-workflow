@@ -116,7 +116,10 @@ func (w *World) readStream(ctx context.Context, runID worlds.RunID, name string,
 
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	// Poll with a backoff from 50ms to 500ms while waiting.
-	start := 0
+	start, err := worlds.StreamsStartIndex(ctx, w, input)
+	if err != nil {
+		return worlds.StreamChunksResult{}, err
+	}
 	if input.Cursor != "" {
 		value, err := strconv.Atoi(input.Cursor)
 		if err != nil || value < 0 {

@@ -29,7 +29,8 @@ type Streamer interface {
 	// StreamsClose marks a stream done when no writer session owns it. It returns
 	// ErrStreamLocked when a session owns the stream.
 	StreamsClose(context.Context, StreamsCloseInput) error
-	// StreamsGetChunks returns chunks after Cursor. When no chunk is available
+	// StreamsGetChunks returns chunks after Cursor, or from StartIndex when
+	// Cursor is empty (see StreamsStartIndex). When no chunk is available
 	// and the stream is not done, it blocks for up to Wait or until ctx is
 	// done.
 	StreamsGetChunks(context.Context, StreamsGetChunksInput) (StreamChunksResult, error)
@@ -113,9 +114,14 @@ type (
 	StreamsGetChunksInput struct {
 		RunID RunID
 		Name  string
-		// Cursor is the Cursor of the previous result. Empty starts at the
-		// first chunk.
+		// Cursor is the Cursor of the previous result. Empty starts at
+		// StartIndex.
 		Cursor string
+		// StartIndex is the index of the chunk to start at when Cursor is
+		// empty. A negative StartIndex counts back from the end of the stream,
+		// so -3 starts at the third chunk from the end, and stops at the first
+		// chunk. An index past the end waits for that chunk.
+		StartIndex int
 		// Limit is the maximum number of chunks to return. Zero or less uses
 		// the World's default.
 		Limit int
@@ -162,4 +168,19 @@ type StreamInfo struct {
 	// no chunks.
 	TailIndex int
 	Done      bool
+}
+
+// StreamsStartIndex resolves input.StartIndex to the index of a chunk. A
+// negative StartIndex counts back from the end of the stream, which streamer
+// reports through StreamsGetInfo. It does not read the stream when
+// input.Cursor is set, since the cursor takes precedence.
+func StreamsStartIndex(ctx context.Context, streamer Streamer, input StreamsGetChunksInput) (int, error) {
+	if input.StartIndex >= 0 || input.Cursor != "" {
+		return input.StartIndex, nil
+	}
+	info, err := streamer.StreamsGetInfo(ctx, StreamsGetInfoInput{RunID: input.RunID, Name: input.Name})
+	if err != nil {
+		return 0, err
+	}
+	return max(info.TailIndex+1+input.StartIndex, 0), nil
 }

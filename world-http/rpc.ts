@@ -172,6 +172,9 @@ export namespace RPC {
 
 	export type GetStreamChunksInput = StreamInput & {
 		cursor?: string;
+		// startIndex is the chunk to start at when cursor is empty; a negative
+		// value counts back from the end of the stream.
+		startIndex?: number;
 		limit?: number;
 		waitMs?: number;
 	};

@@ -171,6 +171,12 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	// Sleep on the change channel until a chunk past the cursor exists, the
 	// stream is done, or Wait elapses.
 	start := chunkCursor(input.Cursor)
+	if input.Cursor == "" {
+		var err error
+		if start, err = worlds.StreamsStartIndex(ctx, w, input); err != nil {
+			return worlds.StreamChunksResult{}, err
+		}
+	}
 	limit := input.Limit
 	if limit <= 0 {
 		limit = 100

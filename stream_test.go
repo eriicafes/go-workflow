@@ -18,7 +18,7 @@ type streamStepOutput struct{ Data string }
 func (streamInput) Workflow(streamOutput)         {}
 func (streamStepInput) Workflow(streamStepOutput) {}
 
-func TestRunStreamsSupportWritersReadersAndByteOffsets(t *testing.T) {
+func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
 	world := testworld.New(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
 		return streamOutput{Value: input.Value}, nil
 	}))
@@ -48,20 +48,40 @@ func TestRunStreamsSupportWritersReadersAndByteOffsets(t *testing.T) {
 	if err := release(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := run.ReaderAt(ctx, 6)
+	reader, err := run.Reader(ctx, workflow.ReaderOption{StartIndex: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != " world" {
+		t.Fatalf("stream from chunk 1 = %q, %v", data, err)
+	}
+	if tail, err := reader.TailIndex(); err != nil || tail != 1 {
+		t.Fatalf("tail index = %d, %v", tail, err)
+	}
+
+	// Next returns whole chunks with their indexes, and the rest of a chunk
+	// after a partial Read.
+	reader, err = run.Reader(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "world" {
-		t.Fatalf("stream = %q", data)
+	part := make([]byte, 2)
+	if n, err := reader.Read(part); err != nil || string(part[:n]) != "he" {
+		t.Fatalf("partial read = %q, %v", part[:n], err)
+	}
+	for _, want := range []workflow.StreamChunk{{Index: 0, Data: []byte("llo")}, {Index: 1, Data: []byte(" world")}} {
+		chunk, err := reader.Next()
+		if err != nil || chunk.Index != want.Index || string(chunk.Data) != string(want.Data) {
+			t.Fatalf("chunk = %d %q, %v, want %d %q", chunk.Index, chunk.Data, err, want.Index, want.Data)
+		}
+	}
+	if _, err := reader.Next(); err != io.EOF {
+		t.Fatalf("Next after the last chunk = %v, want io.EOF", err)
 	}
 }
 
-func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testing.T) {
+func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 	world := testworld.New(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
 		return streamOutput{Value: input.Value}, nil
 	}))
@@ -80,8 +100,10 @@ func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.Write([]byte("abcdef")); err != nil {
-		t.Fatal(err)
+	for _, chunk := range []string{"abc", "def", "ghi"} {
+		if _, err := writer.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
@@ -95,13 +117,13 @@ func TestNamedStreamSupportsNegativeOffsetsAndClosedWritersRejectWrites(t *testi
 	if err := release(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := run.ReaderAt(ctx, -3, workflow.ReaderOption{Name: name})
+	reader, err := run.Reader(ctx, workflow.ReaderOption{Name: name, StartIndex: -2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, err := io.ReadAll(reader)
-	if err != nil || string(data) != "def" {
-		t.Fatalf("negative-offset stream = %q, %v", data, err)
+	if err != nil || string(data) != "defghi" {
+		t.Fatalf("last two chunks = %q, %v", data, err)
 	}
 }
 
