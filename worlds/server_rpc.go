@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -38,6 +39,47 @@ type RPCError struct {
 	// cancelled, deadline_exceeded, or internal.
 	Code    string `cbor:"code"`
 	Message string `cbor:"message"`
+	// Sentinel names the sentinel error the failure matches, such as
+	// run_not_found, so a client can return that error.
+	Sentinel string `cbor:"sentinel,omitempty"`
+}
+
+// maxRPCWait caps how long one RPC request may block in a World wait, so a
+// caller cannot hold a server connection open indefinitely.
+const maxRPCWait = 30 * time.Second
+
+// errRPCInvalidInput reports a request the server cannot decode or route.
+var errRPCInvalidInput = errors.New("workflow: invalid RPC request")
+
+// rpcSentinels names the errors an RPC failure carries to clients, with the
+// code each is reported under. A failure takes the first entry it matches.
+var rpcSentinels = []struct {
+	name, code string
+	err        error
+}{
+	{"workflow_not_found", "not_found", ErrWorkflowNotFound},
+	{"run_not_found", "not_found", ErrRunNotFound},
+	{"step_not_found", "not_found", ErrStepNotFound},
+	{"event_not_found", "not_found", ErrEventNotFound},
+	{"hook_not_found", "not_found", ErrHookNotFound},
+	{"queue_message_not_found", "not_found", ErrQueueMessageNotFound},
+	{"event_invalid", "invalid_argument", ErrEventInvalid},
+	{"run_already_exists", "conflict", ErrRunAlreadyExists},
+	{"run_terminal", "conflict", ErrRunTerminal},
+	{"step_not_startable", "conflict", ErrStepNotStartable},
+	{"stream_locked", "conflict", ErrStreamLocked},
+	{"hook_conflict", "conflict", ErrHookConflict},
+	{"hook_not_active", "conflict", ErrHookNotActive},
+	{"hook_force_claimed", "conflict", ErrHookForceClaimed},
+	{"in_band_superseded", "conflict", ErrInBandSuperseded},
+	{"run_cancelled", "conflict", ErrRunCancelled},
+	{"resume_not_queued", "internal", ErrResumeNotQueued},
+	{"webhook_request_too_large", "invalid_argument", ErrWebhookRequestTooLarge},
+	{"deployment_unavailable", "internal", ErrDeploymentUnavailable},
+	{"deployment_mismatch", "internal", ErrDeploymentMismatch},
+	{"corrupted_event_log", "internal", ErrCorruptedEventLog},
+	{"cancelled", "cancelled", context.Canceled},
+	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
 }
 
 // specVersionMismatchError reports incompatible RPC protocol versions.
@@ -58,15 +100,15 @@ func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 8<<20))
 	if err != nil {
-		writeRPC(writer, RPCResponse{Error: newRPCError(err)})
+		writeRPC(writer, RPCResponse{Error: newRPCError(fmt.Errorf("%w: %w", errRPCInvalidInput, err))})
 		return
 	}
 	var envelope RPCRequest
 	if err := cbor.Unmarshal(body, &envelope); err != nil || envelope.Method == "" {
 		if err == nil {
-			err = fmt.Errorf("workflow: missing RPC method")
+			err = errors.New("missing method")
 		}
-		writeRPC(writer, RPCResponse{Error: newRPCError(err)})
+		writeRPC(writer, RPCResponse{Error: newRPCError(fmt.Errorf("%w: %w", errRPCInvalidInput, err))})
 		return
 	}
 	output, err := dispatchRPC(request.Context(), world, envelope)
@@ -120,6 +162,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
+		input.Timeout = min(input.Timeout, maxRPCWait)
 		value, err := world.RunsWaitForTerminalStatus(ctx, input)
 		if err != nil {
 			return nil, err
@@ -164,7 +207,9 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		result, err := rpcEventResult(ctx, world, input.RunID, input.Event.CorrelationID, value, input.Options.ResolveData)
+		// ResolveData selects the replay events only. The created event is
+		// always returned with its data.
+		result, err := rpcEventResult(ctx, world, input.RunID, input.Event.CorrelationID, value)
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +227,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		result, err := rpcEventResult(ctx, world, input.RunID, "", value, EventsResolveDataAll)
+		result, err := rpcEventResult(ctx, world, input.RunID, "", value)
 		if err != nil {
 			return nil, err
 		}
@@ -349,6 +394,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
+		input.Wait = min(input.Wait, maxRPCWait)
 		value, err := world.StreamsGetChunks(ctx, input)
 		if err != nil {
 			return nil, err
@@ -522,7 +568,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			}
 			return encodeRPC(value)
 		default:
-			return nil, fmt.Errorf("workflow: unknown analytics RPC method %q", request.Method)
+			return nil, fmt.Errorf("%w: unknown analytics method %q", errRPCInvalidInput, request.Method)
 		}
 	case "client.spec":
 		return encodeRPC(ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()})
@@ -531,19 +577,11 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		if input.RunID == "" {
-			input.RunID = NewRunID()
-		}
-		if input.DeploymentID == "" {
-			input.DeploymentID = world.DeploymentID()
-		}
-		if _, err := world.EventsCreateRun(ctx, input); err != nil {
+		runID, err := CreateRun(ctx, world, input)
+		if err != nil {
 			return nil, err
 		}
-		if _, err := world.Queue(ctx, QueueInput{RunID: input.RunID, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); err != nil {
-			return nil, err
-		}
-		return encodeRPC(input.RunID)
+		return encodeRPC(runID)
 	case "client.runs.cancel":
 		input, err := decodeRPC[ClientRunsCancelInput](request.Input)
 		if err != nil {
@@ -604,7 +642,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		}
 		return encodeRPC(struct{}{})
 	default:
-		return nil, fmt.Errorf("workflow: unknown RPC method %q", request.Method)
+		return nil, fmt.Errorf("%w: unknown method %q", errRPCInvalidInput, request.Method)
 	}
 }
 
@@ -674,8 +712,8 @@ type RPCBatchEventResult struct {
 
 // rpcEventResult reads the committed event of result and the entity it
 // created or changed.
-func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID string, result EventResult, resolve EventsResolveData) (RPCEventResult, error) {
-	event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID, ResolveData: resolve})
+func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID string, result EventResult) (RPCEventResult, error) {
+	event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID})
 	if err != nil {
 		return RPCEventResult{}, err
 	}
@@ -715,15 +753,16 @@ func eventEntity(ctx context.Context, world World, event Event, correlationID st
 }
 
 // rpcEventBatch appends a batch and reports each event's outcome. When the
-// batch fails and is not fenced in-band, its events are appended one at a
-// time instead, so each reports the outcome its own events.create would have
-// had.
+// World refuses the batch, which appends none of it, and the batch is not
+// fenced in-band, its events are appended one at a time instead, so each
+// reports the outcome its own events.create would have had. Any other failure
+// may have committed the batch and is returned.
 func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInput) (RPCEventBatchResult, error) {
 	batch, err := world.EventsCreateBatch(ctx, input)
 	if err == nil {
 		value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(batch.Events)), InBandCount: batch.InBandCount}
 		for index, result := range batch.Events {
-			event, err := rpcEventResult(ctx, world, input.RunID, input.Events[index].CorrelationID, result, EventsResolveDataAll)
+			event, err := rpcEventResult(ctx, world, input.RunID, input.Events[index].CorrelationID, result)
 			if err != nil {
 				return RPCEventBatchResult{}, err
 			}
@@ -731,7 +770,7 @@ func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInpu
 		}
 		return value, nil
 	}
-	if input.InBandCount != nil {
+	if code := newRPCError(err).Code; input.InBandCount != nil || code != "conflict" && code != "invalid_argument" {
 		return RPCEventBatchResult{}, err
 	}
 	value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(input.Events))}
@@ -739,7 +778,7 @@ func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInpu
 		created, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: event})
 		if err == nil {
 			var result RPCEventResult
-			result, err = rpcEventResult(ctx, world, input.RunID, event.CorrelationID, created, EventsResolveDataAll)
+			result, err = rpcEventResult(ctx, world, input.RunID, event.CorrelationID, created)
 			if err == nil {
 				value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: result.Event, Run: result.Run, Step: result.Step}
 				value.InBandCount = created.InBandCount
@@ -766,30 +805,25 @@ func rpcErrorStatus(code string) int {
 }
 
 func newRPCError(err error) *RPCError {
-	var specVersionMismatch specVersionMismatchError
-	code := "internal"
-	switch {
-	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound), errors.Is(err, ErrStepNotFound), errors.Is(err, ErrEventNotFound), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrQueueMessageNotFound):
-		code = "not_found"
-	case errors.Is(err, ErrEventInvalid), errors.As(err, &specVersionMismatch):
-		code = "invalid_argument"
-	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict), errors.Is(err, ErrHookNotActive), errors.Is(err, ErrHookForceClaimed), errors.Is(err, ErrInBandSuperseded):
-		code = "conflict"
-	case errors.Is(err, context.Canceled):
-		code = "cancelled"
-	case errors.Is(err, context.DeadlineExceeded):
-		code = "deadline_exceeded"
+	for _, sentinel := range rpcSentinels {
+		if errors.Is(err, sentinel.err) {
+			return &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
+		}
 	}
-	return &RPCError{Code: code, Message: err.Error()}
+	var specVersionMismatch specVersionMismatchError
+	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &specVersionMismatch) {
+		return &RPCError{Code: "invalid_argument", Message: err.Error()}
+	}
+	return &RPCError{Code: "internal", Message: err.Error()}
 }
 
 func decodeRPC[T any](raw cbor.RawMessage) (T, error) {
 	var value T
 	if len(raw) == 0 {
-		return value, fmt.Errorf("workflow: missing RPC input")
+		return value, fmt.Errorf("%w: missing input", errRPCInvalidInput)
 	}
 	if err := cbor.Unmarshal(raw, &value); err != nil {
-		return value, fmt.Errorf("workflow: decode RPC input: %w", err)
+		return value, fmt.Errorf("%w: decode input: %w", errRPCInvalidInput, err)
 	}
 	return value, nil
 }

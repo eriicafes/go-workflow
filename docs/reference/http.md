@@ -29,11 +29,16 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 - **Response:** always `200` with `Content-Type: application/cbor`:
 
   ```
-  { output?: <cbor>, error?: { code: string, message: string } }
+  { output?: <cbor>, error?: { code: string, message: string, sentinel?: string } }
   ```
 
   Error codes are `not_found`, `invalid_argument`, `conflict`, `cancelled`,
-  `deadline_exceeded`, and `internal`.
+  `deadline_exceeded`, and `internal`. `sentinel` names the `worlds` sentinel
+  error the failure matches, such as `run_not_found`, so `workflow.NewHTTPClient`
+  returns errors that match `errors.Is` as they would in process.
+
+- **Waits:** `runs.waitForTerminalStatus` and `streams.getChunks` wait at most
+  30 seconds per request. Clients repeat the request to wait longer.
 
 - **Spec version:** when `specVersion` is set and differs from the World's
   (`worlds.SpecVersion`, currently `1`), the request fails with
@@ -58,8 +63,9 @@ Most methods return the World's Go types. The event writes return the Workflow
 SDK's result shapes instead: `events.create` and `events.createRun` return
 `worlds.RPCEventResult`, with the committed event and the run, step, or hook
 it changed, and `events.createBatch` returns `worlds.RPCEventBatchResult`,
-with one outcome per event. A batch that fails without an in-band fence is
-applied one event at a time, so each event reports its own status. A run
+with one outcome per event. A batch the World refuses without an in-band
+fence is applied one event at a time, so each event reports its own status.
+Other batch failures are returned as the request's error. A run
 created without an ID is given one.
 
 ::: danger Unauthenticated

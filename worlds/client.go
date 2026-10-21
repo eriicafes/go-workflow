@@ -3,6 +3,7 @@ package worlds
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -169,21 +170,34 @@ func (c worldClient) HooksGetByToken(ctx context.Context, input HooksGetByTokenI
 func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
 
 func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
-	runID := input.RunID
-	if runID == "" {
-		runID = NewRunID()
+	return CreateRun(ctx, c.world, input)
+}
+
+// CreateRun creates a run and queues its first delivery. It fills an empty
+// RunID and DeploymentID. When the run already exists and is still pending,
+// as after a create whose queueing failed, it queues the delivery again and
+// returns the run's ID with ErrRunAlreadyExists.
+func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
+	if input.RunID == "" {
+		input.RunID = NewRunID()
 	}
-	deploymentID := input.DeploymentID
-	if deploymentID == "" {
-		deploymentID = c.world.DeploymentID()
+	if input.DeploymentID == "" {
+		input.DeploymentID = world.DeploymentID()
 	}
-	if _, err := c.world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: deploymentID}); err != nil {
+	_, err := world.EventsCreateRun(ctx, input)
+	if errors.Is(err, ErrRunAlreadyExists) {
+		run, getErr := world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
+		if getErr != nil || run.Status != StatusPending {
+			return input.RunID, errors.Join(err, getErr)
+		}
+		input.DeploymentID = run.DeploymentID
+	} else if err != nil {
 		return "", err
 	}
-	if _, err := c.world.Queue(ctx, QueueInput{RunID: runID, IdempotencyKey: string(runID), DeploymentID: deploymentID}); err != nil {
-		return "", err
+	if _, queueErr := world.Queue(ctx, QueueInput{RunID: input.RunID, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); queueErr != nil {
+		return "", queueErr
 	}
-	return runID, nil
+	return input.RunID, err
 }
 
 func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
@@ -259,7 +273,8 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 		}
 		raw = encoded
 	}
-	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw})
+	specVersion := SpecVersion
+	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw, SpecVersion: &specVersion})
 	if err != nil {
 		return err
 	}
@@ -281,7 +296,7 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 		return fmt.Errorf("workflow: decode RPC response: %w", err)
 	}
 	if envelope.Error != nil {
-		return fmt.Errorf("workflow: RPC %s: %s", envelope.Error.Code, envelope.Error.Message)
+		return newRPCClientError(*envelope.Error)
 	}
 	if output == nil {
 		return nil
@@ -291,6 +306,30 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 	}
 	return nil
 }
+
+// rpcClientError is a server's RPC failure. It wraps the sentinel error the
+// server named, so errors.Is matches it as it would in-process.
+type rpcClientError struct {
+	RPCError
+	sentinel error
+}
+
+func newRPCClientError(failure RPCError) error {
+	err := rpcClientError{RPCError: failure}
+	for _, sentinel := range rpcSentinels {
+		if sentinel.name == failure.Sentinel {
+			err.sentinel = sentinel.err
+			break
+		}
+	}
+	return err
+}
+
+func (e rpcClientError) Error() string {
+	return fmt.Sprintf("workflow: RPC %s: %s", e.Code, e.Message)
+}
+
+func (e rpcClientError) Unwrap() error { return e.sentinel }
 
 func (c *httpClient) RunsGet(ctx context.Context, input RunsGetInput) (Run, error) {
 	var output Run

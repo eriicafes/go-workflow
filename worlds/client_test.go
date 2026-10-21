@@ -324,3 +324,45 @@ func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
 		t.Fatalf("last two chunks over HTTP = %#v err=%v", chunks, err)
 	}
 }
+
+func TestHTTPClientReturnsSentinelErrors(t *testing.T) {
+	world := testworld.New()
+	defer world.Close()
+	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
+	defer cancel()
+
+	if _, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_missing"}); !errors.Is(err, worlds.ErrRunNotFound) {
+		t.Fatalf("RunsGet error = %v, want ErrRunNotFound", err)
+	}
+	if err := workflow.ResumeHook(ctx, "token-missing", "value"); !errors.Is(err, workflow.ErrHookNotFound) {
+		t.Fatalf("ResumeHook error = %v, want ErrHookNotFound", err)
+	}
+	if hook, ok, err := workflow.GetHook[string](ctx, "token-missing"); hook != nil || ok || err != nil {
+		t.Fatalf("GetHook = %v, %v, %v, want not found", hook, ok, err)
+	}
+	run, err := workflow.Get[clientOutput](ctx, "wrun_missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := run.Exists(ctx); exists || err != nil {
+		t.Fatalf("Exists = %v, %v, want false", exists, err)
+	}
+}
+
+func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	input := worlds.ClientRunsCreateInput{RunID: "wrun_retried", WorkflowName: "flow"}
+	if _, err := worlds.CreateRun(ctx, queueOutage{world}, input); !errors.Is(err, errQueueUnavailable) {
+		t.Fatalf("first create error = %v, want the queue error", err)
+	}
+	runID, err := worlds.CreateRun(ctx, world, input)
+	if !errors.Is(err, worlds.ErrRunAlreadyExists) || runID != input.RunID {
+		t.Fatalf("retried create = %q, %v", runID, err)
+	}
+	if queued := world.Queued(); len(queued) != 1 || queued[0].RunID != input.RunID {
+		t.Fatalf("queued = %#v, want the run's delivery", queued)
+	}
+}

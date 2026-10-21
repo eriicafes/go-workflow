@@ -117,9 +117,7 @@ export class HTTPWorld implements World {
 		function get(runId: string, params: { resolveData: "none" }): Promise<WorkflowRunWithoutData>;
 		function get(runId: string, params?: { resolveData?: "all" }): Promise<WorkflowRun>;
 		function get(runId: string, params?: { resolveData?: "all" | "none" }): Promise<WorkflowRun | WorkflowRunWithoutData> {
-			return params?.resolveData === "none"
-				? client.call<WorkflowRunWithoutData>("runs.get", { runId, ...params })
-				: client.call<WorkflowRun>("runs.get", { runId, ...params });
+			return client.call<RPC.Run>("runs.get", { runId, ...params }).then(toRun);
 		}
 		function list(input: { resolveData: "none" }): Promise<PaginatedResponse<WorkflowRunWithoutData>>;
 		function list(input?: { resolveData?: "all" }): Promise<PaginatedResponse<WorkflowRun>>;
@@ -128,18 +126,25 @@ export class HTTPWorld implements World {
 				...input,
 				...("status" in input && input.status !== undefined ? { status: Array.isArray(input.status) ? input.status : [input.status] } : {}),
 			};
-			return input.resolveData === "none"
-				? client.call<PaginatedResponse<WorkflowRunWithoutData>>("runs.list", normalized)
-				: client.call<PaginatedResponse<WorkflowRun>>("runs.list", normalized);
+			return client.call<PaginatedResponse<RPC.Run>>("runs.list", normalized).then((page) => ({ ...page, data: page.data.map(toRun) }));
 		}
 		function waitForTerminalStatus(runId: string, params: WaitForTerminalRunStatusParams & { resolveData: "none" }): Promise<WorkflowRunWithoutData>;
 		function waitForTerminalStatus(runId: string, params?: WaitForTerminalRunStatusParams & { resolveData?: "all" }): Promise<WorkflowRun>;
 		function waitForTerminalStatus(runId: string, params?: WaitForTerminalRunStatusParams): Promise<WorkflowRun | WorkflowRunWithoutData>;
-		function waitForTerminalStatus(runId: string, params: WaitForTerminalRunStatusParams = {}): Promise<WorkflowRun | WorkflowRunWithoutData> {
+		async function waitForTerminalStatus(runId: string, params: WaitForTerminalRunStatusParams = {}): Promise<WorkflowRun | WorkflowRunWithoutData> {
 			const { timeoutMs, signal, ...input } = params;
-			return params.resolveData === "none"
-				? client.call<WorkflowRunWithoutData>("runs.waitForTerminalStatus", { runId, ...input, timeout: durationNanoseconds(timeoutMs) }, { signal })
-				: client.call<WorkflowRun>("runs.waitForTerminalStatus", { runId, ...input, timeout: durationNanoseconds(timeoutMs) }, { signal });
+			// The server waits at most a bounded time per request, so the wait
+			// repeats until the run finishes or timeoutMs elapses. Without
+			// timeoutMs it waits until the run finishes or signal aborts.
+			durationNanoseconds(timeoutMs);
+			const deadline = timeoutMs == null ? Infinity : Date.now() + timeoutMs;
+			for (;;) {
+				const wait = Math.max(0, Math.min(terminalWaitMs, deadline - Date.now()));
+				const run = await client.call<RPC.Run>("runs.waitForTerminalStatus", { runId, ...input, timeout: durationNanoseconds(wait) }, { signal });
+				if (terminalStatuses.has(run.status) || Date.now() >= deadline) {
+					return toRun(run);
+				}
+			}
 		}
 		return {
 			get,
@@ -161,17 +166,13 @@ export class HTTPWorld implements World {
 		function get(runId: string, stepId: string, params: { resolveData: "none" }): Promise<StepWithoutData>;
 		function get(runId: string, stepId: string, params?: { resolveData?: "all" }): Promise<Step>;
 		function get(runId: string, stepId: string, params?: { resolveData?: "all" | "none" }): Promise<Step | StepWithoutData> {
-			return params?.resolveData === "none"
-				? client.call<StepWithoutData>("steps.get", { runId, stepId, ...params })
-				: client.call<Step>("steps.get", { runId, stepId, ...params });
+			return client.call<RPC.Step>("steps.get", { runId, stepId, ...params }).then(toStep);
 		}
 		function list(input: ListWorkflowRunStepsParams & { resolveData: "none" }): Promise<PaginatedResponse<StepWithoutData>>;
 		function list(input: ListWorkflowRunStepsParams & { resolveData?: "all" }): Promise<PaginatedResponse<Step>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>> {
-			return input.resolveData === "none"
-				? client.call<PaginatedResponse<StepWithoutData>>("steps.list", input)
-				: client.call<PaginatedResponse<Step>>("steps.list", input);
+			return client.call<PaginatedResponse<RPC.Step>>("steps.list", input).then((page) => ({ ...page, data: page.data.map(toStep) }));
 		}
 		return {
 			get,
@@ -223,7 +224,7 @@ export class HTTPWorld implements World {
 				return {
 					results: result.results.map((item) =>
 						item.status === 200 && item.event
-							? { status: 200 as const, event: withEventData(item.event), run: item.run, step: item.step }
+							? { status: 200 as const, event: withEventData(item.event), run: item.run && toRun(item.run), step: item.step && toStep(item.step) }
 							: { status: item.status, error: item.error ?? "internal", message: item.message ?? "" },
 					),
 				} as EventBatchResult;
@@ -448,8 +449,8 @@ function createOptions(options: CreateEventParams | undefined): Record<string, u
 function toEventResult(result: RPC.EventResult): EventResult {
 	return {
 		event: withEventData(result.event),
-		...(result.run ? { run: result.run } : {}),
-		...(result.step ? { step: result.step } : {}),
+		...(result.run ? { run: toRun(result.run) } : {}),
+		...(result.step ? { step: toStep(result.step) } : {}),
 		...(result.hook ? { hook: result.hook } : {}),
 		...(result.stepCreated ? { stepCreated: true } : {}),
 		allocated: result.allocated,
@@ -477,18 +478,9 @@ function jsonEncoded(value: unknown): Uint8Array {
 // runtime stores event data as JSON, and this client writes it as CBOR.
 function withEventData(event: RPC.Event): Event {
 	const { data, ...rest } = event;
-	if (!data || data.byteLength === 0) {
+	const eventData = decodeData(data);
+	if (eventData === undefined) {
 		return rest as Event;
-	}
-	let eventData: unknown;
-	try {
-		eventData = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
-	} catch {
-		try {
-			eventData = decode(data);
-		} catch {
-			return rest as Event;
-		}
 	}
 	if (eventData && typeof eventData === "object" && !Array.isArray(eventData)) {
 		const fields = eventData as Record<string, unknown>;
@@ -501,6 +493,53 @@ function withEventData(event: RPC.Event): Event {
 	}
 	return { ...rest, eventData } as Event;
 }
+
+// decodeData decodes stored bytes as the JSON the Go runtime writes, or the
+// CBOR this client writes. Empty or undecodable bytes are undefined.
+function decodeData(data: Uint8Array | null | undefined): unknown {
+	if (!data || data.byteLength === 0) {
+		return undefined;
+	}
+	try {
+		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+	} catch {
+		try {
+			return decode(data);
+		} catch {
+			return undefined;
+		}
+	}
+}
+
+// decodeError decodes a stored error, the Go runtime's {message, chain}
+// JSON, as the Workflow SDK's structured error.
+function decodeError(data: Uint8Array | null | undefined): { message: string } | undefined {
+	const value = decodeData(data);
+	if (value === undefined) {
+		return undefined;
+	}
+	if (value && typeof value === "object" && typeof (value as { message?: unknown }).message === "string") {
+		return { message: (value as { message: string }).message };
+	}
+	return { message: typeof value === "string" ? value : JSON.stringify(value) };
+}
+
+// toRun exposes a run's stored input, output, and error as decoded values,
+// the legacy JSON form the Workflow SDK reads for runs without a spec version.
+function toRun(run: RPC.Run): WorkflowRun {
+	const { input, output, error, ...rest } = run;
+	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as WorkflowRun;
+}
+
+// toStep exposes a step's stored input, output, and error as decoded values.
+function toStep(step: RPC.Step): Step {
+	const { input, output, error, ...rest } = step;
+	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as Step;
+}
+
+// terminalWaitMs is how long one runs.waitForTerminalStatus request waits.
+const terminalWaitMs = 10_000;
+const terminalStatuses = new Set<RPC.Status>(["completed", "failed", "cancelled"]);
 
 function withEventDataPage(page: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
 	return { ...page, data: page.data.map(withEventData) };

@@ -149,7 +149,7 @@ test("raises structured RPC errors", async () => {
 			if (request.method === "client.spec") {
 				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
 			}
-			const encoded = encode({ error: { code: "not_found", message: "workflow: run not found" } });
+			const encoded = encode({ error: { code: "not_found", message: "workflow: run not found", sentinel: "run_not_found" } });
 			const body = new Uint8Array(encoded.byteLength);
 			body.set(encoded);
 			return new Response(body, {
@@ -160,6 +160,8 @@ test("raises structured RPC errors", async () => {
 
 	await expect(world.runs.get("wrun_missing")).rejects.toMatchObject({
 		code: "not_found",
+		status: 404,
+		sentinel: "run_not_found",
 		name: HTTPWorldError.name,
 	});
 });
@@ -337,4 +339,46 @@ test("reads a stream from a chunk index, then follows the cursor", async () => {
 	expect((await reader.read()).done).toBe(true);
 	expect(inputs[0]).toMatchObject({ StartIndex: -2, Cursor: "" });
 	expect(inputs[1]).toMatchObject({ Cursor: "4" });
+});
+
+test("decodes run and step data stored by the Go runtime", async () => {
+	const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const request = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			switch (request.method) {
+				case "client.spec":
+					return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+				case "runs.get":
+					return rpcResponse({ RunID: "wrun_01", Status: "failed", Input: json({ topic: "go" }), Error: json({ message: "boom", chain: [] }) });
+				default:
+					return rpcResponse({ RunID: "wrun_01", StepID: "step_01", Status: "completed", Input: json(1), Output: json("done") });
+			}
+		},
+	});
+	const run = await world.runs.get("wrun_01");
+	expect(run.input).toEqual({ topic: "go" });
+	expect(run.error).toEqual({ message: "boom" });
+	const step = await world.steps.get("wrun_01", "step_01");
+	expect(step.input).toBe(1);
+	expect(step.output).toBe("done");
+});
+
+test("waits for a terminal run across bounded requests", async () => {
+	const timeouts: unknown[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const request = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (request.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+			}
+			timeouts.push((request.input as Record<string, unknown>).Timeout);
+			return rpcResponse({ RunID: "wrun_01", Status: timeouts.length < 3 ? "running" : "completed" });
+		},
+	});
+	const run = await world.runs.waitForTerminalStatus!("wrun_01");
+	expect(run.status).toBe("completed");
+	expect(timeouts).toEqual([10_000_000_000, 10_000_000_000, 10_000_000_000]);
 });

@@ -137,6 +137,7 @@ export namespace RPC {
 	export type Error = {
 		code: string;
 		message: string;
+		sentinel?: string;
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
@@ -203,14 +204,27 @@ export namespace RPC {
 export class HTTPWorldError extends Error {
 	readonly code: string;
 	readonly status?: number;
+	/** The Go sentinel error the server reported, such as run_not_found. */
+	readonly sentinel?: string;
 
-	constructor(code: string, message: string, status?: number) {
+	constructor(code: string, message: string, status?: number, sentinel?: string) {
 		super(message);
 		this.name = "HTTPWorldError";
 		this.code = code;
 		this.status = status;
+		this.sentinel = sentinel;
 	}
 }
+
+// rpcErrorStatus is the HTTP status an RPC error code stands for. The server
+// reports every RPC error with status 200 inside the envelope.
+const rpcErrorStatus: Record<string, number> = {
+	not_found: 404,
+	invalid_argument: 400,
+	conflict: 409,
+	cancelled: 499,
+	deadline_exceeded: 504,
+};
 
 export class RPCClient {
 	readonly baseURL: string;
@@ -268,7 +282,8 @@ export class RPCClient {
 			);
 		}
 		if (envelope.error) {
-			throw new HTTPWorldError(envelope.error.code, envelope.error.message, response.status);
+			const { code, message, sentinel } = envelope.error;
+			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel);
 		}
 		if (envelope.output === undefined) {
 			return undefined as T;

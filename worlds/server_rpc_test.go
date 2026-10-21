@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,7 +28,7 @@ func TestRPCRejectsUnsupportedContentAndReportsEnvelopeErrors(t *testing.T) {
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	assertRPCError(t, response, "internal")
+	assertRPCError(t, response, "invalid_argument")
 
 	body, err := cbor.Marshal(rpcRequest{Method: "unknown.method"})
 	if err != nil {
@@ -37,7 +38,7 @@ func TestRPCRejectsUnsupportedContentAndReportsEnvelopeErrors(t *testing.T) {
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	assertRPCError(t, response, "internal")
+	assertRPCError(t, response, "invalid_argument")
 }
 
 func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
@@ -269,5 +270,83 @@ func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
 	}
 	if results[1].Status != http.StatusOK || results[1].Event == nil || results[1].Event.CorrelationID != "wait_rpc" {
 		t.Fatalf("wait result = %#v", results[1])
+	}
+}
+
+// failingBatchWorld commits a batch and then reports an internal error, as a
+// World whose connection drops after the commit would.
+type failingBatchWorld struct{ *testworld.World }
+
+func (w failingBatchWorld) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
+	if _, err := w.World.EventsCreateBatch(ctx, input); err != nil {
+		return worlds.EventBatchResult{}, err
+	}
+	return worlds.EventBatchResult{}, errors.New("connection reset")
+}
+
+func TestRPCBatchDoesNotReappendAfterAnInternalError(t *testing.T) {
+	world := testworld.New()
+	defer world.Close()
+	ctx := context.Background()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_batch", WorkflowName: "rpc"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := worlds.HTTPHandler(failingBatchWorld{world}, "")
+	encoded, _ := cbor.Marshal(worlds.EventsCreateBatchInput{RunID: "wrun_batch", Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeAttrSet, Data: []byte(`{"changes":[]}`)}}})
+	body, _ := cbor.Marshal(rpcRequest{Method: "events.createBatch", Input: encoded})
+	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertRPCError(t, response, "internal")
+	page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_batch"})
+	if err != nil || len(page.Data) != 2 {
+		t.Fatalf("events = %d, err = %v, want run_created and one attr_set", len(page.Data), err)
+	}
+}
+
+func TestRPCCreatedEventKeepsItsDataWithoutResolveData(t *testing.T) {
+	handler := worlds.HTTPHandler(testworld.New(), "")
+	created := callRPC(t, handler, "events.createRun", worlds.EventsCreateRunInput{WorkflowName: "rpc"})
+	var run worlds.Run
+	if err := cbor.Unmarshal(created["Run"], &run); err != nil {
+		t.Fatal(err)
+	}
+	stepData, _ := json.Marshal(worlds.DataStepCreated{StepName: "pkg.step", Input: json.RawMessage(`"in"`)})
+	step := callRPC(t, handler, "events.create", worlds.EventsCreateInput{RunID: run.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_rpc", Data: stepData}, Options: worlds.EventsCreateOptions{ResolveData: worlds.EventsResolveDataNone}})
+	var event worlds.Event
+	if err := cbor.Unmarshal(step["Event"], &event); err != nil || string(event.Data) != string(stepData) {
+		t.Fatalf("created event data = %s, err = %v, want %s", event.Data, err, stepData)
+	}
+}
+
+// recordingWaitWorld records the waits it is asked for.
+type recordingWaitWorld struct {
+	*testworld.World
+	timeout, wait time.Duration
+}
+
+func (w *recordingWaitWorld) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	w.timeout = input.Timeout
+	return w.World.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID})
+}
+
+func (w *recordingWaitWorld) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
+	w.wait = input.Wait
+	input.Wait = 0
+	return w.World.StreamsGetChunks(ctx, input)
+}
+
+func TestRPCCapsWaits(t *testing.T) {
+	world := &recordingWaitWorld{World: testworld.New()}
+	defer world.Close()
+	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: "wrun_wait", WorkflowName: "rpc"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := worlds.HTTPHandler(world, "")
+	callRPC(t, handler, "runs.waitForTerminalStatus", worlds.RunsWaitForTerminalStatusInput{RunID: "wrun_wait", Timeout: time.Hour})
+	callRPC(t, handler, "streams.getChunks", worlds.StreamsGetChunksInput{RunID: "wrun_wait", Name: "s", Wait: time.Hour})
+	if world.timeout != 30*time.Second || world.wait != 30*time.Second {
+		t.Fatalf("timeout = %s, wait = %s, want 30s each", world.timeout, world.wait)
 	}
 }
