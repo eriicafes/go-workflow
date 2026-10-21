@@ -4,7 +4,7 @@ layout: home
 hero:
   name: go-workflow
   text: Durable workflows for Go
-  tagline: Write workflows as ordinary Go functions. Steps are recorded and replayed, so a run survives crashes, restarts, and deploys and resumes where it left off.
+  tagline: Write plain Go code that suspends, resumes, and keeps its state across retries, sleeps, and deploys.
   image:
     src: /logo.svg
     alt: go-workflow
@@ -17,22 +17,13 @@ hero:
       link: /guide/introduction
 
 features:
-  - icon: 🧩
-    title: Plain Go functions
-    details: A workflow is a struct type and a runner is an ordinary function that takes its input and returns its output. No generated code, no workflow interface, no SDK-specific context.
-  - icon: 🔁
-    title: Replay-based durability
-    details: Every run is an append-only event log. Recorded steps return their results on replay instead of running again, so a run picks up exactly where it stopped.
-  - icon: ⏱️
-    title: Sleep for weeks
-    details: Sleep, timers, timeouts, hooks, and webhooks suspend a run without holding a process. The run resumes when the World delivers it again.
   - icon: 🌍
-    title: Pluggable Worlds
-    details: Run on local JSON files, PostgreSQL, Redis with Vercel Queues, or DynamoDB with SQS. Every World passes the same conformance suite.
-  - icon: 🛡️
-    title: Static analysis
-    details: The workflowcheck vet tool catches goroutines, select, map iteration, time.Now, and I/O outside steps before they break replay.
+    title: Run anywhere, no lock-in
+    details: Pick a World for local files, PostgreSQL, Redis with Vercel Queues, or DynamoDB with SQS. Runs sleep for weeks without holding a process, and your workflows stay the same on every World.
   - icon: 🖥️
-    title: Workflow SDK compatible
-    details: Runs follow the Workflow SDK's event model, so the Workflow SDK web UI can inspect your Go runs, steps, hooks, and streams.
+    title: Inspect every run
+    details: Runs follow the Workflow SDK's event model, so its web UI shows every Go run, step, hook, and stream.
+  - icon: 🛡️
+    title: Catch replay bugs early
+    details: The workflowcheck vet tool flags goroutines, select, map iteration, time.Now, and I/O outside steps before they reach production.
 ---

@@ -48,7 +48,7 @@ const guideSidebar: DefaultTheme.SidebarItem[] = [
 
 export default defineConfig({
   title: 'go-workflow',
-  description: 'Durable workflows for Go. Runners are ordinary Go functions whose steps are recorded and replayed.',
+  description: 'Durable workflows for Go.',
   cleanUrls: true,
   lastUpdated: true,
   head: [['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }]],
