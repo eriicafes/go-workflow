@@ -36,14 +36,17 @@ Every function passed to `workflow.Use` must be a valid runner.
 | `workflow body must not start a goroutine, use workflow.Background instead` | Start concurrent work with [`Background`](/guide/concurrency). |
 | `workflow body must not select on channels` | Use the `Select` functions on promises. |
 | `workflow body must not range over a map` | Iterate a sorted slice of keys. |
-| `workflow body calls time.Now, use workflow.Now instead` | Use [`workflow.Now`](/guide/sleep#reading-the-time). |
-| `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O and randomness into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, `crypto/rand`, `math/rand`, and packages whose path contains `uuid`. |
+| `workflow body calls time.Now, use workflow.Now instead` | Use [`workflow.Now`](/guide/sleep#reading-the-time). Also reported for `time.Since` and `time.Until`. |
+| `workflow body calls time.Sleep, use workflow.Sleep instead` | Use [`workflow.Sleep`](/guide/sleep). Also reported for `time.After`, `time.AfterFunc`, `time.Tick`, `time.NewTimer`, and `time.NewTicker`. |
+| `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O and randomness into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, `crypto/rand`, `math/rand`, `math/rand/v2`, and packages whose path contains `uuid`. |
 | `workflow stream access and webhook responses require a durable step` | Move [stream](/guide/streams) access into a step. |
 
 The analyzer also rejects the `context` package's cancellation and deadline
 constructors in workflow bodies. Use [durable cancellation](/guide/cancellation)
-instead. Standard context constructors remain valid inside steps. `Then`
-callbacks follow the same workflow restrictions.
+instead. Standard context constructors remain valid inside steps. Function
+literals in a runner, such as `Then` callbacks and local helpers, follow the
+same workflow restrictions. Only step closures passed to `Step`, `Background`,
+and the other durable operations may do I/O.
 
 ### Steps
 

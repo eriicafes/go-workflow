@@ -67,14 +67,14 @@ func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bo
 	return record, true, nil
 }
 
-// Queue returns an error for a delivery due more than seven days ahead unless
+// Queue returns an error for a delivery due more than six days ahead unless
 // Config.QStash is set. It does not deduplicate by IdempotencyKey. It
 // publishes to input.DeploymentID, or to Config.DeploymentID when that is
 // empty, and returns an error wrapping worlds.ErrDeploymentUnavailable when
 // Vercel cannot find that deployment's consumer.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	// Store the delivery record, then publish its ID to Vercel Queues (delays
-	// up to seven days) or QStash (longer delays). A failed publish removes the
+	// up to six days) or QStash (longer delays). A failed publish removes the
 	// record.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
@@ -83,9 +83,9 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if input.NotBefore != nil {
 		delay = time.Until(*input.NotBefore)
 	}
-	long := delaySeconds(delay) > int64(vqsMaxDelay/time.Second)
+	long := delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second)
 	if long && w.config.QStash == nil {
-		return worlds.QueueResult{}, errors.New("workflow/vercel: delays over seven days require QStash configuration")
+		return worlds.QueueResult{}, errors.New("workflow/vercel: delays over six days require QStash configuration")
 	}
 	id := ulid.Make().String()
 	deploymentID := input.DeploymentID
@@ -109,7 +109,13 @@ func (w *World) schedule(ctx context.Context, id string, record queueRecord, del
 	if !long {
 		return w.publishVQS(ctx, id, delay, record.DeploymentID)
 	}
-	qstashID, err := w.publishQStash(ctx, id, *record.NotBefore)
+	// A delay beyond QStash's limit fires early and is scheduled again by
+	// releaseTimer.
+	due := *record.NotBefore
+	if limit := time.Now().Add(w.config.QStash.maxDelay()); due.After(limit) {
+		due = limit
+	}
+	qstashID, err := w.publishQStash(ctx, id, due)
 	if err != nil {
 		return err
 	}
@@ -125,7 +131,10 @@ func (w *World) schedule(ctx context.Context, id string, record queueRecord, del
 	return nil
 }
 
-// releaseTimer moves a QStash-delivered record onto Vercel Queues.
+// releaseTimer moves a QStash-delivered record onto Vercel Queues. When the
+// deployment the delivery is addressed to is gone, it is published to this
+// deployment instead, whose runtime re-routes it and fails the run when its
+// deployment stays unavailable.
 func (w *World) releaseTimer(ctx context.Context, id string) error {
 	record, ok, err := w.getQueueRecord(ctx, id)
 	if err != nil || !ok {
@@ -135,10 +144,14 @@ func (w *World) releaseTimer(ctx context.Context, id string) error {
 	if record.NotBefore != nil {
 		delay = time.Until(*record.NotBefore)
 	}
-	if delaySeconds(delay) > int64(vqsMaxDelay/time.Second) {
+	if delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second) {
 		return w.schedule(ctx, id, record, delay, true)
 	}
-	if err := w.publishVQS(ctx, id, delay, record.DeploymentID); err != nil {
+	err = w.publishVQS(ctx, id, delay, record.DeploymentID)
+	if errors.Is(err, worlds.ErrDeploymentUnavailable) && record.DeploymentID != w.config.DeploymentID {
+		err = w.publishVQS(ctx, id, delay, w.config.DeploymentID)
+	}
+	if err != nil {
 		return err
 	}
 	record.QStashMessageID = ""

@@ -6,13 +6,13 @@ import vercelworld "github.com/eriicafes/go-workflow/worlds/vercel"
 
 The Vercel World stores the event log and its views in Redis and delivers work
 through Vercel Queues. QStash is optional and only carries timers longer than
-seven days.
+six days.
 
 | Service | Role |
 | --- | --- |
 | Redis (Upstash, TCP or REST) | Event log, run/step/hook views, hook tokens, streams, queue records |
-| Vercel Queues | Delivers queued items with delays up to 7 days |
-| QStash (optional) | Timers longer than 7 days, handed back to Vercel Queues when due |
+| Vercel Queues | Delivers queued items with delays up to 6 days |
+| QStash (optional) | Timers longer than 6 days, handed back to Vercel Queues when due |
 
 ## Usage
 
@@ -96,8 +96,10 @@ published them.
 
 ## Long timers with QStash
 
-Vercel Queues delays deliveries by at most seven days. Without QStash, queueing
-a delivery due later returns an error. Configure QStash before opening the World:
+Vercel Queues delays and retains messages for at most seven days. The World
+publishes delays of up to six days to it, so every message keeps a day of
+retention after it becomes visible. Without QStash, queueing a delivery due
+later returns an error. Configure QStash before opening the World:
 
 ```go
 config.QStash = &vercelworld.QStashConfig{
@@ -113,6 +115,12 @@ the same prefix as the rest of the handler, so custom prefixes work. When QStash
 JWT (HS256 with the current or next signing key, issuer `Upstash`, subject equal
 to the URL, within its `nbf`/`exp` window, and a matching body SHA-256), then
 publishes the delivery to Vercel Queues with the remaining delay.
+
+A timer due further ahead than `QStashConfig.MaxDelay` (default seven days, set
+it to your QStash plan's maximum delay) fires after `MaxDelay` and is scheduled
+again for the rest. When the deployment a timer is pinned to has been deleted,
+the delivery goes to the current deployment instead, whose runtime fails the run
+with `worlds.ErrDeploymentMismatch`.
 
 ## Storage
 

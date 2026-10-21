@@ -37,6 +37,19 @@ type QStashConfig struct {
 	// across key rotation. Both are required.
 	CurrentSigningKey string
 	NextSigningKey    string
+	// MaxDelay is the longest delay the QStash plan accepts. A longer timer
+	// is delivered in steps of at most MaxDelay. Zero uses seven days.
+	MaxDelay time.Duration
+}
+
+// defaultQStashMaxDelay is QStashConfig.MaxDelay when it is zero.
+const defaultQStashMaxDelay = 7 * 24 * time.Hour
+
+func (config QStashConfig) maxDelay() time.Duration {
+	if config.MaxDelay > 0 {
+		return config.MaxDelay
+	}
+	return defaultQStashMaxDelay
 }
 
 // publishQStash schedules messageID for delivery to the QStash route at due

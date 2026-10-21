@@ -97,6 +97,8 @@ CREATE TABLE go_workflow_queue (
 	attempts integer NOT NULL DEFAULT 0,
 	lease_until timestamptz,
 	replay_divergence_count integer NOT NULL DEFAULT 0,
+	deployment_id text NOT NULL DEFAULT '',
+	deployment_mismatch_retry_count integer NOT NULL DEFAULT 0,
 	created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX go_workflow_queue_claim_idx ON go_workflow_queue (not_before, id);

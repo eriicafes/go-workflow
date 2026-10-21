@@ -219,6 +219,19 @@ func TestQueueKeepsReplayDivergenceCount(t *testing.T) {
 	}
 }
 
+func TestQueueKeepsDeploymentFields(t *testing.T) {
+	t.Parallel()
+	world := newTestWorld(t)
+	ctx := context.Background()
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := world.claim(ctx, 10)
+	if err != nil || len(claimed) != 1 || claimed[0].input.DeploymentID != "dpl_1" || claimed[0].input.DeploymentMismatchRetryCount != 3 {
+		t.Fatalf("claimed = %#v err=%v", claimed, err)
+	}
+}
+
 func TestRunsWaitUsesNotifications(t *testing.T) {
 	t.Parallel()
 	url, schema := testSchema(t)

@@ -23,6 +23,10 @@ var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer av
 const (
 	// vqsMaxDelay is the longest Vqs-Delay-Seconds and Vqs-Retention-Seconds.
 	vqsMaxDelay = 7 * 24 * time.Hour
+	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, so a
+	// message keeps a day of retention after it becomes visible. Longer delays
+	// go through QStash.
+	vqsMaxQueueDelay = 6 * 24 * time.Hour
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
 	vqsLease          = 5 * time.Minute

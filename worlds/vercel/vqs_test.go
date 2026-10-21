@@ -270,12 +270,13 @@ func TestQueueLongDelays(t *testing.T) {
 	if len(store.values) != 0 || len(server.all()) != 0 {
 		t.Fatal("long delay without QStash stored or published")
 	}
-	edge := time.Now().Add(vqsMaxDelay - time.Minute)
+	edge := time.Now().Add(vqsMaxQueueDelay - time.Minute)
 	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &edge}); err != nil {
-		t.Fatalf("delay within seven days: %v", err)
+		t.Fatalf("delay within six days: %v", err)
 	}
 
 	world, store = newQueueWorld(t, server, true)
+	due = time.Now().Add(6*24*time.Hour + 12*time.Hour)
 	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due})
 	if err != nil {
 		t.Fatal(err)
@@ -535,4 +536,55 @@ func deliveryRequest(messageID, body string) *http.Request {
 
 func staticOIDCToken(token string) func(context.Context) (string, error) {
 	return func(context.Context) (string, error) { return token, nil }
+}
+
+func TestQueueSplitsDelaysBeyondQStashMaxDelay(t *testing.T) {
+	server := newRecorder(t, nil)
+	world, store := newQueueWorld(t, server, true)
+	due := time.Now().Add(30 * 24 * time.Hour)
+	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := server.all()
+	notBefore, _ := strconv.ParseInt(requests[len(requests)-1].Header.Get("Upstash-Not-Before"), 10, 64)
+	if until := time.Until(time.Unix(notBefore, 0)); until > defaultQStashMaxDelay+time.Second || until < defaultQStashMaxDelay-time.Minute {
+		t.Fatalf("QStash fires in %s, want about %s", until, defaultQStashMaxDelay)
+	}
+	// When it fires, the remaining delay is scheduled through QStash again.
+	if err := world.releaseTimer(context.Background(), result.MessageID); err != nil {
+		t.Fatal(err)
+	}
+	if record, _ := store.record(t, result.MessageID); record.QStashMessageID == "" || !strings.Contains(server.all()[len(server.all())-1].Path, "/qstash/v2/publish/") {
+		t.Fatalf("record = %+v, want a second QStash timer", record)
+	}
+}
+
+func TestReleaseTimerFallsBackFromAnUnavailableDeployment(t *testing.T) {
+	var deployments []string
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		deployment := request.Header.Get("Vqs-Deployment-Id")
+		deployments = append(deployments, deployment)
+		if deployment == "dpl_gone" {
+			writer.Header().Set("Vqs-Error-Code", "consumer_discovery_failed")
+			writer.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte(`{"messageId":"msg_1"}`))
+	}))
+	t.Cleanup(queue.Close)
+	world, _ := newQueueWorld(t, newRecorder(t, nil), true)
+	world.config.QueueURL = queue.URL + "/api/v3"
+	world.config.DeploymentID = "dpl_current"
+	due := time.Now().Add(-time.Minute)
+	if _, err := world.putQueueRecord(context.Background(), "01TIMER", queueRecord{RunID: "wrun_1", NotBefore: &due, DeploymentID: "dpl_gone"}, "NX"); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.releaseTimer(context.Background(), "01TIMER"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deployments, ",") != "dpl_gone,dpl_current" {
+		t.Fatalf("published to %v, want the pinned deployment then the current one", deployments)
+	}
 }

@@ -293,9 +293,17 @@ func (f *fakeDynamo) count() int {
 }
 
 type fakeSQS struct {
-	mu       sync.Mutex
-	messages []*sqs.SendMessageInput
-	err      error
+	mu         sync.Mutex
+	messages   []*sqs.SendMessageInput
+	visibility []*sqs.ChangeMessageVisibilityInput
+	err        error
+}
+
+func (f *fakeSQS) ChangeMessageVisibility(_ context.Context, input *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.visibility = append(f.visibility, input)
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
 func (f *fakeSQS) SendMessage(_ context.Context, input *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {

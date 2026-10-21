@@ -41,8 +41,8 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			id = ""
 			var inserted bool
 			err := tx.QueryRow(ctx, `WITH inserted AS (
-					INSERT INTO go_workflow_queue (id, queue_name, run_id, step_id, idempotency_key, dedupe_key, not_before, replay_divergence_count)
-					VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()), $8)
+					INSERT INTO go_workflow_queue (id, queue_name, run_id, step_id, idempotency_key, dedupe_key, not_before, replay_divergence_count, deployment_id, deployment_mismatch_retry_count)
+					VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()), $8, $9, $10)
 					ON CONFLICT (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
 					RETURNING id
 				)
@@ -50,7 +50,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 				UNION ALL
 				SELECT id, false FROM go_workflow_queue WHERE run_id = $3 AND dedupe_key = $6
 				LIMIT 1`,
-				ulid.Make().String(), input.QueueName, input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore, input.ReplayDivergenceCount).Scan(&id, &inserted)
+				ulid.Make().String(), input.QueueName, input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore, input.ReplayDivergenceCount, input.DeploymentID, input.DeploymentMismatchRetryCount).Scan(&id, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -116,7 +116,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 		UPDATE go_workflow_queue q
 		SET lease_until = now() + make_interval(secs => $2), attempts = q.attempts + 1, dedupe_key = NULL
 		FROM candidate WHERE q.id = candidate.id
-		RETURNING q.id, q.attempts, q.queue_name, q.run_id, q.step_id, q.idempotency_key, q.replay_divergence_count`,
+		RETURNING q.id, q.attempts, q.queue_name, q.run_id, q.step_id, q.idempotency_key, q.replay_divergence_count, q.deployment_id, q.deployment_mismatch_retry_count`,
 		limit, w.lease.Seconds())
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 	return collect(rows, func(row pgx.Row) (delivery, error) {
 		var value delivery
 		var stepID *string
-		if err := row.Scan(&value.id, &value.attempts, &value.input.QueueName, &value.input.RunID, &stepID, &value.input.IdempotencyKey, &value.input.ReplayDivergenceCount); err != nil {
+		if err := row.Scan(&value.id, &value.attempts, &value.input.QueueName, &value.input.RunID, &stepID, &value.input.IdempotencyKey, &value.input.ReplayDivergenceCount, &value.input.DeploymentID, &value.input.DeploymentMismatchRetryCount); err != nil {
 			return delivery{}, err
 		}
 		if stepID != nil {
@@ -193,8 +193,12 @@ func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
 
 // deliver executes one claimed row, renewing its lease meanwhile. Success
 // deletes the row. Failure schedules a retry with capped exponential
-// backoff. A shutdown releases the lease so another worker takes it now.
+// backoff. A shutdown releases the lease so another worker takes it now. A
+// lease lost to another worker, as after this worker stalled past it,
+// cancels the execution.
 func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item delivery) {
+	executeCtx, loseLease := context.WithCancel(ctx)
+	defer loseLease()
 	renewCtx, stopRenew := context.WithCancel(ctx)
 	renewed := make(chan struct{})
 	go func() {
@@ -205,14 +209,20 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				if _, err := w.pool.Exec(renewCtx, `UPDATE go_workflow_queue SET lease_until = now() + make_interval(secs => $3) WHERE id = $1 AND attempts = $2`,
-					item.id, item.attempts, w.lease.Seconds()); err != nil && renewCtx.Err() == nil {
+				tag, err := w.pool.Exec(renewCtx, `UPDATE go_workflow_queue SET lease_until = now() + make_interval(secs => $3) WHERE id = $1 AND attempts = $2`,
+					item.id, item.attempts, w.lease.Seconds())
+				if err != nil && renewCtx.Err() == nil {
 					log.Printf("workflow/postgres: renew lease %s: %v", item.id, err)
+				}
+				if err == nil && tag.RowsAffected() == 0 {
+					log.Printf("workflow/postgres: delivery %s lost its lease, cancelling it", item.id)
+					loseLease()
+					return
 				}
 			}
 		}
 	}()
-	err := runtime.Execute(ctx, item.input)
+	err := runtime.Execute(executeCtx, item.input)
 	stopRenew()
 	<-renewed
 

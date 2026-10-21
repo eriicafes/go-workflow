@@ -87,11 +87,18 @@ Without `Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
 error. SQS standard queues do not deduplicate, so `IdempotencyKey` is not used.
 Delivery is at least once and the runtime is idempotent.
 
-The `Queue` handler loads the record for each SQS message. A missing record is
-acknowledged. A message that arrives early is sent again with the remaining
-delay. Otherwise it executes the delivery, deletes the record on success, and
-reports the message in `BatchItemFailures` on failure so SQS redelivers only
-that message. Configure a dead-letter queue to collect malformed messages.
+The `Queue` handler loads the record for each SQS message. A missing record or
+a body that is not a queue message is acknowledged. A message that arrives
+early is sent again with the remaining delay. Otherwise it executes the
+delivery, extending the message's visibility every 30 seconds while it runs,
+and deletes the record on success. On failure it reports the message in
+`BatchItemFailures` so SQS redelivers only that message, after a backoff that
+doubles from one second with each receive up to 15 minutes. Configure a
+dead-letter queue to collect deliveries that keep failing.
+
+Give the queue a message retention period of at least one hour. Each message
+waits at most 15 minutes before it is due or sent again, and a retention period
+shorter than that drops deliveries.
 
 ::: warning ReportBatchItemFailures
 The event source mapping must enable `ReportBatchItemFailures`. Without it, one
@@ -199,8 +206,8 @@ Both roles need, on the table and its indexes (`<table-arn>` and
 `DeleteItem`, `Query`, and `BatchGetItem`. Both need `sqs:SendMessage` on the
 queue.
 
-The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`, and
-`GetQueueAttributes`, and, with `Scheduler`, `scheduler:CreateSchedule` and
+The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
+`ChangeMessageVisibility`, and `GetQueueAttributes`, and, with `Scheduler`, `scheduler:CreateSchedule` and
 `scheduler:DeleteSchedule` on
 `arn:aws:scheduler:<region>:<account>:schedule/<group>/go-workflow-*` plus
 `iam:PassRole` on the Scheduler role. The API role needs

@@ -134,12 +134,14 @@ func isContextType(value types.Type) bool {
 }
 
 func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
+	// Durable step closures are validated independently, and their bodies may
+	// perform step-only operations. Every other function literal in a runner,
+	// such as a Then callback or a local helper, runs in workflow context.
+	steps := map[*ast.FuncLit]bool{}
 	ast.Inspect(body, func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.FuncLit:
-			// Durable step closures are validated independently. Their bodies are
-			// allowed to perform step-only operations.
-			return false
+			return !steps[node]
 		case *ast.GoStmt:
 			pass.Reportf(node.Pos(), "workflow body must not start a goroutine, use workflow.Background instead")
 		case *ast.SelectStmt:
@@ -159,19 +161,18 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 			if banned, ok := bannedCall(pass, node); ok {
 				if strings.HasPrefix(banned, "context.With") {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.WithCancel/WithCancelCause and durable timers instead", banned)
-				} else if banned == "time.Now" {
-					pass.Reportf(node.Pos(), "workflow body calls time.Now, use workflow.Now instead")
+				} else if banned == "time.Now" || banned == "time.Since" || banned == "time.Until" {
+					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Now instead", banned)
+				} else if strings.HasPrefix(banned, "time.") {
+					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Sleep instead", banned)
 				} else {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Step or workflow.Background instead", banned)
 				}
 			}
-			if isSDKCall(pass, node, "Then") && len(node.Args) == 3 {
-				if callback, ok := node.Args[2].(*ast.FuncLit); ok {
-					checkBody(pass, callback.Body)
-				}
-			}
 			if isDurableOperation(pass, node) {
-				validateStepFunction(pass, node)
+				if closure := validateStepFunction(pass, node); closure != nil {
+					steps[closure] = true
+				}
 			}
 		}
 		return true
@@ -187,28 +188,34 @@ func isSDKMethod(pass *analysis.Pass, call *ast.CallExpr, name string) bool {
 	return ok && function.Pkg() != nil && function.Pkg().Path() == workflowPackage
 }
 
-func validateStepFunction(pass *analysis.Pass, call *ast.CallExpr) {
+// validateStepFunction checks the step function of a durable operation and
+// returns it when it is an inline closure.
+func validateStepFunction(pass *analysis.Pass, call *ast.CallExpr) *ast.FuncLit {
 	index := 1
 	if isSDKCall(pass, call, "Go") {
 		index = 2
 	}
 	if len(call.Args) <= index {
-		return
+		return nil
 	}
 	if closure, ok := call.Args[index].(*ast.FuncLit); ok {
 		validateClosure(pass, closure)
-		return
+		return closure
 	}
 	function := namedFunction(pass, call.Args[index])
 	if function == nil {
 		pass.Reportf(call.Args[index].Pos(), "durable step must be a named function or inline closure, not a wrapper or factory")
 	}
+	return nil
 }
 
 func validateClosure(pass *analysis.Pass, closure *ast.FuncLit) {
 	parameters := map[types.Object]bool{}
-	if closure.Type.Params != nil {
-		for _, field := range closure.Type.Params.List {
+	for _, list := range []*ast.FieldList{closure.Type.Params, closure.Type.Results} {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
 			for _, name := range field.Names {
 				if object := pass.TypesInfo.Defs[name]; object != nil {
 					parameters[object] = true
@@ -223,7 +230,7 @@ func validateClosure(pass *analysis.Pass, closure *ast.FuncLit) {
 		}
 		object := pass.TypesInfo.ObjectOf(identifier)
 		variable, ok := object.(*types.Var)
-		if !ok || parameters[variable] || variable.Pos() >= closure.Body.Pos() {
+		if !ok || variable.IsField() || parameters[variable] || variable.Pos() >= closure.Body.Pos() {
 			return true
 		}
 		pass.Reportf(identifier.Pos(), "durable closure captures %s, pass workflow-relevant state through its explicit input instead", identifier.Name)
@@ -262,10 +269,13 @@ func bannedCall(pass *analysis.Pass, call *ast.CallExpr) (string, bool) {
 	if path == "context" && (name == "WithCancel" || name == "WithCancelCause" || name == "WithTimeout" || name == "WithTimeoutCause" || name == "WithDeadline" || name == "WithDeadlineCause") {
 		return path + "." + name, true
 	}
-	if path == "time" && name == "Now" {
-		return path + "." + name, true
+	if path == "time" {
+		switch name {
+		case "Now", "Since", "Until", "Sleep", "After", "AfterFunc", "Tick", "NewTimer", "NewTicker":
+			return path + "." + name, true
+		}
 	}
-	if path == "os" || path == "io" || path == "net/http" || path == "database/sql" || path == "crypto/rand" || path == "math/rand" || strings.Contains(path, "uuid") {
+	if path == "os" || path == "io" || path == "net/http" || path == "database/sql" || path == "crypto/rand" || path == "math/rand" || path == "math/rand/v2" || strings.Contains(path, "uuid") {
 		return path + "." + name, true
 	}
 	return "", false

@@ -2,6 +2,8 @@ package postgresworld
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strconv"
 	"sync"
@@ -277,7 +279,13 @@ func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) 
 	})
 }
 
-func streamKey(runID worlds.RunID, name string) string { return string(runID) + "/" + name }
+// streamKey is the notification payload for a stream. It is a hash, because
+// pg_notify payloads must stay under 8000 bytes and stream names are not
+// bounded.
+func streamKey(runID worlds.RunID, name string) string {
+	sum := sha256.Sum256([]byte(string(runID) + "/" + name))
+	return hex.EncodeToString(sum[:])
+}
 
 func notifyStream(ctx context.Context, tx pgx.Tx, runID worlds.RunID, name string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelStreams, streamKey(runID, name))
