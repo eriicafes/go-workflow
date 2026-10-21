@@ -114,7 +114,8 @@ type EventsResolveData string
 const (
 	// EventsResolveDataAll returns every event's Data.
 	EventsResolveDataAll EventsResolveData = "all"
-	// EventsResolveDataNone omits every event's Data.
+	// EventsResolveDataNone omits payloads from event Data and keeps its
+	// metadata, as ResolveEventData describes.
 	EventsResolveDataNone EventsResolveData = "none"
 	// EventsResolveDataSkipStepInputs requests event Data without the step
 	// input recorded in step_created events. A World may treat it like
@@ -306,9 +307,13 @@ func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, erro
 // delivery, because an earlier resume may have recorded its payload without
 // queueing one, and returns the error.
 func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (EventResult, error) {
+	data, err := EncodeHookReceived(payload)
+	if err != nil {
+		return EventResult{}, err
+	}
 	result, err := world.EventsCreate(ctx, EventsCreateInput{
 		RunID: hook.RunID,
-		Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: payload},
+		Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: data},
 	})
 	key := string(result.EventID)
 	switch {

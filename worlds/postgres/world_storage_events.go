@@ -4,21 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/jackc/pgx/v5"
 )
-
-type runCreatedData struct {
-	WorkflowName string            `json:"workflowName"`
-	Input        json.RawMessage   `json:"input"`
-	Attributes   map[string]string `json:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty"`
-}
-type attrSetData struct {
-	Changes []worlds.RunsAttributeChange `json:"changes"`
-}
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -27,7 +16,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -163,8 +152,9 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	slot, err := worlds.EventSlot(input.EventID)
 	if err == nil {
 		var event worlds.Event
-		event, err = scanEvent(w.pool.QueryRow(ctx, `SELECT `+eventColumns(input.ResolveData)+` FROM go_workflow_events WHERE run_id = $1 AND slot = $2`, input.RunID, int64(slot)))
+		event, err = scanEvent(w.pool.QueryRow(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot = $2`, input.RunID, int64(slot)))
 		if err == nil {
+			event.Data = worlds.ResolveEventData(event.EventType, event.Data, input.ResolveData)
 			return event, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -216,7 +206,7 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 			q.where("slot > " + q.arg(int64(slot)))
 		}
 	}
-	sql := `SELECT ` + eventColumns(resolve) + ` FROM go_workflow_events` + q.clause() + " ORDER BY slot"
+	sql := `SELECT ` + eventColumns + ` FROM go_workflow_events` + q.clause() + " ORDER BY slot"
 	if descending {
 		sql += " DESC"
 	}
@@ -228,6 +218,7 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
+	events = worlds.ResolveEvents(events, resolve)
 	if len(events) == 0 {
 		if err := w.runExists(ctx, runID); err != nil {
 			return worlds.Page[worlds.Event]{}, err
@@ -320,8 +311,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		var received worlds.WebhookReceivedEventData
-		_ = json.Unmarshal(event.Data, &received)
+		received, _ := worlds.DecodeWebhookReceived(event.Data)
 		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
 			return nil, worlds.ErrHookNotActive
 		}
@@ -379,11 +369,12 @@ func (a *appender) delta(ctx context.Context, options worlds.EventsCreateOptions
 	if start >= a.count {
 		return nil, nil
 	}
-	rows, err := a.tx.Query(ctx, `SELECT `+eventColumns(options.ResolveData)+` FROM go_workflow_events WHERE run_id = $1 AND slot > $2 ORDER BY slot`, a.run.RunID, int64(start))
+	rows, err := a.tx.Query(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot > $2 ORDER BY slot`, a.run.RunID, int64(start))
 	if err != nil {
 		return nil, err
 	}
-	return collect(rows, scanEvent)
+	events, err := collect(rows, scanEvent)
+	return worlds.ResolveEvents(events, options.ResolveData), err
 }
 
 func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (worlds.Event, error) {
@@ -403,13 +394,13 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 	case worlds.EventTypeRunStarted:
 		a.run.Status, a.run.StartedAt = worlds.StatusRunning, &at
 	case worlds.EventTypeRunCompleted:
-		a.run.Status, a.run.CompletedAt, a.run.Output = worlds.StatusCompleted, &at, event.Data
+		a.run.Status, a.run.CompletedAt, a.run.Output = worlds.StatusCompleted, &at, worlds.DecodeRunCompleted(event.Data)
 	case worlds.EventTypeRunFailed:
-		a.run.Status, a.run.CompletedAt, a.run.Error = worlds.StatusFailed, &at, event.Data
+		a.run.Status, a.run.CompletedAt, a.run.Error = worlds.StatusFailed, &at, worlds.DecodeRunFailed(event.Data)
 	case worlds.EventTypeRunCancelled:
 		a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at
 	case worlds.EventTypeAttrSet:
-		var value attrSetData
+		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
 			for _, change := range value.Changes {
 				if change.Value == nil {
@@ -468,7 +459,7 @@ func (a *appender) updateStep(ctx context.Context, event worlds.Event, status wo
 			error = CASE WHEN $5::boolean THEN $7::bytea ELSE error END,
 			retry_after = CASE WHEN $5::boolean THEN $8::timestamptz ELSE retry_after END
 		WHERE run_id = $1 AND step_id = $2`,
-		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, []byte(result.Output), []byte(result.Error), result.RetryAfter)
+		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, []byte(result.Result), []byte(result.Error), result.RetryAfter)
 	return err
 }
 
@@ -484,14 +475,9 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
 		webhook = encoded
 	}
 
-	var until *time.Time
-	if value.MinRetention > 0 {
-		deadline := event.CreatedAt.Add(value.MinRetention)
-		until = &deadline
-	}
-	claimed, _ := json.Marshal(value.ClaimedFrom)
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, metadata, webhook, created_at, updated_at, min_retention, token_retention_until, claimed_from)
- VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9)`, event.CorrelationID, event.RunID, value.Token, value.Metadata, webhook, event.CreatedAt, int64(value.MinRetention), until, claimed); err != nil {
+	claimed, _ := json.Marshal(value.ForceClaimedFrom)
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, metadata, webhook, created_at, updated_at, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)`, event.CorrelationID, event.RunID, value.Token, value.Metadata, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
 		return err
 	}
 
@@ -520,8 +506,8 @@ func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
 	at := event.CreatedAt
 	hook.UpdatedAt, hook.ReceivedAt = at, &at
 	complete := false
-	var value worlds.WebhookReceivedEventData
-	if hook.Webhook != nil && json.Unmarshal(event.Data, &value) == nil {
+	value, ok := worlds.DecodeWebhookReceived(event.Data)
+	if hook.Webhook != nil && ok {
 		if value.Request != nil {
 			hook.WebhookEventID = event.EventID
 		}
@@ -607,12 +593,9 @@ func (a *appender) flush(ctx context.Context) error {
 	return nil
 }
 
-func eventColumns(resolve worlds.EventsResolveData) string {
-	if resolve == worlds.EventsResolveDataNone {
-		return "run_id, slot, type, correlation_id, NULL::bytea, created_at"
-	}
-	return "run_id, slot, type, correlation_id, data, created_at"
-}
+// eventColumns are the columns scanEvent reads. Data is always read, since
+// worlds.ResolveEventData keeps its metadata when payloads are omitted.
+const eventColumns = "run_id, slot, type, correlation_id, data, created_at"
 
 func scanEvent(row pgx.Row) (worlds.Event, error) {
 	var event worlds.Event

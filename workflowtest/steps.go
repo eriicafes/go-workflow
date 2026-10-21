@@ -48,7 +48,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 		t.Fatalf("retrying step = %#v err=%v", step, err)
 	}
 	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
-	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Output: json.RawMessage(`"step-out"`)})
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Result: json.RawMessage(`"step-out"`)})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusCompleted || step.Attempt != 3 || string(step.Output) != `"step-out"` || step.CompletedAt == nil {
 		t.Fatalf("completed step = %#v err=%v", step, err)

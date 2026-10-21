@@ -164,27 +164,39 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		return encodeRPC(value)
+		result, err := rpcEventResult(ctx, world, input.RunID, input.Event.CorrelationID, value, input.Options.ResolveData)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(result)
 	case "events.createRun":
 		input, err := decodeRPC[EventsCreateRunInput](request.Input)
 		if err != nil {
 			return nil, err
 		}
+		// A run created without an ID gets one.
+		if input.RunID == "" {
+			input.RunID = NewRunID()
+		}
 		value, err := world.EventsCreateRun(ctx, input)
 		if err != nil {
 			return nil, err
 		}
-		return encodeRPC(value)
+		result, err := rpcEventResult(ctx, world, input.RunID, "", value, EventsResolveDataAll)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(result)
 	case "events.createBatch":
 		input, err := decodeRPC[EventsCreateBatchInput](request.Input)
 		if err != nil {
 			return nil, err
 		}
-		value, err := world.EventsCreateBatch(ctx, input)
+		result, err := rpcEventBatch(ctx, world, input)
 		if err != nil {
 			return nil, err
 		}
-		return encodeRPC(value)
+		return encodeRPC(result)
 	case "events.get":
 		input, err := decodeRPC[EventsGetInput](request.Input)
 		if err != nil {
@@ -623,6 +635,136 @@ type (
 	}
 )
 
+// RPCEventResult is the output of the events.create and events.createRun RPC
+// methods: the committed Event and the run, step, or hook it created or
+// changed.
+type RPCEventResult struct {
+	Event       *Event
+	Run         *Run  `cbor:",omitempty"`
+	Step        *Step `cbor:",omitempty"`
+	Hook        *Hook `cbor:",omitempty"`
+	StepCreated bool  `cbor:",omitempty"`
+	// Allocated is the number of positions the write allocated in the log.
+	Allocated   int
+	InBandCount int
+	// Events holds the events EventsCreateOptions selected. HasMore is set
+	// with them, since they are never paged.
+	Events  []Event `cbor:",omitempty"`
+	HasMore *bool   `cbor:",omitempty"`
+}
+
+// RPCEventBatchResult is the output of the events.createBatch RPC method, with
+// one outcome per event.
+type RPCEventBatchResult struct {
+	Results     []RPCBatchEventResult
+	InBandCount int
+}
+
+// RPCBatchEventResult is one event's outcome in an RPCEventBatchResult: Status
+// 200 with the committed Event and the entity it changed, or the status and
+// error code a single events.create would have failed with.
+type RPCBatchEventResult struct {
+	Status  int
+	Error   string `cbor:",omitempty"`
+	Message string `cbor:",omitempty"`
+	Event   *Event `cbor:",omitempty"`
+	Run     *Run   `cbor:",omitempty"`
+	Step    *Step  `cbor:",omitempty"`
+}
+
+// rpcEventResult reads the committed event of result and the entity it
+// created or changed.
+func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID string, result EventResult, resolve EventsResolveData) (RPCEventResult, error) {
+	event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID, ResolveData: resolve})
+	if err != nil {
+		return RPCEventResult{}, err
+	}
+	value := RPCEventResult{Event: &event, Hook: result.Hook, StepCreated: result.StepCreated, Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
+	value.Run, value.Step, err = eventEntity(ctx, world, event, correlationID, result.Step)
+	if err != nil {
+		return RPCEventResult{}, err
+	}
+	if result.Events != nil {
+		hasMore := false
+		value.Events, value.HasMore = result.Events, &hasMore
+	}
+	return value, nil
+}
+
+// eventEntity reads the run that a run event changed, or the step that a step
+// event changed. step, when set, is the step the World already returned.
+func eventEntity(ctx context.Context, world World, event Event, correlationID string, step *Step) (*Run, *Step, error) {
+	switch event.EventType {
+	case EventTypeRunCreated, EventTypeRunStarted, EventTypeRunCompleted, EventTypeRunFailed, EventTypeRunCancelled, EventTypeAttrSet:
+		run, err := world.RunsGet(ctx, RunsGetInput{RunID: event.RunID})
+		if err != nil {
+			return nil, nil, err
+		}
+		return &run, nil, nil
+	case EventTypeStepCreated, EventTypeStepStarted, EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying:
+		if step != nil {
+			return nil, step, nil
+		}
+		value, err := world.StepsGet(ctx, StepsGetInput{RunID: event.RunID, StepID: StepID(correlationID)})
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &value, nil
+	}
+	return nil, nil, nil
+}
+
+// rpcEventBatch appends a batch and reports each event's outcome. When the
+// batch fails and is not fenced in-band, its events are appended one at a
+// time instead, so each reports the outcome its own events.create would have
+// had.
+func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInput) (RPCEventBatchResult, error) {
+	batch, err := world.EventsCreateBatch(ctx, input)
+	if err == nil {
+		value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(batch.Events)), InBandCount: batch.InBandCount}
+		for index, result := range batch.Events {
+			event, err := rpcEventResult(ctx, world, input.RunID, input.Events[index].CorrelationID, result, EventsResolveDataAll)
+			if err != nil {
+				return RPCEventBatchResult{}, err
+			}
+			value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: event.Event, Run: event.Run, Step: event.Step}
+		}
+		return value, nil
+	}
+	if input.InBandCount != nil {
+		return RPCEventBatchResult{}, err
+	}
+	value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(input.Events))}
+	for index, event := range input.Events {
+		created, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: event})
+		if err == nil {
+			var result RPCEventResult
+			result, err = rpcEventResult(ctx, world, input.RunID, event.CorrelationID, created, EventsResolveDataAll)
+			if err == nil {
+				value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: result.Event, Run: result.Run, Step: result.Step}
+				value.InBandCount = created.InBandCount
+				continue
+			}
+		}
+		failure := newRPCError(err)
+		value.Results[index] = RPCBatchEventResult{Status: rpcErrorStatus(failure.Code), Error: failure.Code, Message: failure.Message}
+	}
+	return value, nil
+}
+
+// rpcErrorStatus returns the HTTP status reported for an RPC error code.
+func rpcErrorStatus(code string) int {
+	switch code {
+	case "not_found":
+		return http.StatusNotFound
+	case "invalid_argument":
+		return http.StatusBadRequest
+	case "conflict":
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
 func newRPCError(err error) *RPCError {
 	var specVersionMismatch specVersionMismatchError
 	code := "internal"
@@ -631,7 +773,7 @@ func newRPCError(err error) *RPCError {
 		code = "not_found"
 	case errors.Is(err, ErrEventInvalid), errors.As(err, &specVersionMismatch):
 		code = "invalid_argument"
-	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict), errors.Is(err, ErrInBandSuperseded):
+	case errors.Is(err, ErrRunAlreadyExists), errors.Is(err, ErrRunTerminal), errors.Is(err, ErrStepNotStartable), errors.Is(err, ErrStreamLocked), errors.Is(err, ErrHookConflict), errors.Is(err, ErrHookNotActive), errors.Is(err, ErrHookForceClaimed), errors.Is(err, ErrInBandSuperseded):
 		code = "conflict"
 	case errors.Is(err, context.Canceled):
 		code = "cancelled"

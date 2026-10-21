@@ -134,10 +134,10 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			created.ConflictingRunID = previous.RunID
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
-			created.ClaimedFrom = &worlds.HookForceClaim{RunID: previous.RunID, HookID: previous.HookID}
+			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: previous.RunID, HookID: previous.HookID}
 			input.Event.Data, _ = json.Marshal(created)
 			if previous.RunID != input.RunID {
-				if err := writeJSON(w.root, "hook-handoff.json", hookHandoff{RunID: input.RunID, Event: input.Event, InBandCount: input.Options.InBandCount, Previous: *created.ClaimedFrom, At: now}); err != nil {
+				if err := writeJSON(w.root, "hook-handoff.json", hookHandoff{RunID: input.RunID, Event: input.Event, InBandCount: input.Options.InBandCount, Previous: *created.ForceClaimedFrom, At: now}); err != nil {
 					return worlds.EventResult{}, err
 				}
 			}

@@ -45,7 +45,8 @@ type World interface {
   `ForceClaimedBy` to the previous owner's run.
 - **One webhook response.** Refuse a `hook_received` carrying a response with
   `ErrHookNotActive` once the webhook has completed, including while
-  `MinRetention` keeps its token, in the same atomic step as the append.
+  `TokenRetentionUntil` keeps its token, in the same atomic step as the
+  append.
 - **The in-band fence.** Keep a per-run `InBandCount`. An append that carries
   `InBandCount` (in `EventsCreateOptions`, or on `EventsCreateBatchInput`) is
   accepted only when it equals the run's count, in the same atomic step as the

@@ -56,7 +56,7 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	if _, err := conformClaim(world, runID, "hook_c", second, false); err != nil {
 		t.Fatal(err)
 	}
-	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_c", map[string]any{"request": map[string]any{"method": "hello"}, "response": map[string]any{"status": 42}})
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_c", conformReceived(t, map[string]any{"request": map[string]any{"method": "hello"}, "response": map[string]any{"status": 42}}))
 	plainHook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: second})
 	if err != nil || plainHook.WebhookEventID != "" || plainHook.DisposedAt != nil {
 		t.Fatalf("ordinary payload was interpreted as webhook metadata: %#v err=%v", plainHook, err)
@@ -141,7 +141,7 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	if _, err := conformClaim(world, runID, "hook_plain", plain, false); err != nil {
 		t.Fatal(err)
 	}
-	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_plain", []byte(`{"value":1}`))
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_plain", conformReceived(t, []byte(`{"value":1}`)))
 	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_plain"})
 	if err != nil || hook.ReceivedAt == nil {
 		t.Fatalf("received hook = %#v err=%v", hook, err)
@@ -157,7 +157,7 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", nil)
 	hook, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
-	if err != nil || hook.TokenRetentionUntil == nil || hook.MinRetention != 300*time.Millisecond {
+	if err != nil || hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(time.Now()) {
 		t.Fatalf("retained hook = %#v err=%v", hook, err)
 	}
 	other := conformCreateRun(t, world, "retention_other")
@@ -189,9 +189,9 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 		t.Fatalf("webhook = %#v err=%v", hook, err)
 	}
 	request := worlds.WebhookReceivedEventData{Request: &worlds.WebhookRequest{Method: "POST", URL: "/hook", Header: map[string][]string{"X": {"1"}}, Body: []byte("body")}}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(2)})})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(2)}))})
 	conformExpect(t, err, worlds.ErrHookNotActive, "response before request")
-	received := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", request)
+	received := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, request))
 	hook, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_manual"})
 	if err != nil || hook.WebhookEventID != received.EventID || hook.ReceivedAt == nil {
 		t.Fatalf("manual hook after request = %#v err=%v", hook, err)
@@ -199,15 +199,15 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token}); err != nil {
 		t.Fatalf("manual hook released before response: %v", err)
 	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", request)})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, request))})
 	conformExpect(t, err, worlds.ErrHookNotActive, "second request")
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(1)})})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(1)}))})
 	conformExpect(t, err, worlds.ErrHookNotActive, "response to wrong request")
-	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 201, Body: []byte("ok")}, ResponseTo: received.EventID})
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 201, Body: []byte("ok")}, ResponseTo: received.EventID}))
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	conformExpect(t, err, worlds.ErrHookNotFound, "manual hook after response")
 	second := worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 202}, ResponseTo: received.EventID}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", second)})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_manual", conformReceived(t, second))})
 	conformExpect(t, err, worlds.ErrHookNotActive, "second response")
 
 	// A retained webhook keeps its token after responding, and still takes
@@ -216,9 +216,9 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_retained", conformHookData(retained, &worlds.Webhook{Method: "POST", Manual: true}, time.Hour))}); err != nil {
 		t.Fatal(err)
 	}
-	retainedRequest := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", request)
-	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: retainedRequest.EventID})
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_retained", worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 202}, ResponseTo: retainedRequest.EventID})})
+	retainedRequest := conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", conformReceived(t, request))
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_retained", conformReceived(t, worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: retainedRequest.EventID}))
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_retained", conformReceived(t, worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 202}, ResponseTo: retainedRequest.EventID}))})
 	conformExpect(t, err, worlds.ErrHookNotActive, "second response to a retained webhook")
 
 	automatic := token + "-auto"
@@ -229,7 +229,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	if err != nil || hook.Webhook == nil || hook.Webhook.Response == nil || hook.Webhook.Response.Status != 202 {
 		t.Fatalf("automatic webhook = %#v err=%v", hook, err)
 	}
-	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_auto", request)
+	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_auto", conformReceived(t, request))
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: automatic})
 	conformExpect(t, err, worlds.ErrHookNotFound, "automatic hook after request")
 }

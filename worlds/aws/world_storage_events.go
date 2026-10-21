@@ -27,7 +27,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	data, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	data, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -227,7 +227,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 				created.ConflictingRunID = previous.runID
 				input.Event.EventType = worlds.EventTypeHookConflict
 			} else {
-				created.ClaimedFrom = &worlds.HookForceClaim{RunID: previous.runID, HookID: previous.hookID}
+				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: previous.runID, HookID: previous.hookID}
 				owner, err := tx.run(ctx, previous.runID)
 				if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
 					return err
@@ -274,9 +274,7 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 		}
 		if found {
 			event := eventFromItem(item)
-			if input.ResolveData == worlds.EventsResolveDataNone {
-				event.Data = nil
-			}
+			event.Data = worlds.ResolveEventData(event.EventType, event.Data, input.ResolveData)
 			return event, nil
 		}
 	}
@@ -340,7 +338,7 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, correlationI
 			return worlds.Page[worlds.Event]{}, err
 		}
 	}
-	page := worlds.Page[worlds.Event]{Data: stripEvents(events, resolve)}
+	page := worlds.Page[worlds.Event]{Data: worlds.ResolveEvents(events, resolve)}
 	if pagination.Limit > 0 && len(events) > pagination.Limit {
 		page.Data, page.HasMore = events[:pagination.Limit], true
 		page.Cursor = string(events[pagination.Limit-1].EventID)
@@ -371,7 +369,7 @@ func (w *World) delta(ctx context.Context, runID worlds.RunID, seen int, options
 		events = append(events, eventFromItem(item))
 		return true
 	})
-	return stripEvents(events, options.ResolveData), err
+	return worlds.ResolveEvents(events, options.ResolveData), err
 }
 
 func (w *World) runExists(ctx context.Context, runID worlds.RunID) error {
@@ -692,8 +690,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		var received worlds.WebhookReceivedEventData
-		_ = json.Unmarshal(requested.Data, &received)
+		received, _ := worlds.DecodeWebhookReceived(requested.Data)
 		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
 			return nil, worlds.ErrHookNotActive
 		}
@@ -742,13 +739,13 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 	case worlds.EventTypeRunStarted:
 		view.Status, view.StartedAt, view.startedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
-		view.Status, view.CompletedAt, view.Output = worlds.StatusCompleted, &now, event.Data
+		view.Status, view.CompletedAt, view.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
 	case worlds.EventTypeRunFailed:
-		view.Status, view.CompletedAt, view.Error = worlds.StatusFailed, &now, event.Data
+		view.Status, view.CompletedAt, view.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
 	case worlds.EventTypeRunCancelled:
 		view.Status, view.CompletedAt, view.cancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:
-		var data attrSetData
+		var data worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &data) == nil {
 			view.Attributes = maps.Clone(view.Attributes)
 			for _, change := range data.Changes {
@@ -788,11 +785,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		var data worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, MinRetention: data.MinRetention, ClaimedFrom: data.ClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true}
-		if data.MinRetention > 0 {
-			until := now.Add(data.MinRetention)
-			tx.hooks[id].hook.TokenRetentionUntil = &until
-		}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -808,8 +801,8 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		hook := entry.hook
 		entry.dirty = true
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		var data worlds.WebhookReceivedEventData
-		if hook.Webhook != nil && json.Unmarshal(event.Data, &data) == nil {
+		data, ok := worlds.DecodeWebhookReceived(event.Data)
+		if hook.Webhook != nil && ok {
 			if data.Request != nil {
 				hook.WebhookEventID = event.EventID
 			}
@@ -875,7 +868,7 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 	}
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
-		step.Output, step.Error, step.RetryAfter = result.Output, result.Error, result.RetryAfter
+		step.Output, step.Error, step.RetryAfter = result.Result, result.Error, result.RetryAfter
 	}
 	return nil
 }

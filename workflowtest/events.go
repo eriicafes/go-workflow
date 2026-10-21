@@ -1,7 +1,9 @@
 package workflowtest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -200,7 +202,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunNotFound, "batch for missing run")
 	completed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a"},
-		{EventType: worlds.EventTypeRunCompleted, Data: []byte("out")},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"out"}`)},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "late"},
 	}})
 	conformExpect(t, err, worlds.ErrRunTerminal, "batch appending after its own terminal event")
@@ -217,7 +219,7 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "events")
 	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
-	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{DueAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)})
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)})
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_b", nil)
 	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
 
@@ -267,9 +269,10 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	if err != nil || event.EventType != worlds.EventTypeWaitCreated || event.CorrelationID != "wait_a" || len(event.Data) == 0 {
 		t.Fatalf("EventsGet = %#v err=%v", event, err)
 	}
-	event, err = world.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: worlds.EventIDForSlot(3), ResolveData: worlds.EventsResolveDataNone})
-	if err != nil || event.Data != nil {
-		t.Fatalf("EventsGet ResolveDataNone = %#v err=%v", event, err)
+	// A wait's Data is metadata, so omitting payloads keeps it.
+	metadata, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: worlds.EventIDForSlot(3), ResolveData: worlds.EventsResolveDataNone})
+	if err != nil || !bytes.Equal(metadata.Data, event.Data) {
+		t.Fatalf("EventsGet ResolveDataNone = %#v err=%v", metadata, err)
 	}
 	_, err = world.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: worlds.EventIDForSlot(99)})
 	conformExpect(t, err, worlds.ErrEventNotFound, "missing event")
@@ -279,8 +282,16 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunNotFound, "events of missing run")
 
 	stripped, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID, ResolveData: worlds.EventsResolveDataNone})
-	if err != nil || len(stripped.Data) != 5 || stripped.Data[2].Data != nil {
+	if err != nil || len(stripped.Data) != 5 || !bytes.Equal(stripped.Data[2].Data, event.Data) {
 		t.Fatalf("EventsList ResolveDataNone = %#v err=%v", stripped, err)
+	}
+	// Omitting payloads drops the run input and keeps the workflow name.
+	var created map[string]json.RawMessage
+	if err := json.Unmarshal(stripped.Data[0].Data, &created); err != nil {
+		t.Fatalf("run_created Data without payloads = %q: %v", stripped.Data[0].Data, err)
+	}
+	if _, ok := created["input"]; ok || string(created["workflowName"]) != `"conformance"` {
+		t.Fatalf("run_created Data without payloads = %s", stripped.Data[0].Data)
 	}
 	correlated, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: "wait_a"})
 	if err != nil || len(correlated.Data) != 2 || correlated.Data[0].EventID != worlds.EventIDForSlot(3) || correlated.Data[1].EventID != worlds.EventIDForSlot(5) {

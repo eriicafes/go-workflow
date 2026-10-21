@@ -205,7 +205,7 @@ local function materialize(c, d, slot)
     end
   elseif t == 'hook_created' then
     local data = type(d.hook) == 'table' and d.hook or {}
-    hooks[corr] = {runId = c.id, token = data.token or '', metadata = data.metadata, webhook = data.webhook, manual = data.manual, minRetention = data.minRetention, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
+    hooks[corr] = {runId = c.id, token = data.token or '', metadata = data.metadata, webhook = data.webhook, manual = data.manual, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
     if tonumber(data.retentionUs or 0) > 0 then hooks[corr].tokenRetentionUntil = fmt(nowN + tonumber(data.retentionUs)) end
     hooksDirty[corr] = true
     table.insert(hooksNew, {corr, c.id})
@@ -342,8 +342,8 @@ if mode == 'claim' then
       d.t = 'hook_conflict'
       d.payload.conflictingRunId = h.runId
     else
-      d.payload.claimedFrom = {runId = h.runId, hookId = id}
-      d.hook.claimedFrom = d.payload.claimedFrom
+      d.payload.forceClaimedFrom = {runId = h.runId, hookId = id}
+      d.hook.claimedFrom = d.payload.forceClaimedFrom
       local oc = load(h.runId)
       if not oc or terminal(oc.run.status) then setOwner(token, nil) else
         append(oc, {t = 'hook_disposed', c = id, taken = {runId = c.id, hookId = d.c}, r = cjson.encode({t = 'hook_disposed', c = id, d = ARGV[9], at = now})})

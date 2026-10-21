@@ -106,6 +106,20 @@ func conformAppend(t *testing.T, world worlds.World, runID worlds.RunID, eventTy
 	return result
 }
 
+// conformReceived returns hook_received Data carrying value as its payload.
+// A []byte value is used as the JSON payload as is.
+func conformReceived(t *testing.T, value any) worlds.DataHookReceived {
+	t.Helper()
+	payload, ok := value.([]byte)
+	if !ok {
+		var err error
+		if payload, err = json.Marshal(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return worlds.DataHookReceived{Payload: payload}
+}
+
 func conformEvent(t *testing.T, eventType worlds.EventType, correlationID string, data any) worlds.EventsCreateEvent {
 	t.Helper()
 	event := worlds.EventsCreateEvent{EventType: eventType, CorrelationID: correlationID}
@@ -140,7 +154,12 @@ func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []wo
 }
 
 func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) worlds.DataHookCreated {
-	return worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), Webhook: webhook, MinRetention: retention}
+	data := worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), IsWebhook: webhook != nil, Webhook: webhook}
+	if retention > 0 {
+		until := time.Now().UTC().Add(retention)
+		data.TokenRetentionUntil = &until
+	}
+	return data
 }
 
 func conformClaim(world worlds.World, runID worlds.RunID, hookID worlds.HookID, token string, force bool) (worlds.EventResult, error) {

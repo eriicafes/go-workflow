@@ -49,7 +49,7 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 		case worlds.EventTypeWaitCreated:
 			var data worlds.DataWaitCreated
 			if json.Unmarshal(event.Data, &data) == nil {
-				values[worlds.WaitID(event.CorrelationID)] = worlds.AnalyticsWait{RunID: input.RunID, WaitID: worlds.WaitID(event.CorrelationID), DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				values[worlds.WaitID(event.CorrelationID)] = worlds.AnalyticsWait{RunID: input.RunID, WaitID: worlds.WaitID(event.CorrelationID), DueAt: data.ResumeAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			}
 		case worlds.EventTypeWaitCompleted:
 			id := worlds.WaitID(event.CorrelationID)

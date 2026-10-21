@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -312,8 +313,10 @@ func TestKeysAndCursors(t *testing.T) {
 }
 
 func TestDescribeEvent(t *testing.T) {
-	data, _ := json.Marshal(worlds.DataHookCreated{Token: "tok", Metadata: []byte{0xff}, Webhook: &worlds.Webhook{Manual: true}, MinRetention: 1500})
-	raw, err := describeEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_1", Data: data}, parseMicros("1700000000000000"))
+	now := parseMicros("1700000000000000")
+	until := now.Add(1500 * time.Nanosecond)
+	data, _ := json.Marshal(worlds.DataHookCreated{Token: "tok", Metadata: []byte{0xff}, Webhook: &worlds.Webhook{Manual: true}, TokenRetentionUntil: &until})
+	raw, err := describeEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_1", Data: data}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,14 +324,15 @@ func TestDescribeEvent(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &desc); err != nil {
 		t.Fatal(err)
 	}
-	if desc.Hook == nil || desc.Hook.Token != "tok" || desc.Hook.Metadata != "/w==" || !desc.Hook.Manual || desc.Hook.MinRetention != "1500" || desc.Hook.RetentionUs != "2" {
+	if desc.Hook == nil || desc.Hook.Token != "tok" || desc.Hook.Metadata != "/w==" || !desc.Hook.Manual || desc.Hook.RetentionUs != "2" {
 		t.Fatalf("hook descriptor = %+v", desc.Hook)
 	}
 	var record eventRecord
 	if err := json.Unmarshal([]byte(desc.Record), &record); err != nil || record.At != "1700000000000000" || string(record.Data) != string(data) {
 		t.Fatalf("record = %+v %v", record, err)
 	}
-	received, _ := json.Marshal(worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(4)})
+	response, _ := json.Marshal(worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: 200}, ResponseTo: worlds.EventIDForSlot(4)})
+	received, _ := worlds.EncodeHookReceived(response)
 	raw, _ = describeEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, Data: received}, parseMicros("1"))
 	desc = eventDescriptor{}
 	_ = json.Unmarshal([]byte(raw), &desc)

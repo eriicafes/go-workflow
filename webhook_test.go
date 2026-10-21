@@ -3,7 +3,6 @@ package workflow_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -205,8 +204,8 @@ func TestWebhookRequestSurvivesStepSerializationAndResponseRetry(t *testing.T) {
 	}
 	responses := 0
 	for _, event := range page.Data {
-		var payload worlds.WebhookReceivedEventData
-		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &payload) == nil && payload.Response != nil {
+		payload, ok := worlds.DecodeWebhookReceived(event.Data)
+		if event.EventType == worlds.EventTypeHookReceived && ok && payload.Response != nil {
 			responses++
 		}
 	}

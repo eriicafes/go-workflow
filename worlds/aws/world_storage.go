@@ -16,17 +16,6 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-type runCreatedData struct {
-	WorkflowName string            `json:"workflowName"`
-	Input        json.RawMessage   `json:"input"`
-	Attributes   map[string]string `json:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty"`
-}
-
-type attrSetData struct {
-	Changes []worlds.RunsAttributeChange `json:"changes"`
-}
-
 // runView is the META item of a run partition.
 type runView struct {
 	worlds.Run
@@ -292,9 +281,6 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		data, _ := json.Marshal(hook.ForceClaimedBy)
 		item["forceClaimedBy"] = avs(string(data))
 	}
-	if hook.MinRetention != 0 {
-		item["minRetention"] = avn(int64(hook.MinRetention))
-	}
 	return item, nil
 }
 
@@ -308,7 +294,6 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 		CreatedAt:           readTime(item, "createdAt"),
 		UpdatedAt:           readTime(item, "updatedAt"),
 		ReceivedAt:          readTimePtr(item, "receivedAt"),
-		MinRetention:        time.Duration(readInt(item, "minRetention")),
 		TokenRetentionUntil: readTimePtr(item, "tokenRetentionUntil"),
 	}
 	hook.DisposedAt = readTimePtr(item, "disposedAt")
@@ -400,15 +385,6 @@ func stripHook(hook worlds.Hook, resolve worlds.ResolveData) worlds.Hook {
 		hook.Metadata = nil
 	}
 	return hook
-}
-
-func stripEvents(events []worlds.Event, resolve worlds.EventsResolveData) []worlds.Event {
-	if resolve == worlds.EventsResolveDataNone {
-		for index := range events {
-			events[index].Data = nil
-		}
-	}
-	return events
 }
 
 // encodeCursor and decodeCursor carry a DynamoDB key (a LastEvaluatedKey or

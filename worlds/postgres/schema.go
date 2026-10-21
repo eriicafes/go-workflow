@@ -73,7 +73,6 @@ CREATE TABLE go_workflow_hooks (
 	created_at timestamptz NOT NULL,
 	updated_at timestamptz NOT NULL,
 	received_at timestamptz,
-	min_retention bigint NOT NULL DEFAULT 0,
 	token_retention_until timestamptz,
  claimed_from jsonb,
  force_claimed_by jsonb,

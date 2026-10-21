@@ -38,8 +38,8 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		// On first execution, schedule the timer, then persist the queue message
 		// ID with its durable declaration so a later replay can cancel that schedule.
 		waitID := NewWaitID()
-		data := DataWaitCreated{Position: position, DueAt: options.DueAt, Cancellation: CancellationReferences(ctx)}
-		queued := options.Execution.queue(QueueInput{NotBefore: &data.DueAt, IdempotencyKey: string(waitID)})
+		data := DataWaitCreated{Position: position, ResumeAt: options.DueAt, Cancellation: CancellationReferences(ctx)}
+		queued := options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		data.QueueMessageID = queued.MessageID
 		encoded, err := json.Marshal(data)
 		if err != nil {
@@ -71,7 +71,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// every replay does, so the timer's own delivery or any later flow
 	// completes it.
 	_, completed := options.Execution.settles[string(waitID)]
-	if completed || ctx.Err() != nil || options.Execution.target != nil || time.Now().Before(data.DueAt) {
+	if completed || ctx.Err() != nil || options.Execution.target != nil || time.Now().Before(data.ResumeAt) {
 		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
 	}
 	// Replay reaches this declaration before later calls that disarmed it.
@@ -87,12 +87,4 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	}
 	options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
 	return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
-}
-
-// DataWaitCreated is the JSON payload of a wait_created event.
-type DataWaitCreated struct {
-	Position       int                     `json:"position"`
-	DueAt          time.Time               `json:"dueAt"`
-	QueueMessageID string                  `json:"queueMessageId"`
-	Cancellation   []cancellationReference `json:"cancellation,omitempty"`
 }

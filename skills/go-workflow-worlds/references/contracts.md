@@ -17,8 +17,15 @@ SinceCursor. Its returned catch-up events exclude the primary returned event;
 see the interface for force-claim disposal inclusion.
 
 Use SDK payload types such as `DataStepCreated`, `DataStepResult`,
-`DataHookCreated`, and `DataWaitCreated`. `DataStepResult.Error` holds encoded
-error JSON. Preserve the complete encoded error through storage.
+`DataRunCreated`, `DataRunCompleted`, `DataRunFailed`, `DataHookCreated`,
+`DataHookReceived`, `DataAttrSet`, and `DataWaitCreated` from
+`worlds/data.go`. Materialize run output and error with
+`worlds.DecodeRunCompleted` and `worlds.DecodeRunFailed`, decode webhook
+receipts with `worlds.DecodeWebhookReceived`, and build attr_set data with
+`worlds.EncodeAttrSet`. Error fields hold encoded error JSON.
+Preserve the complete encoded error through storage. Apply
+`worlds.ResolveEventData` for `EventsResolveDataNone`, which drops payload
+fields and keeps metadata.
 
 ## In-band fencing
 
@@ -42,7 +49,8 @@ recoverable protocol that preserves the same observable contract. An
 uncoordinated read-then-write token lookup is insufficient.
 
 Disposal deactivates registration and releases its token immediately.
-MinRetention can preserve token ownership after run termination; it does not
+A hook's TokenRetentionUntil can preserve token ownership after run
+termination; it does not
 keep a completed webhook available for another request or response.
 
 Static/default webhook receipt and endpoint deactivation must be admitted

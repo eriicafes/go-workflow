@@ -144,7 +144,7 @@ func (e *Execution) SetTargetResult(result DataStepResult) {
 		value := *result.RetryAfter
 		retryAt = &value
 	}
-	e.result = &DataStepResult{Output: bytes.Clone(result.Output), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
+	e.result = &DataStepResult{Result: bytes.Clone(result.Result), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
 }
 
 // GetTargetResult returns the step result recorded by SetTargetResult. It
@@ -154,7 +154,7 @@ func (e *Execution) GetTargetResult() (DataStepResult, bool) {
 		return DataStepResult{}, false
 	}
 	result := *e.result
-	result.Output = bytes.Clone(result.Output)
+	result.Result = bytes.Clone(result.Result)
 	result.Error = bytes.Clone(result.Error)
 	if result.RetryAfter != nil {
 		value := *result.RetryAfter

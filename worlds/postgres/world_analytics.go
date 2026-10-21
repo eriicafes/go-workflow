@@ -117,7 +117,7 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID, waitID *worlds
 			continue
 		}
 		wait := value.wait
-		wait.DueAt, wait.QueueMessageID = data.DueAt.UTC(), data.QueueMessageID
+		wait.DueAt, wait.QueueMessageID = data.ResumeAt.UTC(), data.QueueMessageID
 		wait.CreatedAt, wait.CompletedAt = wait.CreatedAt.UTC(), utc(wait.CompletedAt)
 		if i, ok := index[wait.WaitID]; ok {
 			waits[i] = wait

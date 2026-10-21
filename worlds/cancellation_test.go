@@ -108,7 +108,7 @@ func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 		var data struct {
 			Cause json.RawMessage `json:"cause"`
 		}
-		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &data) == nil && len(data.Cause) != 0 {
+		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(worlds.DecodeHookReceived(event.Data), &data) == nil && len(data.Cause) != 0 {
 			first = worlds.DecodeError(data.Cause).Error()
 			break
 		}

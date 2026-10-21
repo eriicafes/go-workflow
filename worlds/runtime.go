@@ -126,7 +126,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	if !ok {
 		_, err := r.world.EventsCreate(ctx, EventsCreateInput{
 			RunID: run.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))},
+			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))},
 		})
 		if errors.Is(err, ErrRunTerminal) {
 			return nil
@@ -207,10 +207,14 @@ func (r *Runtime) completeRun(ctx context.Context, input QueueInput, execution *
 	if position, ok := execution.unreachedPosition(); ok {
 		return r.recoverDivergence(ctx, input, replayDivergenceError{Position: position, Reason: "runner returned without reaching the recorded operation"})
 	}
+	completed, err := json.Marshal(DataRunCompleted{Output: data})
+	if err != nil {
+		return r.failRun(ctx, input, execution, fmt.Errorf("workflow: encode run output: %w", err))
+	}
 	eventCount := len(execution.events)
-	_, err := r.world.EventsCreate(ctx, EventsCreateInput{
+	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: EventTypeRunCompleted, Data: data},
+		Event:   EventsCreateEvent{EventType: EventTypeRunCompleted, Data: completed},
 		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: execution.InBandCount()},
 	})
 	if errors.Is(err, ErrRunTerminal) {
@@ -260,7 +264,7 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 	}
 	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(failure)},
+		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(failure)},
 		Options: EventsCreateOptions{InBandCount: execution.InBandCount()},
 	})
 	if errors.Is(err, ErrRunTerminal) {
@@ -519,7 +523,7 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input QueueInput, diver
 		corrupted := corruptedEventLogError{Position: divergenceErr.Position, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
 		_, err := r.world.EventsCreate(ctx, EventsCreateInput{
 			RunID: input.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(corrupted)},
+			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(corrupted)},
 		})
 		if errors.Is(err, ErrRunTerminal) {
 			return nil
@@ -557,7 +561,7 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 	mismatch := deploymentMismatchError{RunDeploymentID: run.DeploymentID, DeploymentID: r.world.DeploymentID(), RecoveryAttempts: attempts}
 	_, err := r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID: run.RunID,
-		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: encodeError(mismatch)},
+		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(mismatch)},
 	})
 	if errors.Is(err, ErrRunTerminal) {
 		return nil

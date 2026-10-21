@@ -149,7 +149,7 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID) ([]worlds.Anal
 				continue
 			}
 			index[id] = len(waits)
-			waits = append(waits, worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt})
+			waits = append(waits, worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.ResumeAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt})
 		case worlds.EventTypeWaitCompleted:
 			if position, ok := index[id]; ok {
 				at := event.CreatedAt

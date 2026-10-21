@@ -19,6 +19,9 @@ type (
 		Webhook      *Webhook
 		MinRetention time.Duration
 		Force        bool
+		// System marks a hook the runtime creates for itself, such as a
+		// cancellation hook, so observability can hide it.
+		System bool
 	}
 
 	// DurableHookResult is the state of a hook. DurableHook reports the hook's
@@ -59,7 +62,12 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 			options.Token = NewHookToken()
 		}
 		hookID := NewHookID()
-		data, err := json.Marshal(DataHookCreated{Position: position, Token: options.Token, Webhook: options.Webhook, MinRetention: options.MinRetention, Force: options.Force})
+		created := DataHookCreated{Position: position, Token: options.Token, IsWebhook: options.Webhook != nil, IsSystem: options.System, Webhook: options.Webhook, Force: options.Force}
+		if options.MinRetention > 0 {
+			until := time.Now().UTC().Add(options.MinRetention)
+			created.TokenRetentionUntil = &until
+		}
+		data, err := json.Marshal(created)
 		if err != nil {
 			return DurableHookResult[T]{Err: err}
 		}
@@ -77,16 +85,16 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if options.Webhook == nil && options.Token != "" && created.Token != options.Token {
 		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
-	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ClaimedFrom}
+	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
 	if event.EventType == EventTypeHookConflict {
 		result.Err, result.ConflictRunID = ErrHookConflict, created.ConflictingRunID
 	}
-	if created.ClaimedFrom != nil {
-		deployment, err := RunDeploymentID(options.Execution.ctx, options.Execution.World(), created.ClaimedFrom.RunID)
+	if created.ForceClaimedFrom != nil {
+		deployment, err := RunDeploymentID(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
-		_, err = options.Execution.World().Queue(options.Execution.ctx, QueueInput{RunID: created.ClaimedFrom.RunID, DeploymentID: deployment, IdempotencyKey: "hook-force:" + string(result.HookID)})
+		_, err = options.Execution.World().Queue(options.Execution.ctx, QueueInput{RunID: created.ForceClaimedFrom.RunID, DeploymentID: deployment, IdempotencyKey: "hook-force:" + string(result.HookID)})
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
@@ -115,10 +123,9 @@ func HookEvent(execution *Execution, id HookID, cursor EventID) (Event, bool) {
 			return event, true
 		}
 		if event.EventType == EventTypeHookReceived {
-			var received WebhookReceivedEventData
 			// Manual responses also use hook_received; skip them so they are
 			// not delivered as another incoming webhook request.
-			if webhook && json.Unmarshal(event.Data, &received) == nil && received.Response != nil {
+			if received, ok := DecodeWebhookReceived(event.Data); webhook && ok && received.Response != nil {
 				continue
 			}
 			return event, true
@@ -147,21 +154,9 @@ func HookOutcome[T any](execution *Execution, hookID HookID, after EventID) Dura
 		}
 		return result
 	}
-	if err := json.Unmarshal(event.Data, &result.Data); err != nil {
+	if err := json.Unmarshal(DecodeHookReceived(event.Data), &result.Data); err != nil {
 		result.Err = fmt.Errorf("workflow: decode hook value: %w", err)
 		return result
 	}
 	return result
-}
-
-// DataHookCreated is the JSON payload of a hook_created or hook_conflict event.
-type DataHookCreated struct {
-	Position         int             `json:"position"`
-	Token            string          `json:"token"`
-	Metadata         []byte          `json:"metadata,omitempty"`
-	Webhook          *Webhook        `json:"webhook,omitempty"`
-	MinRetention     time.Duration   `json:"minRetention,omitempty"`
-	Force            bool            `json:"force,omitempty"`
-	ClaimedFrom      *HookForceClaim `json:"claimedFrom,omitempty"`
-	ConflictingRunID RunID           `json:"conflictingRunId,omitempty"`
 }

@@ -126,18 +126,21 @@ type (
 	}
 	// RunsAttributeChange sets or deletes one run attribute.
 	RunsAttributeChange struct {
-		Key string
+		Key string `json:"key"`
 		// Value is the new value. Nil deletes the attribute.
-		Value *string
+		Value *string `json:"value"`
 	}
 	// RunsSetAttributesInput holds the arguments to RunsSetAttributes.
 	RunsSetAttributesInput struct {
 		RunID   RunID
 		Changes []RunsAttributeChange
+		// Writer names what set the attributes. Nil records a workflow
+		// writer.
+		Writer *AttributeWriter
 	}
 )
 
-// Attributes the runtime sets on a child run, named as in the Workflow SDK.
+// Attributes the runtime sets on a child run.
 const (
 	// ParentRunIDAttribute holds the ID of the run that started a child run.
 	ParentRunIDAttribute = "$parentRunId"
@@ -246,21 +249,6 @@ type (
 		Header map[string][]string `json:"header,omitempty"`
 		Body   []byte              `json:"body,omitempty"`
 	}
-	// WebhookReceivedEventData is the Data of a hook_received event for a
-	// webhook. It holds either the received Request or, for a manual
-	// webhook, the workflow's Response to the request event named by
-	// ResponseTo.
-	WebhookReceivedEventData struct {
-		Request    *WebhookRequest  `json:"request,omitempty"`
-		Response   *WebhookResponse `json:"response,omitempty"`
-		ResponseTo EventID          `json:"responseTo,omitempty"`
-	}
-	// HookDisposedEventData is the Data of a hook_disposed event. It is empty
-	// when the hook disposed of itself. ForceClaimedBy is set when another
-	// hook took the token with a forced claim, as in the Workflow SDK.
-	HookDisposedEventData struct {
-		ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty"`
-	}
 	// HookForceClaim names the hook that took a token with a forced claim.
 	HookForceClaim struct {
 		RunID  RunID  `json:"runId"`
@@ -295,12 +283,10 @@ type Hook struct {
 	// WebhookEventID is the hook_received event that recorded the webhook
 	// request.
 	WebhookEventID EventID
-	// MinRetention reserves the token until CreatedAt plus this duration.
-	// Active runs keep their tokens beyond that deadline; explicit disposal
-	// always releases them immediately.
-	MinRetention time.Duration
 	// TokenRetentionUntil is the earliest time terminal-run cleanup may release
-	// the token, or nil when there is no retention reservation.
+	// the token, or nil when there is no retention reservation. Active runs
+	// keep their tokens beyond it; explicit disposal always releases them
+	// immediately.
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim
 	ForceClaimedBy      *HookForceClaim

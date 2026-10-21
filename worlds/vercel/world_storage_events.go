@@ -45,26 +45,18 @@ type attributeArg struct {
 }
 
 type hookCreatedArg struct {
-	Token        string                 `json:"token"`
-	Metadata     string                 `json:"metadata,omitempty"`
-	Webhook      string                 `json:"webhook,omitempty"`
-	Manual       bool                   `json:"manual,omitempty"`
-	MinRetention string                 `json:"minRetention,omitempty"`
-	ClaimedFrom  *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
-	RetentionUs  string                 `json:"retentionUs,omitempty"`
+	Token       string                 `json:"token"`
+	Metadata    string                 `json:"metadata,omitempty"`
+	Webhook     string                 `json:"webhook,omitempty"`
+	Manual      bool                   `json:"manual,omitempty"`
+	ClaimedFrom *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
+	RetentionUs string                 `json:"retentionUs,omitempty"`
 }
 
 type hookReceivedArg struct {
 	Request  bool   `json:"req,omitempty"`
 	Response bool   `json:"resp,omitempty"`
 	To       uint64 `json:"to,omitempty"`
-}
-
-type runCreatedData struct {
-	WorkflowName string            `json:"workflowName"`
-	Input        json.RawMessage   `json:"input"`
-	Attributes   map[string]string `json:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty"`
 }
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
@@ -74,7 +66,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -328,10 +320,12 @@ func invalidEventType(eventType worlds.EventType) bool {
 func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error) {
 	desc := eventDescriptor{Type: event.EventType, CorrelationID: event.CorrelationID, Record: newEventRecord(event, now), Invalid: invalidEventType(event.EventType)}
 	switch event.EventType {
-	case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed:
-		desc.Data = encodeBytes(event.Data)
+	case worlds.EventTypeRunCompleted:
+		desc.Data = encodeBytes(worlds.DecodeRunCompleted(event.Data))
+	case worlds.EventTypeRunFailed:
+		desc.Data = encodeBytes(worlds.DecodeRunFailed(event.Data))
 	case worlds.EventTypeAttrSet:
-		var data attrSetData
+		var data worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &data) == nil {
 			for _, change := range data.Changes {
 				desc.Attributes = append(desc.Attributes, attributeArg{Key: change.Key, Value: change.Value})
@@ -344,7 +338,7 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		var data worlds.DataStepResult
 		if json.Unmarshal(event.Data, &data) == nil {
-			desc.Result = &stepResultArg{Output: encodeBytes(data.Output), Error: encodeBytes(data.Error)}
+			desc.Result = &stepResultArg{Output: encodeBytes(data.Result), Error: encodeBytes(data.Error)}
 			if data.RetryAfter != nil {
 				desc.Result.RetryAfter = data.RetryAfter.UTC().Format(time.RFC3339Nano)
 			}
@@ -361,9 +355,10 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 				}
 				desc.Hook.Webhook, desc.Hook.Manual = string(webhook), data.Webhook.Manual
 			}
-			if data.MinRetention > 0 {
-				desc.Hook.MinRetention = strconv.FormatInt(int64(data.MinRetention), 10)
-				desc.Hook.RetentionUs = strconv.FormatInt((int64(data.MinRetention)+999)/1000, 10)
+			if data.TokenRetentionUntil != nil {
+				if retention := data.TokenRetentionUntil.Sub(now); retention > 0 {
+					desc.Hook.RetentionUs = strconv.FormatInt((int64(retention)+999)/1000, 10)
+				}
 			}
 		}
 	case worlds.EventTypeHookDisposed:
@@ -372,8 +367,8 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 			desc.Taken = data.ForceClaimedBy
 		}
 	case worlds.EventTypeHookReceived:
-		var data worlds.WebhookReceivedEventData
-		if json.Unmarshal(event.Data, &data) == nil {
+		data, ok := worlds.DecodeWebhookReceived(event.Data)
+		if ok {
 			desc.Received = &hookReceivedArg{Request: data.Request != nil, Response: data.Response != nil}
 			if slot, err := worlds.EventSlot(data.ResponseTo); err == nil {
 				desc.Received.To = slot

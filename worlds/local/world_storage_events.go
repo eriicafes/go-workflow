@@ -12,17 +12,6 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-type runCreatedData struct {
-	WorkflowName string            `json:"workflowName"`
-	Input        json.RawMessage   `json:"input"`
-	Attributes   map[string]string `json:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty"`
-}
-
-type attrSetData struct {
-	Changes []worlds.RunsAttributeChange `json:"changes"`
-}
-
 // txn stages appends to one run. Records are loaded lazily and only dirty
 // records are written. Nothing reaches disk before commit, so a rejected
 // append or batch is discarded by dropping the txn.
@@ -171,8 +160,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			}
 			return "", worlds.ErrHookNotActive
 		}
-		var received worlds.WebhookReceivedEventData
-		_ = json.Unmarshal(event.Data, &received)
+		received, _ := worlds.DecodeWebhookReceived(event.Data)
 		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
 			return "", worlds.ErrHookNotActive
 		}
@@ -236,13 +224,13 @@ func (t *txn) materialize(event worlds.Event) error {
 	case worlds.EventTypeRunStarted:
 		run.Status, run.StartedAt, run.StartedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
-		run.Status, run.CompletedAt, run.Output = worlds.StatusCompleted, &now, bytes.Clone(event.Data)
+		run.Status, run.CompletedAt, run.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
 	case worlds.EventTypeRunFailed:
-		run.Status, run.CompletedAt, run.Error = worlds.StatusFailed, &now, bytes.Clone(event.Data)
+		run.Status, run.CompletedAt, run.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
 	case worlds.EventTypeRunCancelled:
 		run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:
-		var value attrSetData
+		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
 			for _, change := range value.Changes {
 				if change.Value == nil {
@@ -269,11 +257,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Metadata: value.Metadata, Webhook: value.Webhook, MinRetention: value.MinRetention, ClaimedFrom: value.ClaimedFrom, CreatedAt: now, UpdatedAt: now}
-		if value.MinRetention > 0 {
-			until := now.Add(value.MinRetention)
-			hook.TokenRetentionUntil = &until
-		}
+		hook := &worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Metadata: value.Metadata, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
 		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})
@@ -286,8 +270,8 @@ func (t *txn) materialize(event worlds.Event) error {
 		hook := *current
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
 		complete := false
-		var value worlds.WebhookReceivedEventData
-		if hook.Webhook != nil && json.Unmarshal(event.Data, &value) == nil {
+		value, ok := worlds.DecodeWebhookReceived(event.Data)
+		if hook.Webhook != nil && ok {
 			if value.Request != nil {
 				hook.WebhookEventID = event.EventID
 			}
@@ -385,7 +369,7 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 	}
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
-		step.Output, step.Error, step.RetryAfter = result.Output, result.Error, result.RetryAfter
+		step.Output, step.Error, step.RetryAfter = result.Result, result.Error, result.RetryAfter
 	}
 	t.setStep(&step)
 	return nil
@@ -491,7 +475,7 @@ func (w *World) delta(run runRecord, options worlds.EventsCreateOptions) ([]worl
 		return nil, nil
 	}
 	events, err := w.readEvents(run.RunID, start+1, run.EventCount)
-	return resolveEvents(events, options.ResolveData), err
+	return worlds.ResolveEvents(events, options.ResolveData), err
 }
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
@@ -512,7 +496,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 		return worlds.EventResult{}, err
 	}
-	payload, err := json.Marshal(runCreatedData{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -657,7 +641,7 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	if err != nil {
 		return worlds.Event{}, err
 	}
-	return resolveEvents(events, input.ResolveData)[0], nil
+	return worlds.ResolveEvents(events, input.ResolveData)[0], nil
 }
 
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
@@ -696,7 +680,7 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
 			events[i], events[j] = events[j], events[i]
 		}
-		return eventsPage(resolveEvents(events, input.ResolveData), low > 1), nil
+		return eventsPage(worlds.ResolveEvents(events, input.ResolveData), low > 1), nil
 	}
 	low := cursor + 1
 	high := run.EventCount
@@ -707,7 +691,7 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
-	return eventsPage(resolveEvents(events, input.ResolveData), high < run.EventCount), nil
+	return eventsPage(worlds.ResolveEvents(events, input.ResolveData), high < run.EventCount), nil
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
@@ -748,7 +732,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 	if input.Pagination.Limit > 0 && len(matched) > input.Pagination.Limit {
 		matched, hasMore = matched[:input.Pagination.Limit], true
 	}
-	return eventsPage(resolveEvents(matched, input.ResolveData), hasMore), nil
+	return eventsPage(worlds.ResolveEvents(matched, input.ResolveData), hasMore), nil
 }
 
 func validAppend(eventType worlds.EventType) bool {

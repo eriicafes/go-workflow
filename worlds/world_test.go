@@ -173,7 +173,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(worlds.DataWaitCreated{DueAt: dueAt, QueueMessageID: "queue_1"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt, QueueMessageID: "queue_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,11 +300,15 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 			if event.EventType != worlds.EventTypeHookReceived {
 				continue
 			}
-			var received worlds.WebhookReceivedEventData
-			if err := json.Unmarshal(event.Data, &received); err != nil || received.Request == nil {
+			received, ok := worlds.DecodeWebhookReceived(event.Data)
+			if !ok || received.Request == nil {
 				continue
 			}
-			response, err := json.Marshal(worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: http.StatusOK, Header: map[string][]string{"X-Webhook": {"manual"}}, Body: []byte("done")}, ResponseTo: event.EventID})
+			payload, err := json.Marshal(worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: http.StatusOK, Header: map[string][]string{"X-Webhook": {"manual"}}, Body: []byte("done")}, ResponseTo: event.EventID})
+			if err != nil {
+				return nil, err
+			}
+			response, err := worlds.EncodeHookReceived(payload)
 			if err != nil {
 				return nil, err
 			}
@@ -365,11 +369,11 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	if envelope.Error != nil {
 		t.Fatal(envelope.Error)
 	}
-	var result worlds.EventResult
+	var result worlds.RPCEventResult
 	if err := cbor.Unmarshal(envelope.Output, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.EventID != worlds.EventIDForSlot(1) {
+	if result.Event == nil || result.Event.EventID != worlds.EventIDForSlot(1) || result.Run == nil || result.Run.RunID != "wrun_rpc" {
 		t.Fatalf("result=%#v", result)
 	}
 

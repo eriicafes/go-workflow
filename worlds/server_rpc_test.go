@@ -77,7 +77,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(worlds.DataWaitCreated{DueAt: dueAt, QueueMessageID: "message"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt, QueueMessageID: "message"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,5 +187,87 @@ func TestRPCEncodesTimesAsTaggedRFC3339(t *testing.T) {
 	}
 	if !got.CreatedAt.Equal(want.CreatedAt) {
 		t.Fatalf("CreatedAt = %v, want %v", got.CreatedAt, want.CreatedAt)
+	}
+}
+
+// callRPC sends one RPC request to handler and decodes its output into a map
+// keyed as the wire carries it.
+func callRPC(t *testing.T, handler http.Handler, method string, input any) map[string]cbor.RawMessage {
+	t.Helper()
+	encoded, err := cbor.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := cbor.Marshal(rpcRequest{Method: method, Input: encoded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var envelope rpcResponse
+	if err := cbor.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("%s: %s %s", method, envelope.Error.Code, envelope.Error.Message)
+	}
+	var output map[string]cbor.RawMessage
+	if err := cbor.Unmarshal(envelope.Output, &output); err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
+	handler := worlds.HTTPHandler(testworld.New(), "")
+
+	// A run created without an ID gets one, and the result carries the run.
+	created := callRPC(t, handler, "events.createRun", worlds.EventsCreateRunInput{WorkflowName: "rpc", Input: []byte(`"in"`)})
+	var run worlds.Run
+	if err := cbor.Unmarshal(created["Run"], &run); err != nil || run.RunID == "" || run.WorkflowName != "rpc" {
+		t.Fatalf("createRun run = %#v err=%v", run, err)
+	}
+	var event worlds.Event
+	if err := cbor.Unmarshal(created["Event"], &event); err != nil || event.EventType != worlds.EventTypeRunCreated || event.RunID != run.RunID {
+		t.Fatalf("createRun event = %#v err=%v", event, err)
+	}
+
+	// A step event carries the step it changed, and no run.
+	stepData, _ := json.Marshal(worlds.DataStepCreated{StepName: "pkg.step", Input: json.RawMessage(`1`)})
+	step := callRPC(t, handler, "events.create", worlds.EventsCreateInput{RunID: run.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_rpc", Data: stepData}})
+	if _, ok := step["Run"]; ok {
+		t.Fatalf("step event result has a run: %v", step)
+	}
+	var value worlds.Step
+	if err := cbor.Unmarshal(step["Step"], &value); err != nil || value.StepID != "step_rpc" || value.StepName != "pkg.step" {
+		t.Fatalf("step event step = %#v err=%v", value, err)
+	}
+	var allocated int
+	if err := cbor.Unmarshal(step["Allocated"], &allocated); err != nil || allocated != 1 {
+		t.Fatalf("step event allocated = %d err=%v", allocated, err)
+	}
+
+	// A batch reports each event's own outcome: run_created cannot be
+	// appended, while the wait is committed.
+	waitData, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)})
+	batch := callRPC(t, handler, "events.createBatch", worlds.EventsCreateBatchInput{RunID: run.RunID, Events: []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeRunCreated},
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_rpc", Data: waitData},
+	}})
+	var results []struct {
+		Status int
+		Error  string
+		Event  *worlds.Event
+	}
+	if err := cbor.Unmarshal(batch["Results"], &results); err != nil || len(results) != 2 {
+		t.Fatalf("batch results = %#v err=%v", results, err)
+	}
+	if results[0].Status != http.StatusBadRequest || results[0].Error != "invalid_argument" || results[0].Event != nil {
+		t.Fatalf("run_created result = %#v", results[0])
+	}
+	if results[1].Status != http.StatusOK || results[1].Event == nil || results[1].Event.CorrelationID != "wait_rpc" {
+		t.Fatalf("wait result = %#v", results[1])
 	}
 }

@@ -2,7 +2,6 @@ package awsworld
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -66,7 +65,7 @@ func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.Runs
 }
 
 func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttributesInput) error {
-	data, err := json.Marshal(attrSetData{Changes: input.Changes})
+	data, err := worlds.EncodeAttrSet(input)
 	if err != nil {
 		return err
 	}

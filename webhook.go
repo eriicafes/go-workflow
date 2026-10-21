@@ -161,7 +161,11 @@ func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Resp
 	if value == nil {
 		value = &worlds.WebhookResponse{}
 	}
-	data, err := json.Marshal(worlds.WebhookReceivedEventData{Response: value, ResponseTo: r.data.WebhookEventID})
+	payload, err := json.Marshal(worlds.WebhookReceivedEventData{Response: value, ResponseTo: r.data.WebhookEventID})
+	if err != nil {
+		return err
+	}
+	data, err := worlds.EncodeHookReceived(payload)
 	if err != nil {
 		return err
 	}
@@ -180,8 +184,8 @@ func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Resp
 			return listErr
 		}
 		for _, event := range recorded.Data {
-			var received worlds.WebhookReceivedEventData
-			if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(event.Data, &received) == nil && received.Response != nil && received.ResponseTo == r.data.WebhookEventID {
+			received, ok := worlds.DecodeWebhookReceived(event.Data)
+			if event.EventType == worlds.EventTypeHookReceived && ok && received.Response != nil && received.ResponseTo == r.data.WebhookEventID {
 				actual, _ := json.Marshal(received.Response)
 				expected, _ := json.Marshal(value)
 				if bytes.Equal(actual, expected) {

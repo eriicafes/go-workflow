@@ -128,7 +128,7 @@ func (w *World) waits(ctx context.Context, runID worlds.RunID) ([]worlds.Analyti
 		case worlds.EventTypeWaitCreated:
 			var data worlds.DataWaitCreated
 			if json.Unmarshal(event.Data, &data) == nil {
-				waits[id] = &worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				waits[id] = &worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.ResumeAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			}
 		case worlds.EventTypeWaitCompleted:
 			if wait := waits[id]; wait != nil && wait.CompletedAt == nil {

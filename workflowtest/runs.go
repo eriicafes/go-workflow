@@ -77,9 +77,9 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 	if err != nil || run.Status != worlds.StatusRunning || run.StartedAt == nil {
 		t.Fatalf("running run = %#v err=%v", run, err)
 	}
-	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", []byte("output"))
+	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", worlds.DataRunCompleted{Output: json.RawMessage(`"output"`)})
 	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != "output" || run.CompletedAt == nil {
+	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `"output"` || run.CompletedAt == nil {
 		t.Fatalf("completed run = %#v err=%v", run, err)
 	}
 	if !run.UpdatedAt.Equal(*run.CompletedAt) {
@@ -95,9 +95,9 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunTerminal, "cancel completed run")
 
 	failed := conformCreateRun(t, world, "failed")
-	conformAppend(t, world, failed, worlds.EventTypeRunFailed, "", []byte("boom"))
+	conformAppend(t, world, failed, worlds.EventTypeRunFailed, "", worlds.DataRunFailed{Error: json.RawMessage(`{"message":"boom"}`)})
 	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: failed})
-	if err != nil || run.Status != worlds.StatusFailed || string(run.Error) != "boom" || run.CompletedAt == nil {
+	if err != nil || run.Status != worlds.StatusFailed || string(run.Error) != `{"message":"boom"}` || run.CompletedAt == nil {
 		t.Fatalf("failed run = %#v err=%v", run, err)
 	}
 
@@ -121,10 +121,10 @@ func conformRunsWaitForTerminalStatus(t *testing.T, world worlds.World) {
 	}
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte("done")}})
+		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"done"}`)}})
 	}()
 	run, err = world.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 10 * time.Second})
-	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != "done" {
+	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `"done"` {
 		t.Fatalf("terminal wait = %#v err=%v", run, err)
 	}
 	_, err = world.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: "wrun_missing", Timeout: time.Second})

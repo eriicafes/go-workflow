@@ -124,7 +124,7 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 				if _, ok := waits[id]; !ok {
 					order = append(order, id)
 				}
-				waits[id] = &worlds.AnalyticsWait{RunID: input.RunID, WaitID: id, DueAt: data.DueAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
+				waits[id] = &worlds.AnalyticsWait{RunID: input.RunID, WaitID: id, DueAt: data.ResumeAt, QueueMessageID: data.QueueMessageID, CreatedAt: event.CreatedAt}
 			case worlds.EventTypeWaitCompleted:
 				if wait, ok := waits[id]; ok {
 					at := event.CreatedAt

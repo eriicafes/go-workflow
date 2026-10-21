@@ -162,7 +162,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	if err != nil {
 		options.Execution.SetTargetResult(DataStepResult{Error: encodeError(err)})
 	} else {
-		options.Execution.SetTargetResult(DataStepResult{Output: output})
+		options.Execution.SetTargetResult(DataStepResult{Result: output})
 	}
 	panic(options.Execution.exit(errReplayComplete))
 }
@@ -235,7 +235,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 			if err := json.Unmarshal(event.Data, &result); err != nil {
 				return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode inline step result: %w", err)}
 			}
-			if err := json.Unmarshal(result.Output, &value); err != nil {
+			if err := json.Unmarshal(result.Result, &value); err != nil {
 				return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode inline step output: %w", err)}
 			}
 			return DurableStepResult[Out]{StepID: stepID, Data: value}
@@ -299,7 +299,7 @@ func inlineStepAttempt[In, Out any](ctx context.Context, options DurableInlineSt
 		if err != nil {
 			return inlineStepFail[Out](options.Execution, stepID, fmt.Errorf("workflow: encode inline step output: %w", err))
 		}
-		completed, err := json.Marshal(DataStepResult{Output: output})
+		completed, err := json.Marshal(DataStepResult{Result: output})
 		if err != nil {
 			return inlineStepFail[Out](options.Execution, stepID, err)
 		}
@@ -348,28 +348,10 @@ func StepOutcome[Out any](execution *Execution, stepID StepID) (Out, error) {
 	if event.EventType == EventTypeStepFailed {
 		return data, DecodeError(result.Error)
 	}
-	if err := json.Unmarshal(result.Output, &data); err != nil {
+	if err := json.Unmarshal(result.Result, &data); err != nil {
 		return data, fmt.Errorf("workflow: decode step output: %w", err)
 	}
 	return data, nil
-}
-
-// DataStepCreated is the JSON payload of a step_created event.
-type DataStepCreated struct {
-	Position     int                     `json:"position"`
-	StepName     string                  `json:"stepName"`
-	Input        json.RawMessage         `json:"input"`
-	MaxRetries   int                     `json:"maxRetries"`
-	Rollback     bool                    `json:"rollback,omitempty"`
-	Cancellation []cancellationReference `json:"cancellation,omitempty"`
-}
-
-// DataStepResult is the JSON payload of a step_completed, step_retrying, or
-// step_failed event.
-type DataStepResult struct {
-	Output     json.RawMessage `json:"output,omitempty"`
-	Error      json.RawMessage `json:"error,omitempty"`
-	RetryAfter *time.Time      `json:"retryAfter,omitempty"`
 }
 
 func stepAttempt(execution *Execution, stepID StepID) int {

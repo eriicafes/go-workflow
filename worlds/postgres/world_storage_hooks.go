@@ -136,7 +136,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 				created.ConflictingRunID = holder.runID
 				input.Event.EventType = worlds.EventTypeHookConflict
 			} else {
-				created.ClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
+				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
 				owner := runs[holder.runID]
 				if owner == nil {
 					return errClaimRetry
@@ -193,14 +193,13 @@ func hookColumns(prefix string, resolve worlds.ResolveData) string {
 		metadata = "NULL::bytea"
 	}
 	return prefix + "hook_id, " + prefix + "run_id, " + prefix + "token, " + metadata + ", " + prefix + "webhook, " + prefix + "webhook_event_id, " +
-		prefix + "created_at, " + prefix + "updated_at, " + prefix + "received_at, " + prefix + "min_retention, " + prefix + "token_retention_until, " + prefix + "claimed_from, " + prefix + "force_claimed_by, " + prefix + "disposed_at"
+		prefix + "created_at, " + prefix + "updated_at, " + prefix + "received_at, " + prefix + "token_retention_until, " + prefix + "claimed_from, " + prefix + "force_claimed_by, " + prefix + "disposed_at"
 }
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
 	var webhook, claimed, taken []byte
-	var retention int64
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &hook.Metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &retention, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &hook.Metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
 		return worlds.Hook{}, err
 	}
 	if len(claimed) > 0 {
@@ -219,7 +218,6 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 			return worlds.Hook{}, err
 		}
 	}
-	hook.MinRetention = time.Duration(retention)
 	hook.CreatedAt, hook.UpdatedAt = hook.CreatedAt.UTC(), hook.UpdatedAt.UTC()
 	hook.ReceivedAt, hook.TokenRetentionUntil = utc(hook.ReceivedAt), utc(hook.TokenRetentionUntil)
 	return hook, nil

@@ -18,19 +18,46 @@ type Event struct {
 Event IDs encode the event's **slot**, its 1-based position in the log.
 `worlds.EventSlot(id)` and `worlds.EventIDForSlot(slot)` convert between them.
 
-The runtime and Worlds share these JSON payload types from `worlds`:
+The runtime and Worlds share these JSON payload types, defined with their
+helpers in `worlds/data.go`. As in the
+Workflow SDK, event data is a JSON object and each type keeps its payload in
+one named field:
 
-| Type | Events |
-| --- | --- |
-| `DataStepCreated` | `step_created` |
-| `DataStepResult` | `step_completed`, `step_retrying`, `step_failed` |
-| `DataWaitCreated` | `wait_created` |
-| `DataHookCreated` | `hook_created`, `hook_conflict` |
+| Type | Events | Payload field |
+| --- | --- | --- |
+| `DataRunCreated` | `run_created` | `input` |
+| `DataStepCreated` | `step_created` | `input` |
+| `DataStepResult` | `step_completed` | `result` |
+| `DataStepResult` | `step_retrying`, `step_failed` | `error` |
+| `DataRunCompleted` | `run_completed` | `output` |
+| `DataRunFailed` | `run_failed` | `error` |
+| `DataHookCreated` | `hook_created`, `hook_conflict` | `metadata` |
+| `DataHookReceived` | `hook_received` | `payload` |
+| `DataWaitCreated` | `wait_created` | |
+| `DataAttrSet` | `attr_set` | |
 
-`DataStepResult.Output` and `DataStepResult.Error` are `json.RawMessage`.
-An error is embedded as a JSON object containing its message and recorded
-chain. `worlds.DecodeError` decodes the bytes in `DataStepResult.Error` or
-the materialized `Step.Error` field.
+Metadata fields also follow
+the SDK: a wait records `resumeAt`, `attr_set` records its `changes` as
+`key`/`value` pairs and the `writer` that set them, and a hook records
+`isWebhook`, `isSystem` for hooks the runtime creates for itself, and
+`forceClaimedFrom` for a forced claim and `tokenRetentionUntil` for a
+reserved token. Go keeps a few extra metadata fields,
+such as a declaration's `position` and a hook's `webhook` settings. A webhook's `hook_received`
+payload is a `WebhookReceivedEventData`. Helpers named `Decode*` read a
+payload from event data, such as `worlds.DecodeRunCompleted`,
+`worlds.DecodeRunFailed`, `worlds.DecodeHookReceived`, and
+`worlds.DecodeWebhookReceived`, and helpers named `Encode*` build event data,
+such as `worlds.EncodeRunFailed`, `worlds.EncodeHookReceived`, and
+`worlds.EncodeAttrSet`.
+
+Payload fields are `json.RawMessage`. An error is embedded as a JSON object
+containing its message and recorded chain. `worlds.DecodeError` decodes the
+bytes in an `error` field or the materialized `Run.Error` and `Step.Error`
+fields.
+
+Reading events with `EventsResolveDataNone` removes each event's payload field
+and keeps the rest, such as a step's name and position.
+`worlds.ResolveEventData` applies this rule for a World.
 
 ## Event types
 
@@ -84,7 +111,7 @@ rules atomically:
   its token (`ErrHookNotActive`). A plain hook receives repeated payloads, consumed in order with `Next`.
 - A `hook_received` that carries a webhook's response is refused with
   `ErrHookNotActive` once that webhook has responded, because each webhook request has one response.
-- `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `claimedFrom` on the new hook.
+- `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
 - An event that repeats an admitted transition, such as a second
   `run_started`, returns the earlier event without appending.
 - A flow's writes are in-band: each is fenced by the run's `InBandCount` and

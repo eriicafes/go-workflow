@@ -35,7 +35,7 @@ type cancelContextInput struct {
 
 // NewCancelContext creates a durable workflow cancellation context with hook and stream backing.
 func NewCancelContext(ctx context.Context, execution *Execution) (context.Context, func(error) error, error) {
-	hook := DurableHook[cancellationData](DurableHookOptions{Execution: execution})
+	hook := DurableHook[cancellationData](DurableHookOptions{Execution: execution, System: true})
 	if hook.Err != nil {
 		return nil, nil, hook.Err
 	}
@@ -52,7 +52,7 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 				continue
 			}
 			var data cancellationData
-			if json.Unmarshal(event.Data, &data) == nil && len(data.Cause) != 0 {
+			if json.Unmarshal(DecodeHookReceived(event.Data), &data) == nil && len(data.Cause) != 0 {
 				cancel(DecodeError(data.Cause))
 				return
 			}
@@ -95,7 +95,11 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 		return nil, err
 	}
 	if len(data.Cause) == 0 {
-		encoded, _ := json.Marshal(cancellationData{Cause: encodeError(cause)})
+		payload, _ := json.Marshal(cancellationData{Cause: encodeError(cause)})
+		encoded, err := EncodeHookReceived(payload)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: runID, Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(ref.HookID), Data: encoded}}); err != nil {
 			return nil, err
 		}
@@ -176,7 +180,7 @@ func readCancellation(ctx context.Context, execution *Execution, ref cancellatio
 				continue
 			}
 			var data cancellationData
-			if json.Unmarshal(event.Data, &data) == nil && len(data.Cause) != 0 {
+			if json.Unmarshal(DecodeHookReceived(event.Data), &data) == nil && len(data.Cause) != 0 {
 				return data, nil
 			}
 		}

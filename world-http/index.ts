@@ -24,8 +24,8 @@ import type {
 	World,
 } from "@workflow/world";
 import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
-import { encode } from "cbor-x";
-import { HTTPWorldError, RPCClient, type RPC } from "./rpc.js";
+import { decode } from "cbor-x";
+import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 
 const HTTP_WORLD_SPEC_VERSION = 1;
 
@@ -187,37 +187,51 @@ export class HTTPWorld implements World {
 				options?: CreateEventParams,
 			) => {
 				if (event.eventType === "run_created") {
-					return client.call<EventResult>("events.createRun", {
-						runId: runId ?? "",
-						workflowName: event.eventData.workflowName,
-						input: encoded(event.eventData.input),
-						...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
-						...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
-					});
+					// An empty run ID asks the server to generate one.
+					return client
+						.call<RPC.EventResult>("events.createRun", {
+							runId: runId ?? "",
+							workflowName: event.eventData.workflowName,
+							input: jsonEncoded(event.eventData.input),
+							...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
+							...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
+						})
+						.then(toEventResult) as Promise<EventResult<"run_created">>;
 				}
-				return client.call<EventResult>("events.create", {
-					runId,
-					event: {
-						eventType: event.eventType,
-						correlationId: event.correlationId ?? "",
-						data: encoded(event.eventData),
-					},
-					options,
-				});
+				return client
+					.call<RPC.EventResult>("events.create", {
+						runId,
+						event: {
+							eventType: event.eventType,
+							correlationId: event.correlationId ?? "",
+							data: jsonEncoded(event.eventData),
+						},
+						options: createOptions(options),
+					})
+					.then(toEventResult);
 			},
-			createBatch: (runId, events, options) =>
-				client.call<EventBatchResult>("events.createBatch", {
+			createBatch: async (runId, events, options) => {
+				const result = await client.call<RPC.EventBatchResult>("events.createBatch", {
 					runId,
 					events: events.map(({ event }) => ({
 						eventType: event.eventType,
 						correlationId: event.correlationId ?? "",
-						data: encoded(event.eventData),
+						data: jsonEncoded(event.eventData),
 					})),
-					options,
-				}),
-			get: (runId, eventId, params) => client.call<Event>("events.get", { runId, eventId, ...params }),
-			list: (input) => client.call<PaginatedResponse<Event>>("events.list", input),
-			listByCorrelationId: (input) => client.call<PaginatedResponse<Event>>("events.listByCorrelationID", input),
+					...(options?.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
+				});
+				return {
+					results: result.results.map((item) =>
+						item.status === 200 && item.event
+							? { status: 200 as const, event: withEventData(item.event), run: item.run, step: item.step }
+							: { status: item.status, error: item.error ?? "internal", message: item.message ?? "" },
+					),
+				} as EventBatchResult;
+			},
+			get: async (runId, eventId, params) => withEventData(await client.call<RPC.Event>("events.get", { runId, eventId, ...params })),
+			list: async (input) => withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.list", input)),
+			listByCorrelationId: async (input) =>
+				withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.listByCorrelationID", input)),
 		};
 	}
 
@@ -415,15 +429,82 @@ function createReadableStream(client: RPCClient, input: RPC.GetStreamInput): Rea
 	});
 }
 
-function encoded(value: unknown): Uint8Array {
-	if (value instanceof Uint8Array) {
-		return value;
+// createOptions keeps the create parameters the Go world understands. Its
+// in-band fence is the writer's expected in-band count.
+function createOptions(options: CreateEventParams | undefined): Record<string, unknown> | undefined {
+	if (!options) {
+		return undefined;
 	}
-	const valueBytes = encode(value);
-	const result = new Uint8Array(valueBytes.byteLength);
-	result.set(valueBytes);
-	return result;
+	return {
+		...(options.eventCount !== undefined ? { eventCount: options.eventCount } : {}),
+		...(options.sinceCursor ? { sinceCursor: options.sinceCursor } : {}),
+		...(options.resolveData ? { resolveData: options.resolveData } : {}),
+		...(options.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
+	};
 }
+
+// toEventResult shapes an RPC event result as the Workflow SDK's EventResult.
+function toEventResult(result: RPC.EventResult): EventResult {
+	return {
+		event: withEventData(result.event),
+		...(result.run ? { run: result.run } : {}),
+		...(result.step ? { step: result.step } : {}),
+		...(result.hook ? { hook: result.hook } : {}),
+		...(result.stepCreated ? { stepCreated: true } : {}),
+		allocated: result.allocated,
+		...(result.events ? { events: result.events.map(withEventData), cursor: null, hasMore: result.hasMore ?? false } : {}),
+	} as EventResult;
+}
+
+// jsonEncoded encodes event data as the JSON the Go world stores, with bytes
+// as base64 strings, as Go encodes []byte.
+function jsonEncoded(value: unknown): Uint8Array {
+	if (value === undefined) {
+		return new Uint8Array();
+	}
+	// The replacer reads the holder's original value, because a Buffer's
+	// toJSON has already run on item.
+	const text = JSON.stringify(value, function (this: Record<string, unknown>, key, item) {
+		const original = this[key];
+		return original instanceof Uint8Array ? Buffer.from(original).toString("base64") : item;
+	});
+	return new TextEncoder().encode(text);
+}
+
+// withEventData exposes an event's stored data as the eventData object the
+// Workflow SDK reads, with Go workflow and step names in SDK form. The Go
+// runtime stores event data as JSON, and this client writes it as CBOR.
+function withEventData(event: RPC.Event): Event {
+	const { data, ...rest } = event;
+	if (!data || data.byteLength === 0) {
+		return rest as Event;
+	}
+	let eventData: unknown;
+	try {
+		eventData = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
+	} catch {
+		try {
+			eventData = decode(data);
+		} catch {
+			return rest as Event;
+		}
+	}
+	if (eventData && typeof eventData === "object" && !Array.isArray(eventData)) {
+		const fields = eventData as Record<string, unknown>;
+		if (typeof fields.workflowName === "string") {
+			fields.workflowName = devkitName("workflow", fields.workflowName);
+		}
+		if (typeof fields.stepName === "string") {
+			fields.stepName = devkitName("step", fields.stepName);
+		}
+	}
+	return { ...rest, eventData } as Event;
+}
+
+function withEventDataPage(page: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
+	return { ...page, data: page.data.map(withEventData) };
+}
+
 
 function environment(name: string): string | undefined {
 	return typeof process === "undefined" ? undefined : process.env?.[name];

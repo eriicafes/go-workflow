@@ -129,7 +129,7 @@ count, advances the count by the events appended, and returns it as
 and they leave the count alone. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
-Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. `MinRetention` is measured from creation. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
+Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
 Lists take `Pagination{Cursor, Limit, SortOrder}` and return
 `Page[T]{Data, Cursor, HasMore}`. `ResolveData` selects whether payloads
@@ -180,7 +180,6 @@ type Hook struct {
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	ReceivedAt          *time.Time
-	MinRetention        time.Duration
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim
 	ForceClaimedBy      *HookForceClaim

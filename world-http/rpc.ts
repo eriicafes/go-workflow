@@ -72,13 +72,25 @@ export namespace RPC {
 		createdAt: Date;
 	};
 	export type EventResult = {
-		eventId: string;
-		eventType: EventType;
-		events: Event[];
+		event: Event;
+		run?: Run;
+		step?: Step;
 		hook?: Hook;
-		data?: Uint8Array;
+		stepCreated?: boolean;
+		allocated: number;
+		inBandCount: number;
+		events?: Event[];
+		hasMore?: boolean;
 	};
-	export type EventBatchResult = { events: EventResult[] };
+	export type BatchEventResult = {
+		status: number;
+		error?: string;
+		message?: string;
+		event?: Event;
+		run?: Run;
+		step?: Step;
+	};
+	export type EventBatchResult = { results: BatchEventResult[]; inBandCount: number };
 	export type WebhookResponse = {
 		status: number;
 		header?: Record<string, string[]>;
@@ -99,7 +111,6 @@ export namespace RPC {
 		createdAt: Date;
 		updatedAt: Date;
 		receivedAt: Date | null;
-		minRetention: number;
 		tokenRetentionUntil: Date | null;
 		claimedFrom: { runId: string; hookId: string } | null;
 		forceClaimedBy: { runId: string; hookId: string } | null;
@@ -129,6 +140,7 @@ export namespace RPC {
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
+	
 	export type Request = {
 		method: string;
 		input: unknown;
@@ -264,6 +276,35 @@ export class RPCClient {
 
 const opaqueMapKeys = new Set(["attributes", "header"]);
 
+// Go names workflows and steps by package path and identifier, such as
+// "example.com/app/flows.Publish", while the Workflow SDK parses names shaped
+// "workflow//<module>//<function>". These fields carry such names.
+const nameKinds: Record<string, "workflow" | "step"> = { workflowName: "workflow", stepName: "step" };
+
+// devkitName maps a Go name to the Workflow SDK form, splitting the package
+// path from the identifier at the first dot after the last slash. Nested
+// identifiers, such as "Publish.func1", use the SDK's "/" separator.
+export function devkitName(kind: "workflow" | "step", name: string): string {
+	if (name.includes("//")) {
+		return name;
+	}
+	const dot = name.indexOf(".", name.lastIndexOf("/") + 1);
+	if (dot <= 0 || dot === name.length - 1) {
+		return name;
+	}
+	return `${kind}//${name.slice(0, dot)}//${name.slice(dot + 1).replaceAll(".", "/")}`;
+}
+
+// goName reverses devkitName. Names whose module is a relative path or carries
+// a version came from JavaScript and are kept as they are.
+function goName(kind: "workflow" | "step", name: string): string {
+	const [prefix, module, ...identifier] = name.split("//");
+	if (prefix !== kind || !module || identifier.length === 0 || module.startsWith(".") || module.includes("@")) {
+		return name;
+	}
+	return `${module}.${identifier.join("//").replaceAll("/", ".")}`;
+}
+
 function toWire(value: unknown, preserveKeys = false): unknown {
 	if (value == null || value instanceof Date || value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return value;
@@ -277,7 +318,8 @@ function toWire(value: unknown, preserveKeys = false): unknown {
 	const result: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) {
 		const nextKey = preserveKeys ? key : goFieldName(key);
-		result[nextKey] = toWire(item, preserveKeys || opaqueMapKeys.has(key));
+		const kind = preserveKeys ? undefined : nameKinds[key];
+		result[nextKey] = kind && typeof item === "string" ? goName(kind, item) : toWire(item, preserveKeys || opaqueMapKeys.has(key));
 	}
 	return result;
 }
@@ -295,7 +337,8 @@ function fromWire(value: unknown, preserveKeys = false): unknown {
 	const result: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) {
 		const nextKey = preserveKeys ? key : javascriptFieldName(key);
-		result[nextKey] = fromWire(item, preserveKeys || opaqueMapKeys.has(nextKey));
+		const kind = preserveKeys ? undefined : nameKinds[nextKey];
+		result[nextKey] = kind && typeof item === "string" ? devkitName(kind, item) : fromWire(item, preserveKeys || opaqueMapKeys.has(nextKey));
 	}
 	return result;
 }

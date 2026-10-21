@@ -173,9 +173,9 @@ func waitWebhookResponse(ctx context.Context, world World, runID RunID, hookID H
 			if event.EventType != EventTypeHookReceived || event.CorrelationID != string(hookID) {
 				continue
 			}
-			var data WebhookReceivedEventData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return WebhookResponse{}, fmt.Errorf("workflow: decode manual webhook response: %w", err)
+			data, ok := DecodeWebhookReceived(event.Data)
+			if !ok {
+				return WebhookResponse{}, fmt.Errorf("workflow: decode manual webhook response of event %s", event.EventID)
 			}
 			if data.Response != nil && data.ResponseTo == receivedEventID {
 				return *data.Response, nil

@@ -18,12 +18,12 @@
 // recorded in a World, the backend that stores its history, queues its
 // deliveries, and holds its streams.
 //
-// A run executes in one of two contexts, as in the Workflow SDK. In workflow
-// context, the runner's own code executes as a flow, which replays the runner
-// from the beginning, records the operations it starts (steps, timers, hooks,
-// webhooks, and child runs), queues the steps it needs, and records the run's
-// result once the runner returns. In step context, a step function executes as
-// a step, which replays the runner up to that step and calls the step function.
+// A run executes in one of two contexts. In workflow context, the runner's own
+// code executes as a flow, which replays the runner from the beginning, records
+// the operations it starts (steps, timers, hooks, webhooks, and child runs),
+// queues the steps it needs, and records the run's result once the runner
+// returns. In step context, a step function executes as a step, which replays
+// the runner up to that step and calls the step function.
 //
 // # Replay
 //
@@ -379,8 +379,8 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 // Start starts a run of workflow In with input and returns a handle to the run
 // without waiting for it. It needs only the workflow type, not its runner.
 //
-// Called in workflow context, Start starts a child run in a step, as in the
-// Workflow SDK, so replay returns the same run. The child run carries
+// Called in workflow context, Start starts a child run in a step, so replay
+// returns the same run. The child run carries
 // worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Cancellation of ctx
 // does not cancel the child; use Run.Cancel explicitly. Called elsewhere,
 // it uses the Client in ctx and returns ErrNoClient when ctx carries none.

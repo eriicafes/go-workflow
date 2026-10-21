@@ -57,9 +57,9 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 	}
 
 	due := time.Now().Add(time.Minute).UTC().Truncate(time.Millisecond)
-	conformAppend(t, world, second, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{DueAt: due, QueueMessageID: "msg_1"})
+	conformAppend(t, world, second, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: due, QueueMessageID: "msg_1"})
 	time.Sleep(2 * time.Millisecond)
-	conformAppend(t, world, second, worlds.EventTypeWaitCreated, "wait_b", worlds.DataWaitCreated{DueAt: due})
+	conformAppend(t, world, second, worlds.EventTypeWaitCreated, "wait_b", worlds.DataWaitCreated{ResumeAt: due})
 	conformAppend(t, world, second, worlds.EventTypeWaitCompleted, "wait_a", nil)
 	waits, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: second})
 	if err != nil || len(waits.Data) != 2 || waits.Data[0].WaitID != "wait_a" || waits.Data[0].CompletedAt == nil || waits.Data[0].QueueMessageID != "msg_1" || !waits.Data[0].DueAt.Equal(due) || waits.Data[1].CompletedAt != nil || !waits.Data[1].DueAt.Equal(due) {

@@ -318,7 +318,7 @@ func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			previous := worlds.HookForceClaim{RunID: "wrun_victim", HookID: "hook_old"}
-			data, _ := json.Marshal(worlds.DataHookCreated{Token: "handoff", Force: true, ClaimedFrom: &previous})
+			data, _ := json.Marshal(worlds.DataHookCreated{Token: "handoff", Force: true, ForceClaimedFrom: &previous})
 			event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_new", Data: data}
 			if phase >= 1 {
 				disposed, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: "wrun_claimant", HookID: "hook_new"}})

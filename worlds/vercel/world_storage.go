@@ -75,7 +75,6 @@ type hookView struct {
 	Token               string                 `json:"token"`
 	Metadata            string                 `json:"metadata,omitempty"`
 	Webhook             string                 `json:"webhook,omitempty"`
-	MinRetention        string                 `json:"minRetention,omitempty"`
 	ReceivedSlot        uint64                 `json:"rid,omitempty"`
 	CreatedAt           string                 `json:"createdAt"`
 	UpdatedAt           string                 `json:"updatedAt"`
@@ -134,9 +133,7 @@ func decodeEvent(runID worlds.RunID, slot uint64, raw string, resolve worlds.Eve
 	if len(record.JSONData) > 0 {
 		event.Data = record.JSONData
 	}
-	if resolve == worlds.EventsResolveDataNone {
-		event.Data = nil
-	}
+	event.Data = worlds.ResolveEventData(event.EventType, event.Data, resolve)
 	return event, nil
 }
 
@@ -176,13 +173,6 @@ func decodeHook(hookID worlds.HookID, raw string, resolve worlds.ResolveData) (w
 	hook := worlds.Hook{RunID: view.RunID, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
 	if view.ReceivedSlot != 0 {
 		hook.WebhookEventID = worlds.EventIDForSlot(view.ReceivedSlot)
-	}
-	if view.MinRetention != "" {
-		retention, err := strconv.ParseInt(view.MinRetention, 10, 64)
-		if err != nil {
-			return worlds.Hook{}, fmt.Errorf("workflow/vercel: decode hook retention: %w", err)
-		}
-		hook.MinRetention = time.Duration(retention)
 	}
 	if view.Webhook != "" {
 		hook.Webhook = new(worlds.Webhook)

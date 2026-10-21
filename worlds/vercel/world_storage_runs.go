@@ -2,7 +2,6 @@ package vercelworld
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"time"
 
@@ -153,12 +152,8 @@ func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.Runs
 	}
 }
 
-type attrSetData struct {
-	Changes []worlds.RunsAttributeChange `json:"changes"`
-}
-
 func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttributesInput) error {
-	data, err := json.Marshal(attrSetData{Changes: input.Changes})
+	data, err := worlds.EncodeAttrSet(input)
 	if err != nil {
 		return err
 	}

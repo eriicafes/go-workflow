@@ -54,6 +54,14 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
 | Client | `client.spec`, `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
+Most methods return the World's Go types. The event writes return the Workflow
+SDK's result shapes instead: `events.create` and `events.createRun` return
+`worlds.RPCEventResult`, with the committed event and the run, step, or hook
+it changed, and `events.createBatch` returns `worlds.RPCEventBatchResult`,
+with one outcome per event. A batch that fails without an in-band fence is
+applied one event at a time, so each event reports its own status. A run
+created without an ID is given one.
+
 ::: danger Unauthenticated
 The RPC endpoint can start runs, append events, and read every payload. Never
 expose it publicly without your own authentication and authorization in front

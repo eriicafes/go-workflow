@@ -165,15 +165,6 @@ func cloneHook(value worlds.Hook, resolve worlds.ResolveData) worlds.Hook {
 	return value
 }
 
-func resolveEvents(events []worlds.Event, resolve worlds.EventsResolveData) []worlds.Event {
-	if resolve == worlds.EventsResolveDataNone {
-		for index := range events {
-			events[index].Data = nil
-		}
-	}
-	return events
-}
-
 // sortKey orders records by creation time, then ID. The fixed-width UTC time
 // sorts lexically.
 func sortKey(at time.Time, id string) string {
