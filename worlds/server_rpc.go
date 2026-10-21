@@ -78,7 +78,7 @@ func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
 }
 
 func writeRPC(writer http.ResponseWriter, response RPCResponse) {
-	body, err := cbor.Marshal(response)
+	body, err := rpcEncoding.Marshal(response)
 	if err != nil {
 		http.Error(writer, "workflow: could not encode RPC response", http.StatusInternalServerError)
 		return
@@ -652,7 +652,17 @@ func decodeRPC[T any](raw cbor.RawMessage) (T, error) {
 	return value, nil
 }
 
+// rpcEncoding writes times as tagged RFC 3339 strings with nanoseconds, so
+// JavaScript clients decode them as Dates and Go clients keep full precision.
+var rpcEncoding = func() cbor.EncMode {
+	mode, err := cbor.EncOptions{Time: cbor.TimeRFC3339Nano, TimeTag: cbor.EncTagRequired}.EncMode()
+	if err != nil {
+		panic(err)
+	}
+	return mode
+}()
+
 func encodeRPC(value any) (cbor.RawMessage, error) {
-	encoded, err := cbor.Marshal(value)
+	encoded, err := rpcEncoding.Marshal(value)
 	return cbor.RawMessage(encoded), err
 }

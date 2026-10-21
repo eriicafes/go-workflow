@@ -253,13 +253,13 @@ type httpClient struct {
 func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
 	var raw cbor.RawMessage
 	if input != nil {
-		encoded, err := cbor.Marshal(input)
+		encoded, err := rpcEncoding.Marshal(input)
 		if err != nil {
 			return err
 		}
 		raw = encoded
 	}
-	body, err := cbor.Marshal(RPCRequest{Method: method, Input: raw})
+	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw})
 	if err != nil {
 		return err
 	}

@@ -128,13 +128,14 @@ export namespace RPC {
 		message: string;
 	};
 
+	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
 	export type Request = {
 		method: string;
-		input: Uint8Array;
+		input: unknown;
 	};
 
 	export type Response = {
-		output?: Uint8Array;
+		output?: unknown;
 		error?: Error;
 	};
 
@@ -218,7 +219,7 @@ export class RPCClient {
 	async call<T = never>(method: string, input: unknown, options: CallOptions = {}): Promise<T> {
 		const encodedBody = encode({
 			method,
-			input: encode(toWire(input)),
+			input: toWire(input),
 			...(this.specVersion === undefined ? {} : { specVersion: this.specVersion }),
 		});
 		const body = new Uint8Array(encodedBody.byteLength);
@@ -257,7 +258,7 @@ export class RPCClient {
 		if (envelope.output === undefined) {
 			return undefined as T;
 		}
-		return fromWire(decode(envelope.output)) as T;
+		return fromWire(envelope.output) as T;
 	}
 }
 

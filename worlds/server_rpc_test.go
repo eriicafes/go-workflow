@@ -141,3 +141,51 @@ func assertRPCError(t *testing.T, response *httptest.ResponseRecorder, code stri
 		t.Fatalf("RPC error = %#v, want code %q", envelope.Error, code)
 	}
 }
+
+func TestRPCEncodesTimesAsTaggedRFC3339(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.New()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_time", WorkflowName: "time"}); err != nil {
+		t.Fatal(err)
+	}
+	want, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input, err := cbor.Marshal(worlds.RunsGetInput{RunID: "wrun_time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := cbor.Marshal(rpcRequest{Method: "runs.get", Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response := httptest.NewRecorder()
+	worlds.HTTPHandler(world, "").ServeHTTP(response, request)
+	var envelope rpcResponse
+	if err := cbor.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error != nil {
+		t.Fatal(envelope.Error)
+	}
+
+	// JavaScript clients decode tag 0 as a Date, unlike untagged unix seconds.
+	var fields map[string]cbor.RawMessage
+	if err := cbor.Unmarshal(envelope.Output, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if createdAt := fields["CreatedAt"]; len(createdAt) == 0 || createdAt[0] != 0xc0 {
+		t.Fatalf("CreatedAt = %x, want tag 0", createdAt)
+	}
+	var got worlds.Run
+	if err := cbor.Unmarshal(envelope.Output, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Fatalf("CreatedAt = %v, want %v", got.CreatedAt, want.CreatedAt)
+	}
+}

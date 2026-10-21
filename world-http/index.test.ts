@@ -6,7 +6,7 @@ import { HTTPWorldError, createWorld } from "./index.js";
 const rpcContentType = "application/cbor";
 
 function rpcResponse(output: unknown): Response {
-	const encoded = encode({ output: encode(output) });
+	const encoded = encode({ output });
 	const body = new Uint8Array(encoded.byteLength);
 	body.set(encoded);
 	return new Response(body, {
@@ -25,7 +25,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: false, SetAttributes: true } });
 			}
 			expect(envelope.method).toBe("runs.get");
-			expect(decode(envelope.input as Uint8Array)).toEqual({ RunID: "wrun_01" });
+			expect(envelope.input).toEqual({ RunID: "wrun_01" });
 			return rpcResponse({
 				RunID: "wrun_01",
 				WorkflowName: "report",
@@ -58,7 +58,7 @@ test("passes deployment IDs through to the Go world", async () => {
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
 			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
-			const input = envelope.input ? decode(envelope.input as Uint8Array) : undefined;
+			const input = envelope.input;
 			calls.push({ method: envelope.method, input });
 			switch (envelope.method) {
 				case "client.spec":
@@ -116,8 +116,8 @@ test("pulls stream chunks through bounded RPC polling", async () => {
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
-			const request = decode(init?.body as Uint8Array) as { method: unknown; input: Uint8Array };
-			calls.push({ method: request.method, input: decode(request.input) });
+			const request = decode(init?.body as Uint8Array) as { method: unknown; input: unknown };
+			calls.push({ method: request.method, input: request.input });
 			if (request.method === "client.spec") {
 				return rpcResponse({ SpecVersion: 1, Capabilities: { Analytics: true, SetAttributes: false } });
 			}
