@@ -22,6 +22,8 @@ var (
 	ErrRunTerminal = errors.New("workflow: run is terminal")
 	// ErrRunCancelled reports that a run was cancelled.
 	ErrRunCancelled = errors.New("workflow: run cancelled")
+	// ErrResumeNotQueued reports that a hook payload was recorded but its run was not queued.
+	ErrResumeNotQueued = errors.New("workflow: hook payload recorded but run not queued")
 	// ErrStepNotFound is returned when a run has no step with the requested
 	// step ID.
 	ErrStepNotFound = errors.New("workflow: step not found")
@@ -120,8 +122,14 @@ func (e deploymentMismatchError) Unwrap() error { return ErrDeploymentMismatch }
 // FatalError marks an intentional failure that must not be retried.
 type FatalError struct{ Cause error }
 
-func (e FatalError) Error() string { return e.Cause.Error() }
+func (e FatalError) Error() string { return causeMessage(e.Cause) }
 func (e FatalError) Unwrap() error { return e.Cause }
+
+func (e *FatalError) restoreCause(cause error) {
+	if e.Cause == nil {
+		e.Cause = cause
+	}
+}
 
 // RetryableError requests a delay before the next attempt, while retries remain.
 type RetryableError struct {
@@ -129,8 +137,25 @@ type RetryableError struct {
 	After time.Duration
 }
 
-func (e RetryableError) Error() string { return e.Cause.Error() }
+func (e RetryableError) Error() string { return causeMessage(e.Cause) }
 func (e RetryableError) Unwrap() error { return e.Cause }
+
+func (e *RetryableError) restoreCause(cause error) {
+	if e.Cause == nil {
+		e.Cause = cause
+	}
+}
+
+// causeRestorer is an error whose Cause field cannot be decoded from JSON, so
+// As rebuilds it from the rest of the recorded chain.
+type causeRestorer interface{ restoreCause(error) }
+
+func causeMessage(cause error) string {
+	if cause == nil {
+		return "<nil>"
+	}
+	return cause.Error()
+}
 
 // Error is the error a failed step or run returns after it is recorded and read
 // back. Its message is the original error's message, and it keeps the type and
@@ -210,7 +235,7 @@ func (e *Error) As(target any) bool {
 		return false
 	}
 	name := errorTypeName(targetType)
-	for _, cause := range e.chain {
+	for index, cause := range e.chain {
 		if cause.Type != name {
 			continue
 		}
@@ -223,6 +248,14 @@ func (e *Error) As(target any) bool {
 			if err := json.Unmarshal(cause.Data, value.Interface()); err != nil && !errors.As(err, &typeError) {
 				continue
 			}
+		}
+		restorer, ok := value.Interface().(causeRestorer)
+		if !ok && targetType.Kind() == reflect.Pointer {
+			restorer, ok = value.Elem().Interface().(causeRestorer)
+		}
+		if ok && index+1 < len(e.chain) {
+			rest := e.chain[index+1:]
+			restorer.restoreCause(&Error{message: rest[0].Message, chain: rest})
 		}
 		pointer.Elem().Set(value.Elem())
 		return true

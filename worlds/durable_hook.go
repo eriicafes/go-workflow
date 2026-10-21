@@ -38,6 +38,9 @@ type (
 		ConflictRunID RunID
 		EventID       EventID
 		ClaimedFrom   *HookForceClaim
+		// Received reports that EventID is a delivered payload, which a
+		// consumer advances past even when Data fails to decode.
+		Received bool
 	}
 )
 
@@ -154,6 +157,7 @@ func HookOutcome[T any](execution *Execution, hookID HookID, after EventID) Dura
 		}
 		return result
 	}
+	result.Received = true
 	if err := json.Unmarshal(DecodeHookReceived(event.Data), &result.Data); err != nil {
 		result.Err = fmt.Errorf("workflow: decode hook value: %w", err)
 		return result

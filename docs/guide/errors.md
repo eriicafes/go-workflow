@@ -120,6 +120,8 @@ retrying with different input or taking another branch.
 | `workflow.ErrNoWorkflow` | A workflow-context function such as `Step`, `Join`, or `Hook.Next` is called outside workflow context (including in step context), a hook created outside workflow context is used, or a stream function is called outside a run. |
 | `workflow.ErrNotInStep` | A function that does I/O, such as `Writer` or `Run.Reader`, is called in workflow context. |
 | `workflow.ErrRunCancelled` | Reading a cancelled run. Running steps keep their contexts unless they use an explicitly cancelled context. |
+| `workflow.ErrResumeNotQueued` | `ResumeHook` recorded the payload but could not queue its run. Don't resend the payload. |
+| `workflow.ErrNilResult` | A nil `*Result` is returned from a `Then` callback or passed to `Select`. |
 | `workflow.ErrRunNotFinished` | `Run.Value` inside a run, when the awaited run had not finished. |
 | `workflow.ErrHookNotFound` | Resuming a token that no active hook has. |
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |

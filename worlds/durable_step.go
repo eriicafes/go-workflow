@@ -99,17 +99,21 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		// A delivery that recorded the step, or its retry, can stop before
 		// queueing it, and its redelivery finds the step recorded. So a flow
 		// queues a step that has not started since again. The key is the
-		// step ID, so a World that deduplicates drops it while an earlier
+		// step ID, or the retry's key that the runtime queued it under, so a World that deduplicates drops it while an earlier
 		// delivery is queued, and otherwise the step may be delivered twice. A
 		// retry that is not yet due is expected to be unstarted.
-		last := event
+		last, attempts := event, 0
 		for _, later := range options.Execution.events[creationIndex+1:] {
 			if later.CorrelationID == string(stepID) && (later.EventType == EventTypeStepStarted || later.EventType == EventTypeStepRetrying) {
 				last = later
+				if later.EventType == EventTypeStepStarted {
+					attempts++
+				}
 			}
 		}
 		input := QueueInput{StepID: &stepID, IdempotencyKey: string(stepID)}
 		if last.EventType == EventTypeStepRetrying {
+			input.IdempotencyKey = stepRetryKey(stepID, attempts)
 			var result DataStepResult
 			if json.Unmarshal(last.Data, &result) == nil {
 				input.NotBefore = result.RetryAfter
@@ -260,6 +264,12 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 	// queued by a hook payload, and leaves the retry to the flow queued for
 	// it.
 	if retryAfter != nil && time.Now().Before(*retryAfter) {
+		// The retry's own flow can arrive early when clocks disagree. It is
+		// consumed by this replay, so it queues its replacement.
+		key := stepRetryKey(stepID, attempts)
+		if options.Execution.delivery.IdempotencyKey == key {
+			options.Execution.queue(QueueInput{NotBefore: retryAfter, IdempotencyKey: key})
+		}
 		panic(options.Execution.exit(errReplaySuspended))
 	}
 
@@ -314,7 +324,7 @@ func inlineStepAttempt[In, Out any](ctx context.Context, options DurableInlineSt
 		// The flow is queued first, so step_retrying never exists without
 		// one. When recording fails after it, the flow replays the step
 		// and starts another attempt.
-		options.Execution.queue(QueueInput{NotBefore: retryAfter, IdempotencyKey: fmt.Sprintf("retry:%s:%d", stepID, attempt)})
+		options.Execution.queue(QueueInput{NotBefore: retryAfter, IdempotencyKey: stepRetryKey(stepID, attempt)})
 		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeStepRetrying, CorrelationID: string(stepID), Data: data}, nil)
 		panic(options.Execution.exit(errReplaySuspended))
 	}
@@ -378,4 +388,10 @@ func stepRetryAfter(cause error, maxRetries int, attempt int) *time.Time {
 		due = due.Add(retryable.After)
 	}
 	return &due
+}
+
+// stepRetryKey is the idempotency key of the delivery that runs the attempt
+// after attempt of stepID, so every queue call for one retry shares it.
+func stepRetryKey(stepID StepID, attempt int) string {
+	return fmt.Sprintf("retry:%s:%d", stepID, attempt)
 }

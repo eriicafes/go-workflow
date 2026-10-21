@@ -30,10 +30,17 @@ func NewResult[T any](value T, err error) *Result[T] {
 }
 
 func (p *Result[T]) settlementID() (string, bool) {
+	if p == nil {
+		return "", false
+	}
 	return p.id, p.err == nil && p.id != ""
 }
 
+// done reports a nil Result as settled with ErrNilResult.
 func (p *Result[T]) done(context.Context) (bool, error, error) {
+	if p == nil {
+		return true, ErrNilResult, nil
+	}
 	if p.err != nil {
 		return true, p.err, nil
 	}
@@ -65,6 +72,7 @@ func (p *Result[T]) Unwrap(ctx context.Context) T {
 // Then follows the result returned by fn after source settles.
 // The callback runs in workflow context during replay. Return pending work
 // without waiting inside the callback so other Select inputs can still win.
+// A nil result from fn settles the chain with ErrNilResult.
 func Then[T, U any](ctx context.Context, source *Result[T], fn func(T, error) *Result[U]) *Result[U] {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {

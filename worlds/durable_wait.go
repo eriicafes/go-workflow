@@ -71,7 +71,15 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// every replay does, so the timer's own delivery or any later flow
 	// completes it.
 	_, completed := options.Execution.settles[string(waitID)]
-	if completed || ctx.Err() != nil || options.Execution.target != nil || time.Now().Before(data.ResumeAt) {
+	if completed || ctx.Err() != nil || options.Execution.target != nil {
+		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
+	}
+	if time.Now().Before(data.ResumeAt) {
+		// The timer's own delivery can arrive early when clocks disagree. It
+		// is consumed by this replay, so it queues its replacement.
+		if options.Execution.delivery.IdempotencyKey == string(waitID) {
+			options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
+		}
 		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
 	}
 	// Replay reaches this declaration before later calls that disarmed it.

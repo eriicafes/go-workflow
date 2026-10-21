@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -231,8 +232,9 @@ type (
 
 // WakeRun completes the selected pending waits of a run and queues a
 // delivery that replays it. correlationIDs holds wait IDs, and an empty list
-// selects every pending wait. It returns the number of waits it completed and
-// queues nothing when that number is zero.
+// selects every pending wait. It returns the number of waits it completed.
+// It queues the delivery even when that number is zero while the run is not
+// terminal, so retrying a call whose queueing failed still wakes the run.
 func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []string) (int, error) {
 	pending, err := PendingWaits(ctx, world, runID)
 	if err != nil {
@@ -255,7 +257,10 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 		count++
 	}
 	if count == 0 {
-		return 0, nil
+		run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone})
+		if err != nil || run.Status.Terminal() {
+			return 0, err
+		}
 	}
 	deploymentID, err := RunDeploymentID(ctx, world, runID)
 	if err != nil {
@@ -306,6 +311,9 @@ func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, erro
 // the World refuses the payload with ErrHookNotActive, it still queues the
 // delivery, because an earlier resume may have recorded its payload without
 // queueing one, and returns the error.
+//
+// When queueing fails after the payload is recorded, it returns an error
+// wrapping ErrResumeNotQueued.
 func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (EventResult, error) {
 	data, err := EncodeHookReceived(payload)
 	if err != nil {
@@ -326,11 +334,31 @@ func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (Ev
 	if deploymentErr != nil {
 		return result, deploymentErr
 	}
-	if _, queueErr := world.Queue(ctx, QueueInput{RunID: hook.RunID, IdempotencyKey: key, DeploymentID: deploymentID}); queueErr != nil {
-		return result, queueErr
+	queue := QueueInput{RunID: hook.RunID, IdempotencyKey: key, DeploymentID: deploymentID}
+	_, queueErr := world.Queue(ctx, queue)
+retry:
+	for attempt := 1; queueErr != nil && attempt < resumeQueueAttempts; attempt++ {
+		timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			queueErr = errors.Join(queueErr, ctx.Err())
+			break retry
+		case <-timer.C:
+		}
+		_, queueErr = world.Queue(ctx, queue)
 	}
-	return result, err
+	if queueErr == nil {
+		return result, err
+	}
+	if err == nil {
+		return result, fmt.Errorf("%w: %w", ErrResumeNotQueued, queueErr)
+	}
+	return result, queueErr
 }
+
+// resumeQueueAttempts is how often ResumeHook tries to queue a recorded payload's run.
+const resumeQueueAttempts = 3
 
 // RunDeploymentID returns the deployment run runID is pinned to, so a delivery
 // queued from outside the run can be addressed to it. It returns "" without

@@ -273,6 +273,9 @@ func selectPromise(ctx context.Context, successful bool, results ...promise) (pr
 		var earliest uint64
 		pending := false
 		for _, result := range results {
+			if result == nil {
+				return nil, ErrNilResult
+			}
 			settled, settledErr, err := result.done(ctx)
 			if err != nil {
 				return nil, err

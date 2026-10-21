@@ -45,6 +45,8 @@ type Execution struct {
 	events []Event
 	// target identifies the step this delivery executes; nil marks a flow delivery.
 	target *StepID
+	// delivery is the queue message being executed.
+	delivery QueueInput
 	// result holds the target step's outcome for the runtime to persist.
 	result *DataStepResult
 	// index maps declaration positions to indexes in events.

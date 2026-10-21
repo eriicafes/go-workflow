@@ -12,10 +12,14 @@ var (
 	ErrNoClient = errors.New("workflow: context has no client")
 	// ErrNoWorkflow reports that an operation requires workflow context.
 	ErrNoWorkflow = errors.New("workflow: context has no active workflow")
+	// ErrNilResult reports a nil result where an operation's result was expected.
+	ErrNilResult = errors.New("workflow: nil result")
 	// ErrNotInStep reports that an operation cannot be called in workflow context.
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
 	// ErrRunCancelled is returned when awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
+	// ErrResumeNotQueued reports that a hook payload was recorded but its run was not queued.
+	ErrResumeNotQueued = worlds.ErrResumeNotQueued
 	// ErrRunNotFinished reports that a run is still waiting or running.
 	ErrRunNotFinished = errors.New("workflow: run has not finished")
 	// ErrHookNotFound reports that no active hook owns the requested token.

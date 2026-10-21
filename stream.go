@@ -55,6 +55,7 @@ type streamWriter struct {
 
 func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string, writerID string) (io.WriteCloser, func() error, error) {
 	writer := &streamWriter{ctx: ctx, client: client, runID: runID, name: name}
+	backoff := 10 * time.Millisecond
 	for {
 		session, err := client.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: name, WriterID: writerID})
 		if !errors.Is(err, worlds.ErrStreamLocked) {
@@ -64,14 +65,23 @@ func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, nam
 			writer.session = session
 			break
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, nil, ctx.Err()
 		case <-timer.C:
 		}
+		backoff = min(2*backoff, 500*time.Millisecond)
 	}
 	return writer, writer.release, nil
+}
+
+// releaseContext returns the context a writer gives up its hold with. It
+// outlives the writer's own context, so a cancelled step still frees the
+// stream for the next writer.
+func (w *streamWriter) releaseContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(w.ctx), 5*time.Second)
 }
 
 func (w *streamWriter) Write(data []byte) (int, error) {
@@ -89,7 +99,9 @@ func (w *streamWriter) Close() error {
 	if w.closed {
 		return nil
 	}
-	if err := w.session.Close(w.ctx); err != nil {
+	ctx, cancel := w.releaseContext()
+	defer cancel()
+	if err := w.session.Close(ctx); err != nil {
 		return err
 	}
 	w.closed = true
@@ -100,7 +112,9 @@ func (w *streamWriter) release() error {
 	if w.closed {
 		return nil
 	}
-	if err := w.session.Release(w.ctx); err != nil {
+	ctx, cancel := w.releaseContext()
+	defer cancel()
+	if err := w.session.Release(ctx); err != nil {
 		return err
 	}
 	w.closed = true

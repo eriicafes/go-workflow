@@ -161,6 +161,13 @@ func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
 func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 	var zero T
 	if _, err := Select(ctx, h); err != nil {
+		// A payload that fails to decode is still consumed, so the next call
+		// moves on to the payload after it.
+		if execution, ok := workflowExecutionFromContext(ctx); ok && h.executionState == execution && h.err == nil && !h.disposed {
+			if outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received); outcome.Received {
+				h.received = outcome.EventID
+			}
+		}
 		return zero, err
 	}
 	outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received)
@@ -257,7 +264,7 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 	}
 	hook, err := client.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	if err != nil {
-		if err == worlds.ErrHookNotFound {
+		if errors.Is(err, worlds.ErrHookNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err

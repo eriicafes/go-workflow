@@ -118,6 +118,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// Build the replay context and merge the admission append without a
 	// follow-up storage read.
 	execution := newExecution(ctx, r.world, run, events, nil)
+	execution.delivery = input
 	execution.merge(started, startedLatest)
 
 	// A run whose workflow is not registered fails without replaying, so it
@@ -160,8 +161,6 @@ func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution
 			return nil
 		}
 		return deliveryErr.cause
-	case errors.Is(err, ErrRunCancelled):
-		return nil
 	case err != nil:
 		failure := r.failRun(ctx, input, execution, err)
 		if errors.Is(failure, errReplayComplete) || errors.Is(failure, errReplaySuspended) {
@@ -292,10 +291,25 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 		return r.reroute(ctx, run, input)
 	}
 	step, err := r.world.StepsGet(ctx, StepsGetInput{RunID: input.RunID, StepID: *input.StepID})
-	if errors.Is(err, ErrStepNotFound) || step.Status.Terminal() {
+	if errors.Is(err, ErrStepNotFound) {
 		return nil
 	}
 	if err != nil {
+		return err
+	}
+	if step.Status.Terminal() {
+		// The delivery that recorded the result may have failed to queue the
+		// flow that consumes it, and its redelivery lands here.
+		_, err := r.world.Queue(ctx, QueueInput{RunID: run.RunID, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
+		return err
+	}
+	if step.Status == StatusPending && step.RetryAfter != nil && time.Now().Before(*step.RetryAfter) {
+		// An early or duplicate delivery waits for the scheduled retry
+		// instead of starting it ahead of its backoff.
+		retry := input
+		retry.NotBefore = step.RetryAfter
+		retry.IdempotencyKey = stepRetryKey(step.StepID, step.Attempt)
+		_, err := r.world.Queue(ctx, retry)
 		return err
 	}
 	// Atomically admit the target. A terminal or stale target is inert and
@@ -327,6 +341,7 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	// Replay the root workflow with the target selected. DurableStep runs
 	// only when replay reaches the matching step declaration.
 	execution := newExecution(ctx, r.world, run, events, input.StepID)
+	execution.delivery = input
 	execution.merge(started, startedLatest)
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
@@ -421,6 +436,7 @@ func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID
 	if eventType == EventTypeStepRetrying {
 		queue.StepID = &stepID
 		queue.NotBefore = result.RetryAfter
+		queue.IdempotencyKey = stepRetryKey(stepID, stepAttempt(execution, stepID))
 	}
 	_, err = r.world.Queue(ctx, queue)
 	return err
