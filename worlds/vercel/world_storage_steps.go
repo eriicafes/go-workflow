@@ -17,7 +17,15 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	if !ok {
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
-	return decodeStep(input.RunID, input.StepID, raw, input.ResolveData)
+	step, view, err := decodeStep(input.RunID, input.StepID, raw)
+	if err != nil {
+		return worlds.Step{}, err
+	}
+	steps := []worlds.Step{step}
+	if err := w.resolveSteps(ctx, steps, []stepView{view}, input.ResolveData); err != nil {
+		return worlds.Step{}, err
+	}
+	return steps[0], nil
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
@@ -45,15 +53,19 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 		return worlds.Page[worlds.Step]{}, err
 	}
 	page := worlds.Page[worlds.Step]{Data: make([]worlds.Step, 0, len(ids)), Cursor: cursor, HasMore: hasMore}
+	views := make([]stepView, 0, len(ids))
 	for index, raw := range raws {
 		if raw == "" {
 			continue
 		}
-		step, err := decodeStep(input.RunID, worlds.StepID(ids[index]), raw, input.ResolveData)
+		step, view, err := decodeStep(input.RunID, worlds.StepID(ids[index]), raw)
 		if err != nil {
 			return worlds.Page[worlds.Step]{}, err
 		}
-		page.Data = append(page.Data, step)
+		page.Data, views = append(page.Data, step), append(views, view)
+	}
+	if err := w.resolveSteps(ctx, page.Data, views, input.ResolveData); err != nil {
+		return worlds.Page[worlds.Step]{}, err
 	}
 	return page, nil
 }

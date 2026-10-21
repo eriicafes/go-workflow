@@ -19,6 +19,11 @@ and catch-up results. `EventsCreateOptions.EventCount` takes precedence over
 SinceCursor. Its returned catch-up events exclude the primary returned event;
 see the interface for force-claim disposal inclusion.
 
+Keep run, step, and hook payloads only in their events: views store the
+event slots (run result, step created and latest result, hook created; run
+input is slot 1) and reads decode them with `worlds.EventPayload`, skipping
+input, output, and metadata under `ResolveDataNone` but keeping errors.
+
 Use SDK payload types such as `DataStepCreated`, `DataStepResult`,
 `DataRunCreated`, `DataRunCompleted`, `DataRunFailed`, `DataHookCreated`,
 `DataHookReceived`, `DataAttrSet`, and `DataWaitCreated` from

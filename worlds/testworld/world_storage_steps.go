@@ -1,7 +1,6 @@
 package testworld
 
 import (
-	"bytes"
 	"context"
 	"sort"
 
@@ -18,11 +17,7 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	if !ok {
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
-	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
-	if input.ResolveData == worlds.ResolveDataNone {
-		value.Input, value.Output = nil, nil
-	}
-	return value, nil
+	return w.stepPayloadsLocked(value, input.ResolveData), nil
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
@@ -30,11 +25,7 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	defer w.mu.RUnlock()
 	values := make([]worlds.Step, 0, len(w.steps[input.RunID]))
 	for _, step := range w.steps[input.RunID] {
-		step.Input, step.Output, step.Error = bytes.Clone(step.Input), bytes.Clone(step.Output), bytes.Clone(step.Error)
-		if input.ResolveData == worlds.ResolveDataNone {
-			step.Input, step.Output = nil, nil
-		}
-		values = append(values, step)
+		values = append(values, w.stepPayloadsLocked(step, input.ResolveData))
 	}
 	sort.Slice(values, func(i, j int) bool {
 		if !values[i].CreatedAt.Equal(values[j].CreatedAt) {

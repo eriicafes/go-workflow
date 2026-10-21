@@ -69,7 +69,11 @@ the connection string or pool config to use a dedicated schema.
 | `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
-Payloads are `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`
+The event log is the only copy of payloads. The run, step, and hook views
+store the slots of the events holding them (`result_slot`, `created_slot`), and
+reads join `go_workflow_events` to fetch them in the same query.
+
+Event data is `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`
 at microsecond precision; times returned by the World are UTC.
 
 The previous snapshot table `go_workflow_world_state` is not read or removed;

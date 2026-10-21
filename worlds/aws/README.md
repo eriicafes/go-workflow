@@ -97,6 +97,15 @@ that project only keys and `status`:
 | token owner | `TOKEN#<token>` | `META` |
 | queue record | `QUEUE#<messageID>` | `META` |
 
+Events are the only copy of payloads. Run, step and hook items hold no
+input, output, error or metadata; they name the events that recorded them. A
+run's input is its `run_created` event (slot 1) and `resultEventId` names its
+`run_completed` or `run_failed` event. A step's `createdEventId` names its
+`step_created` event and `resultEventId` its latest `step_completed`,
+`step_failed` or `step_retrying` event. A hook's `createdEventId` names its
+`hook_created` event. Reads load these events with one consistent
+`BatchGetItem` per page; `ResolveDataNone` skips all but a failure's error.
+
 | Index | Partition key values | Sort key |
 |---|---|---|
 | `list` (`list_pk`, `list_sk`) | `RUNS`, `HOOKS` | `<createdAt>#<id>` |
@@ -160,8 +169,8 @@ and `GetQueueAttributes` (for the event source mapping), and, with
 
 ## Limits
 
-- **400 KB per item.** Each event, step (input plus output), hook, run view
-  (input plus output plus error) and stream chunk is one item. Writes that
+- **400 KB per item.** Each event and stream chunk is one item, so one
+  payload must fit an event item. Writes that
   would exceed the limit return an error wrapping `worlds.ErrEventInvalid`
   for appends; nothing is truncated or dropped. Keep large payloads in S3 and
   pass references.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -26,7 +25,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if hook == nil {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return cloneHook(*hook, input.ResolveData), nil
+	return hookView(*hook, w.committed(hook.RunID), input.ResolveData)
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -54,7 +53,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if hook == nil {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return cloneHook(*hook, input.ResolveData), nil
+	return hookView(*hook, w.committed(hook.RunID), input.ResolveData)
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
@@ -66,19 +65,20 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		return worlds.Page[worlds.Hook]{}, err
 	}
 	defer unlock()
-	names, err := listJSON(w.root, "hooks")
+	records, err := w.readHooks()
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	hooks := make([]worlds.Hook, 0, len(names))
-	for _, name := range names {
-		var hook worlds.Hook
-		if err := readJSON(w.root, path.Join("hooks", name), &hook); err != nil {
+	hooks := make([]worlds.Hook, 0, len(records))
+	for _, record := range records {
+		if input.RunID != "" && record.RunID != input.RunID {
+			continue
+		}
+		hook, err := hookView(record, w.committed(record.RunID), input.ResolveData)
+		if err != nil {
 			return worlds.Page[worlds.Hook]{}, err
 		}
-		if input.RunID == "" || hook.RunID == input.RunID {
-			hooks = append(hooks, cloneHook(hook, input.ResolveData))
-		}
+		hooks = append(hooks, hook)
 	}
 	pagination := input.Pagination
 	pagination.SortOrder = worlds.SortOrderAscending
@@ -183,9 +183,17 @@ func (w *World) recoverClaim(input worlds.EventsCreateInput, cause error) (world
 	if err != nil || id == "" {
 		return worlds.EventResult{}, cause
 	}
-	hook, err := w.readHook(worlds.HookID(input.Event.CorrelationID))
+	record, err := w.readHook(worlds.HookID(input.Event.CorrelationID))
 	if err != nil {
 		return worlds.EventResult{}, cause
+	}
+	var hook *worlds.Hook
+	if record != nil {
+		value, err := hookView(*record, w.committed(record.RunID), worlds.ResolveDataAll)
+		if err != nil {
+			return worlds.EventResult{}, cause
+		}
+		hook = &value
 	}
 	return worlds.EventResult{EventID: id, EventType: worlds.EventTypeHookCreated, Hook: hook, AllocatedEventCount: 1, InBandCount: claimant.run.InBandCount}, nil
 }

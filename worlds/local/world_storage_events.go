@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
-	"path"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -22,7 +21,7 @@ type txn struct {
 	// replay builds views from committed events without reading current views.
 	replay bool
 	steps  map[worlds.StepID]*stepRecord
-	hooks  map[worlds.HookID]*worlds.Hook
+	hooks  map[worlds.HookID]*hookRecord
 	tokens map[string]*tokenRecord
 	dirty  map[any]bool
 }
@@ -32,7 +31,7 @@ func newTxn(w *World, run runRecord, replay bool) *txn {
 	if run.Attributes == nil {
 		run.Attributes = map[string]string{}
 	}
-	return &txn{w: w, run: run, replay: replay, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*worlds.Hook{}, tokens: map[string]*tokenRecord{}, dirty: map[any]bool{}}
+	return &txn{w: w, run: run, replay: replay, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*hookRecord{}, tokens: map[string]*tokenRecord{}, dirty: map[any]bool{}}
 }
 
 type (
@@ -60,7 +59,7 @@ func (t *txn) step(id worlds.StepID) (*stepRecord, error) {
 	return value, err
 }
 
-func (t *txn) hook(id worlds.HookID) (*worlds.Hook, error) {
+func (t *txn) hook(id worlds.HookID) (*hookRecord, error) {
 	if value, ok := t.hooks[id]; ok || t.replay {
 		return value, nil
 	}
@@ -86,7 +85,7 @@ func (t *txn) setStep(value *stepRecord) {
 	t.steps[value.StepID], t.dirty[stepKey(value.StepID)] = value, true
 }
 
-func (t *txn) setHook(value *worlds.Hook) {
+func (t *txn) setHook(value *hookRecord) {
 	t.hooks[value.HookID], t.dirty[hookKey(value.HookID)] = value, true
 }
 
@@ -252,9 +251,9 @@ func (t *txn) materialize(event worlds.Event) error {
 	case worlds.EventTypeRunStarted:
 		run.Status, run.StartedAt, run.StartedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
-		run.Status, run.CompletedAt, run.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
+		run.Status, run.CompletedAt, run.OutputSlot = worlds.StatusCompleted, &now, eventSlot(event)
 	case worlds.EventTypeRunFailed:
-		run.Status, run.CompletedAt, run.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
+		run.Status, run.CompletedAt, run.ErrorSlot = worlds.StatusFailed, &now, eventSlot(event)
 	case worlds.EventTypeRunCancelled:
 		run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:
@@ -272,7 +271,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.StepID(event.CorrelationID)
-		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, Input: value.Input, CreatedAt: now, UpdatedAt: now}})
+		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
 	case worlds.EventTypeStepStarted:
 		return t.updateStep(event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
@@ -285,7 +284,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Metadata: value.Metadata, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, HookID: id, Token: value.Token, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})
@@ -326,17 +325,9 @@ func (t *txn) materialize(event worlds.Event) error {
 	}
 
 	if event.EventType == worlds.EventTypeRunCompleted || event.EventType == worlds.EventTypeRunFailed || event.EventType == worlds.EventTypeRunCancelled {
-		names, err := listJSON(t.w.root, "hooks")
+		hooks, err := t.w.readHooks()
 		if err != nil {
 			return err
-		}
-		hooks := make([]worlds.Hook, 0, len(names))
-		for _, name := range names {
-			var hook worlds.Hook
-			if err := readJSON(t.w.root, path.Join("hooks", name), &hook); err != nil {
-				return err
-			}
-			hooks = append(hooks, hook)
 		}
 		for id, staged := range t.hooks {
 			replaced := false
@@ -373,7 +364,7 @@ func (t *txn) materialize(event worlds.Event) error {
 }
 
 // completeHook deactivates a completed webhook and releases its token.
-func (t *txn) completeHook(hook *worlds.Hook, now time.Time) error {
+func (t *txn) completeHook(hook *hookRecord, now time.Time) error {
 	hook.DisposedAt = &now
 	return t.releaseToken(hook.Token, hook.HookID)
 }
@@ -397,7 +388,13 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 	}
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
-		step.Output, step.Error, step.RetryAfter = result.Result, result.Error, result.RetryAfter
+		step.RetryAfter = result.RetryAfter
+	}
+	switch event.EventType {
+	case worlds.EventTypeStepCompleted:
+		step.OutputSlot, step.ErrorSlot = eventSlot(event), 0
+	case worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		step.OutputSlot, step.ErrorSlot = 0, eventSlot(event)
 	}
 	t.setStep(&step)
 	return nil
@@ -475,14 +472,38 @@ func (t *txn) advance(count *int, appended int) {
 	}
 }
 
+// eventSlot returns the slot of an event this World allocated.
+func eventSlot(event worlds.Event) int {
+	slot, _ := worlds.EventSlot(event.EventID)
+	return int(slot)
+}
+
+// load returns the event in slot, from the staged appends or the committed log.
+func (t *txn) load(slot int) (worlds.Event, bool, error) {
+	for _, event := range t.appended {
+		if eventSlot(event) == slot {
+			return event, true, nil
+		}
+	}
+	return t.w.readEvent(t.run.RunID, slot)
+}
+
+// result returns the result of appending event. A step_created or
+// hook_created result carries the view as event left it, with the payload
+// already in hand.
 func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResult {
 	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
 	if event.EventType == worlds.EventTypeHookCreated {
-		result.Hook = t.hooks[worlds.HookID(event.CorrelationID)]
+		if hook := t.hooks[worlds.HookID(event.CorrelationID)]; hook != nil {
+			value := hook.Hook
+			value.Metadata = worlds.EventPayload(event)
+			result.Hook = &value
+		}
 	}
 	if event.EventType == worlds.EventTypeStepCreated {
 		if step := t.steps[worlds.StepID(event.CorrelationID)]; step != nil {
-			value := cloneStep(step.Step, worlds.ResolveDataAll)
+			value := step.Step
+			value.Input = worlds.EventPayload(event)
 			result.Step, result.StepCreated = &value, true
 		}
 	}
@@ -533,7 +554,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
+	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
 	if err := w.createRun(run, event); err != nil {
 		return worlds.EventResult{}, err
@@ -590,8 +611,15 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if replay != "" {
 		result := worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}
 		if input.Event.EventType == worlds.EventTypeStepCreated {
-			if step, err := t.step(worlds.StepID(input.Event.CorrelationID)); err == nil && step != nil {
-				value := cloneStep(step.Step, worlds.ResolveDataAll)
+			step, err := t.step(worlds.StepID(input.Event.CorrelationID))
+			if err != nil {
+				return worlds.EventResult{}, err
+			}
+			if step != nil {
+				value, err := stepView(*step, t.load, worlds.ResolveDataAll)
+				if err != nil {
+					return worlds.EventResult{}, err
+				}
 				result.Step = &value
 			}
 		}

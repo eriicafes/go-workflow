@@ -18,11 +18,7 @@ func (m *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	if !ok {
 		return worlds.Run{}, worlds.ErrRunNotFound
 	}
-	value = cloneRun(value)
-	if input.ResolveData == worlds.ResolveDataNone {
-		value.Input, value.Output = nil, nil
-	}
-	return value, nil
+	return m.runPayloadsLocked(cloneRun(value), input.ResolveData), nil
 }
 
 func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
@@ -45,11 +41,7 @@ func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 				continue
 			}
 		}
-		run = cloneRun(run)
-		if input.ResolveData == worlds.ResolveDataNone {
-			run.Input, run.Output = nil, nil
-		}
-		values = append(values, run)
+		values = append(values, m.runPayloadsLocked(cloneRun(run), input.ResolveData))
 	}
 	less := func(a, b worlds.Run) bool {
 		if !a.CreatedAt.Equal(b.CreatedAt) {

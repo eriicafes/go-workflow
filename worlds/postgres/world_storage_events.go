@@ -30,9 +30,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, input, attributes, deployment_id, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, input.Input, encodedAttributes, input.DeploymentID, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, event_count, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, 1, $6, $6) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, at)
 		if err != nil {
 			return err
 		}
@@ -239,6 +239,9 @@ type appender struct {
 	run         worlds.Run
 	count       uint64
 	wasTerminal bool
+	// resultSlot is the run's run_completed or run_failed slot, which flush
+	// writes.
+	resultSlot *int64
 }
 
 // admit applies the transition rules. It returns a non-nil result when the
@@ -302,7 +305,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		}
 
 	case worlds.EventTypeHookReceived:
-		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
 		if err != nil {
 			return nil, err
 		}
@@ -328,7 +331,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		}
 
 	case worlds.EventTypeHookDisposed:
-		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
 		if err != nil {
 			return nil, err
 		}
@@ -406,19 +409,21 @@ func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (
 		event.RunID, int64(a.count), event.EventType, event.CorrelationID, event.Data, event.CreatedAt); err != nil {
 		return worlds.Event{}, err
 	}
-	return event, a.materialize(ctx, event)
+	return event, a.materialize(ctx, event, int64(a.count))
 }
 
-func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
+// materialize applies event, appended at slot, to the views. Payloads stay in
+// the event log, and the views record the slots holding them.
+func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int64) error {
 	at := event.CreatedAt
 	a.run.UpdatedAt = at
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		a.run.Status, a.run.StartedAt = worlds.StatusRunning, &at
 	case worlds.EventTypeRunCompleted:
-		a.run.Status, a.run.CompletedAt, a.run.Output = worlds.StatusCompleted, &at, worlds.DecodeRunCompleted(event.Data)
+		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusCompleted, &at, &slot
 	case worlds.EventTypeRunFailed:
-		a.run.Status, a.run.CompletedAt, a.run.Error = worlds.StatusFailed, &at, worlds.DecodeRunFailed(event.Data)
+		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusFailed, &at, &slot
 	case worlds.EventTypeRunCancelled:
 		a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at
 	case worlds.EventTypeAttrSet:
@@ -435,27 +440,27 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 	case worlds.EventTypeStepCreated:
 		var value worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &value)
-		_, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_steps (run_id, step_id, step_name, status, input, created_at, updated_at)
+		_, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_steps (run_id, step_id, step_name, status, created_slot, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $6)
-			ON CONFLICT (run_id, step_id) DO UPDATE SET step_name = excluded.step_name, status = excluded.status, input = excluded.input,
-				output = NULL, error = NULL, attempt = 0, created_at = excluded.created_at, updated_at = excluded.updated_at,
+			ON CONFLICT (run_id, step_id) DO UPDATE SET step_name = excluded.step_name, status = excluded.status, created_slot = excluded.created_slot,
+				result_slot = NULL, attempt = 0, created_at = excluded.created_at, updated_at = excluded.updated_at,
 				started_at = NULL, completed_at = NULL, retry_after = NULL`,
-			event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, []byte(value.Input), at)
+			event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, slot, at)
 		return err
 	case worlds.EventTypeStepStarted:
-		return a.updateStep(ctx, event, worlds.StatusRunning)
+		return a.updateStep(ctx, event, worlds.StatusRunning, slot)
 	case worlds.EventTypeStepCompleted:
-		return a.updateStep(ctx, event, worlds.StatusCompleted)
+		return a.updateStep(ctx, event, worlds.StatusCompleted, slot)
 	case worlds.EventTypeStepFailed:
-		return a.updateStep(ctx, event, worlds.StatusFailed)
+		return a.updateStep(ctx, event, worlds.StatusFailed, slot)
 	case worlds.EventTypeStepRetrying:
-		return a.updateStep(ctx, event, worlds.StatusPending)
+		return a.updateStep(ctx, event, worlds.StatusPending, slot)
 	case worlds.EventTypeHookCreated:
-		return a.createHook(ctx, event)
+		return a.createHook(ctx, event, slot)
 	case worlds.EventTypeHookReceived:
 		return a.receiveHook(ctx, event)
 	case worlds.EventTypeHookDisposed:
-		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
 		if err != nil || !found {
 			return err
 		}
@@ -470,22 +475,25 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event) error {
 	return nil
 }
 
-func (a *appender) updateStep(ctx context.Context, event worlds.Event, status worlds.Status) error {
+// updateStep applies a step event at slot. A step_completed, step_failed, or
+// step_retrying event becomes the step's result slot, holding its output or
+// error.
+func (a *appender) updateStep(ctx context.Context, event worlds.Event, status worlds.Status, slot int64) error {
 	var result worlds.DataStepResult
 	parsed := json.Unmarshal(event.Data, &result) == nil
+	resulted := event.EventType != worlds.EventTypeStepStarted
 	_, err := a.tx.Exec(ctx, `UPDATE go_workflow_steps SET status = $3::text, updated_at = $4,
 			attempt = attempt + CASE WHEN $3::text = 'running' THEN 1 ELSE 0 END,
 			started_at = CASE WHEN $3::text = 'running' THEN coalesce(started_at, $4) ELSE started_at END,
 			completed_at = CASE WHEN $3::text IN ('completed', 'failed') THEN $4 ELSE completed_at END,
-			output = CASE WHEN $5::boolean THEN $6::bytea ELSE output END,
-			error = CASE WHEN $5::boolean THEN $7::bytea ELSE error END,
+			result_slot = CASE WHEN $6::boolean THEN $7::bigint ELSE result_slot END,
 			retry_after = CASE WHEN $5::boolean THEN $8::timestamptz ELSE retry_after END
 		WHERE run_id = $1 AND step_id = $2`,
-		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, []byte(result.Result), []byte(result.Error), result.RetryAfter)
+		event.RunID, event.CorrelationID, status, event.CreatedAt, parsed, resulted, slot, result.RetryAfter)
 	return err
 }
 
-func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
+func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int64) error {
 	var value worlds.DataHookCreated
 	_ = json.Unmarshal(event.Data, &value)
 	var webhook []byte
@@ -498,8 +506,8 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
 	}
 
 	claimed, _ := json.Marshal(value.ForceClaimedFrom)
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, metadata, webhook, created_at, updated_at, token_retention_until, claimed_from)
- VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)`, event.CorrelationID, event.RunID, value.Token, value.Metadata, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, created_slot, webhook, created_at, updated_at, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)`, event.CorrelationID, event.RunID, value.Token, slot, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
 		return err
 	}
 
@@ -521,7 +529,7 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event) error {
 }
 
 func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
-	hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+	hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
 	if err != nil || !found {
 		return err
 	}
@@ -575,7 +583,7 @@ func (a *appender) result(ctx context.Context, event worlds.Event, created bool)
 		result.AllocatedEventCount = 1
 	}
 	if event.EventType == worlds.EventTypeHookCreated {
-		hook, _, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		hook, _, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
 		if err != nil {
 			return worlds.EventResult{}, err
 		}
@@ -602,9 +610,9 @@ func (a *appender) flush(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET status = $2, output = $3, error = $4, attributes = $5, updated_at = $6,
-			started_at = $7, completed_at = $8, event_count = $9, in_band_count = $10 WHERE run_id = $1`,
-		a.run.RunID, a.run.Status, a.run.Output, a.run.Error, attributes, a.run.UpdatedAt, a.run.StartedAt, a.run.CompletedAt, int64(a.count), int64(a.run.InBandCount)); err != nil {
+	if _, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET status = $2, result_slot = $3, attributes = $4, updated_at = $5,
+			started_at = $6, completed_at = $7, event_count = $8, in_band_count = $9 WHERE run_id = $1`,
+		a.run.RunID, a.run.Status, a.resultSlot, attributes, a.run.UpdatedAt, a.run.StartedAt, a.run.CompletedAt, int64(a.count), int64(a.run.InBandCount)); err != nil {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
@@ -638,9 +646,9 @@ func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, err
 	a := &appender{tx: tx}
 	var attributes []byte
 	var count, inBandCount int64
-	err := tx.QueryRow(ctx, `SELECT run_id, status, output, error, attributes, updated_at, started_at, completed_at, event_count, in_band_count
+	err := tx.QueryRow(ctx, `SELECT run_id, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.Status, &a.run.Output, &a.run.Error, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
+		Scan(&a.run.RunID, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}

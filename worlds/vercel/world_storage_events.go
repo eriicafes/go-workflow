@@ -12,13 +12,13 @@ import (
 )
 
 // eventDescriptor is the scriptAppend argument for one event. Go parses the
-// event data and passes only the fields admission and the views need.
+// event data and passes only the fields admission and the views need. Payloads
+// stay in the record, and views keep its slot instead.
 type eventDescriptor struct {
 	Type          worlds.EventType       `json:"t"`
 	CorrelationID string                 `json:"c"`
 	Record        string                 `json:"r"`
 	Invalid       bool                   `json:"bad,omitempty"`
-	Data          string                 `json:"d,omitempty"`
 	Step          *stepCreatedArg        `json:"step,omitempty"`
 	Result        *stepResultArg         `json:"res,omitempty"`
 	Attributes    []attributeArg         `json:"attrs,omitempty"`
@@ -29,13 +29,10 @@ type eventDescriptor struct {
 }
 
 type stepCreatedArg struct {
-	Name  string `json:"name"`
-	Input string `json:"input,omitempty"`
+	Name string `json:"name"`
 }
 
 type stepResultArg struct {
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
 	RetryAfter string `json:"retryAfter,omitempty"`
 }
 
@@ -46,7 +43,6 @@ type attributeArg struct {
 
 type hookCreatedArg struct {
 	Token       string                 `json:"token"`
-	Metadata    string                 `json:"metadata,omitempty"`
 	Webhook     string                 `json:"webhook,omitempty"`
 	Manual      bool                   `json:"manual,omitempty"`
 	ClaimedFrom *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
@@ -72,7 +68,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	now := time.Now().UTC()
 	record := newEventRecord(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated, Data: payload}, now)
-	args := []string{w.prefix, string(input.RunID), micros(now), input.WorkflowName, encodeBytes(input.Input), record, input.DeploymentID}
+	args := []string{w.prefix, string(input.RunID), micros(now), input.WorkflowName, record, input.DeploymentID}
 	keys := make([]string, 0, len(input.Attributes))
 	for key := range input.Attributes {
 		keys = append(keys, key)
@@ -106,7 +102,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	result, _, err := decodeAppendReply(input.RunID, input.Event.CorrelationID, values, input.Options.ResolveData)
+	result, _, err := w.decodeAppendReply(ctx, input.RunID, input.Event, values, input.Options.ResolveData)
 	return result, err
 }
 
@@ -135,13 +131,16 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	}
 	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events)), InBandCount: int(replyInt(values[len(values)-1]))}
 	for index := 1; index < len(values)-1; index += 3 {
-		correlationID := input.Events[len(result.Events)].CorrelationID
+		event := input.Events[len(result.Events)]
 		item := worlds.EventResult{EventID: worlds.EventIDForSlot(uint64(replyInt(values[index]))), EventType: worlds.EventType(replyString(values[index+1])), AllocatedEventCount: 1}
 		if raw := replyString(values[index+2]); raw != "" {
-			step, err := decodeStep(input.RunID, worlds.StepID(correlationID), raw, worlds.ResolveDataAll)
+			// A batch only appends, so the step is new and its input is the
+			// payload in hand.
+			step, _, err := decodeStep(input.RunID, worlds.StepID(event.CorrelationID), raw)
 			if err != nil {
 				return worlds.EventBatchResult{}, err
 			}
+			step.Input = worlds.EventPayload(worlds.Event{EventType: event.EventType, Data: event.Data})
 			item.Step, item.StepCreated = &step, true
 		}
 		result.Events = append(result.Events, item)
@@ -287,9 +286,9 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 		return worlds.Page[worlds.Event]{Data: []worlds.Event{}}, nil
 	}
 	members, _, hasMore := trimPage(members, input.Pagination.Limit)
-	args := []string{w.prefix, string(input.RunID)}
+	args := []string{w.prefix}
 	for _, member := range members {
-		args = append(args, member.Member)
+		args = append(args, string(input.RunID), member.Member)
 	}
 	result, err := w.redis.Run(ctx, scriptEventsAt, args...)
 	if err != nil {
@@ -320,10 +319,6 @@ func invalidEventType(eventType worlds.EventType) bool {
 func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error) {
 	desc := eventDescriptor{Type: event.EventType, CorrelationID: event.CorrelationID, Record: newEventRecord(event, now), Invalid: invalidEventType(event.EventType)}
 	switch event.EventType {
-	case worlds.EventTypeRunCompleted:
-		desc.Data = encodeBytes(worlds.DecodeRunCompleted(event.Data))
-	case worlds.EventTypeRunFailed:
-		desc.Data = encodeBytes(worlds.DecodeRunFailed(event.Data))
 	case worlds.EventTypeAttrSet:
 		var data worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &data) == nil {
@@ -334,11 +329,11 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 	case worlds.EventTypeStepCreated:
 		var data worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &data)
-		desc.Step = &stepCreatedArg{Name: data.StepName, Input: encodeBytes(data.Input)}
+		desc.Step = &stepCreatedArg{Name: data.StepName}
 	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		var data worlds.DataStepResult
 		if json.Unmarshal(event.Data, &data) == nil {
-			desc.Result = &stepResultArg{Output: encodeBytes(data.Result), Error: encodeBytes(data.Error)}
+			desc.Result = &stepResultArg{}
 			if data.RetryAfter != nil {
 				desc.Result.RetryAfter = data.RetryAfter.UTC().Format(time.RFC3339Nano)
 			}
@@ -347,7 +342,7 @@ func describeEvent(event worlds.EventsCreateEvent, now time.Time) (string, error
 		desc.Payload = event.Data
 		var data worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &data) == nil {
-			desc.Hook = &hookCreatedArg{Token: data.Token, Metadata: encodeBytes(data.Metadata)}
+			desc.Hook = &hookCreatedArg{Token: data.Token}
 			if data.Webhook != nil {
 				webhook, err := json.Marshal(data.Webhook)
 				if err != nil {
@@ -394,30 +389,36 @@ func deltaStart(options worlds.EventsCreateOptions) string {
 }
 
 // decodeAppendReply reads {slot, type, allocated, step, forcedRunID,
-// deltaStart, deltaRecords...}.
-func decodeAppendReply(runID worlds.RunID, correlationID string, values []any, resolve worlds.EventsResolveData) (worlds.EventResult, worlds.RunID, error) {
+// deltaStart, deltaRecords...} for event. A created step's input is event's
+// payload, and a replayed step's payloads are read from the log.
+func (w *World) decodeAppendReply(ctx context.Context, runID worlds.RunID, event worlds.EventsCreateEvent, values []any, resolve worlds.EventsResolveData) (worlds.EventResult, worlds.RunID, error) {
 	if len(values) < 7 {
 		return worlds.EventResult{}, "", errCorrupt
 	}
 	result := worlds.EventResult{EventID: worlds.EventIDForSlot(uint64(replyInt(values[0]))), EventType: worlds.EventType(replyString(values[1])), AllocatedEventCount: int(replyInt(values[2])), InBandCount: int(replyInt(values[6]))}
 	if raw := replyString(values[3]); raw != "" {
-		step, err := decodeStep(runID, worlds.StepID(correlationID), raw, worlds.ResolveDataAll)
+		step, view, err := decodeStep(runID, worlds.StepID(event.CorrelationID), raw)
 		if err != nil {
 			return worlds.EventResult{}, "", err
 		}
-		result.Step = &step
 		result.StepCreated = result.AllocatedEventCount == 1
+		if result.StepCreated {
+			step.Input = worlds.EventPayload(worlds.Event{EventType: event.EventType, Data: event.Data})
+		} else if err := w.resolvePayloads(ctx, stepPayloads(&step, view, worlds.ResolveDataAll)); err != nil {
+			return worlds.EventResult{}, "", err
+		}
+		result.Step = &step
 	}
 	start := uint64(replyInt(values[5]))
 	records := values[7:]
 	if len(records) > 0 {
 		result.Events = make([]worlds.Event, len(records))
 		for index, record := range records {
-			event, err := decodeEvent(runID, start+uint64(index)+1, replyString(record), resolve)
+			decoded, err := decodeEvent(runID, start+uint64(index)+1, replyString(record), resolve)
 			if err != nil {
 				return worlds.EventResult{}, "", err
 			}
-			result.Events[index] = event
+			result.Events[index] = decoded
 		}
 	}
 	return result, worlds.RunID(replyString(values[4])), nil

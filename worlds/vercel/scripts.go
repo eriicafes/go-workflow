@@ -27,17 +27,18 @@ local function rpush(key, values)
 end
 `
 
-// scriptCreateRun takes ARGV prefix, runID, now, workflowName, input, record,
-// deploymentID, and attribute key/value pairs...
+// scriptCreateRun takes ARGV prefix, runID, now, workflowName, record,
+// deploymentID, and attribute key/value pairs... The run's input stays in its
+// run_created record at slot 1.
 var scriptCreateRun = newRedisScript(luaPrelude + `
 local id, now, wf = ARGV[2], ARGV[3], ARGV[4]
 local key = k('run', id)
 if redis.call('EXISTS', key) == 1 then return {'err', 'run_exists'} end
 local score = fmt(nextScore(tonumber(now)))
-redis.call('HSET', key, 'wf', wf, 'status', 'pending', 'input', ARGV[5], 'createdAt', now, 'updatedAt', now, 'count', '1', 'score', score)
-if ARGV[7] ~= '' then redis.call('HSET', key, 'deployment', ARGV[7]) end
-redis.call('RPUSH', k('events', id), ARGV[6])
-if #ARGV > 7 then redis.call('HSET', k('attrs', id), unpack(ARGV, 8)) end
+redis.call('HSET', key, 'wf', wf, 'status', 'pending', 'createdAt', now, 'updatedAt', now, 'count', '1', 'score', score)
+if ARGV[6] ~= '' then redis.call('HSET', key, 'deployment', ARGV[6]) end
+redis.call('RPUSH', k('events', id), ARGV[5])
+if #ARGV > 6 then redis.call('HSET', k('attrs', id), unpack(ARGV, 7)) end
 redis.call('ZADD', P .. ':runs', score, id)
 redis.call('ZADD', P .. ':runs:wf:' .. wf, score, id)
 redis.call('ZADD', P .. ':runs:status:pending', score, id)
@@ -51,8 +52,10 @@ return {'ok'}
 // eventDescriptor). In claim mode the last ARGV is the base64 data of the
 // hook_disposed a forced claim appends. Changes are staged in memory and
 // written only after every event is admitted, so a rejected batch writes
-// nothing. An in-band count that is not the run's 'inband' field rejects the
-// write with in_band_superseded, and an accepted in-band write advances it.
+// nothing. Views keep the slots of the events that carry their payloads
+// rather than copies, so the event log is the only copy. An in-band count that
+// is not the run's 'inband' field rejects the write with in_band_superseded,
+// and an accepted in-band write advances it.
 //
 // append and claim return {'ok', slot, type, allocated, step, forcedRunID,
 // deltaStart, inBandCount, deltaRecords...}, while batch returns {'ok', n,
@@ -190,11 +193,11 @@ local function materialize(c, d, slot)
   elseif t == 'run_completed' then
     setRun(c, 'status', 'completed')
     setRun(c, 'completedAt', now)
-    setRun(c, 'output', d.d)
+    setRun(c, 'resultSlot', fmt(slot))
   elseif t == 'run_failed' then
     setRun(c, 'status', 'failed')
     setRun(c, 'completedAt', now)
-    setRun(c, 'error', d.d)
+    setRun(c, 'resultSlot', fmt(slot))
   elseif t == 'run_cancelled' then
     setRun(c, 'status', 'cancelled')
     setRun(c, 'completedAt', now)
@@ -202,7 +205,7 @@ local function materialize(c, d, slot)
     for _, change in ipairs(d.attrs or {}) do c.attrs[change.k] = change.v or false end
   elseif t == 'step_created' then
     local data = d.step or {}
-    c.steps[corr] = {name = data.name or '', status = 'pending', input = data.input, attempt = 0, slot = slot, createdAt = now, updatedAt = now}
+    c.steps[corr] = {name = data.name or '', status = 'pending', attempt = 0, slot = slot, createdAt = now, updatedAt = now}
     c.stepsDirty[corr] = true
     c.stepsNew[corr] = slot
   elseif stepStatus[t] then
@@ -215,12 +218,13 @@ local function materialize(c, d, slot)
       elseif t == 'step_completed' or t == 'step_failed' then
         s.completedAt = now
       end
-      if type(d.res) == 'table' then s.output, s.error, s.retryAfter = d.res.output, d.res.error, d.res.retryAfter end
+      if t ~= 'step_started' then s.resultSlot = slot end
+      if type(d.res) == 'table' then s.retryAfter = d.res.retryAfter end
       c.stepsDirty[corr] = true
     end
   elseif t == 'hook_created' then
     local data = type(d.hook) == 'table' and d.hook or {}
-    hooks[corr] = {runId = c.id, token = data.token or '', metadata = data.metadata, webhook = data.webhook, manual = data.manual, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
+    hooks[corr] = {runId = c.id, token = data.token or '', slot = slot, webhook = data.webhook, manual = data.manual, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
     if tonumber(data.retentionUs or 0) > 0 then hooks[corr].tokenRetentionUntil = fmt(nowN + tonumber(data.retentionUs)) end
     hooksDirty[corr] = true
     table.insert(hooksNew, {corr, c.id})
@@ -411,20 +415,36 @@ for _, record in ipairs(records) do table.insert(out, record) end
 return out
 `)
 
-// scriptLoadRuns takes ARGV prefix, runIDs... It returns per run {hash, attrs}
-// as flat field/value arrays. A missing run has an empty hash.
+// scriptLoadRuns takes ARGV prefix, resolve flag, runIDs... It returns per run
+// {hash, attrs, input, result}: flat field/value arrays, then the run_created
+// record when the flag is '1' and the record at resultSlot when the flag is
+// '1' or the run failed, each empty when not read. A missing run has an empty
+// hash.
 var scriptLoadRuns = newRedisScript(luaPrelude + `
+local all = ARGV[2] == '1'
 local out = {}
-for i = 2, #ARGV do
-  table.insert(out, {redis.call('HGETALL', k('run', ARGV[i])), redis.call('HGETALL', k('attrs', ARGV[i]))})
+for i = 3, #ARGV do
+  local id = ARGV[i]
+  local hash = redis.call('HGETALL', k('run', id))
+  local input, result = '', ''
+  if #hash > 0 then
+    local fields = {}
+    for j = 1, #hash, 2 do fields[hash[j]] = hash[j + 1] end
+    if all then input = redis.call('LINDEX', k('events', id), 0) or '' end
+    if fields.resultSlot and (all or fields.status == 'failed') then
+      result = redis.call('LINDEX', k('events', id), tonumber(fields.resultSlot) - 1) or ''
+    end
+  end
+  table.insert(out, {hash, redis.call('HGETALL', k('attrs', id)), input, result})
 end
 return out
 `)
 
-// scriptEventsAt takes ARGV prefix, runID, slots... It returns the records.
+// scriptEventsAt takes ARGV prefix, then runID and slot pairs... It returns
+// the records, empty for a missing one.
 var scriptEventsAt = newRedisScript(luaPrelude + `
 local out = {}
-for i = 3, #ARGV do table.insert(out, redis.call('LINDEX', k('events', ARGV[2]), tonumber(ARGV[i]) - 1) or '') end
+for i = 2, #ARGV, 2 do table.insert(out, redis.call('LINDEX', k('events', ARGV[i]), tonumber(ARGV[i + 1]) - 1) or '') end
 return out
 `)
 

@@ -170,19 +170,16 @@ func TestTokenCondition(t *testing.T) {
 
 func TestViewItems(t *testing.T) {
 	now := time.Now().UTC()
-	run := runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusCompleted, Input: []byte("in"), Output: []byte("out"), Attributes: map[string]string{"k": "v"}, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 3, startedEventID: worlds.EventIDForSlot(2)}
+	run := runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusCompleted, Attributes: map[string]string{"k": "v"}, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 3, startedEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(3)}
 	decoded := runFromItem(runItem(run))
-	if decoded.RunID != run.RunID || string(decoded.Output) != "out" || decoded.Attributes["k"] != "v" || decoded.eventCount != 3 || decoded.startedEventID != run.startedEventID || decoded.StartedAt != nil || !decoded.CompletedAt.Equal(now) {
+	if decoded.RunID != run.RunID || decoded.resultEventID != run.resultEventID || decoded.Attributes["k"] != "v" || decoded.eventCount != 3 || decoded.startedEventID != run.startedEventID || decoded.StartedAt != nil || !decoded.CompletedAt.Equal(now) {
 		t.Fatalf("run = %#v", decoded)
 	}
 	set, remove := runUpdate(run)
-	if _, ok := set["input"]; ok {
-		t.Fatal("update rewrites input")
-	}
 	if _, ok := set["list_pk"]; ok {
 		t.Fatal("update rewrites index keys")
 	}
-	if strings.Join(remove, ",") != "outputRef,error,errorRef,startedAt,cancelledEventId" {
+	if strings.Join(remove, ",") != "startedAt,cancelledEventId" {
 		t.Fatalf("remove = %v", remove)
 	}
 	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), Webhook: &worlds.Webhook{Method: "POST", Manual: true}, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: &now}
@@ -194,11 +191,14 @@ func TestViewItems(t *testing.T) {
 		t.Fatalf("hook index keys = %v", item)
 	}
 	back, err := hookFromItem(item)
-	if err != nil || back.Webhook == nil || !back.Webhook.Manual || !back.TokenRetentionUntil.Equal(now) || string(back.Metadata) != "m" {
+	if _, ok := item["metadata"]; ok {
+		t.Fatal("hook item holds metadata")
+	}
+	if err != nil || back.Webhook == nil || !back.Webhook.Manual || !back.TokenRetentionUntil.Equal(now) || back.Metadata != nil {
 		t.Fatalf("hook = %#v err=%v", back, err)
 	}
-	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}}
-	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || !got.RetryAfter.Equal(now) {
+	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}, createdEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(5)}
+	if got := stepFromItem(stepItem(step)); got.Attempt != 2 || !got.RetryAfter.Equal(now) || got.createdEventID != step.createdEventID || got.resultEventID != step.resultEventID {
 		t.Fatalf("step = %#v", got)
 	}
 	event := worlds.Event{RunID: "wrun_1", EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: []byte("{}"), CreatedAt: now}
@@ -210,25 +210,28 @@ func TestViewItems(t *testing.T) {
 func TestLargeDataIsReferencedFromItsEvent(t *testing.T) {
 	input := []byte(`"` + strings.Repeat("i", 150<<10) + `"`)
 	large := []byte(`"` + strings.Repeat("o", 300<<10) + `"`)
-	view := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Input: input, Output: large}}
-	view.refs.set("input", 2, view.Input)
-	view.refs.set("output", 5, view.Output)
-
-	item := stepItem(view)
-	if err := checkItemSize(item); err != nil {
+	run := runView{Run: worlds.Run{RunID: "wrun_1", Input: input, Output: large, Error: large}, resultEventID: worlds.EventIDForSlot(6)}
+	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Input: input, Output: large, Error: large}, createdEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(5)}
+	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Metadata: large}
+	hookAttrs, err := hookItem(hook)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, inline := item["input"]; !inline || readInt(item, "outputRef") != 5 {
-		t.Fatalf("item keeps input %v, outputRef %d; want input inline and output referenced", item["input"] != nil, readInt(item, "outputRef"))
+	for name, item := range map[string]map[string]ddb.AttributeValue{"run": runItem(run), "step": stepItem(step), "hook": hookAttrs} {
+		if err := checkItemSize(item); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"input", "output", "error", "metadata"} {
+			if _, ok := item[field]; ok {
+				t.Fatalf("%s item holds %s", name, field)
+			}
+		}
 	}
-
-	// A reloaded view keeps the reference when it is rewritten.
-	back := stepFromItem(item)
-	if back.Output != nil || back.refs["output"] != 5 || readInt(stepItem(back), "outputRef") != 5 {
-		t.Fatalf("reloaded view = %#v refs=%v", back.Output, back.refs)
+	if back := stepFromItem(stepItem(step)); back.Input != nil || back.Output != nil || back.createdEventID != step.createdEventID || back.resultEventID != step.resultEventID {
+		t.Fatalf("reloaded step = %#v", back)
 	}
 	result, _ := json.Marshal(worlds.DataStepResult{Result: large})
-	if got := eventValue(worlds.Event{EventType: worlds.EventTypeStepCompleted, Data: result}, "output"); string(got) != string(large) {
-		t.Fatal("event value differs from the referenced output")
+	if got := worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeStepCompleted, Data: result}); string(got) != string(large) {
+		t.Fatal("event payload differs from the referenced output")
 	}
 }

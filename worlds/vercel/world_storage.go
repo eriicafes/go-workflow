@@ -1,6 +1,7 @@
 package vercelworld
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,7 +20,8 @@ var errCorrupt = errors.New("workflow/vercel: corrupt Redis data")
 //
 //	p:run:<run>                 hash: run view, count (event count), score
 //	p:attrs:<run>               hash: attributes
-//	p:events:<run>              list: event records, index = slot-1
+//	p:events:<run>              list: event records, index = slot-1, the only
+//	                            copy of payloads
 //	p:last:<run>                hash: "<type>[\n<correlation>]" -> last slot
 //	p:corr:<run>:<hex(cid)>     zset: slots of a correlation ID
 //	p:steps:<run>               hash: step ID -> step JSON
@@ -38,6 +40,13 @@ var errCorrupt = errors.New("workflow/vercel: corrupt Redis data")
 //
 // Creation scores are microsecond timestamps made strictly increasing by
 // p:order, so they are unique and give stable cursors.
+//
+// Views hold the slots of the events that carry their payloads instead of
+// copies: a run's input is slot 1 and its resultSlot is its run_completed or
+// run_failed, a step's slot is its step_created and its resultSlot its latest
+// step_completed, step_failed, or step_retrying, and a hook's slot is its
+// hook_created in the hook's run. Reads fetch those records, at most one
+// script call per page.
 func (w *World) key(kind, id string) string { return w.prefix + ":" + kind + ":" + id }
 
 func (w *World) corrKey(runID worlds.RunID, correlationID string) string {
@@ -57,11 +66,9 @@ type eventRecord struct {
 type stepView struct {
 	Name        string `json:"name"`
 	Status      string `json:"status"`
-	Input       string `json:"input,omitempty"`
-	Output      string `json:"output,omitempty"`
-	Error       string `json:"error,omitempty"`
 	Attempt     int    `json:"attempt"`
 	Slot        uint64 `json:"slot"`
+	ResultSlot  uint64 `json:"resultSlot,omitempty"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
 	StartedAt   string `json:"startedAt,omitempty"`
@@ -73,7 +80,7 @@ type stepView struct {
 type hookView struct {
 	RunID               worlds.RunID           `json:"runId"`
 	Token               string                 `json:"token"`
-	Metadata            string                 `json:"metadata,omitempty"`
+	Slot                uint64                 `json:"slot"`
 	Webhook             string                 `json:"webhook,omitempty"`
 	ReceivedSlot        uint64                 `json:"rid,omitempty"`
 	CreatedAt           string                 `json:"createdAt"`
@@ -137,38 +144,105 @@ func decodeEvent(runID worlds.RunID, slot uint64, raw string, resolve worlds.Eve
 	return event, nil
 }
 
-func decodeStep(runID worlds.RunID, stepID worlds.StepID, raw string, resolve worlds.ResolveData) (worlds.Step, error) {
+// decodeRecord decodes the record at a slot a view references, with its data.
+func decodeRecord(runID worlds.RunID, slot uint64, raw string) (worlds.Event, error) {
+	if raw == "" {
+		return worlds.Event{}, fmt.Errorf("%w: missing event %d of %s", errCorrupt, slot, runID)
+	}
+	return decodeEvent(runID, slot, raw, worlds.EventsResolveDataAll)
+}
+
+// payloadRef names an event record a view references and receives its
+// payload.
+type payloadRef struct {
+	runID worlds.RunID
+	slot  uint64
+	set   func(eventType worlds.EventType, payload []byte)
+}
+
+// resolvePayloads reads the records refs name in one script call and passes
+// each payload to its ref.
+func (w *World) resolvePayloads(ctx context.Context, refs []payloadRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	args := make([]string, 0, 1+2*len(refs))
+	args = append(args, w.prefix)
+	for _, ref := range refs {
+		args = append(args, string(ref.runID), strconv.FormatUint(ref.slot, 10))
+	}
+	result, err := w.redis.Run(ctx, scriptEventsAt, args...)
+	if err != nil {
+		return err
+	}
+	raws := replyStrings(result)
+	if len(raws) != len(refs) {
+		return errCorrupt
+	}
+	for index, raw := range raws {
+		event, err := decodeRecord(refs[index].runID, refs[index].slot, raw)
+		if err != nil {
+			return err
+		}
+		refs[index].set(event.EventType, worlds.EventPayload(event))
+	}
+	return nil
+}
+
+// decodeStep decodes a step view. Its payloads are in the event log, and
+// stepPayloads resolves them.
+func decodeStep(runID worlds.RunID, stepID worlds.StepID, raw string) (worlds.Step, stepView, error) {
 	var view stepView
 	if err := json.Unmarshal([]byte(raw), &view); err != nil {
-		return worlds.Step{}, fmt.Errorf("workflow/vercel: decode step %s: %w", stepID, err)
+		return worlds.Step{}, stepView{}, fmt.Errorf("workflow/vercel: decode step %s: %w", stepID, err)
 	}
 	step := worlds.Step{RunID: runID, StepID: stepID, StepName: view.Name, Status: worlds.Status(view.Status), Attempt: view.Attempt, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), StartedAt: optionalMicros(view.StartedAt), CompletedAt: optionalMicros(view.CompletedAt)}
-	var err error
-	if step.Error, err = decodeBytes(view.Error); err != nil {
-		return worlds.Step{}, err
-	}
-	if resolve != worlds.ResolveDataNone {
-		if step.Input, err = decodeBytes(view.Input); err != nil {
-			return worlds.Step{}, err
-		}
-		if step.Output, err = decodeBytes(view.Output); err != nil {
-			return worlds.Step{}, err
-		}
-	}
 	if view.RetryAfter != "" {
 		retryAfter, err := time.Parse(time.RFC3339Nano, view.RetryAfter)
 		if err != nil {
-			return worlds.Step{}, fmt.Errorf("workflow/vercel: decode step retry time: %w", err)
+			return worlds.Step{}, stepView{}, fmt.Errorf("workflow/vercel: decode step retry time: %w", err)
 		}
 		step.RetryAfter = &retryAfter
 	}
-	return step, nil
+	return step, view, nil
 }
 
-func decodeHook(hookID worlds.HookID, raw string, resolve worlds.ResolveData) (worlds.Hook, error) {
+// stepPayloads returns the refs that fill step's input from its step_created
+// and its output or error from its latest result. ResolveDataNone skips the
+// input and output, so a completed step reads nothing.
+func stepPayloads(step *worlds.Step, view stepView, resolve worlds.ResolveData) []payloadRef {
+	var refs []payloadRef
+	if resolve != worlds.ResolveDataNone && view.Slot != 0 {
+		refs = append(refs, payloadRef{runID: step.RunID, slot: view.Slot, set: func(_ worlds.EventType, payload []byte) { step.Input = payload }})
+	}
+	if view.ResultSlot != 0 && (resolve != worlds.ResolveDataNone || step.Status != worlds.StatusCompleted) {
+		refs = append(refs, payloadRef{runID: step.RunID, slot: view.ResultSlot, set: func(eventType worlds.EventType, payload []byte) {
+			if eventType != worlds.EventTypeStepCompleted {
+				step.Error = payload
+			} else if resolve != worlds.ResolveDataNone {
+				step.Output = payload
+			}
+		}})
+	}
+	return refs
+}
+
+// resolveSteps fills the payloads of steps, whose views are views, in one
+// script call.
+func (w *World) resolveSteps(ctx context.Context, steps []worlds.Step, views []stepView, resolve worlds.ResolveData) error {
+	var refs []payloadRef
+	for index := range steps {
+		refs = append(refs, stepPayloads(&steps[index], views[index], resolve)...)
+	}
+	return w.resolvePayloads(ctx, refs)
+}
+
+// decodeHook decodes a hook view. Its metadata is in its hook_created record,
+// and resolveHooks reads it.
+func decodeHook(hookID worlds.HookID, raw string) (worlds.Hook, hookView, error) {
 	var view hookView
 	if err := json.Unmarshal([]byte(raw), &view); err != nil {
-		return worlds.Hook{}, fmt.Errorf("workflow/vercel: decode hook %s: %w", hookID, err)
+		return worlds.Hook{}, hookView{}, fmt.Errorf("workflow/vercel: decode hook %s: %w", hookID, err)
 	}
 	hook := worlds.Hook{RunID: view.RunID, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
 	if view.ReceivedSlot != 0 {
@@ -177,16 +251,27 @@ func decodeHook(hookID worlds.HookID, raw string, resolve worlds.ResolveData) (w
 	if view.Webhook != "" {
 		hook.Webhook = new(worlds.Webhook)
 		if err := json.Unmarshal([]byte(view.Webhook), hook.Webhook); err != nil {
-			return worlds.Hook{}, fmt.Errorf("workflow/vercel: decode hook webhook: %w", err)
+			return worlds.Hook{}, hookView{}, fmt.Errorf("workflow/vercel: decode hook webhook: %w", err)
 		}
 	}
-	if resolve != worlds.ResolveDataNone {
-		var err error
-		if hook.Metadata, err = decodeBytes(view.Metadata); err != nil {
-			return worlds.Hook{}, err
-		}
+	return hook, view, nil
+}
+
+// resolveHooks fills the metadata of hooks, whose views are views, in one
+// script call. ResolveDataNone reads nothing.
+func (w *World) resolveHooks(ctx context.Context, hooks []worlds.Hook, views []hookView, resolve worlds.ResolveData) error {
+	if resolve == worlds.ResolveDataNone {
+		return nil
 	}
-	return hook, nil
+	var refs []payloadRef
+	for index := range hooks {
+		if views[index].Slot == 0 {
+			continue
+		}
+		hook := &hooks[index]
+		refs = append(refs, payloadRef{runID: hook.RunID, slot: views[index].Slot, set: func(_ worlds.EventType, payload []byte) { hook.Metadata = payload }})
+	}
+	return w.resolvePayloads(ctx, refs)
 }
 
 // scriptReply splits a script result into its values, mapping an {"err", code}

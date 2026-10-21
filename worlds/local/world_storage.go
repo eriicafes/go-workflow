@@ -1,7 +1,6 @@
 package localworld
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -16,17 +15,38 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
+// The run, step, and hook views hold no payloads. The event log is their only
+// copy: a view records the slot of each event holding one, and reads load it
+// with worlds.EventPayload. A slot of 0 means no such event.
+
 // runRecord is the materialized run plus the committed event count. Writing it
-// commits every event file at or below EventCount.
+// commits every event file at or below EventCount. The run's input is always
+// in slot 1, its run_created event.
 type runRecord struct {
 	worlds.Run
 	EventCount       int            `json:"eventCount"`
 	StartedEventID   worlds.EventID `json:"startedEventId,omitempty"`
 	CancelledEventID worlds.EventID `json:"cancelledEventId,omitempty"`
+	// OutputSlot is the run_completed event and ErrorSlot the run_failed event.
+	OutputSlot int `json:"outputSlot,omitempty"`
+	ErrorSlot  int `json:"errorSlot,omitempty"`
 }
 
+// stepRecord is the materialized step. InputSlot is its step_created event.
+// OutputSlot or ErrorSlot is its latest result: step_completed, or
+// step_failed or step_retrying. A later result replaces the earlier one.
 type stepRecord struct {
 	worlds.Step
+	InputSlot  int `json:"inputSlot,omitempty"`
+	OutputSlot int `json:"outputSlot,omitempty"`
+	ErrorSlot  int `json:"errorSlot,omitempty"`
+}
+
+// hookRecord is the materialized hook. MetadataSlot is its hook_created event
+// in the hook's own run.
+type hookRecord struct {
+	worlds.Hook
+	MetadataSlot int `json:"metadataSlot,omitempty"`
 }
 
 // tokenRecord is the token uniqueness index. A token is held while its record
@@ -66,8 +86,8 @@ func (w *World) readStep(runID worlds.RunID, stepID worlds.StepID) (*stepRecord,
 	return &record, nil
 }
 
-func (w *World) readHook(hookID worlds.HookID) (*worlds.Hook, error) {
-	var record worlds.Hook
+func (w *World) readHook(hookID worlds.HookID) (*hookRecord, error) {
+	var record hookRecord
 	if ok, err := w.readOptional(hookPath(hookID), &record); !ok || err != nil {
 		return nil, err
 	}
@@ -99,6 +119,32 @@ func (w *World) readEvents(runID worlds.RunID, from, to int) ([]worlds.Event, er
 		events = append(events, event)
 	}
 	return events, nil
+}
+
+// readEvent returns a committed slot's event, or false for slot 0.
+func (w *World) readEvent(runID worlds.RunID, slot int) (worlds.Event, bool, error) {
+	if slot < 1 {
+		return worlds.Event{}, false, nil
+	}
+	var event worlds.Event
+	err := readJSON(w.root, eventPath(runID, slot), &event)
+	return event, err == nil, err
+}
+
+func (w *World) readHooks() ([]hookRecord, error) {
+	names, err := listJSON(w.root, "hooks")
+	if err != nil {
+		return nil, err
+	}
+	hooks := make([]hookRecord, 0, len(names))
+	for _, name := range names {
+		var hook hookRecord
+		if err := readJSON(w.root, path.Join("hooks", name), &hook); err != nil {
+			return nil, err
+		}
+		hooks = append(hooks, hook)
+	}
+	return hooks, nil
 }
 
 func (w *World) readRuns() ([]runRecord, error) {
@@ -137,32 +183,78 @@ func stepPath(runID worlds.RunID, stepID worlds.StepID) string {
 	return path.Join(stepsDir(runID), fileKey(string(stepID))+".json")
 }
 
-func cloneRun(value worlds.Run, resolve worlds.ResolveData) worlds.Run {
-	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
+// eventLoader returns the event in a run's slot, or false for slot 0.
+type eventLoader func(slot int) (worlds.Event, bool, error)
+
+// committed loads a run's committed events.
+func (w *World) committed(runID worlds.RunID) eventLoader {
+	return func(slot int) (worlds.Event, bool, error) { return w.readEvent(runID, slot) }
+}
+
+// payload returns the payload of the event in slot, or nil for slot 0.
+func (load eventLoader) payload(slot int) ([]byte, error) {
+	event, ok, err := load(slot)
+	if !ok || err != nil {
+		return nil, err
+	}
+	return worlds.EventPayload(event), nil
+}
+
+// runView returns the run with its payloads loaded from its events.
+// ResolveDataNone leaves out the input and output.
+func runView(record runRecord, load eventLoader, resolve worlds.ResolveData) (worlds.Run, error) {
+	value := record.Run
+	value.Input, value.Output, value.Error = nil, nil, nil
 	value.Attributes = maps.Clone(value.Attributes)
 	if value.Attributes == nil {
 		value.Attributes = map[string]string{}
 	}
-	if resolve == worlds.ResolveDataNone {
-		value.Input, value.Output = nil, nil
+	var err error
+	if resolve != worlds.ResolveDataNone {
+		if value.Input, err = load.payload(1); err != nil {
+			return worlds.Run{}, err
+		}
+		if value.Output, err = load.payload(record.OutputSlot); err != nil {
+			return worlds.Run{}, err
+		}
 	}
-	return value
+	if value.Error, err = load.payload(record.ErrorSlot); err != nil {
+		return worlds.Run{}, err
+	}
+	return value, nil
 }
 
-func cloneStep(value worlds.Step, resolve worlds.ResolveData) worlds.Step {
-	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
-	if resolve == worlds.ResolveDataNone {
-		value.Input, value.Output = nil, nil
+// stepView returns the step with its payloads loaded from its events.
+// ResolveDataNone leaves out the input and output.
+func stepView(record stepRecord, load eventLoader, resolve worlds.ResolveData) (worlds.Step, error) {
+	value := record.Step
+	value.Input, value.Output, value.Error = nil, nil, nil
+	var err error
+	if resolve != worlds.ResolveDataNone {
+		if value.Input, err = load.payload(record.InputSlot); err != nil {
+			return worlds.Step{}, err
+		}
+		if value.Output, err = load.payload(record.OutputSlot); err != nil {
+			return worlds.Step{}, err
+		}
 	}
-	return value
+	if value.Error, err = load.payload(record.ErrorSlot); err != nil {
+		return worlds.Step{}, err
+	}
+	return value, nil
 }
 
-func cloneHook(value worlds.Hook, resolve worlds.ResolveData) worlds.Hook {
-	value.Metadata = bytes.Clone(value.Metadata)
+// hookView returns the hook with its metadata loaded from hook_created.
+// ResolveDataNone leaves out the metadata.
+func hookView(record hookRecord, load eventLoader, resolve worlds.ResolveData) (worlds.Hook, error) {
+	value := record.Hook
+	value.Metadata = nil
 	if resolve == worlds.ResolveDataNone {
-		value.Metadata = nil
+		return value, nil
 	}
-	return value
+	var err error
+	value.Metadata, err = load.payload(record.MetadataSlot)
+	return value, err
 }
 
 // sortKey orders records by creation time, then ID. The fixed-width UTC time

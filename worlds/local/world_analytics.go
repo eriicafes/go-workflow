@@ -14,11 +14,20 @@ import (
 type analytics struct{ world *World }
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
-	run, err := a.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
+	// Analytics runs carry no payloads, so the run record alone answers.
+	if err := ctx.Err(); err != nil {
+		return worlds.AnalyticsRun{}, err
+	}
+	unlock, err := a.world.readLock()
 	if err != nil {
 		return worlds.AnalyticsRun{}, err
 	}
-	return analyticsRun(run), nil
+	defer unlock()
+	record, err := a.world.readRun(input.RunID)
+	if err != nil {
+		return worlds.AnalyticsRun{}, err
+	}
+	return analyticsRun(record.Run), nil
 }
 
 // matchingRuns returns runs that match the filters, ascending by CreatedAt.

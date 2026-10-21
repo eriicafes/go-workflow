@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,4 +146,49 @@ func conformStepAdmission(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCompleted, "step_missing", nil)})
 	conformExpect(t, err, worlds.ErrRunTerminal, "result for a missing step of a terminal run")
+}
+
+func conformLargePayloads(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	// Each payload fits in its own event, while together they exceed what a
+	// World could keep in one record of a step.
+	payload := func(fill string) json.RawMessage {
+		return json.RawMessage(`"` + strings.Repeat(fill, 300<<10) + `"`)
+	}
+	input, output := payload("i"), payload("o")
+	runID := conformRunID("payloads")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "payloads", Input: input}); err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "big", Input: input})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Result: output})
+	encoded, err := json.Marshal(worlds.NewError(errors.New("failed")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeRunFailed, "", worlds.DataRunFailed{Error: encoded})
+
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
+	if err != nil || string(step.Input) != string(input) || string(step.Output) != string(output) {
+		t.Fatalf("step input %d bytes, output %d bytes, err=%v", len(step.Input), len(step.Output), err)
+	}
+	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID})
+	if err != nil || len(steps.Data) != 1 || string(steps.Data[0].Output) != string(output) {
+		t.Fatalf("listed steps = %d, err=%v", len(steps.Data), err)
+	}
+	stripped, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a", ResolveData: worlds.ResolveDataNone})
+	if err != nil || stripped.Input != nil || stripped.Output != nil || stripped.Status != worlds.StatusCompleted {
+		t.Fatalf("ResolveDataNone step = %d/%d bytes, status %s, err=%v", len(stripped.Input), len(stripped.Output), stripped.Status, err)
+	}
+
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || string(run.Input) != string(input) || string(run.Error) != string(encoded) {
+		t.Fatalf("run input %d bytes, error %s, err=%v", len(run.Input), run.Error, err)
+	}
+	strippedRun, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
+	if err != nil || strippedRun.Input != nil || string(strippedRun.Error) != string(encoded) {
+		t.Fatalf("ResolveDataNone run = input %d bytes, error %s, err=%v", len(strippedRun.Input), strippedRun.Error, err)
+	}
 }

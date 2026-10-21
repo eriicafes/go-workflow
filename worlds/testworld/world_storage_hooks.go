@@ -15,11 +15,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if !ok {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	value = cloneHook(value)
-	if input.ResolveData == worlds.ResolveDataNone {
-		value.Metadata = nil
-	}
-	return value, nil
+	return w.hookPayloadLocked(cloneHook(value), input.ResolveData), nil
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -45,11 +41,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		if input.RunID != "" && hook.RunID != input.RunID {
 			continue
 		}
-		hook = cloneHook(hook)
-		if input.ResolveData == worlds.ResolveDataNone {
-			hook.Metadata = nil
-		}
-		values = append(values, hook)
+		values = append(values, w.hookPayloadLocked(cloneHook(hook), input.ResolveData))
 	}
 	sort.Slice(values, func(i, j int) bool {
 		if !values[i].CreatedAt.Equal(values[j].CreatedAt) {

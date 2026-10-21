@@ -88,7 +88,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: bytes.Clone(input.Input), Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
@@ -346,7 +346,7 @@ func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, cre
 		result.AllocatedEventCount = 1
 	}
 	if event.EventType == worlds.EventTypeHookCreated {
-		hook := cloneHook(m.hooks[worlds.HookID(event.CorrelationID)])
+		hook := m.hookPayloadLocked(cloneHook(m.hooks[worlds.HookID(event.CorrelationID)]), worlds.ResolveDataAll)
 		result.Hook = &hook
 	}
 	if event.EventType != worlds.EventTypeStepCreated {
@@ -356,7 +356,7 @@ func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, cre
 	if step.StepID == "" {
 		return result
 	}
-	step.Input, step.Output, step.Error = bytes.Clone(step.Input), bytes.Clone(step.Output), bytes.Clone(step.Error)
+	step = m.stepPayloadsLocked(step, worlds.ResolveDataAll)
 	result.Step = &step
 	result.StepCreated = created
 	return result
@@ -393,9 +393,9 @@ func (m *World) materializeLocked(event worlds.Event) {
 	case worlds.EventTypeRunStarted:
 		run.Status, run.StartedAt = worlds.StatusRunning, &now
 	case worlds.EventTypeRunCompleted:
-		run.Status, run.CompletedAt, run.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
+		run.Status, run.CompletedAt = worlds.StatusCompleted, &now
 	case worlds.EventTypeRunFailed:
-		run.Status, run.CompletedAt, run.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
+		run.Status, run.CompletedAt = worlds.StatusFailed, &now
 	case worlds.EventTypeRunCancelled:
 		run.Status, run.CompletedAt = worlds.StatusCancelled, &now
 	case worlds.EventTypeAttrSet:
@@ -416,7 +416,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 			m.steps[event.RunID] = make(map[worlds.StepID]worlds.Step)
 		}
 		id := worlds.StepID(event.CorrelationID)
-		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, Input: bytes.Clone(value.Input), CreatedAt: now, UpdatedAt: now}
+		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}
 	case worlds.EventTypeStepStarted:
 		m.updateStepLocked(event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
@@ -429,7 +429,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Metadata: bytes.Clone(value.Metadata), Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)
@@ -509,7 +509,7 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 	}
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
-		step.Output, step.Error, step.RetryAfter = bytes.Clone(result.Result), bytes.Clone(result.Error), result.RetryAfter
+		step.RetryAfter = result.RetryAfter
 	}
 	m.steps[event.RunID][step.StepID] = step
 }

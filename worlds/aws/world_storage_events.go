@@ -36,8 +36,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
-	view.refs.set("input", 1, input.Input)
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
 	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
 	if conditional(err) {
@@ -430,6 +429,9 @@ type stepEntry struct {
 type hookEntry struct {
 	hook  *worlds.Hook
 	dirty bool
+	// createdEventID is the hook's hook_created event, which holds its
+	// metadata.
+	createdEventID worlds.EventID
 	// disposedEventID is the hook's hook_disposed event, which a repeated
 	// disposal returns.
 	disposedEventID worlds.EventID
@@ -530,6 +532,7 @@ func (tx *appendTx) load(ctx context.Context, keys []map[string]ddb.AttributeVal
 					return err
 				}
 				entry.hook = &hook
+				entry.createdEventID = worlds.EventID(read(item, "createdEventId"))
 				entry.disposedEventID = worlds.EventID(read(item, "disposedEventId"))
 			}
 			tx.hooks[id] = entry
@@ -672,9 +675,12 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		}
 		// Steps recorded before createdEventId was stored are overwritten.
 		if entry.view != nil && entry.view.createdEventID != "" {
+			steps, err := tx.world.resolveSteps(ctx, []stepView{*entry.view}, worlds.ResolveDataAll)
+			if err != nil {
+				return nil, err
+			}
 			result := replay(entry.view.createdEventID)
-			step := entry.view.Step
-			result.Step = &step
+			result.Step = &steps[0]
 			return result, nil
 		}
 	case worlds.EventTypeStepStarted:
@@ -787,11 +793,9 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 	case worlds.EventTypeRunStarted:
 		view.Status, view.StartedAt, view.startedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
-		view.Status, view.CompletedAt, view.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
-		view.refs.set("output", slotOf(event), view.Output)
+		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusCompleted, &now, event.EventID
 	case worlds.EventTypeRunFailed:
-		view.Status, view.CompletedAt, view.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
-		view.refs.set("error", slotOf(event), view.Error)
+		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusFailed, &now, event.EventID
 	case worlds.EventTypeRunCancelled:
 		view.Status, view.CompletedAt, view.cancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:
@@ -821,8 +825,8 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if err != nil {
 			return err
 		}
+		// The input is kept in memory only for this append's result.
 		entry.view = &stepView{Step: worlds.Step{RunID: run.view.RunID, StepID: worlds.StepID(event.CorrelationID), StepName: data.StepName, Status: worlds.StatusPending, Input: data.Input, CreatedAt: now, UpdatedAt: now}, createdEventID: event.EventID}
-		entry.view.refs.set("input", slotOf(event), data.Input)
 		entry.dirty = true
 	case worlds.EventTypeStepStarted:
 		return tx.updateStep(ctx, event, worlds.StatusRunning)
@@ -836,7 +840,8 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		var data worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true}
+		// The metadata is kept in memory only for this append's result.
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -917,19 +922,14 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &event.CreatedAt
 	}
+	if event.EventType != worlds.EventTypeStepStarted {
+		step.resultEventID = event.EventID
+	}
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
-		step.Output, step.Error, step.RetryAfter = result.Result, result.Error, result.RetryAfter
-		step.refs.set("output", slotOf(event), step.Output)
-		step.refs.set("error", slotOf(event), step.Error)
+		step.RetryAfter = result.RetryAfter
 	}
 	return nil
-}
-
-// slotOf returns the log slot of an event this World assigned.
-func slotOf(event worlds.Event) uint64 {
-	slot, _ := worlds.EventSlot(event.EventID)
-	return slot
 }
 
 func (tx *appendTx) result(event worlds.Event, created bool) worlds.EventResult {
@@ -946,7 +946,7 @@ func (tx *appendTx) result(event worlds.Event, created bool) worlds.EventResult 
 	if event.EventType == worlds.EventTypeStepCreated {
 		if entry := tx.steps[itemID(stepKey(string(event.RunID), event.CorrelationID))]; entry != nil && entry.view != nil {
 			step := entry.view.Step
-			step.Input, step.Output, step.Error = bytes.Clone(step.Input), bytes.Clone(step.Output), bytes.Clone(step.Error)
+			step.Input = bytes.Clone(step.Input)
 			result.Step, result.StepCreated = &step, created
 		}
 	}
@@ -1001,6 +1001,7 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			setString(item, "createdEventId", string(entry.createdEventID))
 			setString(item, "disposedEventId", string(entry.disposedEventID))
 			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: item}})
 		}

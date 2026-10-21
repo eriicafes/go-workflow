@@ -2,7 +2,9 @@ package vercelworld
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -19,8 +21,8 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	return *runs[0], nil
 }
 
-// loadRuns reads runs and their attributes in one script call. Missing runs
-// are nil.
+// loadRuns reads runs, their attributes, and the records holding their
+// payloads in one script call. Missing runs are nil.
 func (w *World) loadRuns(ctx context.Context, ids []string, resolve worlds.ResolveData) ([]*worlds.Run, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -28,7 +30,11 @@ func (w *World) loadRuns(ctx context.Context, ids []string, resolve worlds.Resol
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	result, err := w.redis.Run(ctx, scriptLoadRuns, append([]string{w.prefix}, ids...)...)
+	all := "1"
+	if resolve == worlds.ResolveDataNone {
+		all = "0"
+	}
+	result, err := w.redis.Run(ctx, scriptLoadRuns, append([]string{w.prefix, all}, ids...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -39,14 +45,14 @@ func (w *World) loadRuns(ctx context.Context, ids []string, resolve worlds.Resol
 	runs := make([]*worlds.Run, len(ids))
 	for index, item := range items {
 		pair, _ := item.([]any)
-		if len(pair) != 2 {
+		if len(pair) != 4 {
 			return nil, errCorrupt
 		}
 		fields := flatHash(pair[0])
 		if len(fields) == 0 {
 			continue
 		}
-		run, err := decodeRun(worlds.RunID(ids[index]), fields, flatHash(pair[1]), resolve)
+		run, err := decodeRun(worlds.RunID(ids[index]), fields, flatHash(pair[1]), replyString(pair[2]), replyString(pair[3]), resolve)
 		if err != nil {
 			return nil, err
 		}
@@ -161,18 +167,34 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 	return err
 }
 
-func decodeRun(runID worlds.RunID, fields, attrs map[string]string, resolve worlds.ResolveData) (worlds.Run, error) {
+// decodeRun decodes a run view with its run_created record input and its
+// run_completed or run_failed record result, either empty when not read.
+// ResolveDataNone leaves out the input and output.
+func decodeRun(runID worlds.RunID, fields, attrs map[string]string, input, result string, resolve worlds.ResolveData) (worlds.Run, error) {
 	run := worlds.Run{RunID: runID, WorkflowName: fields["wf"], Status: worlds.Status(fields["status"]), Attributes: attrs, DeploymentID: fields["deployment"], InBandCount: parseCount(fields["inband"]), CreatedAt: parseMicros(fields["createdAt"]), UpdatedAt: parseMicros(fields["updatedAt"]), StartedAt: optionalMicros(fields["startedAt"]), CompletedAt: optionalMicros(fields["completedAt"])}
-	var err error
-	if run.Error, err = decodeBytes(fields["error"]); err != nil {
-		return worlds.Run{}, err
-	}
 	if resolve != worlds.ResolveDataNone {
-		if run.Input, err = decodeBytes(fields["input"]); err != nil {
+		event, err := decodeRecord(runID, 1, input)
+		if err != nil {
 			return worlds.Run{}, err
 		}
-		if run.Output, err = decodeBytes(fields["output"]); err != nil {
+		run.Input = worlds.EventPayload(event)
+	}
+	if slot := fields["resultSlot"]; slot != "" && (resolve != worlds.ResolveDataNone || run.Status == worlds.StatusFailed) {
+		n, err := strconv.ParseUint(slot, 10, 64)
+		if err != nil {
+			return worlds.Run{}, fmt.Errorf("%w: run %s result slot %q", errCorrupt, runID, slot)
+		}
+		event, err := decodeRecord(runID, n, result)
+		if err != nil {
 			return worlds.Run{}, err
+		}
+		switch event.EventType {
+		case worlds.EventTypeRunCompleted:
+			if resolve != worlds.ResolveDataNone {
+				run.Output = worlds.EventPayload(event)
+			}
+		case worlds.EventTypeRunFailed:
+			run.Error = worlds.EventPayload(event)
 		}
 	}
 	return run, nil

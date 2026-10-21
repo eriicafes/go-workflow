@@ -11,7 +11,7 @@ import (
 )
 
 func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
-	run, err := scanRun(w.pool.QueryRow(ctx, `SELECT `+runColumns(input.ResolveData)+` FROM go_workflow_runs WHERE run_id = $1`, input.RunID))
+	run, err := scanRun(w.pool.QueryRow(ctx, runSelect(input.ResolveData)+` WHERE r.run_id = $1`, input.RunID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Run{}, worlds.ErrRunNotFound
 	}
@@ -21,16 +21,16 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	var q query
 	if input.WorkflowName != "" {
-		q.where("workflow_name = " + q.arg(input.WorkflowName))
+		q.where("r.workflow_name = " + q.arg(input.WorkflowName))
 	}
 	if len(input.Status) > 0 {
-		q.where("status = ANY(" + q.arg(statusStrings(input.Status)) + ")")
+		q.where("r.status = ANY(" + q.arg(statusStrings(input.Status)) + ")")
 	}
 	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	if err := q.keyset(input.Pagination.Cursor, "created_at", "run_id", descending); err != nil {
+	if err := q.keyset(input.Pagination.Cursor, "r.created_at", "r.run_id", descending); err != nil {
 		return worlds.Page[worlds.Run]{}, err
 	}
-	sql := `SELECT ` + runColumns(input.ResolveData) + ` FROM go_workflow_runs` + q.clause() + order("created_at", "run_id", descending) + q.limit(input.Pagination.Limit)
+	sql := runSelect(input.ResolveData) + q.clause() + order("r.created_at", "r.run_id", descending) + q.limit(input.Pagination.Limit)
 	rows, err := w.pool.Query(ctx, sql, q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Run]{}, err
@@ -75,20 +75,36 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 	return err
 }
 
-func runColumns(resolve worlds.ResolveData) string {
-	data := "input, output"
+// runSelect selects runs as r with their payloads joined from the event log:
+// the input from run_created in slot 1 and the output or error from the
+// result slot. ResolveDataNone joins only a run_failed result, for the error.
+func runSelect(resolve worlds.ResolveData) string {
+	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = r.run_id AND ie.slot = 1"
 	if resolve == worlds.ResolveDataNone {
-		data = "NULL::bytea, NULL::bytea"
+		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""
 	}
-	return "run_id, workflow_name, status, " + data + ", error, attributes, deployment_id, in_band_count, created_at, updated_at, started_at, completed_at"
+	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.in_band_count, r.created_at, r.updated_at, r.started_at, r.completed_at" +
+		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot"
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
 	var run worlds.Run
-	var attributes []byte
+	var attributes, input, result []byte
+	var resultType *worlds.EventType
 	var inBandCount int64
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &run.Input, &run.Output, &run.Error, &attributes, &run.DeploymentID, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
 		return worlds.Run{}, err
+	}
+	if input != nil {
+		run.Input = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeRunCreated, Data: input})
+	}
+	if resultType != nil && result != nil {
+		payload := worlds.EventPayload(worlds.Event{EventType: *resultType, Data: result})
+		if *resultType == worlds.EventTypeRunCompleted {
+			run.Output = payload
+		} else {
+			run.Error = payload
+		}
 	}
 	run.InBandCount = int(inBandCount)
 	run.Attributes = map[string]string{}

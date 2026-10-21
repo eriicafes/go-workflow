@@ -23,7 +23,7 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	if step == nil {
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
-	return cloneStep(step.Step, input.ResolveData), nil
+	return stepView(*step, w.committed(input.RunID), input.ResolveData)
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
@@ -46,7 +46,11 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 		if err := readJSON(w.root, path.Join(dir, name), &step); err != nil {
 			return worlds.Page[worlds.Step]{}, err
 		}
-		steps = append(steps, cloneStep(step.Step, input.ResolveData))
+		value, err := stepView(step, w.committed(input.RunID), input.ResolveData)
+		if err != nil {
+			return worlds.Page[worlds.Step]{}, err
+		}
+		steps = append(steps, value)
 	}
 	pagination := input.Pagination
 	pagination.SortOrder = worlds.SortOrderAscending

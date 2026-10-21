@@ -40,6 +40,10 @@ type World interface {
   a second `run_started`, `step_created`, or `hook_disposed`, returns the
   earlier event with `AllocatedEventCount` zero instead of appending. A
   `step_started` for a running step is not a repeat: it appends a new attempt.
+- **One copy of each payload.** The built-in Worlds keep run, step, and hook
+  payloads only in their events. Their views store the slot of the event that
+  holds each one, and reads decode it with `worlds.EventPayload`. A payload
+  then only has to fit in one event, and results are written once.
 - **Step results need a running step.** Refuse `step_completed`, `step_failed`,
   and `step_retrying` with `ErrStepNotStartable` unless the step is running,
   and `hook_disposed` with `ErrHookNotActive` unless the hook belongs to the run.

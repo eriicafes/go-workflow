@@ -21,7 +21,7 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	if err != nil {
 		return worlds.Run{}, err
 	}
-	return cloneRun(run.Run, input.ResolveData), nil
+	return runView(run, w.committed(run.RunID), input.ResolveData)
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
@@ -39,9 +39,14 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	}
 	runs := make([]worlds.Run, 0, len(records))
 	for _, record := range records {
-		if matchesRun(record.Run, input.WorkflowName, input.Status) {
-			runs = append(runs, cloneRun(record.Run, input.ResolveData))
+		if !matchesRun(record.Run, input.WorkflowName, input.Status) {
+			continue
 		}
+		run, err := runView(record, w.committed(record.RunID), input.ResolveData)
+		if err != nil {
+			return worlds.Page[worlds.Run]{}, err
+		}
+		runs = append(runs, run)
 	}
 	return keyPage(runs, input.Pagination, func(run worlds.Run) string { return sortKey(run.CreatedAt, string(run.RunID)) })
 }

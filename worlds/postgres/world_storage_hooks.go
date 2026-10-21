@@ -23,7 +23,7 @@ type tokenHolder struct {
 }
 
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
-	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns("", input.ResolveData)+` FROM go_workflow_hooks WHERE hook_id = $1`, input.HookID))
+	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns(input.ResolveData)+` FROM go_workflow_hooks h`+hookJoin(input.ResolveData)+` WHERE h.hook_id = $1`, input.HookID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
@@ -33,8 +33,8 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
 	// An expired retention counts as released without writing. The row itself
 	// is removed by the next claim of the token.
-	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns("h.", input.ResolveData)+` FROM go_workflow_hook_tokens t
-		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id JOIN go_workflow_runs r ON r.run_id = h.run_id WHERE t.token = $1 AND h.disposed_at IS NULL AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`, input.Token, now()))
+	hook, err := scanHook(w.pool.QueryRow(ctx, `SELECT `+hookColumns(input.ResolveData)+` FROM go_workflow_hook_tokens t
+		JOIN go_workflow_hooks h ON h.hook_id = t.hook_id JOIN go_workflow_runs r ON r.run_id = h.run_id`+hookJoin(input.ResolveData)+` WHERE t.token = $1 AND h.disposed_at IS NULL AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`, input.Token, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
@@ -44,12 +44,12 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
 	var q query
 	if input.RunID != "" {
-		q.where("run_id = " + q.arg(input.RunID))
+		q.where("h.run_id = " + q.arg(input.RunID))
 	}
-	if err := q.keyset(input.Pagination.Cursor, "created_at", "hook_id", false); err != nil {
+	if err := q.keyset(input.Pagination.Cursor, "h.created_at", "h.hook_id", false); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	rows, err := w.pool.Query(ctx, `SELECT `+hookColumns("", input.ResolveData)+` FROM go_workflow_hooks`+q.clause()+order("created_at", "hook_id", false)+q.limit(input.Pagination.Limit), q.args...)
+	rows, err := w.pool.Query(ctx, `SELECT `+hookColumns(input.ResolveData)+` FROM go_workflow_hooks h`+hookJoin(input.ResolveData)+q.clause()+order("h.created_at", "h.hook_id", false)+q.limit(input.Pagination.Limit), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
@@ -187,20 +187,34 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 	return result, nil
 }
 
-func hookColumns(prefix string, resolve worlds.ResolveData) string {
-	metadata := prefix + "metadata"
+// hookColumns are the columns scanHook reads from hooks as h, with the
+// metadata from the hook_created event hookJoin joins, unless resolve is
+// ResolveDataNone.
+func hookColumns(resolve worlds.ResolveData) string {
+	metadata := "me.data"
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::bytea"
 	}
-	return prefix + "hook_id, " + prefix + "run_id, " + prefix + "token, " + metadata + ", " + prefix + "webhook, " + prefix + "webhook_event_id, " +
-		prefix + "created_at, " + prefix + "updated_at, " + prefix + "received_at, " + prefix + "token_retention_until, " + prefix + "claimed_from, " + prefix + "force_claimed_by, " + prefix + "disposed_at"
+	return "h.hook_id, h.run_id, h.token, " + metadata + ", h.webhook, h.webhook_event_id, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
+}
+
+// hookJoin joins the hook's hook_created event in its own run, unless resolve
+// is ResolveDataNone.
+func hookJoin(resolve worlds.ResolveData) string {
+	if resolve == worlds.ResolveDataNone {
+		return ""
+	}
+	return " LEFT JOIN go_workflow_events me ON me.run_id = h.run_id AND me.slot = h.created_slot"
 }
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
-	var webhook, claimed, taken []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &hook.Metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
+	var metadata, webhook, claimed, taken []byte
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.Token, &metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
 		return worlds.Hook{}, err
+	}
+	if metadata != nil {
+		hook.Metadata = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeHookCreated, Data: metadata})
 	}
 	if len(claimed) > 0 {
 		if err := json.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
@@ -223,8 +237,8 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 	return hook, nil
 }
 
-func loadHook(ctx context.Context, tx pgx.Tx, hookID worlds.HookID) (worlds.Hook, bool, error) {
-	hook, err := scanHook(tx.QueryRow(ctx, `SELECT `+hookColumns("", worlds.ResolveDataAll)+` FROM go_workflow_hooks WHERE hook_id = $1 FOR UPDATE`, hookID))
+func loadHook(ctx context.Context, tx pgx.Tx, hookID worlds.HookID, resolve worlds.ResolveData) (worlds.Hook, bool, error) {
+	hook, err := scanHook(tx.QueryRow(ctx, `SELECT `+hookColumns(resolve)+` FROM go_workflow_hooks h`+hookJoin(resolve)+` WHERE h.hook_id = $1 FOR UPDATE OF h`, hookID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, false, nil
 	}

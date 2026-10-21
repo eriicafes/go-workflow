@@ -20,7 +20,15 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if !ok {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return decodeHook(input.HookID, raw, input.ResolveData)
+	hook, view, err := decodeHook(input.HookID, raw)
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	hooks := []worlds.Hook{hook}
+	if err := w.resolveHooks(ctx, hooks, []hookView{view}, input.ResolveData); err != nil {
+		return worlds.Hook{}, err
+	}
+	return hooks[0], nil
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -81,15 +89,19 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		return worlds.Page[worlds.Hook]{}, err
 	}
 	page := worlds.Page[worlds.Hook]{Data: make([]worlds.Hook, 0, len(raws)), Cursor: cursor, HasMore: hasMore}
+	views := make([]hookView, 0, len(raws))
 	for index, raw := range raws {
 		if raw == "" {
 			continue
 		}
-		hook, err := decodeHook(worlds.HookID(members[index].Member), raw, input.ResolveData)
+		hook, view, err := decodeHook(worlds.HookID(members[index].Member), raw)
 		if err != nil {
 			return worlds.Page[worlds.Hook]{}, err
 		}
-		page.Data = append(page.Data, hook)
+		page.Data, views = append(page.Data, hook), append(views, view)
+	}
+	if err := w.resolveHooks(ctx, page.Data, views, input.ResolveData); err != nil {
+		return worlds.Page[worlds.Hook]{}, err
 	}
 	return page, nil
 }
@@ -127,7 +139,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	result, _, err := decodeAppendReply(input.RunID, input.Event.CorrelationID, values, input.Options.ResolveData)
+	result, _, err := w.decodeAppendReply(ctx, input.RunID, input.Event, values, input.Options.ResolveData)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}

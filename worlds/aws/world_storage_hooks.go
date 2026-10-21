@@ -19,11 +19,11 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if !found {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	hook, err := hookFromItem(item)
+	hooks, err := w.resolveHooks(ctx, []map[string]ddb.AttributeValue{item}, input.ResolveData)
 	if err != nil {
 		return worlds.Hook{}, err
 	}
-	return stripHook(hook, input.ResolveData), nil
+	return hooks[0], nil
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -43,18 +43,33 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if token.expired(time.Now()) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	hook, err := w.HooksGet(ctx, worlds.HooksGetInput{HookID: token.hookID, ResolveData: input.ResolveData})
+	item, found, err = w.item(ctx, hookKey(string(token.hookID)))
 	if err != nil {
 		return worlds.Hook{}, err
 	}
-	run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: hook.RunID, ResolveData: worlds.ResolveDataNone})
+	if !found {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	hook, err := hookFromItem(item)
 	if err != nil {
 		return worlds.Hook{}, err
 	}
+	runItem, found, err := w.item(ctx, runKey(string(hook.RunID)))
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if !found {
+		return worlds.Hook{}, worlds.ErrRunNotFound
+	}
+	run := runFromItem(runItem)
 	if hook.DisposedAt != nil || run.Status.Terminal() && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(time.Now())) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	return hook, nil
+	hooks, err := w.resolveHooks(ctx, []map[string]ddb.AttributeValue{item}, input.ResolveData)
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	return hooks[0], nil
 }
 
 // HooksList reads a global secondary index, which is eventually consistent. A
@@ -73,17 +88,9 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	return hooksPage(items, cursor, more, input.ResolveData)
-}
-
-func hooksPage(items []map[string]ddb.AttributeValue, cursor string, more bool, resolve worlds.ResolveData) (worlds.Page[worlds.Hook], error) {
-	hooks := make([]worlds.Hook, len(items))
-	for index, item := range items {
-		hook, err := hookFromItem(item)
-		if err != nil {
-			return worlds.Page[worlds.Hook]{}, err
-		}
-		hooks[index] = stripHook(hook, resolve)
+	hooks, err := w.resolveHooks(ctx, items, input.ResolveData)
+	if err != nil {
+		return worlds.Page[worlds.Hook]{}, err
 	}
 	return worlds.Page[worlds.Hook]{Data: hooks, Cursor: cursor, HasMore: more}, nil
 }

@@ -13,14 +13,16 @@ const schemaLockKey int64 = 0x676f5f776f726b66
 
 // migrations are applied in order, and the index plus one is the recorded
 // version. Never edit a released migration, append a new one instead.
+//
+// The run, step, and hook views hold no payloads. They name the slots of the
+// events carrying them, and reads join go_workflow_events, which is the only
+// copy. A run's input is always slot 1 (run_created).
 var migrations = []string{`
 CREATE TABLE go_workflow_runs (
 	run_id text PRIMARY KEY,
 	workflow_name text NOT NULL,
 	status text NOT NULL,
-	input bytea,
-	output bytea,
-	error bytea,
+	result_slot bigint,
 	attributes jsonb NOT NULL DEFAULT '{}'::jsonb,
 	event_count bigint NOT NULL,
 	created_at timestamptz NOT NULL,
@@ -50,9 +52,8 @@ CREATE TABLE go_workflow_steps (
 	step_id text NOT NULL,
 	step_name text NOT NULL,
 	status text NOT NULL,
-	input bytea,
-	output bytea,
-	error bytea,
+	created_slot bigint NOT NULL,
+	result_slot bigint,
 	attempt integer NOT NULL DEFAULT 0,
 	created_at timestamptz NOT NULL,
 	updated_at timestamptz NOT NULL,
@@ -67,7 +68,7 @@ CREATE TABLE go_workflow_hooks (
 	hook_id text PRIMARY KEY,
 	run_id text NOT NULL,
 	token text NOT NULL,
-	metadata bytea,
+	created_slot bigint NOT NULL,
 	webhook jsonb,
 	webhook_event_id text NOT NULL DEFAULT '',
 	created_at timestamptz NOT NULL,

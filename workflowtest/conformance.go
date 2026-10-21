@@ -36,6 +36,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"Steps", conformSteps},
 		{"TerminalSteps", conformTerminalSteps},
 		{"StepAdmission", conformStepAdmission},
+		{"LargePayloads", conformLargePayloads},
 		{"Batch", conformBatch},
 		{"EventsList", conformEventsList},
 		{"Attributes", conformAttributes},

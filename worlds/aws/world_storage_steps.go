@@ -21,11 +21,16 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	if !found {
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
-	return w.resolveStep(ctx, stepFromItem(item), input.ResolveData)
+	steps, err := w.resolveSteps(ctx, []stepView{stepFromItem(item)}, input.ResolveData)
+	if err != nil {
+		return worlds.Step{}, err
+	}
+	return steps[0], nil
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
-	// Read the run's STEP# items and order them by creation time.
+	// Read the run's STEP# items, order them by creation time, and read the
+	// payloads of the requested page only.
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
@@ -41,13 +46,15 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
-	steps := make([]worlds.Step, len(views))
-	for index, view := range views {
-		if steps[index], err = w.resolveStep(ctx, view, input.ResolveData); err != nil {
-			return worlds.Page[worlds.Step]{}, err
-		}
+	sortKey := func(view stepView) string { return indexSortKey(view.CreatedAt, string(view.StepID)) }
+	sort.Slice(views, func(i, j int) bool { return sortKey(views[i]) < sortKey(views[j]) })
+	page, err := sortedPage(views, sortKey, worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit})
+	if err != nil {
+		return worlds.Page[worlds.Step]{}, err
 	}
-	sortKey := func(step worlds.Step) string { return indexSortKey(step.CreatedAt, string(step.StepID)) }
-	sort.Slice(steps, func(i, j int) bool { return sortKey(steps[i]) < sortKey(steps[j]) })
-	return sortedPage(steps, sortKey, worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit})
+	steps, err := w.resolveSteps(ctx, page.Data, input.ResolveData)
+	if err != nil {
+		return worlds.Page[worlds.Step]{}, err
+	}
+	return worlds.Page[worlds.Step]{Data: steps, Cursor: page.Cursor, HasMore: page.HasMore}, nil
 }

@@ -18,11 +18,18 @@ import (
 type analytics struct{ world *World }
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
-	run, err := a.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
+	// An analytics run has no payloads, so its events are not read.
+	if err := ctx.Err(); err != nil {
+		return worlds.AnalyticsRun{}, err
+	}
+	item, found, err := a.world.item(ctx, runKey(string(input.RunID)))
 	if err != nil {
 		return worlds.AnalyticsRun{}, err
 	}
-	return analyticsRun(run), nil
+	if !found {
+		return worlds.AnalyticsRun{}, worlds.ErrRunNotFound
+	}
+	return analyticsRun(runFromItem(item).Run), nil
 }
 
 // RunsList reads a global secondary index, which is eventually consistent. A

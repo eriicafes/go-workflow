@@ -324,7 +324,7 @@ func TestDescribeEvent(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &desc); err != nil {
 		t.Fatal(err)
 	}
-	if desc.Hook == nil || desc.Hook.Token != "tok" || desc.Hook.Metadata != "/w==" || !desc.Hook.Manual || desc.Hook.RetentionUs != "2" {
+	if desc.Hook == nil || desc.Hook.Token != "tok" || !desc.Hook.Manual || desc.Hook.RetentionUs != "2" {
 		t.Fatalf("hook descriptor = %+v", desc.Hook)
 	}
 	var record eventRecord
@@ -348,6 +348,25 @@ func TestDescribeEvent(t *testing.T) {
 	raw, _ = describeEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated}, parseMicros("1"))
 	if !strings.Contains(raw, `"bad":true`) {
 		t.Fatalf("run_created descriptor = %s", raw)
+	}
+	// Payloads stay only in the record, and views keep its slot.
+	payload := []byte(`"payload"`)
+	created, _ := json.Marshal(worlds.DataStepCreated{StepName: "pkg.step", Input: payload})
+	result, _ := json.Marshal(worlds.DataStepResult{Result: payload})
+	completed, _ := json.Marshal(worlds.DataRunCompleted{Output: payload})
+	for _, event := range []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_1", Data: created},
+		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_1", Data: result},
+		{EventType: worlds.EventTypeRunCompleted, Data: completed},
+	} {
+		raw, _ = describeEvent(event, parseMicros("1"))
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &fields)
+		delete(fields, "r")
+		rest, _ := json.Marshal(fields)
+		if strings.Contains(string(rest), "payload") || strings.Contains(string(rest), encodeBytes(payload)) {
+			t.Errorf("%s descriptor copies its payload: %s", event.EventType, rest)
+		}
 	}
 }
 

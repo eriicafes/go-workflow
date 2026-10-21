@@ -93,7 +93,7 @@ func (s *memStore) Run(_ context.Context, script *redisScript, args ...string) (
 		if s.loadErr != nil {
 			return nil, s.loadErr
 		}
-		return []any{[]any{[]any{}, []any{}}}, nil
+		return []any{[]any{[]any{}, []any{}, "", ""}}, nil
 	}
 	return nil, errors.New("memStore: unsupported script")
 }

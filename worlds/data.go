@@ -48,6 +48,44 @@ func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveDat
 	return stripped
 }
 
+// EventPayload returns the payload a run, step, or hook view exposes from the
+// event that recorded it: a run's Input from run_created, Output from
+// run_completed, and Error from run_failed; a step's Input from step_created,
+// Output from step_completed, and Error from step_failed or step_retrying; and
+// a hook's Metadata from hook_created. It returns nil for other events.
+//
+// The event log is the only copy of these payloads. A World's views record
+// which event holds each one and read it back with EventPayload.
+func EventPayload(event Event) []byte {
+	switch event.EventType {
+	case EventTypeRunCreated:
+		var data DataRunCreated
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Input
+	case EventTypeRunCompleted:
+		return DecodeRunCompleted(event.Data)
+	case EventTypeRunFailed:
+		return DecodeRunFailed(event.Data)
+	case EventTypeStepCreated:
+		var data DataStepCreated
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Input
+	case EventTypeStepCompleted:
+		var data DataStepResult
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Result
+	case EventTypeStepFailed, EventTypeStepRetrying:
+		var data DataStepResult
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Error
+	case EventTypeHookCreated:
+		var data DataHookCreated
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Metadata
+	}
+	return nil
+}
+
 // ResolveEvents applies ResolveEventData to each event's Data in place and
 // returns events.
 func ResolveEvents(events []Event, resolve EventsResolveData) []Event {

@@ -16,20 +16,23 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// runView is the META item of a run partition.
+// runView is the META item of a run partition. Its Run holds no payloads;
+// resultEventID names the run_completed or run_failed event holding them.
 type runView struct {
 	worlds.Run
 	eventCount       int
 	startedEventID   worlds.EventID
 	cancelledEventID worlds.EventID
-	refs             dataRefs
+	resultEventID    worlds.EventID
 }
 
-// stepView is a STEP# item.
+// stepView is a STEP# item. Its Step holds no payloads; createdEventID and
+// resultEventID name the step_created event and latest result event holding
+// them.
 type stepView struct {
 	worlds.Step
 	createdEventID worlds.EventID
-	refs           dataRefs
+	resultEventID  worlds.EventID
 }
 
 // tokenView is a TOKEN# item. It holds the hook owning a token and, once the
@@ -161,7 +164,7 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
-	storeData(item, map[string][]byte{"input": run.Input, "output": run.Output, "error": run.Error}, view.refs)
+	setString(item, "resultEventId", string(view.resultEventID))
 	return item
 }
 
@@ -177,9 +180,6 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			RunID:        worlds.RunID(read(item, "runId")),
 			WorkflowName: read(item, "workflowName"),
 			Status:       worlds.Status(read(item, "status")),
-			Input:        readBytes(item, "input"),
-			Output:       readBytes(item, "output"),
-			Error:        readBytes(item, "error"),
 			Attributes:   attributes,
 			DeploymentID: read(item, "deploymentId"),
 			InBandCount:  int(readInt(item, "inBandCount")),
@@ -191,19 +191,19 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 		eventCount:       int(readInt(item, "eventCount")),
 		startedEventID:   worlds.EventID(read(item, "startedEventId")),
 		cancelledEventID: worlds.EventID(read(item, "cancelledEventId")),
-		refs:             readRefs(item),
+		resultEventID:    worlds.EventID(read(item, "resultEventId")),
 	}
 }
 
 // runUpdate converts the new view into an update of the mutable META
-// attributes. Keys, index keys and input never change after creation, so the
-// update leaves them, and the indexes, untouched unless status changes.
+// attributes. Keys and index keys never change after creation, so the update
+// leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "inputRef", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
-	for _, name := range []string{"output", "outputRef", "error", "errorRef", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
+	for _, name := range []string{"resultEventId", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
 		if _, ok := item[name]; !ok {
 			remove = append(remove, name)
 		}
@@ -226,7 +226,7 @@ func stepItem(view stepView) map[string]ddb.AttributeValue {
 	setTime(item, "completedAt", step.CompletedAt)
 	setTime(item, "retryAfter", step.RetryAfter)
 	setString(item, "createdEventId", string(view.createdEventID))
-	storeData(item, map[string][]byte{"input": step.Input, "output": step.Output, "error": step.Error}, view.refs)
+	setString(item, "resultEventId", string(view.resultEventID))
 	return item
 }
 
@@ -237,9 +237,6 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			StepID:      worlds.StepID(read(item, "stepId")),
 			StepName:    read(item, "stepName"),
 			Status:      worlds.Status(read(item, "status")),
-			Input:       readBytes(item, "input"),
-			Output:      readBytes(item, "output"),
-			Error:       readBytes(item, "error"),
 			Attempt:     int(readInt(item, "attempt")),
 			CreatedAt:   readTime(item, "createdAt"),
 			UpdatedAt:   readTime(item, "updatedAt"),
@@ -248,10 +245,12 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			RetryAfter:  readTimePtr(item, "retryAfter"),
 		},
 		createdEventID: worlds.EventID(read(item, "createdEventId")),
-		refs:           readRefs(item),
+		resultEventID:  worlds.EventID(read(item, "resultEventId")),
 	}
 }
 
+// hookItem returns the HOOK# item of hook without its metadata, which its
+// hook_created event holds. The writer adds createdEventId naming that event.
 func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	item := merge(hookKey(string(hook.HookID)), map[string]ddb.AttributeValue{
 		"runId":         avs(string(hook.RunID)),
@@ -271,7 +270,6 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		}
 		item["webhook"] = avs(string(webhook))
 	}
-	setBytes(item, "metadata", hook.Metadata)
 	setString(item, "webhookEventId", string(hook.WebhookEventID))
 	setTime(item, "receivedAt", hook.ReceivedAt)
 	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
@@ -292,7 +290,6 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 		RunID:               worlds.RunID(read(item, "runId")),
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),
-		Metadata:            readBytes(item, "metadata"),
 		WebhookEventID:      worlds.EventID(read(item, "webhookEventId")),
 		CreatedAt:           readTime(item, "createdAt"),
 		UpdatedAt:           readTime(item, "updatedAt"),
@@ -367,27 +364,6 @@ func eventFromItem(item map[string]ddb.AttributeValue) worlds.Event {
 		Data:          readBytes(item, "data"),
 		CreatedAt:     readTime(item, "createdAt"),
 	}
-}
-
-func stripRun(run worlds.Run, resolve worlds.ResolveData) worlds.Run {
-	if resolve == worlds.ResolveDataNone {
-		run.Input, run.Output = nil, nil
-	}
-	return run
-}
-
-func stripStep(step worlds.Step, resolve worlds.ResolveData) worlds.Step {
-	if resolve == worlds.ResolveDataNone {
-		step.Input, step.Output = nil, nil
-	}
-	return step
-}
-
-func stripHook(hook worlds.Hook, resolve worlds.ResolveData) worlds.Hook {
-	if resolve == worlds.ResolveDataNone {
-		hook.Metadata = nil
-	}
-	return hook
 }
 
 // encodeCursor and decodeCursor carry a DynamoDB key (a LastEvaluatedKey or

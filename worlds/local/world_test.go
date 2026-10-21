@@ -2,6 +2,7 @@ package localworld_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -144,6 +145,73 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	next, err := reopened.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_persist", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}})
 	if err != nil || next.EventID != worlds.EventIDForSlot(5) {
 		t.Fatalf("append after reopen = %#v err=%v", next, err)
+	}
+}
+
+func TestViewsHoldNoPayloads(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	world := startWorld(t, dir, nil)
+	runID := worlds.RunID("wrun_payloads")
+	metadata := base64.StdEncoding.EncodeToString([]byte(`"hook-metadata-bytes"`))
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "payloads", Input: []byte(`"run-input-bytes"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeRunStarted},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a","input":"step-input-bytes"}`)},
+		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
+		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: []byte(`{"error":{"message":"step-error-bytes"}}`)},
+		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
+		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a", Data: []byte(`{"result":"step-output-bytes"}`)},
+		{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"payload-token","metadata":"` + metadata + `"}`)},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"run-output-bytes"}`)},
+	} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event}); err != nil {
+			t.Fatalf("%s: %v", event.EventType, err)
+		}
+	}
+	if err := world.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payloads := []string{"run-input-bytes", "run-output-bytes", "step-input-bytes", "step-error-bytes", "step-output-bytes", metadata}
+	assertNoPayloads := func() {
+		t.Helper()
+		for _, name := range []string{"runs/" + key(string(runID)) + ".json", "steps/" + key(string(runID)) + "/" + key("step_a") + ".json", "hooks/" + key("hook_a") + ".json"} {
+			raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, payload := range payloads {
+				if strings.Contains(string(raw), payload) {
+					t.Fatalf("%s holds payload %s: %s", name, payload, raw)
+				}
+			}
+		}
+	}
+	assertNoPayloads()
+
+	// An uncommitted event file makes the next Prepare rebuild the run's views
+	// from its committed events.
+	writeRecord(t, dir, "events/"+key(string(runID))+"/"+string(worlds.EventIDForSlot(10))+".json", worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(10), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", CreatedAt: time.Now().UTC()})
+	reopened := startWorld(t, dir, nil)
+	assertNoPayloads()
+	run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || string(run.Input) != `"run-input-bytes"` || string(run.Output) != `"run-output-bytes"` || run.Error != nil {
+		t.Fatalf("run = %#v err=%v", run, err)
+	}
+	step, err := reopened.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
+	if err != nil || string(step.Input) != `"step-input-bytes"` || string(step.Output) != `"step-output-bytes"` || step.Error != nil || step.Attempt != 2 {
+		t.Fatalf("step = %#v err=%v", step, err)
+	}
+	hook, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
+	if err != nil || string(hook.Metadata) != `"hook-metadata-bytes"` {
+		t.Fatalf("hook = %#v err=%v", hook, err)
+	}
+	stripped, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone})
+	if err != nil || stripped.Metadata != nil {
+		t.Fatalf("ResolveDataNone hook = %#v err=%v", stripped, err)
 	}
 }
 
