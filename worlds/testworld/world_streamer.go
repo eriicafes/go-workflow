@@ -169,7 +169,10 @@ func (m *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 		return worlds.StreamChunksResult{}, err
 	}
 	if input.Cursor != "" {
-		start, _ = strconv.Atoi(input.Cursor)
+		start = 0
+		if value, err := strconv.Atoi(input.Cursor); err == nil && value > 0 {
+			start = value
+		}
 	}
 	deadline := time.Now().Add(input.Wait)
 	timer := time.NewTimer(input.Wait)

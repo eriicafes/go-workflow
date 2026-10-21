@@ -37,9 +37,12 @@ type World interface {
   transition rules and append in one atomic operation. A batch is
   all-or-nothing. This is what makes duplicate deliveries safe.
 - **Idempotent repeats.** An event that repeats an admitted transition, such as
-  a second `run_started`, returns the earlier event with
-  `AllocatedEventCount` zero instead of appending. A `step_started` for a
-  running step is not a repeat: it appends a new attempt.
+  a second `run_started`, `step_created`, or `hook_disposed`, returns the
+  earlier event with `AllocatedEventCount` zero instead of appending. A
+  `step_started` for a running step is not a repeat: it appends a new attempt.
+- **Step results need a running step.** Refuse `step_completed`, `step_failed`,
+  and `step_retrying` with `ErrStepNotStartable` unless the step is running,
+  and `hook_disposed` with `ErrHookNotActive` unless the hook belongs to the run.
 - **Exclusive hook tokens.** `EventsCreate(hook_created)` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run.

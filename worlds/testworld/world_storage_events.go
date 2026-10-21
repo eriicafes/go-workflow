@@ -272,6 +272,27 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		}
 	}
 
+	switch requested.EventType {
+	case worlds.EventTypeStepCreated:
+		if _, exists := m.steps[runID][worlds.StepID(requested.CorrelationID)]; exists {
+			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+		}
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		if m.steps[runID][worlds.StepID(requested.CorrelationID)].Status != worlds.StatusRunning {
+			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+		}
+	case worlds.EventTypeHookDisposed:
+		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
+		if !exists || hook.RunID != runID {
+			return worlds.EventResult{}, false, worlds.ErrHookNotActive
+		}
+		if hook.DisposedAt != nil {
+			if earlier := m.lastResultLocked(runID, requested.EventType, requested.CorrelationID); earlier.EventID != "" {
+				return earlier, true, nil
+			}
+		}
+	}
+
 	if requested.EventType == worlds.EventTypeWaitCompleted {
 		for _, event := range m.events[runID] {
 			if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == requested.CorrelationID {
@@ -354,7 +375,7 @@ func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string) []wor
 		}
 	} else if cursor != "" {
 		if slot, err := worlds.EventSlot(worlds.EventID(cursor)); err == nil {
-			start = int(slot)
+			start = min(int(slot), len(log))
 		}
 	}
 	result := make([]worlds.Event, 0, len(log)-start)
@@ -513,14 +534,11 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		}
 	}
 	values = worlds.ResolveEvents(values, input.ResolveData)
-	if input.Pagination.SortOrder == worlds.SortOrderDescending {
-		return page(values, input.Pagination), nil
-	}
 	return eventPage(values, input.Pagination), nil
 }
 
 func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData})
+	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData, Pagination: worlds.Pagination{SortOrder: input.Pagination.SortOrder}})
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
@@ -530,7 +548,7 @@ func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 			filtered = append(filtered, event)
 		}
 	}
-	return page(filtered, input.Pagination), nil
+	return eventPage(filtered, input.Pagination), nil
 }
 
 func (m *World) analyticsRunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
@@ -592,15 +610,21 @@ func (m *World) analyticsAttributesList(ctx context.Context, input worlds.Analyt
 	return page(values, input.Pagination), nil
 }
 
+// eventPage pages events listed in pagination's order. The cursor is the
+// last event ID of the previous page.
 func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[worlds.Event] {
 	start := 0
 	if pagination.Cursor != "" {
-		if slot, err := worlds.EventSlot(worlds.EventID(pagination.Cursor)); err == nil {
-			start = int(slot)
+		if cursor, err := worlds.EventSlot(worlds.EventID(pagination.Cursor)); err == nil {
+			descending := pagination.SortOrder == worlds.SortOrderDescending
+			for start < len(values) {
+				slot, _ := worlds.EventSlot(values[start].EventID)
+				if descending && slot < cursor || !descending && slot > cursor {
+					break
+				}
+				start++
+			}
 		}
-	}
-	if start > len(values) {
-		start = len(values)
 	}
 	limit := pagination.Limit
 	if limit <= 0 {

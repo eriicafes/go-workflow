@@ -21,7 +21,7 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 	if !found {
 		return worlds.Step{}, worlds.ErrStepNotFound
 	}
-	return stripStep(stepFromItem(item).Step, input.ResolveData), nil
+	return w.resolveStep(ctx, stepFromItem(item), input.ResolveData)
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
@@ -29,17 +29,23 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
-	var steps []worlds.Step
+	var views []stepView
 	err := w.query(ctx, &dynamodb.QueryInput{
 		KeyConditionExpression:    awsv2.String("pk = :pk AND begins_with(sk, :prefix)"),
 		ExpressionAttributeValues: map[string]ddb.AttributeValue{":pk": avs(runPartitionKey(string(input.RunID))), ":prefix": avs("STEP#")},
 		ConsistentRead:            awsv2.Bool(true),
 	}, func(item map[string]ddb.AttributeValue) bool {
-		steps = append(steps, stripStep(stepFromItem(item).Step, input.ResolveData))
+		views = append(views, stepFromItem(item))
 		return true
 	})
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
+	}
+	steps := make([]worlds.Step, len(views))
+	for index, view := range views {
+		if steps[index], err = w.resolveStep(ctx, view, input.ResolveData); err != nil {
+			return worlds.Page[worlds.Step]{}, err
+		}
 	}
 	sortKey := func(step worlds.Step) string { return indexSortKey(step.CreatedAt, string(step.StepID)) }
 	sort.Slice(steps, func(i, j int) bool { return sortKey(steps[i]) < sortKey(steps[j]) })

@@ -247,10 +247,10 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 	if a.run.Status.Terminal() {
 		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
 			step, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
-			if err != nil {
+			if err != nil && !errors.Is(err, worlds.ErrStepNotFound) {
 				return nil, err
 			}
-			if step.Status == worlds.StatusRunning {
+			if err == nil && step.Status == worlds.StatusRunning {
 				return nil, nil
 			}
 		}
@@ -264,7 +264,20 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if a.run.Status == worlds.StatusRunning {
 			return a.replay(ctx, event.EventType, "", true)
 		}
-	case worlds.EventTypeStepStarted:
+	case worlds.EventTypeStepCreated:
+		step, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
+		if errors.Is(err, worlds.ErrStepNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		result, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
+		if err == nil {
+			result.Step = &step
+		}
+		return result, err
+	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		var status worlds.Status
 		err := a.tx.QueryRow(ctx, `SELECT status FROM go_workflow_steps WHERE run_id = $1 AND step_id = $2`, a.run.RunID, event.CorrelationID).Scan(&status)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -279,13 +292,8 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			if status != worlds.StatusPending && status != worlds.StatusRunning {
 				return nil, worlds.ErrStepNotStartable
 			}
-		} else {
-			if status == worlds.StatusCancelled {
-				return a.replay(ctx, event.EventType, event.CorrelationID, true)
-			}
-			if status.Terminal() {
-				return nil, worlds.ErrStepNotStartable
-			}
+		} else if status != worlds.StatusRunning {
+			return nil, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
 		result, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
@@ -319,6 +327,21 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return nil, worlds.ErrHookNotActive
 		}
 
+	case worlds.EventTypeHookDisposed:
+		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID))
+		if err != nil {
+			return nil, err
+		}
+		if !found || hook.RunID != a.run.RunID {
+			return nil, worlds.ErrHookNotActive
+		}
+		if hook.DisposedAt != nil {
+			result, err := a.replay(ctx, event.EventType, event.CorrelationID, true)
+			if err != nil || result.EventID != "" {
+				return result, err
+			}
+		}
+
 	case worlds.EventTypeHookCreated:
 		var created worlds.DataHookCreated
 		if json.Unmarshal(event.Data, &created) != nil {
@@ -336,15 +359,14 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 }
 
 // replay finds the latest (or, when latest is false, the earliest) event of
-// eventType, matching correlationID when it is set. A missing event yields
-// an empty result.
+// eventType for correlationID. A missing event yields an empty result.
 func (a *appender) replay(ctx context.Context, eventType worlds.EventType, correlationID string, latest bool) (*worlds.EventResult, error) {
 	direction := "ASC"
 	if latest {
 		direction = "DESC"
 	}
 	var slot int64
-	err := a.tx.QueryRow(ctx, `SELECT slot FROM go_workflow_events WHERE run_id = $1 AND type = $2 AND ($3 = '' OR correlation_id = $3)
+	err := a.tx.QueryRow(ctx, `SELECT slot FROM go_workflow_events WHERE run_id = $1 AND type = $2 AND correlation_id = $3
 		ORDER BY slot `+direction+` LIMIT 1`, a.run.RunID, eventType, correlationID).Scan(&slot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &worlds.EventResult{}, nil

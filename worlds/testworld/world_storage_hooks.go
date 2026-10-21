@@ -51,6 +51,11 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		}
 		values = append(values, hook)
 	}
-	sort.Slice(values, func(i, j int) bool { return values[i].CreatedAt.Before(values[j].CreatedAt) })
+	sort.Slice(values, func(i, j int) bool {
+		if !values[i].CreatedAt.Equal(values[j].CreatedAt) {
+			return values[i].CreatedAt.Before(values[j].CreatedAt)
+		}
+		return values[i].HookID < values[j].HookID
+	})
 	return page(values, input.Pagination), nil
 }

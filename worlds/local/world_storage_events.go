@@ -139,8 +139,34 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
 			return "", worlds.ErrStepNotStartable
 		}
+	case worlds.EventTypeStepCreated:
+		step, err := t.step(worlds.StepID(event.CorrelationID))
+		if err != nil || step == nil {
+			return "", err
+		}
+		return t.findEvent(worlds.EventTypeStepCreated, event.CorrelationID)
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		step, err := t.step(worlds.StepID(event.CorrelationID))
+		if err != nil {
+			return "", err
+		}
+		if step == nil || step.Status != worlds.StatusRunning {
+			return "", worlds.ErrStepNotStartable
+		}
 	case worlds.EventTypeWaitCompleted:
-		return t.findWaitCompleted(event.CorrelationID)
+		return t.findEvent(worlds.EventTypeWaitCompleted, event.CorrelationID)
+
+	case worlds.EventTypeHookDisposed:
+		hook, err := t.hook(worlds.HookID(event.CorrelationID))
+		if err != nil {
+			return "", err
+		}
+		if hook == nil || hook.RunID != t.run.RunID {
+			return "", worlds.ErrHookNotActive
+		}
+		if hook.DisposedAt != nil {
+			return t.findEvent(worlds.EventTypeHookDisposed, event.CorrelationID)
+		}
 
 	case worlds.EventTypeHookReceived:
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
@@ -184,9 +210,11 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 	return "", nil
 }
 
-func (t *txn) findWaitCompleted(correlationID string) (worlds.EventID, error) {
+// findEvent returns the ID of the run's earlier eventType event for
+// correlationID, or "" when it has none.
+func (t *txn) findEvent(eventType worlds.EventType, correlationID string) (worlds.EventID, error) {
 	for _, event := range t.appended {
-		if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == correlationID {
+		if event.EventType == eventType && event.CorrelationID == correlationID {
 			return event.EventID, nil
 		}
 	}
@@ -195,7 +223,7 @@ func (t *txn) findWaitCompleted(correlationID string) (worlds.EventID, error) {
 		return "", err
 	}
 	for _, event := range committed {
-		if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == correlationID {
+		if event.EventType == eventType && event.CorrelationID == correlationID {
 			return event.EventID, nil
 		}
 	}
@@ -560,7 +588,14 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if replay != "" {
-		return worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}, nil
+		result := worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}
+		if input.Event.EventType == worlds.EventTypeStepCreated {
+			if step, err := t.step(worlds.StepID(input.Event.CorrelationID)); err == nil && step != nil {
+				value := cloneStep(step.Step, worlds.ResolveDataAll)
+				result.Step = &value
+			}
+		}
+		return result, nil
 	}
 	event, err := t.append(input.Event, now)
 	if err != nil {

@@ -37,6 +37,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		attributes = map[string]string{}
 	}
 	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Input: input.Input, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	view.refs.set("input", 1, input.Input)
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
 	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
 	if conditional(err) {
@@ -202,24 +203,8 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		if err != nil {
 			return err
 		}
-		if token.cur.expired(tx.now) {
-			token.cur = nil
-		}
-
-		if token.cur != nil {
-			owner, err := tx.run(ctx, token.cur.runID)
-			if err != nil {
-				return err
-			}
-			if owner.view.Status.Terminal() {
-				entry, err := tx.hook(ctx, token.cur.hookID)
-				if err != nil {
-					return err
-				}
-				if entry.hook == nil || entry.hook.TokenRetentionUntil == nil || !entry.hook.TokenRetentionUntil.After(tx.now) {
-					token.cur = nil
-				}
-			}
+		if err := tx.releaseLapsed(ctx, token); err != nil {
+			return err
 		}
 		if token.cur != nil {
 			previous := *token.cur
@@ -445,6 +430,9 @@ type stepEntry struct {
 type hookEntry struct {
 	hook  *worlds.Hook
 	dirty bool
+	// disposedEventID is the hook's hook_disposed event, which a repeated
+	// disposal returns.
+	disposedEventID worlds.EventID
 }
 
 type tokenEntry struct {
@@ -542,6 +530,7 @@ func (tx *appendTx) load(ctx context.Context, keys []map[string]ddb.AttributeVal
 					return err
 				}
 				entry.hook = &hook
+				entry.disposedEventID = worlds.EventID(read(item, "disposedEventId"))
 			}
 			tx.hooks[id] = entry
 		case strings.HasPrefix(pk, "TOKEN#"):
@@ -611,6 +600,33 @@ func (tx *appendTx) wait(ctx context.Context, runID worlds.RunID, correlationID 
 	return tx.waits[itemID(key)], nil
 }
 
+// releaseLapsed clears token's owner when the owning run is gone, or has
+// finished and its hook's token retention has lapsed.
+func (tx *appendTx) releaseLapsed(ctx context.Context, token *tokenEntry) error {
+	if token.cur.expired(tx.now) {
+		token.cur = nil
+	}
+	if token.cur == nil {
+		return nil
+	}
+	owner, err := tx.run(ctx, token.cur.runID)
+	if errors.Is(err, worlds.ErrRunNotFound) || err == nil && owner == nil {
+		token.cur = nil
+		return nil
+	}
+	if err != nil || !owner.view.Status.Terminal() {
+		return err
+	}
+	entry, err := tx.hook(ctx, token.cur.hookID)
+	if err != nil {
+		return err
+	}
+	if entry.hook == nil || entry.hook.TokenRetentionUntil == nil || !entry.hook.TokenRetentionUntil.After(tx.now) {
+		token.cur = nil
+	}
+	return nil
+}
+
 // owns reports whether hook currently holds its token.
 func (tx *appendTx) owns(ctx context.Context, hook *worlds.Hook) (*tokenEntry, bool, error) {
 	if hook.Token == "" {
@@ -649,6 +665,18 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if run.view.Status == worlds.StatusRunning {
 			return replay(run.view.startedEventID), nil
 		}
+	case worlds.EventTypeStepCreated:
+		entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
+		if err != nil {
+			return nil, err
+		}
+		// Steps recorded before createdEventId was stored are overwritten.
+		if entry.view != nil && entry.view.createdEventID != "" {
+			result := replay(entry.view.createdEventID)
+			step := entry.view.Step
+			result.Step = &step
+			return result, nil
+		}
 	case worlds.EventTypeStepStarted:
 		entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
 		if err != nil {
@@ -660,6 +688,14 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		step := entry.view
 		// Redelivery of a running step records another attempt.
 		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
+			return nil, worlds.ErrStepNotStartable
+		}
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
+		if err != nil {
+			return nil, err
+		}
+		if entry.view == nil || entry.view.Status != worlds.StatusRunning {
 			return nil, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
@@ -698,6 +734,18 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			return nil, worlds.ErrHookNotActive
 		}
 
+	case worlds.EventTypeHookDisposed:
+		entry, err := tx.hook(ctx, worlds.HookID(requested.CorrelationID))
+		if err != nil {
+			return nil, err
+		}
+		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
+			return nil, worlds.ErrHookNotActive
+		}
+		if entry.hook.DisposedAt != nil && entry.disposedEventID != "" {
+			return replay(entry.disposedEventID), nil
+		}
+
 	case worlds.EventTypeHookCreated:
 		var created worlds.DataHookCreated
 		if json.Unmarshal(requested.Data, &created) == nil && created.Token != "" {
@@ -705,8 +753,8 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			if err != nil {
 				return nil, err
 			}
-			if token.cur.expired(tx.now) {
-				token.cur = nil
+			if err := tx.releaseLapsed(ctx, token); err != nil {
+				return nil, err
 			}
 			if token.cur != nil {
 				return nil, worlds.ErrHookConflict
@@ -740,8 +788,10 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		view.Status, view.StartedAt, view.startedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
 		view.Status, view.CompletedAt, view.Output = worlds.StatusCompleted, &now, worlds.DecodeRunCompleted(event.Data)
+		view.refs.set("output", slotOf(event), view.Output)
 	case worlds.EventTypeRunFailed:
 		view.Status, view.CompletedAt, view.Error = worlds.StatusFailed, &now, worlds.DecodeRunFailed(event.Data)
+		view.refs.set("error", slotOf(event), view.Error)
 	case worlds.EventTypeRunCancelled:
 		view.Status, view.CompletedAt, view.cancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:
@@ -771,7 +821,8 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if err != nil {
 			return err
 		}
-		entry.view = &stepView{Step: worlds.Step{RunID: run.view.RunID, StepID: worlds.StepID(event.CorrelationID), StepName: data.StepName, Status: worlds.StatusPending, Input: data.Input, CreatedAt: now, UpdatedAt: now}}
+		entry.view = &stepView{Step: worlds.Step{RunID: run.view.RunID, StepID: worlds.StepID(event.CorrelationID), StepName: data.StepName, Status: worlds.StatusPending, Input: data.Input, CreatedAt: now, UpdatedAt: now}, createdEventID: event.EventID}
+		entry.view.refs.set("input", slotOf(event), data.Input)
 		entry.dirty = true
 	case worlds.EventTypeStepStarted:
 		return tx.updateStep(ctx, event, worlds.StatusRunning)
@@ -818,7 +869,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if err != nil || entry.hook == nil {
 			return err
 		}
-		entry.dirty = true
+		entry.dirty, entry.disposedEventID = true, event.EventID
 		entry.hook.DisposedAt, entry.hook.UpdatedAt = &now, now
 		var disposed worlds.HookDisposedEventData
 		_ = json.Unmarshal(event.Data, &disposed)
@@ -869,8 +920,16 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 	var result worlds.DataStepResult
 	if json.Unmarshal(event.Data, &result) == nil {
 		step.Output, step.Error, step.RetryAfter = result.Result, result.Error, result.RetryAfter
+		step.refs.set("output", slotOf(event), step.Output)
+		step.refs.set("error", slotOf(event), step.Error)
 	}
 	return nil
+}
+
+// slotOf returns the log slot of an event this World assigned.
+func slotOf(event worlds.Event) uint64 {
+	slot, _ := worlds.EventSlot(event.EventID)
+	return slot
 }
 
 func (tx *appendTx) result(event worlds.Event, created bool) worlds.EventResult {
@@ -942,6 +1001,7 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			setString(item, "disposedEventId", string(entry.disposedEventID))
 			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: item}})
 		}
 	}

@@ -69,6 +69,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_b", nil)
 	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_b", worlds.DataStepResult{Error: encoded})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_b"})
 	if err != nil || step.Status != worlds.StatusFailed || string(step.Error) != string(encoded) || step.CompletedAt == nil {
@@ -107,4 +108,41 @@ func conformTerminalSteps(t *testing.T, world worlds.World) {
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_b"}})
 	conformExpect(t, err, worlds.ErrRunTerminal, "start after terminal run")
+}
+
+func conformStepAdmission(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "step_admission")
+	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
+	created := conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "first", Input: json.RawMessage(`"in"`)})
+
+	// A repeated step_created returns the earlier event and keeps the step.
+	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "second"})})
+	if err != nil || repeat.EventID != created.EventID || repeat.AllocatedEventCount != 0 || repeat.StepCreated || repeat.Step == nil || repeat.Step.StepName != "first" {
+		t.Fatalf("repeated step_created = %#v step=%#v err=%v", repeat, repeat.Step, err)
+	}
+
+	// Results need a running step.
+	for _, eventType := range []worlds.EventType{worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying} {
+		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, eventType, "step_a", worlds.DataStepResult{Error: json.RawMessage(`{"message":"x"}`)})})
+		conformExpect(t, err, worlds.ErrStepNotStartable, string(eventType)+" for a pending step")
+		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, eventType, "step_missing", nil)})
+		conformExpect(t, err, worlds.ErrStepNotStartable, string(eventType)+" for a missing step")
+	}
+
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Result: json.RawMessage(`"out"`)})
+	for _, eventType := range []worlds.EventType{worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying} {
+		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, eventType, "step_a", worlds.DataStepResult{Error: json.RawMessage(`{"message":"late"}`)})})
+		conformExpect(t, err, worlds.ErrStepNotStartable, string(eventType)+" for a completed step")
+	}
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
+	if err != nil || step.StepName != "first" || step.Status != worlds.StatusCompleted || string(step.Output) != `"out"` || step.Attempt != 1 {
+		t.Fatalf("step = %#v err=%v", step, err)
+	}
+
+	// On a terminal run, a result for a missing step reports the run.
+	conformAppend(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCompleted, "step_missing", nil)})
+	conformExpect(t, err, worlds.ErrRunTerminal, "result for a missing step of a terminal run")
 }

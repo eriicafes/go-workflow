@@ -51,11 +51,17 @@ func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 		}
 		values = append(values, run)
 	}
+	less := func(a, b worlds.Run) bool {
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.RunID < b.RunID
+	}
 	sort.Slice(values, func(i, j int) bool {
 		if input.Pagination.SortOrder == worlds.SortOrderDescending {
-			return values[i].CreatedAt.After(values[j].CreatedAt)
+			return less(values[j], values[i])
 		}
-		return values[i].CreatedAt.Before(values[j].CreatedAt)
+		return less(values[i], values[j])
 	})
 	return page(values, input.Pagination), nil
 }

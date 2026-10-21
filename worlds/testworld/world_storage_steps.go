@@ -36,6 +36,11 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 		}
 		values = append(values, step)
 	}
-	sort.Slice(values, func(i, j int) bool { return values[i].CreatedAt.Before(values[j].CreatedAt) })
+	sort.Slice(values, func(i, j int) bool {
+		if !values[i].CreatedAt.Equal(values[j].CreatedAt) {
+			return values[i].CreatedAt.Before(values[j].CreatedAt)
+		}
+		return values[i].StepID < values[j].StepID
+	})
 	return page(values, input.Pagination), nil
 }

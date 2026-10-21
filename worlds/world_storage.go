@@ -63,11 +63,14 @@ type StorageEvents interface {
 	// not allow the event, and ErrHookConflict when a hook_created token is
 	// taken.
 	//
+	// A step's step_completed, step_failed, or step_retrying needs the step to
+	// be running, and a hook_disposed needs a hook of the same run.
+	//
 	// An event that repeats an admitted transition, such as a second
-	// run_started, returns the earlier event with AllocatedEventCount zero
-	// instead of appending. A step_started for a running step is not a repeat.
-	// It appends a new attempt, so a delivery can take over a step whose
-	// previous delivery died.
+	// run_started, step_created, or hook_disposed, returns the earlier event
+	// with AllocatedEventCount zero instead of appending. A step_started for a
+	// running step is not a repeat. It appends a new attempt, so a delivery can
+	// take over a step whose previous delivery died.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	// EventsCreateBatch appends Events to a run in order, atomically. It appends
 	// none of them when any event is invalid or cannot be admitted.

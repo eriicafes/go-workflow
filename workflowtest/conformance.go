@@ -35,12 +35,14 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"RunsList", conformRunsList},
 		{"Steps", conformSteps},
 		{"TerminalSteps", conformTerminalSteps},
+		{"StepAdmission", conformStepAdmission},
 		{"Batch", conformBatch},
 		{"EventsList", conformEventsList},
 		{"Attributes", conformAttributes},
 		{"HookTokens", conformHookTokens},
 		{"HooksForce", conformHooksForce},
 		{"HooksRetention", conformHooksRetention},
+		{"HookDisposal", conformHookDisposal},
 		{"Webhooks", conformWebhooks},
 		{"Waits", conformWaits},
 		{"Streams", conformStreams},
@@ -147,11 +149,19 @@ func conformExpect(t *testing.T, err, want error, label string) {
 
 func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []worlds.Event {
 	t.Helper()
-	page, err := world.EventsList(context.Background(), worlds.EventsListInput{RunID: runID})
-	if err != nil {
-		t.Fatalf("EventsList: %v", err)
+	var events []worlds.Event
+	var cursor worlds.Pagination
+	for {
+		page, err := world.EventsList(context.Background(), worlds.EventsListInput{RunID: runID, Pagination: cursor})
+		if err != nil {
+			t.Fatalf("EventsList: %v", err)
+		}
+		events = append(events, page.Data...)
+		if !page.HasMore {
+			return events
+		}
+		cursor = worlds.Pagination{Cursor: page.Cursor}
 	}
-	return page.Data
 }
 
 func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) worlds.DataHookCreated {

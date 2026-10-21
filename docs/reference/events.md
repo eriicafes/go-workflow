@@ -107,13 +107,17 @@ rules atomically:
 - A step can only be started while pending or running (`ErrStepNotStartable`).
   Starting a running step appends a new attempt, so a delivery can take over a
   step whose previous delivery died.
+- A step's result (`step_completed`, `step_failed`, or `step_retrying`) is only
+  recorded while the step is running (`ErrStepNotStartable`).
+- `hook_disposed` only targets a hook of the same run (`ErrHookNotActive`).
 - A webhook's `hook_received` only targets an active webhook that still owns
   its token (`ErrHookNotActive`). A plain hook receives repeated payloads, consumed in order with `Next`.
 - A `hook_received` that carries a webhook's response is refused with
   `ErrHookNotActive` once that webhook has responded, because each webhook request has one response.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
 - An event that repeats an admitted transition, such as a second
-  `run_started`, returns the earlier event without appending.
+  `run_started`, `step_created`, or `hook_disposed`, returns the earlier event
+  without appending.
 - A flow's writes are in-band: each is fenced by the run's `InBandCount` and
   refused with `ErrInBandSuperseded` when another flow has written since. See
   [Concurrent flows](/guide/replay#concurrent-flows).

@@ -9,7 +9,10 @@ none of it.
 Repeated admitted lifecycle transitions return the existing event with
 `AllocatedEventCount == 0`. A `step_started` event for an already running step
 is a new attempt, not an idempotent repeat: another delivery may be taking over
-after a worker died. Apply the admission rules for each event type.
+after a worker died. A repeated `step_created` or `hook_disposed` is a repeat.
+Step results need a running step (`ErrStepNotStartable`), and `hook_disposed`
+needs a hook of the same run (`ErrHookNotActive`). Apply the admission rules
+for each event type.
 
 Preserve event order, correlation IDs, timestamps, pagination, ResolveData,
 and catch-up results. `EventsCreateOptions.EventCount` takes precedence over

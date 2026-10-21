@@ -2,6 +2,7 @@ package awsworld
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -181,7 +182,7 @@ func TestViewItems(t *testing.T) {
 	if _, ok := set["list_pk"]; ok {
 		t.Fatal("update rewrites index keys")
 	}
-	if strings.Join(remove, ",") != "error,startedAt,cancelledEventId" {
+	if strings.Join(remove, ",") != "outputRef,error,errorRef,startedAt,cancelledEventId" {
 		t.Fatalf("remove = %v", remove)
 	}
 	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), Webhook: &worlds.Webhook{Method: "POST", Manual: true}, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: &now}
@@ -203,5 +204,31 @@ func TestViewItems(t *testing.T) {
 	event := worlds.Event{RunID: "wrun_1", EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: []byte("{}"), CreatedAt: now}
 	if got := eventFromItem(eventItem(event, 4)); got.EventID != event.EventID || got.CorrelationID != "w" || string(got.Data) != "{}" || !got.CreatedAt.Equal(now) {
 		t.Fatalf("event = %#v", got)
+	}
+}
+
+func TestLargeDataIsReferencedFromItsEvent(t *testing.T) {
+	input := []byte(`"` + strings.Repeat("i", 150<<10) + `"`)
+	large := []byte(`"` + strings.Repeat("o", 300<<10) + `"`)
+	view := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Input: input, Output: large}}
+	view.refs.set("input", 2, view.Input)
+	view.refs.set("output", 5, view.Output)
+
+	item := stepItem(view)
+	if err := checkItemSize(item); err != nil {
+		t.Fatal(err)
+	}
+	if _, inline := item["input"]; !inline || readInt(item, "outputRef") != 5 {
+		t.Fatalf("item keeps input %v, outputRef %d; want input inline and output referenced", item["input"] != nil, readInt(item, "outputRef"))
+	}
+
+	// A reloaded view keeps the reference when it is rewritten.
+	back := stepFromItem(item)
+	if back.Output != nil || back.refs["output"] != 5 || readInt(stepItem(back), "outputRef") != 5 {
+		t.Fatalf("reloaded view = %#v refs=%v", back.Output, back.refs)
+	}
+	result, _ := json.Marshal(worlds.DataStepResult{Result: large})
+	if got := eventValue(worlds.Event{EventType: worlds.EventTypeStepCompleted, Data: result}, "output"); string(got) != string(large) {
+		t.Fatal("event value differs from the referenced output")
 	}
 }

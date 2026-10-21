@@ -142,10 +142,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 				}
 			}
 			if _, err := w.forceRelease(claimant, owner.HookID, worlds.HookID(input.Event.CorrelationID), now); err != nil {
-				if recoveryErr := w.recoverHandoff(); recoveryErr != nil {
-					w.broken = recoveryErr
-				}
-				return worlds.EventResult{}, err
+				return w.recoverClaim(input, err)
 			}
 		}
 	}
@@ -153,18 +150,12 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 
 	event, err := claimant.append(input.Event, now)
 	if err != nil {
-		if recoveryErr := w.recoverHandoff(); recoveryErr != nil {
-			w.broken = recoveryErr
-		}
-		return worlds.EventResult{}, err
+		return w.recoverClaim(input, err)
 	}
 	delta = append(delta, claimant.appended[:len(claimant.appended)-1]...)
 	claimant.advance(input.Options.InBandCount, len(claimant.appended))
 	if err := claimant.commit(); err != nil {
-		if recoveryErr := w.recoverHandoff(); recoveryErr != nil {
-			w.broken = recoveryErr
-		}
-		return worlds.EventResult{}, err
+		return w.recoverClaim(input, err)
 	}
 	if err := remove(w.root, "hook-handoff.json"); err != nil {
 		w.broken = err
@@ -174,6 +165,29 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	result = claimant.result(event, delta)
 	result.AllocatedEventCount = len(claimant.appended)
 	return result, nil
+}
+
+// recoverClaim completes an interrupted forced claim from its handoff record.
+// When recovery commits the claimant's hook_created, the claim succeeded and
+// its result is returned instead of cause.
+func (w *World) recoverClaim(input worlds.EventsCreateInput, cause error) (worlds.EventResult, error) {
+	if err := w.recoverHandoff(); err != nil {
+		w.broken = err
+		return worlds.EventResult{}, cause
+	}
+	claimant, err := w.begin(input.RunID)
+	if err != nil {
+		return worlds.EventResult{}, cause
+	}
+	id, err := claimant.findEvent(worlds.EventTypeHookCreated, input.Event.CorrelationID)
+	if err != nil || id == "" {
+		return worlds.EventResult{}, cause
+	}
+	hook, err := w.readHook(worlds.HookID(input.Event.CorrelationID))
+	if err != nil {
+		return worlds.EventResult{}, cause
+	}
+	return worlds.EventResult{EventID: id, EventType: worlds.EventTypeHookCreated, Hook: hook, AllocatedEventCount: 1, InBandCount: claimant.run.InBandCount}, nil
 }
 
 // forceRelease records hook_disposed, naming claimantHook in ForceClaimedBy,

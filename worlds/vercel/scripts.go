@@ -133,9 +133,24 @@ local function admit(c, d)
     return {err = 'run_terminal'}
   end
   if t == 'run_started' and status == 'running' then return {replay = last(c, t) or 0} end
+  if t == 'step_created' and step(c, corr) then
+    return {replay = last(c, lastField(t, corr)) or step(c, corr).slot or 0}
+  end
   if t == 'step_started' then
     local s = step(c, corr)
     if not s or (s.status ~= 'pending' and s.status ~= 'running') then return {err = 'step_not_startable'} end
+  end
+  if t == 'step_completed' or t == 'step_failed' or t == 'step_retrying' then
+    local s = step(c, corr)
+    if not s or s.status ~= 'running' then return {err = 'step_not_startable'} end
+  end
+  if t == 'hook_disposed' then
+    local h = hook(corr)
+    if not h or h.runId ~= c.id then return {err = 'hook_not_active'} end
+    if h.disposedAt then
+      local slot = last(c, lastField(t, corr))
+      if slot then return {replay = slot} end
+    end
   end
   if t == 'wait_completed' then
     local slot = last(c, lastField(t, corr))
@@ -254,7 +269,28 @@ local function delta(c)
   return start, redis.call('LRANGE', k('events', c.id), start, c.count - 1)
 end
 
+-- retainTokens releases the tokens of a run that became terminal, or expires
+-- them when their hook's retention lapses, so token keys do not outlive it.
+local function retainTokens(c)
+  if not terminal(c.run.status) or terminal(c.status0) then return end
+  local ids = redis.call('ZRANGE', k('runhooks', c.id), 0, -1)
+  for _, entry in ipairs(hooksNew) do
+    if entry[2] == c.id then table.insert(ids, entry[1]) end
+  end
+  for _, id in ipairs(ids) do
+    local h = hook(id)
+    if h and owner(h.token) == id then
+      if h.tokenRetentionUntil and tonumber(h.tokenRetentionUntil) > nowN then
+        tokenTTL[h.token] = id
+      else
+        setOwner(h.token, nil)
+      end
+    end
+  end
+end
+
 local function flush()
+  for _, c in pairs(contexts) do retainTokens(c) end
   for _, c in pairs(contexts) do
     if #c.records > 0 then
       rpush(k('events', c.id), c.records)
@@ -289,7 +325,7 @@ local function flush()
   for token, id in pairs(tokenTTL) do
     local h = hooks[id]
     if tokens[token] == id and h and h.tokenRetentionUntil then
-      redis.call('PEXPIRE', k('token', token), math.ceil(tonumber(h.retentionUs) / 1000) + 60000)
+      redis.call('PEXPIRE', k('token', token), math.ceil((tonumber(h.tokenRetentionUntil) - nowN) / 1000))
     end
   end
 end

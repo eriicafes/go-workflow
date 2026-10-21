@@ -23,7 +23,7 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 	if !found {
 		return worlds.Run{}, worlds.ErrRunNotFound
 	}
-	return stripRun(runFromItem(item).Run, input.ResolveData), nil
+	return w.resolveRun(ctx, runFromItem(item), input.ResolveData)
 }
 
 // RunsList reads a global secondary index, which is eventually consistent. A
@@ -39,7 +39,9 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	}
 	runs := make([]worlds.Run, len(items))
 	for index, item := range items {
-		runs[index] = stripRun(runFromItem(item).Run, input.ResolveData)
+		if runs[index], err = w.resolveRun(ctx, runFromItem(item), input.ResolveData); err != nil {
+			return worlds.Page[worlds.Run]{}, err
+		}
 	}
 	return worlds.Page[worlds.Run]{Data: runs, Cursor: cursor, HasMore: more}, nil
 }

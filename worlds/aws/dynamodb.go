@@ -41,6 +41,8 @@ const (
 	maxItemBytes = 400 << 10
 	// maxTransactItems is DynamoDB's TransactWriteItems action limit.
 	maxTransactItems = 100
+	// maxTransactBytes is DynamoDB's TransactWriteItems size limit.
+	maxTransactBytes = 4 << 20
 )
 
 // CreateTable creates the DynamoDB table name in the layout World expects, with
@@ -142,12 +144,20 @@ func (w *World) transact(ctx context.Context, items []ddb.TransactWriteItem) err
 	if len(items) > maxTransactItems {
 		return fmt.Errorf("%w: %d transaction items, over the limit of %d", errWriteTooLarge, len(items), maxTransactItems)
 	}
+	size := 0
 	for _, item := range items {
 		if item.Put != nil {
 			if err := checkItemSize(item.Put.Item); err != nil {
 				return err
 			}
+			size += itemSize(item.Put.Item)
 		}
+		if item.Update != nil {
+			size += itemSize(item.Update.ExpressionAttributeValues)
+		}
+	}
+	if size > maxTransactBytes {
+		return fmt.Errorf("%w: transaction is %d bytes, over the 4 MB transaction limit", errWriteTooLarge, size)
 	}
 	_, err := w.dynamo.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
 	return err

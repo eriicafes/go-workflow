@@ -233,3 +233,45 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: automatic})
 	conformExpect(t, err, worlds.ErrHookNotFound, "automatic hook after request")
 }
+
+func conformHookDisposal(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "hook_disposal")
+	other := conformCreateRun(t, world, "hook_disposal_other")
+	token := fmt.Sprintf("dispose-%d", time.Now().UnixNano())
+	if _, err := conformClaim(world, runID, "hook_a", token, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: other, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
+	conformExpect(t, err, worlds.ErrHookNotActive, "dispose another run's hook")
+	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token}); err != nil || owner.HookID != "hook_a" {
+		t.Fatalf("token owner = %#v err=%v", owner, err)
+	}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_missing", nil)})
+	conformExpect(t, err, worlds.ErrHookNotActive, "dispose a missing hook")
+	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_missing"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "hook after disposing a missing hook")
+
+	disposed := conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
+	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
+	if err != nil || repeat.EventID != disposed.EventID || repeat.AllocatedEventCount != 0 {
+		t.Fatalf("repeated hook_disposed = %#v err=%v", repeat, err)
+	}
+
+	// Disposing a hook that lost its token to a forced claim keeps the claim.
+	forced := token + "-forced"
+	if _, err := conformClaim(world, runID, "hook_f", forced, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conformClaim(world, other, "hook_g", forced, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_f", nil)}); err != nil {
+		t.Fatalf("dispose a force-claimed hook: %v", err)
+	}
+	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_f"})
+	if err != nil || hook.DisposedAt == nil || hook.ForceClaimedBy == nil || hook.ForceClaimedBy.HookID != "hook_g" {
+		t.Fatalf("force-claimed hook = %#v err=%v", hook, err)
+	}
+}

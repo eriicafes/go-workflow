@@ -45,10 +45,25 @@ func (w *World) deliver(id string, input worlds.QueueInput) {
 		case <-timer.C:
 		}
 	}
-	if w.runtime.Execute(w.ctx, input) == nil {
-		_ = w.QueueCancel(w.ctx, worlds.QueueCancelInput{MessageID: id})
+	// A failed delivery is retried a few times, as a real queue redelivers it.
+	for attempt := range deliveryAttempts {
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt) * 10 * time.Millisecond)
+			select {
+			case <-w.ctx.Done():
+				return
+			case <-timer.C:
+			}
+		}
+		if w.runtime.Execute(w.ctx, input) == nil {
+			_ = w.QueueCancel(w.ctx, worlds.QueueCancelInput{MessageID: id})
+			return
+		}
 	}
 }
+
+// deliveryAttempts is how often an automatic World executes a delivery.
+const deliveryAttempts = 3
 
 func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
 	if err := ctx.Err(); err != nil {

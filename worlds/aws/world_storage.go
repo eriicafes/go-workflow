@@ -22,11 +22,14 @@ type runView struct {
 	eventCount       int
 	startedEventID   worlds.EventID
 	cancelledEventID worlds.EventID
+	refs             dataRefs
 }
 
 // stepView is a STEP# item.
 type stepView struct {
 	worlds.Step
+	createdEventID worlds.EventID
+	refs           dataRefs
 }
 
 // tokenView is a TOKEN# item. It holds the hook owning a token and, once the
@@ -153,14 +156,12 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 		"list_group_pk": avs("RUNS#" + run.WorkflowName),
 		"list_group_sk": avs(indexSortKey(run.CreatedAt, string(run.RunID))),
 	})
-	setBytes(item, "input", run.Input)
-	setBytes(item, "output", run.Output)
-	setBytes(item, "error", run.Error)
 	setTime(item, "startedAt", run.StartedAt)
 	setTime(item, "completedAt", run.CompletedAt)
 	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
+	storeData(item, map[string][]byte{"input": run.Input, "output": run.Output, "error": run.Error}, view.refs)
 	return item
 }
 
@@ -190,6 +191,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 		eventCount:       int(readInt(item, "eventCount")),
 		startedEventID:   worlds.EventID(read(item, "startedEventId")),
 		cancelledEventID: worlds.EventID(read(item, "cancelledEventId")),
+		refs:             readRefs(item),
 	}
 }
 
@@ -198,10 +200,10 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // update leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "input", "inputRef", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
-	for _, name := range []string{"output", "error", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
+	for _, name := range []string{"output", "outputRef", "error", "errorRef", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
 		if _, ok := item[name]; !ok {
 			remove = append(remove, name)
 		}
@@ -220,12 +222,11 @@ func stepItem(view stepView) map[string]ddb.AttributeValue {
 		"createdAt": avs(stamp(step.CreatedAt)),
 		"updatedAt": avs(stamp(step.UpdatedAt)),
 	})
-	setBytes(item, "input", step.Input)
-	setBytes(item, "output", step.Output)
-	setBytes(item, "error", step.Error)
 	setTime(item, "startedAt", step.StartedAt)
 	setTime(item, "completedAt", step.CompletedAt)
 	setTime(item, "retryAfter", step.RetryAfter)
+	setString(item, "createdEventId", string(view.createdEventID))
+	storeData(item, map[string][]byte{"input": step.Input, "output": step.Output, "error": step.Error}, view.refs)
 	return item
 }
 
@@ -246,6 +247,8 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			CompletedAt: readTimePtr(item, "completedAt"),
 			RetryAfter:  readTimePtr(item, "retryAfter"),
 		},
+		createdEventID: worlds.EventID(read(item, "createdEventId")),
+		refs:           readRefs(item),
 	}
 }
 
