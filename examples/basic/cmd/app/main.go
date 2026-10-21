@@ -7,10 +7,12 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/flows"
@@ -94,11 +96,77 @@ func routes() *http.ServeMux {
 		if !ok {
 			return
 		}
+		data.Reviewing = data.Running
 		if data.output != nil {
-			data.Report = &data.output.Report
+			data.Draft = data.output.Draft
 			data.Location = data.output.Location
+			data.Reviews = data.output.Reviews
 		}
 		render(w, "run", data.page)
+	})
+	mux.HandleFunc("GET /runs/{id}/progress", func(w http.ResponseWriter, r *http.Request) {
+		// startIndex resumes from a chunk; a negative value reads the last
+		// chunks.
+		startIndex := 0
+		if value := r.URL.Query().Get("startIndex"); value != "" {
+			index, err := strconv.Atoi(value)
+			if err != nil {
+				http.Error(w, "invalid startIndex", http.StatusBadRequest)
+				return
+			}
+			startIndex = index
+		}
+		run, err := workflow.Get[any](r.Context(), r.PathValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		reader, err := run.Reader(r.Context(), workflow.ReaderOption{Name: workflows.ProgressStream, StartIndex: startIndex})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Relay each write as it arrives until the run closes the stream.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		flusher, _ := w.(http.Flusher)
+		for {
+			chunk, err := reader.Next()
+			if err != nil {
+				return
+			}
+			if _, err := w.Write(chunk.Data); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	})
+	mux.HandleFunc("POST /runs/{id}/review", func(w http.ResponseWriter, r *http.Request) {
+		runID := r.PathValue("id")
+		review := workflows.Review{
+			Reviewer: r.PostFormValue("reviewer"),
+			Approved: r.PostFormValue("decision") == "approve",
+			Comment:  r.PostFormValue("comment"),
+		}
+		if !review.Approved && review.Comment == "" {
+			http.Error(w, "a comment is required to request changes", http.StatusBadRequest)
+			return
+		}
+
+		err := workflow.ResumeHook(r.Context(), workflows.ReviewToken(runID), review)
+		if errors.Is(err, workflow.ErrHookNotFound) {
+			http.Error(w, "this run is not waiting for a review", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			http.Error(w, "send review: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		http.Redirect(w, r, "/reports/publish/"+url.PathEscape(runID), http.StatusSeeOther)
 	})
 	mux.HandleFunc("POST /reports", func(w http.ResponseWriter, r *http.Request) {
 		input := workflows.GenerateReport{Topic: r.PostFormValue("topic")}

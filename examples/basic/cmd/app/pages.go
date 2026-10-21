@@ -24,16 +24,19 @@ func parsePage(name string) *template.Template {
 	return template.Must(template.ParseFS(templateFiles, "templates/layout.html", name))
 }
 
-// page is the data every template renders. Refresh reloads a page whose run
-// has not finished.
+// page is the data every template renders. Running is set while the run has
+// not finished, so the page follows its progress stream.
 type page struct {
-	Title    string
-	RunID    string
-	Status   workflow.Status
-	Report   *workflows.GenerateReportResult
-	Location string
-	Error    string
-	Refresh  bool
+	Title     string
+	RunID     string
+	Status    workflow.Status
+	Report    *workflows.GenerateReportResult
+	Draft     string
+	Location  string
+	Reviews   []workflows.Review
+	Reviewing bool
+	Error     string
+	Running   bool
 }
 
 func render(w http.ResponseWriter, name string, data page) {
@@ -67,7 +70,7 @@ func runPage[Out any](w http.ResponseWriter, r *http.Request, title string) (run
 		return data, false
 	}
 	if !data.Status.Terminal() {
-		data.Refresh = true
+		data.Running = true
 		return data, true
 	}
 	output, err := run.Value(r.Context())

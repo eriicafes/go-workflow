@@ -3,7 +3,6 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	{{if .Refresh}}<meta http-equiv="refresh" content="1">{{end}}
 	<title>{{.Title}}</title>
 	<style>
 		:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
@@ -15,6 +14,9 @@
 		dt { font-weight: 600; }
 		dd { margin: 0; overflow-wrap: anywhere; }
 		.error { color: #c62828; }
+		pre { padding: .75rem; min-height: 3rem; white-space: pre-wrap; border: 1px solid #8884; border-radius: 4px; }
+		form.review { flex-direction: column; }
+		textarea { min-height: 4rem; padding: .4rem .6rem; font: inherit; }
 	</style>
 </head>
 <body>

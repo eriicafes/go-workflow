@@ -7,5 +7,57 @@
 	{{with .Location}}<dt>Location</dt><dd>{{.}}</dd>{{end}}
 </dl>
 {{with .Error}}<p class="error">{{.}}</p>{{end}}
-{{if .Refresh}}<p>Refreshing until the run finishes…</p>{{end}}
+
+<h2>Progress</h2>
+<pre id="progress" data-src="/runs/{{.RunID}}/progress" data-running="{{.Running}}"></pre>
+
+{{if .Reviewing}}
+<h2>Review</h2>
+<p>Read the draft as it streams above, then approve it or request changes.</p>
+<form class="review" method="post" action="/runs/{{.RunID}}/review">
+	<input name="reviewer" placeholder="Your name">
+	<textarea name="comment" placeholder="Requested changes"></textarea>
+	<div>
+		<button name="decision" value="approve">Approve</button>
+		<button name="decision" value="changes">Request changes</button>
+	</div>
+</form>
+{{end}}
+
+{{with .Report}}
+<h2>Sections</h2>
+{{range .Sections}}<h3>{{.Title}}</h3><p>{{.Body}}</p>{{end}}
+<h2>Sources</h2>
+<ul>
+	{{range .Sources}}<li>{{.Title}} <small>({{.URL}})</small></li>{{end}}
+</ul>
+{{end}}
+
+{{with .Draft}}
+<h2>Published draft</h2>
+<pre>{{.}}</pre>
+{{end}}
+
+{{with .Reviews}}
+<h2>Reviews</h2>
+<ul>
+	{{range .}}<li>{{or .Reviewer "reviewer"}}: {{if .Approved}}approved{{else}}requested changes, {{.Comment}}{{end}}</li>{{end}}
+</ul>
+{{end}}
+
+<script>
+	// Follow the progress stream; once a running run closes it, reload to show
+	// the outcome.
+	(async () => {
+		const log = document.getElementById("progress");
+		const response = await fetch(log.dataset.src);
+		const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			log.textContent += value;
+		}
+		if (log.dataset.running === "true") location.reload();
+	})();
+</script>
 {{end}}
