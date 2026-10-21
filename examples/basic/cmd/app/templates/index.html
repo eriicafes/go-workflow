@@ -1,0 +1,15 @@
+{{define "content"}}
+<h1>Reports</h1>
+
+<h2>Create a report</h2>
+<form method="post" action="/reports">
+	<input name="topic" placeholder="Topic" required>
+	<button>Create</button>
+</form>
+
+<h2>Publish a report</h2>
+<form method="post" action="/reports/publish">
+	<input name="topic" placeholder="Topic" required>
+	<button>Publish</button>
+</form>
+{{end}}

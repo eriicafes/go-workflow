@@ -1,0 +1,24 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	{{if .Refresh}}<meta http-equiv="refresh" content="1">{{end}}
+	<title>{{.Title}}</title>
+	<style>
+		:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+		body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+		form { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+		input { flex: 1; padding: .4rem .6rem; font: inherit; }
+		button { padding: .4rem .9rem; font: inherit; cursor: pointer; }
+		dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+		dt { font-weight: 600; }
+		dd { margin: 0; overflow-wrap: anywhere; }
+		.error { color: #c62828; }
+	</style>
+</head>
+<body>
+	<p><a href="/">Reports</a></p>
+	{{template "content" .}}
+</body>
+</html>{{end}}

@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -66,21 +66,18 @@ func startWorkflow(
 	request := httptest.NewRequest(
 		http.MethodPost,
 		path,
-		strings.NewReader(`{"topic":"durable workflows"}`),
+		strings.NewReader(url.Values{"topic": {"durable workflows"}}.Encode()),
 	)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusAccepted, recorder.Body)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusSeeOther, recorder.Body)
 	}
-	var response struct {
-		RunID string `json:"runId"`
+	location := recorder.Header().Get("Location")
+	runID, ok := strings.CutPrefix(location, path+"/")
+	if !ok || runID == "" {
+		t.Fatalf("redirect location = %q, want %s/{runID}", location, path)
 	}
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatal(err)
-	}
-	if response.RunID == "" {
-		t.Fatal("response did not include a run ID")
-	}
-	return response.RunID
+	return runID
 }

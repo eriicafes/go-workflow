@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>{{.Title}}</h1>
+<dl>
+	<dt>Run</dt><dd>{{.RunID}}</dd>
+	<dt>Status</dt><dd>{{.Status}}</dd>
+	{{with .Report}}<dt>Summary</dt><dd>{{.Summary}}</dd>{{end}}
+	{{with .Location}}<dt>Location</dt><dd>{{.}}</dd>{{end}}
+</dl>
+{{with .Error}}<p class="error">{{.}}</p>{{end}}
+{{if .Refresh}}<p>Refreshing until the run finishes…</p>{{end}}
+{{end}}
