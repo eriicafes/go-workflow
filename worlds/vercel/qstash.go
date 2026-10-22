@@ -22,7 +22,7 @@ const (
 	qstashLeeway    = 30 * time.Second
 )
 
-// QStashConfig configures QStash to deliver work due more than seven days
+// QStashConfig configures QStash to deliver work due more than six days
 // ahead, beyond the Vercel Queues delay limit. QStash holds such a delivery
 // until it is due, then calls <Config.BaseURL>/callbacks/qstash, which
 // HTTP(world) serves with a signature check, and that route publishes it to

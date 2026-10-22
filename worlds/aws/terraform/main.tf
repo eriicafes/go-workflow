@@ -169,7 +169,7 @@ data "aws_iam_policy_document" "worker" {
 
   statement {
     sid       = "Queue"
-    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
     resources = [aws_sqs_queue.tasks.arn]
   }
 

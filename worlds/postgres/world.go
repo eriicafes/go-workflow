@@ -1,7 +1,7 @@
 // Package postgresworld implements a World on PostgreSQL, for production
 // deployments where any number of application and worker processes share one
 // database. Deliveries are rows in the database, executed by workers run with
-// Start.
+// Worker.
 package postgresworld
 
 import (

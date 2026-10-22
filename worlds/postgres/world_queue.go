@@ -135,7 +135,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 	})
 }
 
-// work is the Start loop. It claims as many due rows as there are free slots,
+// work is the Worker loop. It claims as many due rows as there are free slots,
 // executes each in its own goroutine, and sleeps until a notification, a free
 // slot, or PollInterval.
 func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
