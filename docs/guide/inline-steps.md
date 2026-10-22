@@ -60,9 +60,10 @@ if err != nil {
 }
 ```
 
-A failed attempt suspends the run. A later flow delivery starts the next
-attempt when its retry is due. Retries never run back to back in one delivery.
-After retries run out, the caller receives a `*workflow.Error`.
+A failed attempt that can retry suspends the run. A later flow delivery
+starts the next attempt when its retry is due. Retries never run back to back
+in one delivery. After retries run out, or on a fatal error, the caller
+receives a `*workflow.Error`.
 
 ## Replay behavior
 
@@ -70,9 +71,9 @@ An inline step records `step_created`, followed by `step_started` and the
 attempt's outcome. Storage failures retry the delivery. The
 [event reference](/reference/events) describes the recorded events.
 
-`workflow.Now` uses an inline step with one attempt. Run methods also use
-inline steps when called in workflow context, so their reads and changes are
-preserved across replay. See [Starting and Reading Runs](/guide/runs#in-workflow-context).
+`workflow.Now` uses an inline step with one attempt. Most `Run` methods also
+use inline steps when called in workflow context, so their reads and changes
+are preserved across replay. See [Starting and Reading Runs](/guide/runs#in-workflow-context).
 
 A step delivery cannot execute an unsettled inline step while replaying toward
 its target. It suspends until a flow delivery records the outcome. Inside a

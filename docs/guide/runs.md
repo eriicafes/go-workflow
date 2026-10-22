@@ -68,7 +68,7 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | Method | Description |
 | --- | --- |
 | `ID` | Run ID. |
-| `Value` | Output once the run finishes. Blocks outside a run until it finishes or `ctx` is done. |
+| `Value` | Output once the run finishes. Blocks outside workflow context until it finishes or `ctx` is done. |
 | `Status` | Current `Status`. |
 | `Exists` | Whether the run is recorded in its World. |
 | `WorkflowName` | Name of the workflow the run executes. |
@@ -97,13 +97,13 @@ a fatal failure.
 
 ### In workflow context
 
-Inside a runner, `Status`, `Exists`, `WorkflowName`, `Value`, `Cancel`,
-and `WakeUp` each run once as an [inline step](/guide/inline-steps), and
-replay returns the recorded result. They never wait: `Value` returns
-`workflow.ErrRunNotFinished` for a run that hadn't finished. `WakeUp` records
-which waits it will wake before waking them, so a retry never wakes a timer the
-other run created later. `Reader` and `Writer` are I/O and return
-`workflow.ErrNotInStep` there. Use them in a step.
+Inside a runner, methods that read or change the run use
+[inline steps](/guide/inline-steps), and replay returns the recorded result.
+They never wait: `Value` returns `workflow.ErrRunNotFinished` for a run that
+hadn't finished. `WakeUp` records which waits it will wake in one inline step
+before waking them in another, so a retry never wakes a timer the other run
+created later. The exceptions are `Reader` and `Writer`, which are I/O and
+return `workflow.ErrNotInStep` there. Use them in a step.
 
 ## Cancelling a run
 

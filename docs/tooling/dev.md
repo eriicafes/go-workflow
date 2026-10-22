@@ -19,7 +19,8 @@ workflowdev.Web("http://localhost:8080/v1/workflow")
 ```
 
 The web UI needs the Workflow SDK CLI and the go-workflow World adapter,
-installed in the directory go-dev runs from:
+installed where the command runs: the parent command's `Dir`, or the directory
+go-dev runs from when `Dir` is empty:
 
 ```sh
 npm install --save-dev workflow @eriicafes/go-workflow

@@ -1,7 +1,7 @@
 # Workflow Analyzer
 
-The `check` package provides a static analyzer that reports runners that cannot
-replay deterministically and calls that misuse the workflow API. The
+The `check` package provides a static analyzer that reports runner code that
+breaks deterministic replay and calls that misuse the workflow API. The
 `workflowcheck` command runs it as a `go vet` tool.
 
 ## Install and run
@@ -24,7 +24,7 @@ Every function passed to `workflow.Use` must be a valid runner.
 | Diagnostic | Cause |
 | --- | --- |
 | `workflow.Use requires one workflow function` | `Use` called with the wrong number of arguments. |
-| `workflow.Use requires a named package-level workflow function` | A closure or method value passed to `Use`. |
+| `workflow.Use requires a named package-level workflow function` | A closure or function variable passed to `Use`. |
 | `workflow function must be func(context.Context, NamedInput) (Output, error)` | Wrong runner signature. |
 | `workflow input must be a named package type` | Input is not a named type. |
 | `<Input> must declare Workflow(<Output>)` | Input type has no matching `Workflow` method. |
@@ -39,7 +39,7 @@ Every function passed to `workflow.Use` must be a valid runner.
 | `workflow body calls time.Now, use workflow.Now instead` | Use [`workflow.Now`](/guide/sleep#reading-the-time). Also reported for `time.Since` and `time.Until`. |
 | `workflow body calls time.Sleep, use workflow.Sleep instead` | Use [`workflow.Sleep`](/guide/sleep). Also reported for `time.After`, `time.AfterFunc`, `time.Tick`, `time.NewTimer`, and `time.NewTicker`. |
 | `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O and randomness into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, `crypto/rand`, `math/rand`, `math/rand/v2`, and packages whose path contains `uuid`. |
-| `workflow stream access and webhook responses require a durable step` | Move [stream](/guide/streams) access into a step. |
+| `workflow stream access and webhook responses require a durable step` | Move [stream](/guide/streams) access and `RespondWith` calls into a step. |
 
 The analyzer also rejects the `context` package's cancellation and deadline
 constructors in workflow bodies. Use [durable cancellation](/guide/cancellation)

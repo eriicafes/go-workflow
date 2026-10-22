@@ -50,7 +50,8 @@ payload from event data, such as `worlds.DecodeRunCompleted`,
 such as `worlds.EncodeRunFailed`, `worlds.EncodeHookReceived`, and
 `worlds.EncodeAttrSet`.
 
-Payload fields are `json.RawMessage`. An error is embedded as a JSON object
+Payload fields are `json.RawMessage`, except a hook's `metadata`, which is
+`[]byte`. An error is embedded as a JSON object
 containing its message and recorded chain. `worlds.DecodeError` decodes the
 bytes in an `error` field or the materialized `Run.Error` and `Step.Error`
 fields.
@@ -110,8 +111,9 @@ rules atomically:
 - A step's result (`step_completed`, `step_failed`, or `step_retrying`) is only
   recorded while the step is running (`ErrStepNotStartable`).
 - `hook_disposed` only targets a hook of the same run (`ErrHookNotActive`).
-- A webhook's `hook_received` only targets an active webhook that still owns
-  its token (`ErrHookNotActive`). A plain hook receives repeated payloads, consumed in order with `Next`.
+- `hook_received` only targets an active hook of the same run that still owns
+  its token (`ErrHookNotActive`, or `ErrHookForceClaimed` after a forced claim).
+  A webhook accepts one request. A plain hook receives repeated payloads, consumed in order with `Next`.
 - A `hook_received` that carries a webhook's response is refused with
   `ErrHookNotActive` once that webhook has responded, because each webhook request has one response.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
@@ -126,7 +128,7 @@ Managed cancellation records its cause as hook payload data and uses a stream fo
 
 ## A sample run
 
-A run of `GenerateReport` that calls one step:
+A run of a workflow that calls one step:
 
 | Slot | Type | Correlation |
 | --- | --- | --- |

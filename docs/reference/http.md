@@ -26,7 +26,8 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   { method: string, input: <cbor>, specVersion?: int }
   ```
 
-- **Response:** always `200` with `Content-Type: application/cbor`:
+- **Response:** `200` with `Content-Type: application/cbor`, including when the
+  method fails:
 
   ```
   { output?: <cbor>, error?: { code: string, message: string, sentinel?: string } }

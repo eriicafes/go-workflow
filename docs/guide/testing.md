@@ -95,8 +95,8 @@ func TestMonthly(t *testing.T) {
 ```
 
 `time.Now` in steps and in the test reads the same fake clock, so you can assert
-on durations. `WithTimeout`, `WithDeadline`, `Timer`, and `RetryableError` delays behave the same
-way.
+on durations. Other durable delays, such as timeouts and retry delays, behave
+the same way.
 
 To check what a run does at a point in time, sleep the test itself. The fake
 clock advances only as far as you ask:

@@ -36,7 +36,7 @@ it.
 Omit `WriterOption` to write the run's default stream.
 
 ::: tip Streams are I/O
-Streams can only be used in step context. `Writer` and `Reader` return
+Inside a run, streams can only be used in step context. `Writer` and `Reader` return
 `ErrNotInStep` in workflow context and `ErrNoWorkflow` outside a run. The
 [analyzer](/tooling/analyzer) reports stream access outside steps.
 :::

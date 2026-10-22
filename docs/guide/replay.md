@@ -19,8 +19,9 @@ either a flow or a step of one run.
   returns, the flow records `run_completed` or `run_failed`.
 - A **step delivery** replays the runner up to the target step, calls the step
   function with its recorded input, and records the result with
-  `step_completed`, `step_retrying`, or `step_failed`. A new flow delivery is
-  then queued so the runner can continue.
+  `step_completed`, `step_retrying`, or `step_failed`. It then queues a flow
+  delivery so the runner can continue, or, after `step_retrying`, a step
+  delivery for the next attempt.
 
 ```
 Start ──► run_created ──► flow delivery
@@ -40,7 +41,7 @@ Start ──► run_created ──► flow delivery
 Whether a delivery may run is decided by appending events, which the World
 admits or rejects atomically. Duplicate and stale deliveries are therefore
 safe: a delivery for a run or step that is already terminal returns without
-running any code. A delivery that dies before recording its result is
+running runner or step code. A delivery that dies before recording its result is
 redelivered by the queue and runs the step again as a new attempt.
 
 ### Concurrent flows
@@ -54,7 +55,7 @@ since, the World refuses the write with `worlds.ErrInBandSuperseded`. The refuse
 stops and queues one follow-up flow, which replays the run and sees the other
 flow's declarations. Flows refused by the same write share one
 follow-up on a World that deduplicates deliveries. Writes from step deliveries, hook resumes, `WakeUp`, and
-cancellation are out-of-band: they are never refused and don't move the count.
+cancellation are out-of-band: they are never fenced and don't move the count.
 
 ## Identifying operations
 
@@ -66,8 +67,8 @@ that the runner reaches a matching operation there.
 
 Replay walks the event log in order, and a result (a step finishing, a timer
 firing, a hook receiving its payload) becomes visible to the runner only once
-the walk has passed it. The walk advances only where the runner waits: `Value`, `Next`,
-`Join`, `JoinOk`, and the `Select` functions. So:
+the walk has passed it. The walk advances only where the runner waits on a
+promise. So:
 
 - **`Select` picks the first promise to settle.** When several promises have
   settled, the one whose result was recorded first wins, not the first in
@@ -78,9 +79,10 @@ the walk has passed it. The walk advances only where the runner waits: `Value`, 
   `WithDeadline` attach a `Then` continuation that cancels their context when
   the timer settles.
 
-Inline steps (`InlineStep`, `Now`, and the `Run` methods in workflow context)
-and hook conflicts are the exception: the runner sees them where it declares
-them, because the flow that declares them also settles them.
+[Inline steps](/guide/inline-steps) are the exception: the runner sees them where it declares them,
+because the flow that declares them also settles them. `GetConflict` likewise
+returns a hook conflict as soon as it is called, but `Next` and `Select`
+see it only when the walk reaches it.
 
 This matches how the Workflow SDK consumes its event log, where a promise
 resolves when the walk reaches its result.
@@ -140,7 +142,7 @@ context must make the same decisions every time.
 - **Pass state to steps as input.** A step function that captures variables
   from the runner hides its real input from the recorded log.
 
-The [analyzer](/tooling/analyzer) reports violations of these rules.
+The [analyzer](/tooling/analyzer) reports common violations of these rules.
 
 ::: warning Suspension uses panics
 When a runner awaits a promise that has not settled, the runtime ends the
@@ -170,8 +172,8 @@ let existing runs finish on the old runner.
 On a World with **deployment affinity**, each run is pinned to the deployment
 that started it, and only that deployment's code ever replays it. The Vercel
 World has affinity: Vercel keeps every deployment reachable, and its queue can
-address a delivery to a specific one. Other Worlds deliver to whichever worker
-consumes their queue, so they record a run's deployment but don't enforce it.
+address a delivery to a specific one. The other built-in Worlds have no
+deployment ID and deliver to whichever worker consumes their queue.
 
 How it works:
 

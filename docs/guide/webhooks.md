@@ -47,8 +47,11 @@ accepts any request method.
 | Configuration | Response |
 | --- | --- |
 | default | `202 Accepted` |
-| `Response` | Static response, then endpoint deactivation. |
+| `Response` | Static response. |
 | `Manual: true` | Waits for the receiving step's recorded response. |
+
+Each webhook accepts one request. The endpoint deactivates once the request
+is recorded, or with `Manual`, once its response is recorded.
 
 Request and static response bodies are limited to 128 KiB. See
 [HTTP Endpoints](/reference/http#webhooks) for response codes and failure cases.
@@ -111,4 +114,4 @@ Dispose it when the endpoint is no longer needed.
 Anyone with a webhook URL can resume it. Treat the URL as a bearer capability and verify the provider's signature, timestamp, and replay protection before trusting the payload.
 :::
 
-Every World exports `Webhook(world)` to expose only the webhook endpoint while keeping RPC private.
+Every World except the test World exports `Webhook(world)` to expose only the webhook endpoint while keeping RPC private.

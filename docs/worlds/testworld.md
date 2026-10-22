@@ -11,7 +11,8 @@ processes and is not meant for production. Its base URL is
 ## Automatic delivery
 
 `testworld.New` executes deliveries in-process, each in its own goroutine once
-it is due.
+it is due. A failing delivery is tried at most three times and then left
+queued.
 
 ```go
 world := testworld.New(

@@ -46,9 +46,9 @@ How matching works:
 
 `worlds.FatalError` and `worlds.RetryableError` are plain Go error wrappers.
 Durable steps inspect them before encoding the result and record the retry
-time separately. `worlds.Error` records their type markers and underlying
-error chain through its normal encoding. Inspect persisted causes on
-`worlds.Error`. Wrapper `Cause` fields are not reconstructed after replay.
+time separately. `worlds.Error` records them in its chain like other errors, so `errors.As`
+still matches them after replay and rebuilds their `Cause` from the rest of
+the recorded chain.
 
 ## Step retries
 
@@ -116,16 +116,16 @@ retrying with different input or taking another branch.
 
 | Error | Returned when |
 | --- | --- |
-| `workflow.ErrNoClient` | `Start`, `Get`, `GetHook`, or `ResumeHook` is called with no Client in the context and outside a run. |
-| `workflow.ErrNoWorkflow` | A workflow-context function such as `Step`, `Join`, or `Hook.Next` is called outside workflow context (including in step context), a hook created outside workflow context is used, or a stream function is called outside a run. |
+| `workflow.ErrNoClient` | A function that needs a Client, such as `Start`, is called with no Client in the context and outside a run. |
+| `workflow.ErrNoWorkflow` | A workflow-context function such as `Step` is called outside workflow context (including in step context), a hook created outside workflow context is used, or a stream function is called outside a run. |
 | `workflow.ErrNotInStep` | A function that does I/O, such as `Writer` or `Run.Reader`, is called in workflow context. |
 | `workflow.ErrRunCancelled` | Reading a cancelled run. Running steps keep their contexts unless they use an explicitly cancelled context. |
 | `workflow.ErrResumeNotQueued` | `ResumeHook` recorded the payload but could not queue its run. Don't resend the payload. |
-| `workflow.ErrNilResult` | A nil `*Result` is returned from a `Then` callback or passed to `Select`. |
-| `workflow.ErrRunNotFinished` | `Run.Value` inside a run, when the awaited run had not finished. |
+| `workflow.ErrNilResult` | A nil `*Result` is returned from a `Then` callback or awaited. |
+| `workflow.ErrRunNotFinished` | `Run.Value` in workflow context, when the awaited run had not finished. |
 | `workflow.ErrHookNotFound` | Resuming a token that no active hook has. |
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
-| `workflow.ErrHookConflict` | Creating a hook whose token another active hook already has. |
+| `workflow.ErrHookConflict` | Receiving or selecting a hook whose token another active hook already has. The token is claimed on first use, not at creation. |
 | `workflow.ErrHookForceClaimed` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
 | `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log. See [Replay divergence](/guide/replay#replay-divergence). |
 

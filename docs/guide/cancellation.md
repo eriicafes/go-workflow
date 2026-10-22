@@ -73,9 +73,10 @@ with `workflow.FatalError`, even if the step body returns nil after
 cancellation. Pending timers using the context also fail with a fatal
 cancellation error. The runner can handle these errors and continue.
 
-A step can request cancellation through `workflow.CancelFunc(ctx)`. When a
-controller is available, it cancels that managed context, including other work
-sharing it:
+A step can request cancellation through `workflow.CancelFunc(ctx)`. It reports
+a controller when the step's context comes from a constructor such as
+`WithCancel`, but not from `CancelAny`. The controller cancels that managed
+context, so the calling step and other work sharing it are cancelled:
 
 ```go
 cancel, ok := workflow.CancelFunc(ctx)
@@ -177,7 +178,7 @@ Timeouts use durable [timers](/guide/sleep#timers). Waking their timers with
 
 ## Combining contexts
 
-Use `workflow.CancelAny` when work should stop if either of two managed
+Use `workflow.CancelAny` when work should stop if any of several managed
 contexts is cancelled:
 
 ```go

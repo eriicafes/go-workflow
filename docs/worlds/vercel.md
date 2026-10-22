@@ -54,7 +54,8 @@ Give the consumer a `queue/v2beta` trigger for the topic:
 ```
 
 When the code that starts workflows has the World in process, pass it to
-`workflow.NewClient`. This setup needs no HTTP function.
+`workflow.NewClient`. The HTTP function is then needed only for webhooks, the
+QStash callback, or clients in other processes.
 
 ## Configuration
 
@@ -69,7 +70,7 @@ When the code that starts workflows has the World in process, pass it to
 | `Prefix` | Redis key prefix. Default `go-workflow`. |
 | `QStash` | Optional long-timer configuration. |
 | `HTTPClient` | Client for Redis REST, Vercel Queues, and QStash. Default `http.DefaultClient`. |
-| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them and always delivered there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
+| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
 
 `New` does not contact Redis or Vercel. `Close` closes the Redis TCP pool and
 does nothing with the REST transport.
@@ -78,9 +79,9 @@ Vercel rotates OIDC tokens, so `OIDCToken` is called for every Queues request.
 `vercelworld.OIDCTokenFromEnv(name)` reads the environment variable `name` on
 each call. The default reads `VERCEL_OIDC_TOKEN`.
 
-When `VERCEL_DEPLOYMENT_ID` is set, Queues requests send it as
-`Vqs-Deployment-Id`, so push deliveries return to the deployment that
-published them.
+When a deployment ID is set, Queues requests send `Vqs-Deployment-Id`. A
+delivery is published to its run's deployment, or to this World's when the run
+has none.
 
 ## Entry points
 
@@ -154,7 +155,7 @@ Cluster. Upstash regional and global databases are fine.
 Binary payloads are stored as base64 so every value is valid UTF-8 for the REST
 API. Event data is parsed in Go, and only the fields admission needs are passed
 to Lua. `RunsWaitForTerminalStatus` and `StreamsGetChunks` poll with a backoff
-from 50 ms to 500 ms, because REST has no blocking reads.
+from 50 ms to 500 ms on both transports.
 
 ## Queue delivery
 

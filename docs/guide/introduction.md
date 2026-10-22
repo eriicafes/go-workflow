@@ -33,8 +33,8 @@ A run executes in one of two contexts, as in the Workflow SDK.
 
 Because the runner replays on every delivery, it must be **deterministic**: it
 does side effects only through steps and reads time only through
-`workflow.Now`. The [analyzer](/tooling/analyzer) reports runners that break
-these rules. [How Replay Works](/guide/replay) explains the model in detail.
+`workflow.Now`. The [analyzer](/tooling/analyzer) reports common ways runners
+break these rules. [How Replay Works](/guide/replay) explains the model in detail.
 
 ## What you get
 
@@ -46,9 +46,10 @@ these rules. [How Replay Works](/guide/replay) explains the model in detail.
 - [Cancellation](/guide/cancellation) to stop work manually or set a timeout.
 - **Hooks and webhooks** that suspend a run until an external event or HTTP
   request resumes it with a typed payload.
-- **Streams** of bytes that steps write and readers consume while the run is
-  still going.
-- **Rollbacks**: deferred compensations that run in Go's defer order when a run fails.
+- **Streams** of bytes that steps or outside code write and readers consume
+  while the run is still going.
+- **Rollbacks**: compensations that run in registration order when a run fails,
+  so deferred ones run in reverse.
 - **Typed errors** that survive replay, so `errors.Is` and `errors.As` work on a
   failed step or run.
 - **Child runs** and direct composition of runners.

@@ -19,11 +19,11 @@ hero:
 features:
   - icon: 🌍
     title: Run anywhere, no lock-in
-    details: Pick a World for local files, PostgreSQL, Redis with Vercel Queues, or DynamoDB with SQS. Runs sleep for weeks without holding a process, and your workflows stay the same on every World.
+    details: Pick a World for local files, PostgreSQL, Redis with Vercel Queues, or DynamoDB with SQS. Runs sleep without holding a process, and your workflows stay the same on every World.
   - icon: 🖥️
     title: Inspect every run
     details: Runs follow the Workflow SDK's event model, so its web UI shows every Go run, step, hook, and stream.
   - icon: 🛡️
     title: Catch replay bugs early
-    details: The workflowcheck vet tool flags goroutines, select, map iteration, time.Now, and I/O outside steps before they reach production.
+    details: The workflowcheck vet tool flags goroutines, select, map iteration, time.Now, and common I/O calls in runners before they reach production.
 ---

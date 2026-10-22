@@ -145,5 +145,5 @@ go test -race ./worlds/postgres/...
 ```
 
 The tests use `DATABASE_URL`, defaulting to
-`postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`. Each test
-creates and drops its own schema.
+`postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`. Each
+database test creates and drops its own schema.

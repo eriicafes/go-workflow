@@ -44,12 +44,12 @@ client := workflow.NewClient(world)
   left by the previous process, and begins delivering every persisted queue
   item. It returns `ErrInUse` when another World, in this or another process,
   holds the directory. Cancelling `ctx` stops delivery.
-- **Every other method requires a prepared World.** Methods return
-  `ErrNotPrepared` before `Prepare` and `ErrClosed` after `Close`.
+- **Methods that read or write data require a prepared World.**
+  They return `ErrNotPrepared` before `Prepare` and `ErrClosed` after `Close`.
 - **`Close()`** stops delivery, waits for in-flight deliveries, releases the
   lock, and closes a directory opened by `Open`. Interrupted deliveries stay
   queued and run again after the next `Prepare`.
-- **`Clear(ctx)`** stops delivery, removes all persisted state while holding the
+- **`Clear(ctx)`** requires a prepared World. It stops delivery, removes all persisted state while holding the
   lock, writes a fresh `version.json`, and closes the World. Open a new World to
   continue.
 
@@ -91,8 +91,8 @@ files.
 
 ## Durability
 
-Every file is written to a temporary sibling, fsynced, renamed into place, and
-its directory is synced. Reads reject malformed records and unknown fields.
+Every record is written to a temporary sibling, fsynced, renamed into place,
+and its directory is synced where the file system supports it. Reads reject malformed records and unknown fields.
 
 Each append writes its event files first, then the step, hook, and token files
 it changes, and finally `runs/<run>.json` with the new `eventCount`. That run

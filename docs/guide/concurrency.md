@@ -140,7 +140,7 @@ if err := group.Wait(ctx); err != nil {
 return Output{Profile: profile.Unwrap(ctx), Orders: orders.Unwrap(ctx)}, nil
 ```
 
-Groups start observing members when first inspected by Wait, Select, or Join.
+Groups start observing members when first awaited.
 After that, the first member failure cancels `groupCtx`, including when the
 runner is waiting on other work. Steps must observe their context to stop.
 Wait returns the first failure after every member settles and cancels the
@@ -230,9 +230,12 @@ immediate result cannot win before the callback ran.
 
 ## Cancelling remaining work
 
-`Select` and `JoinOk` leave other inputs running. To stop them, start the work
-with a shared cancellation context and cancel it after the wait. See
-[Cancellation](/guide/cancellation#cancelling-work) for a complete race example.
+Waiting on work does not cancel it. Only `All` and an ErrGroup from
+`ErrGroupWithContext` cancel for you: `All` cancels its remaining steps when
+one fails, and the ErrGroup cancels its context on the first observed failure
+or when `Wait` returns.
 
-`All` already cancels remaining steps when one fails. In either case, steps
-must observe their context to stop cooperatively.
+To stop other work, start it with a shared cancellation context and cancel it
+after the wait. See [Cancellation](/guide/cancellation#cancelling-work) for a
+complete race example. Steps must observe their context to stop
+cooperatively.

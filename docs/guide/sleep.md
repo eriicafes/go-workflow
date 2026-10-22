@@ -101,7 +101,7 @@ natively, and handles longer timers differently:
 | --- | --- | --- |
 | Local | none | in-process timer heap |
 | Postgres | none | rows with `not_before` |
-| Vercel | 7 days | set `Config.QStash` |
+| Vercel | 6 days | set `Config.QStash` |
 | AWS | 15 minutes | set `Config.Scheduler` (EventBridge Scheduler) |
 
 Without the optional component, queueing a delivery beyond the limit returns an

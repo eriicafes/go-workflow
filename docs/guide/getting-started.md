@@ -9,7 +9,7 @@ runs as JSON files and needs no database or worker.
 go get github.com/eriicafes/go-workflow
 ```
 
-go-workflow requires Go 1.25 or later.
+go-workflow requires Go 1.25.4 or later.
 
 ## 1. Define a workflow
 
@@ -185,4 +185,5 @@ go vet -vettool=$(which workflowcheck) ./...
 - Split your [application and worker](/guide/deployment) and pick a
   production [World](/worlds/).
 - Browse [`examples/basic`](https://github.com/eriicafes/go-workflow/tree/main/examples/basic),
-  a full application with a worker for each World.
+  a full application that uses the local World in development and has a worker
+  for each production World.

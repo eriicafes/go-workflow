@@ -27,8 +27,9 @@ builds one from a JSON function, for runners written without the `workflow`
 package.
 
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
-flow. With `StepID` set it executes that step. A delivery for a terminal run or
-step returns nil without running code. A non-nil error means the delivery
+flow. With `StepID` set it executes that step. A delivery for a terminal run
+returns nil without running code, and one for a terminal step queues the flow
+that consumes its result instead of running the step. A non-nil error means the delivery
 should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
 `NewClientContext`, so a run never uses a Client it inherited.
 
@@ -45,8 +46,8 @@ the run fails with an error matching `ErrDeploymentMismatch`. See
 [Pinning runs to a deployment](/guide/replay#pinning-runs-to-a-deployment).
 
 A flow whose write another flow superseded (`ErrInBandSuperseded`) queues one
-follow-up flow delivery right away and acknowledges its own. Flows refused by
-the same write share that follow-up. See
+follow-up flow delivery right away and acknowledges its own. On a World that
+deduplicates, flows refused by the same write share that follow-up. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
 A storage error while declaring a step, timer, or hook, or while cancelling a
@@ -57,7 +58,7 @@ When a flow replays past a step's declaration, it queues the step's delivery
 again if the step hasn't started since it was declared or last scheduled for a
 retry, in case a crash or queue error lost the first one. This covers steps
 started with `Background` that nothing awaits. The re-queue uses the step ID as
-its idempotency key. A step waiting for a retry that isn't due yet is
+its idempotency key, or the retry's key for a step scheduled for a retry. A step waiting for a retry that isn't due yet is
 left alone until its queued retry is due. Once that time has passed
 without a start, it is re-queued like any unstarted step. Steps declared in the
 same replay are skipped, and inline steps never need it. If the re-queue fails,
@@ -69,7 +70,8 @@ steps on replay the same way.
 
 Timers settle the same way: a flow that replays past a timer's declaration
 once it is due completes it. `WithTimeout` and `WithDeadline` use normal timers
-and continuations to cancel contexts. Timer events carry no run cancellation flag.
+and continuations to cancel contexts. Cancelling those contexts affects the
+steps and timers that use them, not the run.
 
 ## World
 
@@ -99,8 +101,8 @@ are successful no-ops, and `Analytics` returns nil.
 execute, or `""`. Runs created through the World's Client record it on
 `Run.DeploymentID`. With `DeploymentAffinity`, the Runtime also enforces it:
 deliveries are addressed to the run's deployment through
-`QueueInput.DeploymentID`, and misdelivered ones are re-routed. Only the Vercel
-World reports affinity.
+`QueueInput.DeploymentID`, and misdelivered ones are re-routed. Of the built-in Worlds, only Vercel reports
+affinity, and only when it has a deployment ID.
 
 ## Storage
 
@@ -247,7 +249,7 @@ methods are shared with the World:
 | `StepsGet`, `StepsList` | Read steps. |
 | `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
 | `StreamsCreateWriteSession` | Open an exclusive writer session. |
-| `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID or active token. |
+| `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID, or by the token of an active or retained hook. |
 | `Analytics` | As on World. |
 
 The rest are the Client's own:
@@ -329,10 +331,11 @@ to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 | `ErrStepNotStartable` | Step transition not allowed. |
 | `ErrEventNotFound` | No event (or wait) has the ID. |
 | `ErrEventInvalid` | Malformed event, ID, or cursor, or an item over a backend limit. |
-| `ErrHookNotFound` | No hook has the ID, or no active hook has the token. |
+| `ErrHookNotFound` | No hook has the ID, or no hook owns the token. |
 | `ErrHookNotActive` | The hook was resolved, disposed, or lost its token. |
 | `ErrHookConflict` | Another active hook owns the token. |
-| `ErrHookForceClaimed` | Another run took the token with `Force`. |
+| `ErrHookForceClaimed` | Another hook took the token with `Force`. |
+| `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
 | `ErrStreamLocked` | Stream write conflicts with its writer session. |
 | `ErrQueueMessageNotFound` | `QueueCancel` with an unknown message. |
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |

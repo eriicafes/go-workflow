@@ -123,11 +123,12 @@ See [Vercel](/worlds/vercel) and [AWS](/worlds/aws).
 
 ## Deploying runner changes
 
-Runs replay against the runner code that handles each delivery. Changing what
-a runner does, or the order it does it in, can break runs that are already in
-flight: the runtime detects the divergence and fails those runs with a
-`worlds.ErrCorruptedEventLog`. Add a new workflow type for incompatible
-changes. On Vercel, runs are pinned to the deployment that started them and
+Runs replay against the runner code that handles each delivery. Changing which
+steps, hooks, or waits a runner reaches, or their order, can break runs that
+are already in flight: when a replay no longer matches the recorded events, the
+runtime fails the run with `worlds.ErrCorruptedEventLog`. Other changes are not
+detected, and runs in flight continue with the new code. Add a new workflow
+type for incompatible changes. On Vercel, runs are pinned to the deployment that started them and
 keep replaying its code, so keep old deployments until their runs finish. See
 [Pinning runs to a deployment](/guide/replay#pinning-runs-to-a-deployment).
 
@@ -138,5 +139,6 @@ keep replaying its code, so keep old deployments until their runs finish. See
   who may start each workflow and read each run.
 - Webhook URLs are bearer capabilities. Serve `Webhook(world)` publicly if you
   need webhooks, and verify provider signatures in the workflow.
-- Queue consumers (`vercelworld.Queue`, `awsworld.Queue`, `postgresworld.Worker`)
-  must only be reachable by the queue infrastructure.
+- Queue consumers (`vercelworld.Queue`, `awsworld.Queue`) must only be
+  reachable by the queue infrastructure. `postgresworld.Worker` serves no
+  endpoint; it reads deliveries from the database.

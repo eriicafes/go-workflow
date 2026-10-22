@@ -2,7 +2,7 @@
 
 `@eriicafes/go-workflow/world-http` exposes a Go World served by
 `HTTP(world)` as a [Workflow SDK](https://workflow-sdk.dev) `World` in
-JavaScript. It sends every operation to the handler's CBOR
+JavaScript. It sends its operations to the handler's CBOR
 [RPC endpoint](/reference/http#rpc) and uses bounded polling for stream chunks.
 
 Most projects never import it: the [web UI](/tooling/web-ui) loads it for you

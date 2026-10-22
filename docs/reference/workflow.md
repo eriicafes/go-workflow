@@ -96,19 +96,20 @@ func Then[T, U any](ctx context.Context, source *Result[T], fn func(T, error) *R
 | Function | Context | Description |
 | --- | --- | --- |
 | `Join` | W | Waits for all settlement, ignoring operation failures. |
-| `JoinOk` | W | Waits for all successes. Returns the first recorded failure without cancelling other inputs. |
+| `JoinOk` | W | Waits for all successes. Returns the first recorded failure. |
 | `Select` | W | First settlement and its error, in recorded order. |
-| `SelectOk` | W | First success, or a nil winner if all fail. |
+| `SelectOk` | W | First success, or a nil winner and the first failed input's error if all fail. |
 | `NewResult` | W, S, O | Creates an already-settled result. Reading it requires workflow context. |
-| `Then` | W | Follows the callback's returned result without waiting inside the callback. |
+| `Then` | W | Runs the callback after `source` settles and follows the result it returns. Return pending work instead of waiting inside the callback. |
 
 An empty join succeeds. An empty selection returns a nil winner and no error.
+None of these functions cancel inputs they stop waiting for.
 
 ## Groups
 
 WaitGroup and ErrGroup wait for all members. Their zero values are ready to
 use. WaitGroup ignores operation failures; ErrGroup returns the first recorded
-failure. Groups begin observing members on their first Wait, Select, or Join.
+failure. Groups begin observing members when first awaited.
 Completed groups ignore new work: Add does nothing and Go returns nil without
 starting a step.
 
@@ -172,8 +173,8 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 | Function | Context | Description |
 | --- | --- | --- |
 | `Now` | W | Recorded current time in UTC. |
-| `Sleep` | W | Suspends the run for `d`. |
-| `Timer` | W | Promise that settles after `d`. |
+| `Sleep` | W | Suspends the run for `duration`. |
+| `Timer` | W | Promise that settles after `duration`. |
 
 ## Runs
 
@@ -204,7 +205,7 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.Writ
 | Method | Description |
 | --- | --- |
 | `ID` | Run ID. |
-| `Value` | Output once finished. Blocks outside a run. Returns `ErrRunNotFinished` inside one. |
+| `Value` | Output once finished. Blocks in step context and outside a run. In workflow context, returns `ErrRunNotFinished` for an unfinished run. |
 | `Cancel` | Cancels the run. Uses an inline step in workflow context. |
 | `Status` | Current status. |
 | `Exists` | Whether the run is recorded. |
@@ -249,7 +250,7 @@ func NewHookToken() string
 | `DefineHook` | — | Declares a reusable hook. An empty token is generated when a handle is created. |
 | `HookDefinition.Create` | W | Creates an unregistered handle for the declared hook. Invalid context errors are reported when used. |
 | `ResumeHook` | S, O | Resumes the active hook with `token`. |
-| `ResumeHookWithRetries` | S, O | Attempts resume immediately, then at fixed intervals while the hook is not found. |
+| `ResumeHookWithRetries` | S, O | Attempts resume immediately, then at fixed intervals while the hook is not found, up to `attempts` times. |
 | `GetHook` | S, O | Looks up an active hook. The result cannot be awaited. |
 | `NewHookToken` | — | Random 21-character token. |
 
@@ -376,7 +377,7 @@ func Middleware(handler http.Handler, client Client) http.Handler
 | Function | Description |
 | --- | --- |
 | `NewClient` | Client that calls a World in the same process. |
-| `NewHTTPClient` | Client for a World served by `worlds.HTTPHandler`. `endpoint` includes `/v1/workflow`. |
+| `NewHTTPClient` | Client for a World served by `worlds.HTTPHandler`. `endpoint` includes the handler's prefix, such as `/v1/workflow`. |
 | `NewContext` | Context carrying `client`. |
 | `Middleware` | Adds `client` to every request context. |
 
@@ -391,7 +392,7 @@ func Middleware(handler http.Handler, client Client) http.Handler
 | `ErrNoWorkflow` | Workflow-context function called elsewhere, or stream function outside a run. |
 | `ErrNotInStep` | I/O function called in workflow context. |
 | `ErrRunCancelled` | Run was cancelled. |
-| `ErrRunNotFinished` | `Run.Value` inside a run on an unfinished run. |
+| `ErrRunNotFinished` | `Run.Value` in workflow context on an unfinished run. |
 | `ErrHookNotActive` | Hook was disposed and no longer receives. |
 | `ErrHookNotFound` | No active hook has the token. |
 | `ErrHookNotRegistered` | Receiving from a hook not created in this run. |

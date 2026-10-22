@@ -24,7 +24,7 @@ You can also [implement your own](/worlds/custom).
 
 ## HTTP handlers
 
-Every World package exports the same handler constructors:
+Every World package except the test World exports the same handler constructors:
 
 | Function | Serves |
 | --- | --- |
@@ -48,8 +48,9 @@ See [HTTP Endpoints](/reference/http) for details.
 Set `Config.BaseURL` to the absolute public URL of the handler's prefix,
 **including** `/v1/workflow` (or the prefix you passed to `HTTPPrefix`), for
 example `https://workflows.example.com/v1/workflow`. Webhook URLs are built from
-it. It is required on every World except the local World, which defaults to
-`http://localhost:3000/v1/workflow`.
+it. It is required except on the local World, which defaults to
+`http://localhost:3000/v1/workflow`, and the test World, which always uses
+`http://localhost/v1/workflow`.
 
 `workflow.NewHTTPClient` takes the same kind of URL: the server's address
 followed by the prefix, such as `http://workflow-worker:8081/v1/workflow`.
@@ -64,13 +65,13 @@ is retried with backoff.
 | World | Native max delay | Failed delivery backoff |
 | --- | --- | --- |
 | Local | unlimited | 100 ms up to 30 s |
-| Vercel | 7 days (longer with QStash) | 5 s up to 5 min |
-| AWS | 15 min (longer with Scheduler) | SQS redelivery |
+| Vercel | 6 days (longer with QStash) | 5 s up to 5 min |
+| AWS | 15 min (longer with Scheduler) | 1 s up to 15 min |
 | Postgres | unlimited | 1 s up to 5 min |
 
 ## Security
 
-None of the HTTP handlers authenticate requests.
+The RPC and webhook handlers don't authenticate requests.
 
 - **RPC** can start runs and read every run's input, output, and events. Keep it
   on a private network, or put your own authentication and authorization in

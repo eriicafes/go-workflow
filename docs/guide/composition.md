@@ -30,8 +30,8 @@ Use a direct call when the work should share the current run and event log.
 
 `workflow.Start` in workflow context starts a **child run**. The child is
 started in an [inline step](/guide/inline-steps), so replay returns the
-same run. Its ID is derived from that recorded step, so calling it again never
-starts a second child. It is pinned to the deployment executing the parent, and
+same run. Its ID is derived from that recorded step, so a retried attempt does
+not start a second child. It is pinned to the deployment executing the parent, and
 it carries two attributes:
 
 | Attribute | Value |
@@ -44,8 +44,10 @@ workers, and can outlive its parent.
 
 ### Waiting for a child
 
-In workflow context, `Run` methods read or change the run once in an inline
-step and replay returns the recorded result, so they never wait. `Run.Value` returns
+In workflow context, `Run` methods other than `Reader` and `Writer` read or
+change the run in an inline step and replay returns the recorded result, so
+they never wait. `Reader` and `Writer` return `workflow.ErrNotInStep` there.
+`Run.Value` returns
 `workflow.ErrRunNotFinished` for a child that had not finished.
 
 To wait for a child, pass it a hook token and have it resume the hook when it

@@ -23,7 +23,7 @@ events, hooks, waits, and streams.
    ```
 
 With [go-dev](/tooling/dev), `workflowdev.Web(baseURL)` runs this command for
-you. [Development](/guide/development) shows the whole setup.
+you, with `--noBrowser`. [Development](/guide/development) shows the whole setup.
 
 The CLI loads [`@eriicafes/go-workflow/world-http`](/tooling/world-http), which
 talks to your handler's RPC endpoint. You don't import it yourself.

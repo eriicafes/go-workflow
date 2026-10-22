@@ -54,9 +54,11 @@ stable across replay, even if a delivery stops before registration.
 ## Registering before starting work
 
 Creating a handle returns no error and does not claim its token. Registration
-happens when receiving from or selecting that specific hook, including through
-`Next`, `Values`, `Select`, or `Join`. Unrelated waits and ownership checks on
-other hooks do not register it. Its ID becomes available after registration.
+happens the first time that specific hook is received from or selected.
+Unrelated waits and ownership checks on
+other hooks do not register it. `Join` reaches its inputs in order, so it
+registers a hook only after the inputs before it settle. Its ID becomes
+available after registration.
 
 A handle created outside workflow context reports `ErrNoWorkflow` when used.
 
@@ -121,7 +123,8 @@ to receive that payload afterward.
 
 ## Sending a payload
 
-Call `ResumeHook` from a step or external handler with a Client in its context:
+Call `ResumeHook` from a step, or from external code with a Client in its
+context:
 
 ```go
 if err := workflow.ResumeHook(ctx, "approve:"+orderID, workflows.Approval{
@@ -145,15 +148,16 @@ if err != nil {
 This makes up to five attempts, starting immediately and waiting one second
 between attempts. Context cancellation interrupts the wait.
 
-Use `GetHook` to look up an active hook by token. The returned handle exposes
-identity and prior ownership but cannot receive workflow payloads. Lookup
-and resume operations return `ErrNotInStep` in workflow context.
+Use `GetHook` to look up the hook that holds a token, including a retained
+one. The returned handle exposes identity and prior ownership but cannot
+receive workflow payloads. Lookup and resume operations return `ErrNotInStep`
+in workflow context.
 
 ## Conflicts and forced ownership
 
 `GetConflict` returns nil after a successful claim or the owning run on a
 conflict. Repeated calls use the recorded result. Receiving without a prior
-check registers automatically and returns `ErrHookConflict` if another run
+check registers automatically and returns `ErrHookConflict` if another hook
 owns the token. Storage errors retry the delivery.
 
 Set `HookOption.Force` to take a token from its owner. The new hook's

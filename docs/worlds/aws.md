@@ -101,13 +101,13 @@ waits at most 15 minutes before it is due or sent again, and a retention period
 shorter than that drops deliveries.
 
 ::: warning ReportBatchItemFailures
-The event source mapping must enable `ReportBatchItemFailures`. Without it, one
-failed record makes Lambda retry the whole batch.
+The event source mapping must enable `ReportBatchItemFailures`. Without it,
+Lambda ignores the reported failures, treats the batch as successful, and
+deletes every message, so failed deliveries are not retried.
 :::
 
-`Scheduler` can be omitted when the World is only used for `HTTP`, `RPC`, or
-`Webhook`, or when no workflow sleeps, times out, or retries more than 15
-minutes ahead.
+`Scheduler` can be omitted when the World only serves HTTP requests, or when no
+delay is longer than 15 minutes.
 
 ## Table
 
@@ -216,7 +216,8 @@ The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 ## Limits
 
 - **400 KB per item.** Each event, step, hook, run view, and stream chunk is one
-  item. Oversized writes return an error wrapping `worlds.ErrEventInvalid`.
+  item. An oversized event append returns an error wrapping
+  `worlds.ErrEventInvalid`. Other oversized writes also fail with an error.
   Keep large payloads in S3 and pass references.
 - **100 actions per transaction (4 MB).** One append writes the run view, each
   event, and each changed step, hook, token, and wait marker in one transaction.
@@ -230,7 +231,7 @@ The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 
 - `Queue` is an SQS event-source handler, not an HTTP handler. Attach it only
   through an event source mapping.
-- `HTTP`, `RPC`, and `Webhook` do not authenticate requests. Prefer an internal
+- The HTTP handlers do not authenticate requests. Prefer an internal
   Function URL with `AWS_IAM` auth or an API Gateway route with an IAM or JWT
   authorizer, and enforce workflow and run ownership there.
 - Webhooks at `/v1/workflow/webhooks/{token}` are authorized only by the token.
