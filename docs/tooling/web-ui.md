@@ -11,13 +11,13 @@ events, hooks, waits, and streams.
 2. Install the Workflow SDK CLI and the go-workflow World adapter:
 
    ```sh
-   npm install --save-dev workflow @eriicafes/go-workflow
+   npm install --save-dev workflow go-workflow
    ```
 
 3. Point the CLI at the adapter and your handler:
 
    ```sh
-   export WORKFLOW_TARGET_WORLD=@eriicafes/go-workflow/world-http
+   export WORKFLOW_TARGET_WORLD=go-workflow/world-http
    export WORKFLOW_HTTP_BASE_URL=http://localhost:8080/v1/workflow
    npx workflow web
    ```
@@ -25,7 +25,7 @@ events, hooks, waits, and streams.
 With [go-dev](/tooling/dev), `workflowdev.Web(baseURL)` runs this command for
 you, with `--noBrowser`. [Development](/guide/development) shows the whole setup.
 
-The CLI loads [`@eriicafes/go-workflow/world-http`](/tooling/world-http), which
+The CLI loads [`go-workflow/world-http`](/tooling/world-http), which
 talks to your handler's RPC endpoint. You don't import it yourself.
 
 ::: warning

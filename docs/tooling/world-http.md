@@ -1,6 +1,6 @@
 # world-http Adapter
 
-`@eriicafes/go-workflow/world-http` exposes a Go World served by
+`go-workflow/world-http` exposes a Go World served by
 `HTTP(world)` as a [Workflow SDK](https://workflow-sdk.dev) `World` in
 JavaScript. It sends its operations to the handler's CBOR
 [RPC endpoint](/reference/http#rpc) and uses bounded polling for stream chunks.
@@ -13,7 +13,7 @@ as an admin script or a Node service.
 ## Install
 
 ```sh
-npm install @eriicafes/go-workflow
+npm install go-workflow
 ```
 
 ## Usage
@@ -21,7 +21,7 @@ npm install @eriicafes/go-workflow
 Create the World with the URL of the Go handler, including `/v1/workflow`:
 
 ```ts
-import { createWorld } from "@eriicafes/go-workflow/world-http";
+import { createWorld } from "go-workflow/world-http";
 
 const world = await createWorld({
   baseURL: "http://localhost:8080/v1/workflow",
@@ -74,7 +74,7 @@ const world = await createWorld({
 The Workflow SDK CLI and runtime load a World by module name. Set:
 
 ```sh
-export WORKFLOW_TARGET_WORLD=@eriicafes/go-workflow/world-http
+export WORKFLOW_TARGET_WORLD=go-workflow/world-http
 export WORKFLOW_HTTP_BASE_URL=http://localhost:8080/v1/workflow
 ```
 

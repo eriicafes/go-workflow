@@ -1,14 +1,15 @@
 name: CI
 
-permissions:
-  contents: write
-  id-token: write
-  pull-requests: write
 on:
   pull_request:
   push:
     branches:
       - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
 
 jobs:
   test:
@@ -74,11 +75,28 @@ jobs:
           done
       - name: Run tests
         run: go test -race ./...
+
+  test-js:
+    name: Test JS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Run tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
   release:
     name: Version Releases
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
-    needs: test
+    needs: [test, test-js]
     steps:
       - uses: actions/checkout@v7
 
@@ -92,4 +110,6 @@ jobs:
         id: changesets
         uses: changesets/action@v2
         with:
-          publish-script: npx changeset git-tag
+          publish-script: npm run release
+        env:
+          NPM_CONFIG_PROVENANCE: true

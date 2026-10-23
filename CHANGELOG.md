@@ -1,4 +1,4 @@
-# @eriicafes/go-workflow
+# go-workflow
 
 ## 0.2.0
 

@@ -1,6 +1,6 @@
 {
   "name": "go-workflow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Event-sourced durable workflows for Go worlds.",
   "type": "module",
   "exports": {
@@ -10,18 +10,27 @@
     }
   },
   "files": [
-    "world-http/dist",
-    "world-http/README.md"
+    "world-http/dist"
   ],
   "scripts": {
     "build": "tsdown",
     "check": "tsc --noEmit",
-    "prepack": "npm run build",
-    "test": "vitest"
+    "prepack": "npm run build && mv README.md .README.go.md && cp world-http/README.md README.md",
+    "postpack": "mv .README.go.md README.md",
+    "release": "changeset publish",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "Eric Afes <eriicafes@gmail.com>",
   "license": "MIT",
+  "homepage": "https://go-workflow.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eriicafes/go-workflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eriicafes/go-workflow/issues"
+  },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
     "@types/node": "^26.6.5",

@@ -11,7 +11,7 @@ func Web(baseURL string) dev.Cmd {
 		Run:  dev.Binary("npx"),
 		Args: dev.Values("workflow", "web", "--noBrowser"),
 		Env: dev.OsEnv(
-			dev.Pair("WORKFLOW_TARGET_WORLD", "@eriicafes/go-workflow/world-http"),
+			dev.Pair("WORKFLOW_TARGET_WORLD", "go-workflow/world-http"),
 			dev.Pair("WORKFLOW_HTTP_BASE_URL", baseURL),
 		),
 	}

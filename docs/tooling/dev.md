@@ -23,7 +23,7 @@ installed where the command runs: the parent command's `Dir`, or the directory
 go-dev runs from when `Dir` is empty:
 
 ```sh
-npm install --save-dev workflow @eriicafes/go-workflow
+npm install --save-dev workflow go-workflow
 ```
 
 ## Check

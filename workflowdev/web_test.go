@@ -16,7 +16,7 @@ func TestWeb(t *testing.T) {
 		t.Errorf("Web() Args = %q, want %q", got, want)
 	}
 	for _, pair := range []string{
-		"WORKFLOW_TARGET_WORLD=@eriicafes/go-workflow/world-http",
+		"WORKFLOW_TARGET_WORLD=go-workflow/world-http",
 		"WORKFLOW_HTTP_BASE_URL=http://localhost:8081/v1/workflow",
 	} {
 		if !slices.Contains(cmd.Env, pair) {

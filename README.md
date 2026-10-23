@@ -10,6 +10,8 @@ inspected with the Workflow SDK web UI.
 go get github.com/eriicafes/go-workflow
 ```
 
+Read the docs at [go-workflow.vercel.app](https://go-workflow.vercel.app).
+
 Agent skills are available for [writing workflows](skills/go-workflow/SKILL.md)
 and [implementing World backends](skills/go-workflow-worlds/SKILL.md).
 
@@ -423,7 +425,7 @@ CLI and this repository's World adapter for it, installed in the directory
 go-dev runs from.
 
 ```sh
-npm install --save-dev workflow @eriicafes/go-workflow
+npm install --save-dev workflow go-workflow
 ```
 
 ```go

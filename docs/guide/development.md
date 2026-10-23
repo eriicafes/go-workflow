@@ -28,7 +28,7 @@ installed in the directory go-dev runs from:
 
 ```sh
 go get github.com/eriicafes/go-dev
-npm install --save-dev workflow @eriicafes/go-workflow
+npm install --save-dev workflow go-workflow
 ```
 
 ## 2. Run the World in the application
@@ -121,7 +121,7 @@ go run ./cmd/dev
 ```
 
 - **`workflowdev.Web(baseURL)`** runs `npx workflow web --noBrowser` with
-  `WORKFLOW_TARGET_WORLD=@eriicafes/go-workflow/world-http` and
+  `WORKFLOW_TARGET_WORLD=go-workflow/world-http` and
   `WORKFLOW_HTTP_BASE_URL=baseURL`, so the web UI reads runs from the
   application's World.
 - **`workflowdev.Check("./...")`** runs the analyzer before every start or
@@ -151,7 +151,7 @@ event log.
 To run the web UI by hand instead of through go-dev:
 
 ```sh
-export WORKFLOW_TARGET_WORLD=@eriicafes/go-workflow/world-http
+export WORKFLOW_TARGET_WORLD=go-workflow/world-http
 export WORKFLOW_HTTP_BASE_URL=http://localhost:8080/v1/workflow
 npx workflow web
 ```

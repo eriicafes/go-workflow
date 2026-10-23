@@ -72,4 +72,4 @@ break these rules. [How Replay Works](/guide/replay) explains the model in detai
 | [`workflowtest`](/worlds/custom#conformance) | Conformance suites for World implementations. |
 | [`check`](/tooling/analyzer) and `cmd/workflowcheck` | Static analyzer and its vet tool. |
 | [`workflowdev`](/tooling/dev) | go-dev integration. |
-| [`@eriicafes/go-workflow/world-http`](/tooling/world-http) | JavaScript World adapter the Workflow SDK web UI loads. |
+| [`go-workflow/world-http`](/tooling/world-http) | JavaScript World adapter the Workflow SDK web UI loads. |
