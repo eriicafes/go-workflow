@@ -1,7 +1,7 @@
 {
-  "name": "@eriicafes/go-workflow",
+  "name": "go-workflow",
   "version": "0.2.0",
-  "description": "Event-sourced durable workflows for Go and JavaScript worlds.",
+  "description": "Event-sourced durable workflows for Go worlds.",
   "type": "module",
   "exports": {
     "./world-http": {
