@@ -3,7 +3,6 @@ package workflow_test
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -59,14 +58,12 @@ func TestCancellationConstructorsReturnErrorsInStepContext(t *testing.T) {
 }
 
 func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
-	var attempts atomic.Int32
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 		cancelCtx, cancel, err := workflow.WithCancelCause(ctx)
 		if err != nil {
 			return cancellationOutput{}, err
 		}
 		result := workflow.Background(cancelCtx, func(ctx context.Context, _ struct{}) (string, error) {
-			attempts.Add(1)
 			<-ctx.Done()
 			return context.Cause(ctx).Error(), ctx.Err()
 		}, struct{}{})
@@ -87,8 +84,19 @@ func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := run.Value(ctx)
-	if err != nil || !output.Cancelled || output.Cause != "stop work" || attempts.Load() != 1 {
-		t.Fatalf("output=%#v err=%v attempts=%d", output, err, attempts.Load())
+	if err != nil || !output.Cancelled || output.Cause != "stop work" {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+	// A replay can deliver the unstarted step again, so the step may start more
+	// than once, but cancellation must never schedule a retry.
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeStepRetrying {
+			t.Fatalf("cancelled step retried: %s", event.Data)
+		}
 	}
 }
 
