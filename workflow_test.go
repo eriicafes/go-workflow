@@ -19,6 +19,12 @@ import (
 type timerInput struct{}
 type timerOutput struct{}
 
+type structWorkflowInput struct {
+	workflow.Struct[structWorkflowOutput]
+	Value int
+}
+type structWorkflowOutput struct{ Value int }
+
 type pointerWorkflowInput struct{ Value int }
 type pointerWorkflowOutput struct{ Value int }
 type unencodableInput struct{ Values chan int }
@@ -104,6 +110,31 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 	}
 	if childRun.Attributes[worlds.ParentRunIDAttribute] != run.ID() || childRun.Attributes[worlds.RootRunIDAttribute] != run.ID() {
 		t.Fatalf("child attributes = %#v", childRun.Attributes)
+	}
+}
+
+func TestStructDeclaresWorkflowOutput(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input structWorkflowInput) (structWorkflowOutput, error) {
+		return structWorkflowOutput{Value: input.Value + 1}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, structWorkflowInput{Value: 41})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The workflow is named after the struct that embeds Struct.
+	expected := reflect.TypeFor[structWorkflowInput]().PkgPath() + "." + reflect.TypeFor[structWorkflowInput]().Name()
+	if name, err := run.WorkflowName(ctx); err != nil || name != expected {
+		t.Fatalf("workflow name = %q, %v; want %q", name, err, expected)
+	}
+	output, err := run.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Value != 42 {
+		t.Fatalf("output = %#v", output)
 	}
 }
 

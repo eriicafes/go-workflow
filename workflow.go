@@ -3,10 +3,10 @@
 //
 // # Workflows and runners
 //
-// A workflow is a struct type whose Workflow(Out) method declares the
-// workflow's output. Its package path and type name are the workflow name, and
-// a value of it is the input of a run, so code can Start a workflow from the
-// type alone.
+// A workflow is a struct type that embeds Struct[Out], or has its own
+// Workflow(Out) method, to declare the workflow's output. Its package path and
+// type name are the workflow name, and a value of it is the input of a run, so
+// code can Start a workflow from the type alone.
 //
 // A runner executes the workflow. It is a function func(context.Context, In)
 // (Out, error) registered with Use, and it calls steps through Step,
@@ -103,6 +103,20 @@ const clientWait = time.Hour
 // workflow is satisfied by a workflow, a struct type whose Workflow(Out)
 // method declares the workflow's output type.
 type workflow[Out any] interface{ Workflow(Out) }
+
+// Struct declares a workflow's output type when embedded in the workflow
+// struct, in place of writing its Workflow(Out) method:
+//
+//	type GenerateReport struct {
+//		workflow.Struct[GenerateReportResult]
+//		Topic string
+//	}
+//
+// It has no fields, so it adds nothing to the workflow's JSON input.
+type Struct[Out any] struct{}
+
+// Workflow declares Out as the output of the workflow that embeds Struct.
+func (Struct[Out]) Workflow(Out) {}
 
 // Run is a handle to a run of a workflow whose output type is Out. Start and
 // Get return one. A Run has an independent lifetime; use Cancel to cancel it.

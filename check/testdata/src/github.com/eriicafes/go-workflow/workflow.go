@@ -8,6 +8,10 @@ import (
 
 type Runner struct{}
 
+type Struct[Out any] struct{}
+
+func (Struct[Out]) Workflow(Out) {}
+
 type Result[T any] struct{}
 
 func Use[In, Out any](func(context.Context, In) (Out, error)) Runner { return Runner{} }

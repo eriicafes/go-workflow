@@ -15,6 +15,25 @@ func (Input) Workflow(Output) {}
 
 var _ = workflow.Use(Report)
 
+// Embedding workflow.Struct declares the output.
+type Embedded struct {
+	workflow.Struct[Output]
+	Name string
+}
+
+var _ = workflow.Use(RunEmbedded)
+
+func RunEmbedded(ctx context.Context, in Embedded) (Output, error) { return Output{Name: in.Name}, nil }
+
+// Embedding a Struct of another output type is reported.
+type Mismatched struct {
+	workflow.Struct[Input]
+}
+
+var _ = workflow.Use(RunMismatched) // want `flows.Mismatched must declare Workflow\(flows.Output\)`
+
+func RunMismatched(ctx context.Context, in Mismatched) (Output, error) { return Output{}, nil }
+
 func Report(ctx context.Context, in Input) (Output, error) {
 	// A local helper runs in workflow context.
 	now := func() int64 { return time.Now().Unix() } // want `workflow body calls time.Now, use workflow.Now instead`
