@@ -79,6 +79,13 @@ use the same policy.
 | `workflow.FatalError(err)` | Fails immediately, never retried. |
 | `workflow.RetryableError(err, after)` | Retried no sooner than `after`, while retries remain. |
 
+::: tip Steps only
+`FatalError` and `RetryableError` only change how a step is retried, so return
+them from step functions, [inline steps](/guide/inline-steps), and
+[rollback](/guide/rollbacks) compensations. Runs are never retried: a runner
+that returns an error fails its run whether or not the error is wrapped.
+:::
+
 Both wrappers return `nil` when `err` is `nil`, so you can wrap
 unconditionally.
 
@@ -95,7 +102,8 @@ func sendInvoice(ctx context.Context, invoice Invoice) (struct{}, error) {
 
 ## Failing a run
 
-A runner fails its run by returning an error or panicking. Error panics preserve
+A runner fails its run by returning an error or panicking. Runs are not
+retried, so there is no need to wrap a runner's error in `FatalError`. Error panics preserve
 the original error; other panic values become `workflow: panic: <value>` errors.
 Before the run is marked failed, deferred [rollbacks](/guide/rollbacks) run in
 Go's defer order, with the last defer first. The run's error

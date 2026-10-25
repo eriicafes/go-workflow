@@ -1,0 +1,7 @@
+@import 'tailwindcss';
+
+@layer base {
+  body {
+    @apply bg-stone-50 text-[15px] text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100;
+  }
+}

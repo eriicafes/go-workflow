@@ -43,7 +43,7 @@ dev.Cmd{
 
 This runs an application on `:8080` that opens the World, runs the worker, and
 mounts `HTTP(world)` under `/v1/workflow/`, along with the web UI connected to
-it. It checks runners and reloads on changes to `cmd`, `flows`, and
+it. It checks runners and reloads on changes to `cmd` and
 `workflows`:
 
 ```go
@@ -59,7 +59,7 @@ func main() {
 	err := session.Run(dev.Cmd{
 		Run:        dev.Package("./cmd/app"),
 		Prepare:    dev.Hooks(workflowdev.Check("./...")),
-		Watch:      dev.Values("cmd", "flows", "workflows"),
+		Watch:      dev.Values("cmd", "workflows"),
 		ServerAddr: ":8080",
 		Commands: dev.Commands(
 			workflowdev.Web("http://localhost:8080/v1/workflow"),

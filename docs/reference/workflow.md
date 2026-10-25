@@ -47,8 +47,8 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
 | `All` | W | Collects values in input order. Cancels remaining steps on any failure. |
 | `InlineStep` | W, S | Records work in the flow delivery. See [Inline Steps](/guide/inline-steps). In step context calls `fn` directly. |
 | `Rollback` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
-| `FatalError` | S | Wraps an error so the step fails without retrying. |
-| `RetryableError` | S | Wraps an error so the step retries no sooner than `after`. |
+| `FatalError` | S | Wraps an error a step returns so the step fails without retrying. Has no effect on a runner's error. |
+| `RetryableError` | S | Wraps an error a step returns so the step retries no sooner than `after`. Has no effect on a runner's error. |
 | `StepID` | S | Stable step ID, usable as an idempotency key. |
 | `GetStepMetadata` | S | ID, name, start time, and attempt of the current step. |
 | `GetWorkflowMetadata` | W, S | Workflow name, run ID, and start time. |

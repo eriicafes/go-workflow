@@ -27,7 +27,7 @@ Every function passed to `workflow.Use` must be a valid runner.
 | `workflow.Use requires a named package-level workflow function` | A closure or function variable passed to `Use`. |
 | `workflow function must be func(context.Context, NamedInput) (Output, error)` | Wrong runner signature. |
 | `workflow input must be a named package type` | Input is not a named type. |
-| `<Input> must declare Workflow(<Output>)` | Input type has no matching `Workflow` method. |
+| `<Input> must declare Workflow(<Output>)` | Input type does not embed `workflow.Struct[<Output>]` or have a matching `Workflow` method. |
 
 ### Runner bodies
 

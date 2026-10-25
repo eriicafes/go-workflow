@@ -13,7 +13,7 @@ recorded results instead of running again. The run resumes where it left off.
 
 | Concept | What it is |
 | --- | --- |
-| **Workflow** | A struct type whose `Workflow` method declares its output type. Its package path and type name are the workflow name, and a value of it is the input of a run. |
+| **Workflow** | A struct type that embeds `workflow.Struct[Out]` to declare its output type. Its package path and type name are the workflow name, and a value of it is the input of a run. |
 | **Runner** | A function that takes a context and the workflow input, returns the output and an error, and executes the workflow. You register it with `workflow.Use`. |
 | **Step** | A function with the same shape as a runner that does the real work and side effects. It runs at least once and retries on error. |
 | **Run** | One execution of a workflow, recorded as an append-only event log. |

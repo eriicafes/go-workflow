@@ -100,3 +100,17 @@ World recording the run unless `workflow.NewContext` supplies another Client.
 Pass the step's context to I/O so work can stop cooperatively. See
 [Cancellation](/guide/cancellation) for cancelling steps and how that differs
 from cancelling a run.
+
+## Tracing
+
+Each step attempt runs in an OpenTelemetry span named after the step's
+function, such as `step flows.sendEmail`, with the run ID, step ID, and
+attempt as attributes. The span uses the global tracer provider, so it is
+recorded once you set one with `otel.SetTracerProvider`, and a failed attempt
+records its error.
+
+A step runs in the replay that delivers it, with the context the runner passed
+to it. So a span context the runner puts in that context becomes the parent of
+the step's span, and the step's own instrumented I/O nests under it. Rebuild
+the span context the same way on every replay, for example from a trace
+context recorded in an [inline step](#inline-steps).

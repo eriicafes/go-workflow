@@ -27,6 +27,10 @@ const guideSidebar: DefaultTheme.SidebarItem[] = [
     ],
   },
   {
+    text: 'AI',
+    items: [{ text: 'AI Agents', link: '/guide/ai-agents' }],
+  },
+  {
     text: 'Running Workflows',
     items: [
       { text: 'Starting and Reading Runs', link: '/guide/runs' },

@@ -87,7 +87,7 @@ The local World delivers work in-process, so it needs no worker goroutine.
 
 ## 3. Run it with go-dev
 
-The dev command runs the application, reloads it when `cmd`, `flows`, or
+The dev command runs the application, reloads it when `cmd` or
 `workflows` change, and runs the web UI alongside it, connected to the
 handler mounted in the application:
 
@@ -105,7 +105,7 @@ func main() {
 	err := session.Run(dev.Cmd{
 		Run:        dev.Package("./cmd/app"),
 		Prepare:    dev.Hooks(workflowdev.Check("./...")),
-		Watch:      dev.Values("cmd", "flows", "workflows"),
+		Watch:      dev.Values("cmd", "workflows"),
 		ServerAddr: ":8080",
 		Commands: dev.Commands(
 			workflowdev.Web("http://localhost:8080/v1/workflow"),

@@ -13,7 +13,7 @@ func main() {
 	app := dev.Cmd{
 		Dir:        dev.Dir("..", ".."),
 		Run:        dev.Package("./cmd/app"),
-		Watch:      dev.Values("cmd", "flows", "workflows"),
+		Watch:      dev.Values("cmd", "workflows"),
 		ServerAddr: ":8080",
 	}
 	env := cmp.Or(os.Getenv("ENVIRONMENT"), "development")
@@ -39,7 +39,7 @@ func main() {
 					dev.Pair("DATABASE_URL", dbURL),
 				),
 				Prepare: dev.Hooks(workflowdev.Check("./...")),
-				Watch:   dev.Values("cmd", "flows", "workflows"),
+				Watch:   dev.Values("cmd", "workflows"),
 				Phase:   dev.Before,
 			},
 			workflowdev.Web("http://localhost:8081/v1/workflow"),

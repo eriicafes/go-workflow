@@ -2,19 +2,29 @@
 
 ## Workflows
 
-A workflow is a struct type with a `Workflow` method that takes the output type
-as its only parameter. The method body is empty: it exists so the type system
-knows the workflow's output.
+A workflow is a struct type that embeds `workflow.Struct[Out]`, where `Out` is
+the workflow's output type. `Struct` has no fields, so it adds nothing to the
+workflow's input.
 
 ```go
 package workflows
 
 type GenerateReport struct {
+	workflow.Struct[GenerateReportResult]
 	Topic string
 }
 
 type GenerateReportResult struct {
 	Summary string
+}
+```
+
+`Struct` gives the workflow a `Workflow(Out)` method, which is what marks
+the type as a workflow. A struct can declare the method itself instead:
+
+```go
+type GenerateReport struct {
+	Topic string
 }
 
 func (GenerateReport) Workflow(GenerateReportResult) {}
@@ -25,13 +35,15 @@ The struct's package path and type name form the **workflow name**, such as
 their runner. Each value of the struct supplies a run's input. Inputs and
 outputs use JSON, so give them exported fields and JSON-friendly types.
 
-Keep workflow types in their own package. Request handlers can then
-[start runs](/guide/runs) without importing runners or their dependencies.
+Keep workflow types in a `workflows` package and their runners in a `flows`
+package inside it, `workflows/flows`. Request handlers import only
+`workflows`, so they can [start runs](/guide/runs) without importing runners
+or their dependencies.
 
 ## Runners
 
-A runner is a named, package-level function that executes a workflow. Its
-input and output types match the workflow declaration:
+A runner is a named, package-level function that executes a workflow, kept in
+`workflows/flows`. Its input and output types match the workflow declaration:
 
 ```go
 package flows
@@ -75,11 +87,11 @@ A run that names a workflow with no registered runner fails with
 ## Suggested layout
 
 ```
-workflows/         workflow types: imported by the application and flows
+workflows/           workflow types: imported by the application and flows
   reports.go
-flows/             runners and their steps: imported only by workers
-  generate_report.go
-  publish_report.go
+  flows/             runners and their steps: imported only by workers
+    generate_report.go
+    publish_report.go
 cmd/
   app/             starts runs with a Client
   worker/          opens a World with the runners

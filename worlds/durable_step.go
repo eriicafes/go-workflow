@@ -5,7 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type (
@@ -136,6 +142,8 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
 	stepCtx, stop := StepCancelContext(ctx, options.Execution, createdData.Cancellation)
 	defer stop()
+	stepCtx, span := startStepSpan(stepCtx, options.Execution, stepID, options.Name, attempt)
+	defer span.End()
 	value, callErr := func() (value Out, err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -152,6 +160,10 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	}()
 	if stepCtx.Err() != nil && options.Execution.ctx.Err() == nil {
 		callErr = FatalError{Cause: context.Canceled}
+	}
+	if callErr != nil {
+		span.RecordError(callErr)
+		span.SetStatus(codes.Error, callErr.Error())
 	}
 
 	// Report the target result to the engine, which appends the lifecycle
@@ -394,4 +406,20 @@ func stepRetryAfter(cause error, maxRetries int, attempt int) *time.Time {
 // after attempt of stepID, so every queue call for one retry shares it.
 func stepRetryKey(stepID StepID, attempt int) string {
 	return fmt.Sprintf("retry:%s:%d", stepID, attempt)
+}
+
+// startStepSpan starts the span of a step attempt with the global
+// OpenTelemetry tracer, as a child of the span in ctx. A runner that puts a
+// span context in the ctx it passes to a step parents the step's span under
+// it, since the step runs in the replay that delivers it.
+func startStepSpan(ctx context.Context, execution *Execution, stepID StepID, name string, attempt int) (context.Context, trace.Span) {
+	short := strings.TrimSuffix(name[strings.LastIndex(name, "/")+1:], "-fm")
+	run := execution.Run()
+	return otel.Tracer("github.com/eriicafes/go-workflow").Start(ctx, "step "+short, trace.WithAttributes(
+		attribute.String("workflow.name", run.WorkflowName),
+		attribute.String("workflow.run.id", string(run.RunID)),
+		attribute.String("workflow.step.id", string(stepID)),
+		attribute.String("workflow.step.name", name),
+		attribute.Int("workflow.step.attempt", attempt),
+	))
 }

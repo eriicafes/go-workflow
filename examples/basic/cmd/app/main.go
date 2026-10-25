@@ -15,8 +15,8 @@ import (
 	"strconv"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/examples/basic/flows"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows"
+	"github.com/eriicafes/go-workflow/examples/basic/workflows/flows"
 	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )

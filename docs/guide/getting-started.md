@@ -9,27 +9,37 @@ runs as JSON files and needs no database or worker.
 go get github.com/eriicafes/go-workflow
 ```
 
-go-workflow requires Go 1.25.4 or later.
+go-workflow requires Go 1.26 or later.
 
 ## 1. Define a workflow
 
-A workflow is a struct type whose `Workflow` method declares its output. Keep
-workflows in their own package so request handlers can start them without
-importing their runners.
+A workflow is a struct type that embeds `workflow.Struct[Out]` to declare its
+output `Out`. Keep
+workflows in a `workflows` package and their runners in a `flows` package
+inside it, so request handlers can start workflows without importing their
+runners.
+
+```
+workflows/
+  reports.go            workflow types
+  flows/
+    generate_report.go  runners and their steps
+```
 
 ```go
 // workflows/reports.go
 package workflows
 
+import "github.com/eriicafes/go-workflow"
+
 type GenerateReport struct {
+	workflow.Struct[GenerateReportResult]
 	Topic string
 }
 
 type GenerateReportResult struct {
 	Summary string
 }
-
-func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
 
 The workflow name is the package path and type name, for example
@@ -39,10 +49,10 @@ The workflow name is the package path and type name, for example
 
 A runner executes the workflow. It is a plain function that takes the workflow
 as input and calls steps, which do the real work. Keep each runner in a file
-with the steps it calls.
+with the steps it calls, in `workflows/flows`.
 
 ```go
-// flows/generate_report.go
+// workflows/flows/generate_report.go
 package flows
 
 import (
@@ -92,8 +102,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 
-	"example.com/app/flows"
 	"example.com/app/workflows"
+	"example.com/app/workflows/flows"
 )
 
 func main() {
@@ -153,7 +163,7 @@ func main() {
 	err := session.Run(dev.Cmd{
 		Run:     dev.Package("./cmd/app"),
 		Prepare: dev.Hooks(workflowdev.Check("./...")),
-		Watch:   dev.Values("cmd", "flows", "workflows"),
+		Watch:   dev.Values("cmd", "workflows"),
 	})
 	session.Catch(err)
 	session.Catch(session.Wait())

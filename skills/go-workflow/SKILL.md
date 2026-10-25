@@ -12,12 +12,13 @@ package symbol to confirm signatures against that version.
 
 ## Structure the workflow
 
-- Define workflow input structs and their output marker method in a shared
-  package: `func (GenerateReport) Workflow(GenerateReportResult) {}`. Put shared
-  `workflow.DefineHook[T]` definitions there too. Clients should not need to
-  import runner implementations.
-- Implement a runner as a named
-  `func(context.Context, Input) (Output, error)` and register it with
+- Define workflow input structs in a `workflows` package, embedding
+  `workflow.Struct[Out]` to declare the output:
+  `type GenerateReport struct { workflow.Struct[GenerateReportResult]; Topic string }`.
+  Put shared `workflow.DefineHook[T]` definitions there too. Clients should
+  not need to import runner implementations.
+- Implement a runner in a `flows` package inside it, `workflows/flows`, as a
+  named `func(context.Context, Input) (Output, error)`, and register it with
   `workflow.Use(runner)` in `worlds.Runners(...)`.
 - Keep step inputs and outputs serializable. Pass business data explicitly
   instead of capturing it in closures. Prefer named step functions beside the
@@ -40,9 +41,12 @@ and idempotency requirements as other steps.
 
 Step attempts are delivered at least once. Use `workflow.StepID(ctx)` as a
 stable external idempotency key where supported. Omitted `StepOptions` allows
-three retries; an explicit zero-valued option disables retries. Use
+three retries; an explicit zero-valued option disables retries. In step
+functions, inline steps, and rollback compensations, return
 `FatalError(err)` to stop retries and `RetryableError(err, delay)` to choose a
-retry delay. Step panics follow the step failure and retry path.
+retry delay. They have no effect on a runner's error: runs are never retried,
+and a runner that returns an error fails its run, so return it unwrapped. Step
+panics follow the step failure and retry path.
 
 Do not swallow SDK suspension panics with a blanket `recover`. Plain deferred
 side effects can repeat on replay; durable cleanup belongs in SDK operations.

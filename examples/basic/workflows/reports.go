@@ -1,9 +1,12 @@
 package workflows
 
+import "github.com/eriicafes/go-workflow"
+
 // ProgressStream names the stream that report runs write progress lines to.
 const ProgressStream = "progress"
 
 type GenerateReport struct {
+	workflow.Struct[GenerateReportResult]
 	Topic string
 }
 
@@ -12,8 +15,6 @@ type GenerateReportResult struct {
 	Sources  []Source
 	Sections []Section
 }
-
-func (GenerateReport) Workflow(GenerateReportResult) {}
 
 type Source struct {
 	Provider string
@@ -27,6 +28,7 @@ type Section struct {
 }
 
 type PublishReport struct {
+	workflow.Struct[PublishReportResult]
 	Topic string
 }
 
@@ -35,8 +37,6 @@ type PublishReportResult struct {
 	Location string
 	Reviews  []Review
 }
-
-func (PublishReport) Workflow(PublishReportResult) {}
 
 // Review is the payload reviewers send to a publish run. A review that is not
 // approved requests changes, and its comment is applied as a revision.

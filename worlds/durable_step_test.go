@@ -11,6 +11,12 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type durableStepInput struct{ Value int }
@@ -220,5 +226,64 @@ func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
 	if err != nil || executions.Load() != 1 || step.Status != worlds.StatusCompleted || step.Attempt != 2 {
 		t.Fatalf("step = %#v executions=%d err=%v", step, executions.Load(), err)
+	}
+}
+
+type tracedStepInput struct{}
+type tracedStepOutput struct{}
+
+func (tracedStepInput) Workflow(tracedStepOutput) {}
+
+func tracedStep(context.Context, int) (int, error) { return 0, errors.New("try again") }
+
+func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter)))
+	defer otel.SetTracerProvider(previous)
+
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1},
+		SpanID:     trace.SpanID{2},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ tracedStepInput) (tracedStepOutput, error) {
+		// The runner's ctx reaches the step, so the step's span is a child
+		// of the span context the runner set.
+		ctx = trace.ContextWithRemoteSpanContext(ctx, parent)
+		_, err := workflow.Step(ctx, tracedStep, 1, workflow.StepOptions{MaxRetries: 1})
+		return tracedStepOutput{}, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, tracedStepInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err == nil {
+		t.Fatal("expected the step to fail")
+	}
+
+	// One span per attempt, not per replay.
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans", len(spans))
+	}
+	for i, span := range spans {
+		if span.Name != "step worlds_test.tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
+			t.Fatalf("span = %q with parent %v", span.Name, span.Parent)
+		}
+		if span.Status.Code != codes.Error {
+			t.Fatalf("status = %v", span.Status)
+		}
+		attributes := map[attribute.Key]attribute.Value{}
+		for _, kv := range span.Attributes {
+			attributes[kv.Key] = kv.Value
+		}
+		if attributes["workflow.run.id"].AsString() != run.ID() || attributes["workflow.step.attempt"].AsInt64() != int64(i+1) {
+			t.Fatalf("attributes = %v", span.Attributes)
+		}
 	}
 }

@@ -1,0 +1,6 @@
+# The Workflow SDK CLI, which runs the web UI, needs the esbuild and SWC
+# binaries. cbor-extract only speeds up cbor-x, which works without it.
+allowBuilds:
+  '@swc/core': true
+  esbuild: true
+  cbor-extract: false

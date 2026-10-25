@@ -17,30 +17,30 @@ and [implementing World backends](skills/go-workflow-worlds/SKILL.md).
 
 ## Workflows
 
-A workflow is a struct type whose `Workflow` method declares its output. Its
-package path and type name are the workflow name, and a value of it is the
-input of a run. Keep workflows in their own package so request handlers can
-start them without importing their runners.
+A workflow is a struct type that embeds `workflow.Struct[Out]` to declare its
+output `Out`. Its package path and type name are the workflow name, and a value of it is the
+input of a run. Keep workflows in a `workflows` package and their runners in a
+`flows` package inside it, `workflows/flows`, so request handlers can start
+workflows without importing their runners.
 
 ```go
 package workflows
 
 type GenerateReport struct {
+	workflow.Struct[GenerateReportResult]
 	Topic string
 }
 
 type GenerateReportResult struct {
 	Summary string
 }
-
-func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
 
 ## Runners and steps
 
 A runner executes a workflow. It is a plain function that takes the workflow as
 input and calls steps, which do the real work and side effects. Keep each runner
-in a file with the steps it calls.
+in a file with the steps it calls, in `workflows/flows`.
 
 ```go
 package flows
@@ -82,8 +82,11 @@ so in-flight runs keep replaying the code that recorded them.
 Steps run at least once and retry on error, three times by default. Set
 `workflow.StepOptions{MaxRetries: n}` to change that, return
 `workflow.FatalError(err)` to fail without retrying, or return
-`workflow.RetryableError(err, after)` to retry after a delay. Step functions
-should be idempotent, and `workflow.StepID(ctx)` is a stable idempotency key.
+`workflow.RetryableError(err, after)` to retry after a delay. These wrappers
+only apply to errors returned by steps, inline steps, and rollbacks: a runner
+that returns an error fails its run without retrying, wrapped or not. Step
+functions should be idempotent, and `workflow.StepID(ctx)` is a stable
+idempotency key.
 
 `workflow.InlineStep(ctx, fn, input)` takes the same arguments as `Step` but
 runs a short step, such as generating an ID, in the flow itself, without a
@@ -292,12 +295,13 @@ defer workflow.Rollback(ctx, voidInvoice, invoice.ID)
 ## Streams
 
 Steps write run-owned byte streams that readers consume while the run is still
-going. A stream has one writer at a time, and another writer waits until the
-current one releases or closes it.
+going. Writers and readers use the run's default stream unless their option
+names another. A stream has one writer at a time, and another writer waits
+until the current one releases or closes it.
 
 ```go
 func writeProgress(ctx context.Context, count int) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: "progress"})
+	writer, release, err := workflow.Writer(ctx)
 	if err != nil {
 		return struct{}{}, err
 	}
@@ -314,7 +318,7 @@ closes.
 
 ```go
 // The last three writes onward.
-reader, err := run.Reader(ctx, workflow.ReaderOption{Name: "progress", StartIndex: -3})
+reader, err := run.Reader(ctx, workflow.ReaderOption{StartIndex: -3})
 ```
 
 ## Hooks and webhooks
@@ -405,6 +409,17 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 }
 ```
 
+## AI agents
+
+The [`workflowai`](workflowai) package runs AI SDK style agents as
+durable runs: every model call and tool step is recorded, the response streams
+through the run's stream, and tool approvals wait for the user across turns. It matches `@ai-sdk/workflow`'s `WorkflowAgent` and is
+built on the [Go AI SDK](https://goaisdk.com).
+[`examples/durable-agent`](examples/durable-agent) serves it to a React
+`useChat` client, and the
+[AI Agents guide](https://go-workflow.vercel.app/guide/ai-agents) covers it in
+depth.
+
 ## Development
 
 The analyzer checks that every runner passed to `Use` is a named function whose
@@ -432,10 +447,10 @@ npm install --save-dev workflow go-workflow
 session := dev.New()
 task := session.NewTask(dev.Cmd{
 	Run:        dev.Package("./cmd/app"),
-	Watch:      dev.Values("cmd", "flows", "workflows"),
+	Watch:      dev.Values("cmd", "workflows"),
 	ServerAddr: ":8080",
 	Commands: dev.Commands(
-		dev.Cmd{Run: dev.Package("./cmd/worker/pg"), Prepare: dev.Hooks(workflowdev.Check("./...")), Watch: dev.Values("cmd", "flows", "workflows"), Phase: dev.Before},
+		dev.Cmd{Run: dev.Package("./cmd/worker/pg"), Prepare: dev.Hooks(workflowdev.Check("./...")), Watch: dev.Values("cmd", "workflows"), Phase: dev.Before},
 		workflowdev.Web("http://localhost:8081/v1/workflow"),
 	),
 })
