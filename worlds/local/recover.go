@@ -231,7 +231,9 @@ func (w *World) releaseStreamSessions() error {
 		if err != nil {
 			return err
 		}
-		for _, name := range names {
+		// The default stream's key is empty, so its meta.json is in the run's
+		// directory itself.
+		for _, name := range append(names, "") {
 			metaPath := path.Join("streams", run, name, "meta.json")
 			var meta streamMeta
 			ok, err := w.readOptional(metaPath, &meta)

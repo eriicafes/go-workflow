@@ -253,8 +253,10 @@ func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) 
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(keys))
-	for _, key := range keys {
+	names := make([]string, 0, len(keys)+1)
+	// The default stream's key is empty, so its meta.json is in the run's
+	// directory itself.
+	for _, key := range append(keys, "") {
 		var meta streamMeta
 		ok, err := w.readOptional(path.Join(dir, key, "meta.json"), &meta)
 		if err != nil {

@@ -103,11 +103,11 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_persist", Name: "out/1", Chunks: [][]byte{[]byte("x"), []byte("y")}}); err != nil {
 		t.Fatal(err)
 	}
-	session, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: "held"})
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"held", ""} {
+		if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: name}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	_ = session
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -135,12 +135,15 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("chunks = %#v err=%v", chunks, err)
 	}
 	names, err := reopened.StreamsList(ctx, worlds.StreamsListInput{RunID: "wrun_persist"})
-	if err != nil || len(names) != 2 || names[0] != "held" || names[1] != "out/1" {
-		t.Fatalf("stream names = %v err=%v", names, err)
+	if err != nil || len(names) != 3 || names[0] != "" || names[1] != "held" || names[2] != "out/1" {
+		t.Fatalf("stream names = %q err=%v", names, err)
 	}
-	// Sessions belong to the process that opened them and are released at Prepare.
-	if _, err := reopened.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: "held"}); err != nil {
-		t.Fatalf("session after restart: %v", err)
+	// Sessions belong to the process that opened them and are released at
+	// Prepare, including the default stream's.
+	for _, name := range []string{"held", ""} {
+		if _, err := reopened.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: name}); err != nil {
+			t.Fatalf("session on %q after restart: %v", name, err)
+		}
 	}
 	next, err := reopened.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_persist", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}})
 	if err != nil || next.EventID != worlds.EventIDForSlot(5) {
