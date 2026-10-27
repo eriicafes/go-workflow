@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,9 @@ const (
 type Runtime struct {
 	world   World
 	runners RunnerSet
+	// running holds the steps this process runs inline, so a duplicate
+	// delivery of the same flow message does not run them again.
+	running sync.Map
 }
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
@@ -118,7 +122,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// Build the replay context and merge the admission append without a
 	// follow-up storage read.
 	execution := newExecution(ctx, r.world, run, events, nil)
-	execution.delivery = input
+	execution.delivery, execution.running = input, &r.running
 	execution.merge(started, startedLatest)
 
 	// A run whose workflow is not registered fails without replaying, so it
@@ -138,11 +142,19 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 }
 
 // replayFlow replays the runner once against execution and records the run's
-// outcome when the runner returns. A replay that diverges from the event log
-// is handed to recoverDivergence.
-func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution *Execution) error {
+// outcome when the runner returns. Steps the flow still runs inline record
+// their results before the delivery ends. A replay that diverges from the
+// event log is handed to recoverDivergence.
+func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution *Execution) (err error) {
 	ctx := execution.Context()
 	output, err := r.run(runner, ctx, json.RawMessage(run.Input))
+	// Steps the runner declared and no longer waits for are not started.
+	execution.pending = nil
+	defer func() {
+		if finishErr := execution.finishSteps(); finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
+	}()
 
 	// Interpret replay control flow or materialize the root outcome.
 	var divergenceErr replayDivergenceError
@@ -390,50 +402,12 @@ func (r *Runtime) replayStep(input QueueInput, runner Runner, run Run, execution
 // completeStep records a targeted step result and queues either its retry or a
 // root replay that can consume the terminal result.
 func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID StepID, result DataStepResult) error {
-	eventType := EventTypeStepCompleted
-	if len(result.Error) != 0 {
-		eventType = EventTypeStepFailed
-		if result.RetryAfter != nil {
-			eventType = EventTypeStepRetrying
-		}
-	}
-	payload, err := json.Marshal(result)
-	if err != nil {
+	event, err := execution.recordStepResult(stepID, result)
+	if err != nil || event.EventID == "" {
 		return err
 	}
-	eventCount := len(execution.events)
-	input := EventsCreateInput{
-		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: eventType, CorrelationID: string(stepID), Data: payload},
-		Options: EventsCreateOptions{EventCount: &eventCount},
-	}
-	eventResult, err := r.world.EventsCreate(ctx, input)
-	if errors.Is(err, ErrRunTerminal) && eventType == EventTypeStepRetrying {
-		// A terminal run permits the admitted step's final failure, but no retry.
-		result.RetryAfter = nil
-		payload, err = json.Marshal(result)
-		if err != nil {
-			return err
-		}
-		eventType = EventTypeStepFailed
-		input.Event.EventType, input.Event.Data = eventType, payload
-		eventResult, err = r.world.EventsCreate(ctx, input)
-	}
-	if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrStepNotStartable) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	execution.merge(eventResult, Event{
-		RunID:         execution.run.RunID,
-		EventID:       eventResult.EventID,
-		EventType:     eventType,
-		CorrelationID: string(stepID),
-		Data:          payload,
-	})
-	queue := QueueInput{RunID: execution.run.RunID, IdempotencyKey: string(eventResult.EventID), DeploymentID: execution.run.DeploymentID}
-	if eventType == EventTypeStepRetrying {
+	queue := QueueInput{RunID: execution.run.RunID, IdempotencyKey: string(event.EventID), DeploymentID: execution.run.DeploymentID}
+	if event.EventType == EventTypeStepRetrying {
 		queue.StepID = &stepID
 		queue.NotBefore = result.RetryAfter
 		queue.IdempotencyKey = stepRetryKey(stepID, stepAttempt(execution, stepID))

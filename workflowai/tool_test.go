@@ -1,10 +1,13 @@
 package workflowai_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/digitallysavvy/go-ai/pkg/ai"
 	"github.com/digitallysavvy/go-ai/pkg/provider/types"
@@ -73,4 +76,44 @@ func TestStreamClientToolCall(t *testing.T) {
 			t.Fatalf("tool output = %+v", output)
 		}
 	})
+}
+
+func TestStreamInlineStepTool(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls []types.ToolCall
+		for i, seconds := range []int{10, 1, 1} {
+			calls = append(calls, call(fmt.Sprintf("c%d", i+1), "waitInline", fmt.Sprintf(`{"name":"c%d","seconds":%d}`, i+1, seconds)))
+		}
+		setup(toolCalls(calls...), text("Done."))
+		testOptions.ToolCallConcurrency = 2
+		result, _, err := chat(t, []workflowai.ModelMessage{user("wait")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Inline steps run concurrently up to the limit, the third once the
+		// second settles, and each runs once.
+		if got, want := waits.startedAfter("c1", "c2", "c3"), []time.Duration{0, 0, time.Second}; !slices.Equal(got, want) {
+			t.Fatalf("starts = %v, want %v", got, want)
+		}
+		if waits.runs != 3 || len(result.Steps[0].ToolResults) != 3 {
+			t.Fatalf("runs = %d, results = %v", waits.runs, result.Steps[0].ToolResults)
+		}
+		var output string
+		if err := json.Unmarshal(result.Steps[0].ToolResults[2].Output, &output); err != nil || output != "c3" {
+			t.Fatalf("output = %q, %v", output, err)
+		}
+	})
+}
+
+func TestExecuteInlineStepDerivesInputSchema(t *testing.T) {
+	executor := workflowai.ExecuteInlineStep(func(context.Context, struct {
+		City string `json:"city"`
+	}) (string, error) {
+		return "", nil
+	})
+	schema := executor.(interface{ InputSchema() map[string]any }).InputSchema()
+	properties, _ := schema["properties"].(map[string]any)
+	if _, ok := properties["city"]; !ok {
+		t.Fatalf("schema = %v", schema)
+	}
 }

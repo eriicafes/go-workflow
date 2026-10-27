@@ -223,7 +223,8 @@ func TestThenPreservesRecordedSettlementOrder(t *testing.T) {
 				}
 				return composedOutput{Value: middle.Unwrap(ctx)}, nil
 			})
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// Steps are queued, so the manual queue decides the order they settle in.
+			ctx, cancel := context.WithTimeout(workflow.SetMaxInlineSteps(context.Background(), 0), 2*time.Second)
 			defer cancel()
 			clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
 			run, err := workflow.Start(clientCtx, composedInput{})

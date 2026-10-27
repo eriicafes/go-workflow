@@ -204,68 +204,41 @@ func TestHookRejectsOtherExecution(t *testing.T) {
 	}
 }
 
-func TestDeferredHookDisposalPropagatesFailures(t *testing.T) {
-	for _, recordedFailure := range []bool{false, true} {
-		t.Run(map[bool]string{false: "storage retry", true: "recorded failure"}[recordedFailure], func(t *testing.T) {
-			base := testworld.NewManual()
-			defer base.Close()
-			storageErr := errors.New("disposal storage unavailable")
-			world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookDisposed, err: storageErr}
-			world.failures.Store(1)
-			runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
-				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
-				defer hook.Dispose(ctx)
-				_, err := hook.GetConflict(ctx)
-				return hookResumeOutput{}, err
-			})
-			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-			defer cancel()
-			run, err := workflow.Start(ctx, hookResumeInput{Token: "dispose-failure"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			runtime := worlds.NewRuntime(world, worlds.Runners(runner))
-			delivery := base.QueuedMessages()[0].Input
-			if err := runtime.Execute(ctx, delivery); !errors.Is(err, storageErr) {
-				t.Fatalf("disposal delivery error=%v", err)
-			}
-			failure := errors.New("disposal failed")
-			if recordedFailure {
-				events, err := base.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-				if err != nil {
-					t.Fatal(err)
-				}
-				encoded, err := json.Marshal(worlds.NewError(failure))
-				if err != nil {
-					t.Fatal(err)
-				}
-				data, err := json.Marshal(worlds.DataStepResult{Error: encoded})
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, event := range events.Data {
-					if event.EventType == worlds.EventTypeStepCreated {
-						if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: event.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepFailed, CorrelationID: event.CorrelationID, Data: data}}); err != nil {
-							t.Fatal(err)
-						}
-					}
-				}
-			}
-			if err := runtime.Execute(ctx, delivery); err != nil {
-				t.Fatal(err)
-			}
-			_, err = run.Value(ctx)
-			if recordedFailure {
-				if !errors.Is(err, failure) {
-					t.Fatalf("deferred failure=%v", err)
-				}
-			} else if err != nil {
-				t.Fatal(err)
-			}
-			if _, found, err := workflow.GetHook[string](ctx, "dispose-failure"); err != nil || found {
-				t.Fatalf("disposed token found=%t err=%v", found, err)
-			}
-		})
+func TestDeferredHookDisposalRetriesTheDeliveryOnStorageErrors(t *testing.T) {
+	base := testworld.NewManual()
+	defer base.Close()
+	storageErr := errors.New("disposal storage unavailable")
+	world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookDisposed, err: storageErr}
+	world.failures.Store(2)
+	runner := workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+		defer hook.Dispose(ctx)
+		_, err := hook.GetConflict(ctx)
+		return hookResumeOutput{}, err
+	})
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, hookResumeInput{Token: "dispose-failure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A storage error is not the disposal's failure: the delivery fails and
+	// its redelivery disposes the hook, however many times storage fails.
+	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	delivery := base.QueuedMessages()[0]
+	for range 2 {
+		if err := runtime.Execute(ctx, delivery.Input); !errors.Is(err, storageErr) {
+			t.Fatalf("delivery error = %v, want the storage error", err)
+		}
+	}
+	if err := runtime.Execute(ctx, delivery.Input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := workflow.GetHook[string](ctx, "dispose-failure"); err != nil || found {
+		t.Fatalf("disposed token found=%t err=%v", found, err)
 	}
 }
 
@@ -359,7 +332,7 @@ func TestHookRegistersOnlyWhenUsedAndKeepsTokenAfterInterruptedCommit(t *testing
 	commitErr := errors.New("registration unavailable")
 	world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookCreated, err: commitErr}
 	world.failures.Store(1)
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	ctx, cancel := context.WithTimeout(workflow.NewContext(workflow.SetMaxInlineSteps(context.Background(), 0), workflow.NewClient(world)), time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, hookResumeInput{})
 	if err != nil {
@@ -512,6 +485,11 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 		step := workflow.Background(ctx, func(context.Context, struct{}) (struct{}, error) {
 			return struct{}{}, nil
 		}, struct{}{})
+		// The flow records the step when the runner suspends here, before
+		// the hook is used.
+		if err := workflow.Sleep(ctx, 0); err != nil {
+			return hookResumeOutput{}, err
+		}
 		winner, err := workflow.Select(ctx, hook, step)
 		if err != nil {
 			return hookResumeOutput{}, err
@@ -523,7 +501,7 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 	})
 	base := testworld.NewManual()
 	defer base.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(base)), time.Second)
+	ctx, cancel := context.WithTimeout(workflow.NewContext(workflow.SetMaxInlineSteps(context.Background(), 0), workflow.NewClient(base)), time.Second)
 	defer cancel()
 	if _, err := workflow.Start(ctx, hookConflictInput{Token: "ordered-conflict"}); err != nil {
 		t.Fatal(err)
@@ -540,15 +518,25 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 	world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookCreated, err: commitErr}
 	world.failures.Store(1)
 	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
-	delivery := base.QueuedMessages()[1].Input
-	if err := runtime.Execute(ctx, delivery); !errors.Is(err, commitErr) {
-		t.Fatalf("interrupted commit error=%v", err)
-	}
-	// The started step can finish before the retry commits the conflicting claim.
-	if err := runtime.Execute(ctx, base.QueuedMessages()[2].Input); err != nil {
+	if err := runtime.Execute(ctx, base.QueuedMessages()[1].Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Execute(ctx, delivery); err != nil {
+	var timer, step worlds.QueueInput
+	for _, message := range base.QueuedMessages()[2:] {
+		if message.Input.StepID != nil {
+			step = message.Input
+		} else {
+			timer = message.Input
+		}
+	}
+	if err := runtime.Execute(ctx, timer); !errors.Is(err, commitErr) {
+		t.Fatalf("interrupted commit error=%v", err)
+	}
+	// The recorded step can finish before the retry commits the conflicting claim.
+	if err := runtime.Execute(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, timer); err != nil {
 		t.Fatal(err)
 	}
 	output, err := run.Value(ctx)

@@ -42,9 +42,10 @@ committed write whose acknowledgement was lost. Assert recorded outcomes and
 invariants rather than exactly-once callback execution.
 
 Exercise runtime integration with `testworld.NewManual` when precise delivery
-control is needed. A consumer calls `Runtime.Execute(ctx, input)`, acknowledges
-on nil, and retries on error. Persist and redeliver the original QueueInput
-including its recovery counters and deployment metadata.
+control is needed. A consumer sets `input.MessageID` to the message's ID,
+calls `Runtime.Execute(ctx, input)`, acknowledges on nil, and retries on error.
+Persist and redeliver the original QueueInput including its recovery counters
+and deployment metadata, with the same message ID on every redelivery.
 
 Run the adapter's tests and relevant conformance tests; use `-race` for local
 concurrency changes. Integration tests that require services must use the

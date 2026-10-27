@@ -723,6 +723,15 @@ func (w *flakyEventWorld) EventsCreate(ctx context.Context, input worlds.EventsC
 	return w.World.EventsCreate(ctx, input)
 }
 
+func (w *flakyEventWorld) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
+	for _, event := range input.Events {
+		if event.EventType == w.eventType && w.failures.Add(-1) >= 0 {
+			return worlds.EventBatchResult{}, w.err
+		}
+	}
+	return w.World.EventsCreateBatch(ctx, input)
+}
+
 func inlineStepRunner() worlds.Runner {
 	return workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
 		first, err := workflow.InlineStep(ctx, nextInlineValue, struct{}{})
@@ -1037,6 +1046,94 @@ func TestJoinOkReturnsLaterFailureWithoutWaitingForEarlierTimer(t *testing.T) {
 	for _, event := range events.Data {
 		if event.EventType == worlds.EventTypeWaitCompleted {
 			t.Fatal("JoinOk waited for the earlier timer")
+		}
+	}
+}
+
+type inlineBackgroundInput struct{ Fail bool }
+type inlineBackgroundOutput struct{ Sum int }
+
+func (inlineBackgroundInput) Workflow(inlineBackgroundOutput) {}
+
+func inlineBackgroundRunner(calls *atomic.Int32) worlds.Runner {
+	return workflow.Use(func(ctx context.Context, input inlineBackgroundInput) (inlineBackgroundOutput, error) {
+		double := func(_ context.Context, value int) (int, error) {
+			if calls.Add(1) == 1 && input.Fail {
+				return 0, errors.New("try again")
+			}
+			return value * 2, nil
+		}
+		a := workflow.InlineBackground(ctx, double, 1, workflow.StepOptions{MaxRetries: 1})
+		b := workflow.InlineBackground(ctx, double, 2)
+		if _, err := workflow.Select(ctx, a, b); err != nil {
+			return inlineBackgroundOutput{}, err
+		}
+		if err := workflow.JoinOk(ctx, a, b); err != nil {
+			return inlineBackgroundOutput{}, err
+		}
+		var group workflow.ErrGroup
+		c := workflow.InlineBackground(ctx, double, 3)
+		group.Add(c)
+		if err := group.Wait(ctx); err != nil {
+			return inlineBackgroundOutput{}, err
+		}
+		// A timer makes the runner replay with the recorded results.
+		if err := workflow.Sleep(ctx, time.Millisecond); err != nil {
+			return inlineBackgroundOutput{}, err
+		}
+		return inlineBackgroundOutput{Sum: a.Unwrap(ctx) + b.Unwrap(ctx) + c.Unwrap(ctx)}, nil
+	})
+}
+
+func TestInlineBackgroundComposesWithSelectJoinAndGroups(t *testing.T) {
+	var calls atomic.Int32
+	world := testworld.New(inlineBackgroundRunner(&calls))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, inlineBackgroundInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(ctx)
+	if err != nil || output.Sum != 12 || calls.Load() != 3 {
+		t.Fatalf("output=%#v err=%v calls=%d", output, err, calls.Load())
+	}
+}
+
+func TestInlineBackgroundRunsInlineWithoutStepDeliveries(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		var calls atomic.Int32
+		runner := inlineBackgroundRunner(&calls)
+		world := testworld.NewManual(runner)
+		defer world.Close()
+		// Promotion is off, but inline steps still run inline.
+		ctx := workflow.SetMaxInlineSteps(workflow.NewContext(context.Background(), workflow.NewClient(world)), 0)
+		run, err := workflow.Start(ctx, inlineBackgroundInput{Fail: fail})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+		for len(world.QueuedMessages()) != 0 {
+			message := world.QueuedMessages()[0]
+			if message.Input.StepID != nil {
+				t.Fatalf("queued a step delivery: %#v", message.Input)
+			}
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		output, err := run.Value(ctx)
+		// A failed first attempt is retried once.
+		want := int32(3)
+		if fail {
+			want = 4
+		}
+		if err != nil || output.Sum != 12 || calls.Load() != want {
+			t.Fatalf("fail=%v output=%#v err=%v calls=%d", fail, output, err, calls.Load())
 		}
 	}
 }

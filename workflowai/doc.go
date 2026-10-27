@@ -22,7 +22,9 @@
 // A Tool executes calls with an Executor. Execute runs in workflow context,
 // so it does its side effects through steps. ExecuteStep starts a step
 // function in the background and derives the tool's input schema from the
-// function's input type. The calls of a step run concurrently, up to
+// function's input type. ExecuteInlineStep does the same with an inline step,
+// which always runs in the flow delivery, for short work. ExecuteFunc runs
+// tools that combine several operations or wait durably. The calls of a step run concurrently, up to
 // ToolCallConcurrency, and their results keep the order of the calls. A
 // tool without Execute runs on the client. RepairToolCall can fix a call to
 // an unknown tool or with invalid input before it is reported to the model.

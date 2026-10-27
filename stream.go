@@ -38,9 +38,8 @@ func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func(
 		}
 		return nil, nil, ErrNoWorkflow
 	}
-	stepID, _ := execution.TargetStepID()
 	opts := writerOption(options)
-	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, string(stepID))
+	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, StepID(ctx))
 }
 
 type streamWriter struct {

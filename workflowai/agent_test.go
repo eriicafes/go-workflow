@@ -176,6 +176,7 @@ func getWeather(_ context.Context, input weatherInput) (map[string]any, error) {
 type waitLog struct {
 	mu     sync.Mutex
 	starts map[string]time.Time
+	runs   int
 }
 
 type waitInput struct {
@@ -187,6 +188,7 @@ type waitInput struct {
 func wait(_ context.Context, input waitInput) (string, error) {
 	waits.mu.Lock()
 	waits.starts[input.Name] = time.Now()
+	waits.runs++
 	waits.mu.Unlock()
 	time.Sleep(time.Duration(input.Seconds) * time.Second)
 	return input.Name, nil
@@ -230,6 +232,10 @@ func tools() workflowai.ToolSet {
 		"wait": {
 			Description: "Wait for some seconds",
 			Execute:     workflowai.ExecuteStep(wait),
+		},
+		"waitInline": {
+			Description: "Wait for some seconds",
+			Execute:     workflowai.ExecuteInlineStep(wait),
 		},
 		// getLocation runs on the client, which sends its output back.
 		"getLocation": {Description: "Get the user's location"},

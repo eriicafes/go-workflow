@@ -133,7 +133,9 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body strin
 			return w.sendMessage(ctx, body, delay)
 		}
 	}
-	if err := runtime.Execute(ctx, record.input); err != nil {
+	input := record.input
+	input.MessageID = message.ID
+	if err := runtime.Execute(ctx, input); err != nil {
 		return err
 	}
 	return w.deleteQueueRecord(ctx, message.ID)

@@ -6,8 +6,11 @@ order.
 
 ## Starting work
 
-`workflow.Background` starts a step without waiting. Read its result when you
-need it:
+`workflow.Background` starts a step without waiting. When the runner waits,
+the flow delivery runs up to three new steps at the same time and queues the
+rest for other workers. See
+[Running steps inline](/guide/steps#running-steps-inline). Read its result when
+you need it:
 
 ```go
 profile := workflow.Background(ctx, fetchProfile, userID)

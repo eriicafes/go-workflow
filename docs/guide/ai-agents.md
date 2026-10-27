@@ -121,6 +121,13 @@ func Chat(ctx context.Context, input workflows.Chat) (workflows.ChatResult, erro
 }
 ```
 
+Building clients and models in the runner is fine as long as building does
+no I/O. Values read while building, such as a key from the environment, are
+read again on every replay and delivery, so rotated credentials are picked up.
+Credentials that need I/O to fetch belong in a provider that resolves them per
+request, inside the model call step. Don't read them in an inline step: its
+result, and so the secret, would be stored in the run's event log.
+
 `Stream` writes to the run's default stream, like `getWritable()` in the
 Workflow SDK, and closes it when the turn ends. Streams can only be opened in
 step context, so the steps that write open it with `workflow.Writer`. To write
@@ -189,18 +196,31 @@ to the model as the tool's result, so the model can recover. Calls to unknown
 tools or with input that does not match the schema are reported to the model
 as invalid and not executed.
 
-`Tool.InputSchema` sets a JSON schema explicitly. `ExecuteFunc` adapts a plain
-function that takes the call's raw JSON input, for tools that are not a single
-step.
+`Tool.InputSchema` sets a JSON schema explicitly.
 
-The calls of a step run concurrently, like the AI SDK's. `ExecuteStep` starts
-its step in the background, so a step's calls run at the same time and their
-results reach the model in the order the model made the calls. An
-`ExecuteFunc` blocks the runner until it returns, so its calls run one at a
-time. `ToolCallConcurrency` in `WorkflowAgentOptions` or `CallOptions` limits
+Choose an executor by where the work should run:
+
+- `ExecuteStep(fn)` runs `fn` as a [step](/guide/steps). The flow runs the
+  first few calls inline, up to `workflow.SetMaxInlineSteps`, and queues the
+  rest as step deliveries that other workers can run. Use it for slow work and
+  for work that should spread across workers.
+- `ExecuteInlineStep(fn)` runs `fn` as an
+  [inline step](/guide/inline-steps#running-inline-steps-concurrently), which
+  always runs in the flow delivery and never goes through the queue. Use it
+  for short work. It derives the input schema and decodes the input like
+  `ExecuteStep`.
+- `ExecuteFunc` adapts a plain function that takes the call's raw JSON input.
+  Use it for tools that combine several operations or wait durably, such as
+  with `workflow.Sleep` or a hook.
+
+The calls of a step run concurrently, like the AI SDK's. `ExecuteStep` and
+`ExecuteInlineStep` start their steps in the background, so a step's calls run
+at the same time and their results reach the model in the order the model made
+the calls. An `ExecuteFunc` blocks the runner until it returns, so its calls
+run one at a time. `ToolCallConcurrency` in `WorkflowAgentOptions` or `CallOptions` limits
 how many calls run at once, including approved calls; `1` runs them one at a
-time in the model's order. A custom `Executor` returns a `workflow.Result`,
-such as one from `workflow.Background`, to run concurrently.
+time in the model's order. A custom `Executor` returns a `workflow.Result`, such as one from
+`workflow.Background`, to run concurrently.
 
 `RepairToolCall` gets a chance to fix a call to an unknown tool or with input
 that fails the tool's schema, before the call is reported to the model as
@@ -496,5 +516,8 @@ support, inside the model call's step. Without one, URLs are sent as they are.
 ::: warning Callbacks replay
 `PrepareCall`, `PrepareStep`, `NeedsApproval`, `Execute`, and callbacks run
 in workflow context, so they run again on every replay and must be
-deterministic. Do side effects in steps.
+deterministic. They get the workflow `ctx`, so they can call `workflow.Step`
+or `workflow.InlineStep` themselves to record side effects and external
+reads, and replays reuse the recorded results. Plain logging in a callback
+may repeat on replay, which is usually fine.
 :::

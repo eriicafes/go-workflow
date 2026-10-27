@@ -230,7 +230,9 @@ func (w *World) deliver(value delivery) {
 		return
 	}
 	if err == nil {
-		err = w.runtime.Execute(w.ctx, record.Input)
+		input := record.Input
+		input.MessageID = value.id
+		err = w.runtime.Execute(w.ctx, input)
 	}
 	if err == nil {
 		err = w.ackDelivery(value.id)

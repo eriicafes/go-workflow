@@ -24,8 +24,9 @@ type ToolSet map[string]Tool
 // Execute and NeedsApproval run in workflow context, so they replay with the
 // run and must be deterministic. Do side effects in Execute through steps, so
 // a call's result is recorded and survives restarts. ExecuteStep runs a step
-// function.
-// Execute may also wait durably, such as with workflow.Sleep or a hook.
+// function as a step, ExecuteInlineStep as an inline step, and ExecuteFunc
+// calls a function that may combine several operations or wait durably, such
+// as with workflow.Sleep or a hook.
 type Tool struct {
 	Description string
 	// InputSchema is the JSON schema of the tool's input. Inputs that fail it
@@ -144,14 +145,31 @@ type stepExecutor[In, Out any] struct {
 	fn      func(context.Context, In) (Out, error)
 	options []workflow.StepOptions
 	schema  func() map[string]any
+	// inline runs fn as an inline step.
+	inline bool
 }
 
 // ExecuteStep returns an Executor that decodes a call's input into In and
 // starts fn with it as a background step, so calls run concurrently, each
-// call executes at least once, and its result is recorded. The tool's input schema is derived from In's JSON fields
-// when the agent first sends the tool to the model.
+// call executes at least once, and its result is recorded. Like any step, it
+// runs inline in the flow up to workflow.SetMaxInlineSteps, and otherwise as
+// a step delivery from the World's queue. The tool's input schema is derived
+// from In's JSON fields when the agent first sends the tool to the model.
 func ExecuteStep[In, Out any](fn func(context.Context, In) (Out, error), options ...workflow.StepOptions) Executor {
-	return stepExecutor[In, Out]{fn: fn, options: options, schema: sync.OnceValue(func() map[string]any {
+	return newStepExecutor(fn, options, false)
+}
+
+// ExecuteInlineStep returns an Executor like ExecuteStep that starts fn as an
+// inline step with workflow.InlineBackground. It always runs in the flow,
+// never through the World's queue, and its retries run in a later flow. Use it
+// for short work, and ExecuteStep for slow work, which a step delivery can run
+// on another worker.
+func ExecuteInlineStep[In, Out any](fn func(context.Context, In) (Out, error), options ...workflow.StepOptions) Executor {
+	return newStepExecutor(fn, options, true)
+}
+
+func newStepExecutor[In, Out any](fn func(context.Context, In) (Out, error), options []workflow.StepOptions, inline bool) Executor {
+	return stepExecutor[In, Out]{fn: fn, options: options, inline: inline, schema: sync.OnceValue(func() map[string]any {
 		return ai.SchemaFor[In]().Validator().JSONSchema()
 	})}
 }
@@ -161,7 +179,11 @@ func (e stepExecutor[In, Out]) Execute(ctx context.Context, raw json.RawMessage,
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return workflow.NewResult[any](nil, fmt.Errorf("decode tool input: %w", err))
 	}
-	result := workflow.Background(ctx, e.fn, input, e.options...)
+	start := workflow.Background[In, Out]
+	if e.inline {
+		start = workflow.InlineBackground[In, Out]
+	}
+	result := start(ctx, e.fn, input, e.options...)
 	return workflow.Then(ctx, result, func(output Out, err error) *workflow.Result[any] {
 		return workflow.NewResult[any](output, err)
 	})
@@ -170,7 +192,9 @@ func (e stepExecutor[In, Out]) Execute(ctx context.Context, raw json.RawMessage,
 func (e stepExecutor[In, Out]) InputSchema() map[string]any { return e.schema() }
 
 // NeedsApprovalFunc reports whether a tool call needs approval. It runs in
-// workflow context.
+// workflow context. It can call
+// workflow.Step or workflow.InlineStep to record side effects and external
+// reads, so replays don't repeat them.
 type NeedsApprovalFunc func(ctx context.Context, input json.RawMessage, options ToolCallOptions) (bool, error)
 
 // NeedsApprovalAlways is a NeedsApprovalFunc that asks for approval for every call.

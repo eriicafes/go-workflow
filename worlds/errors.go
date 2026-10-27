@@ -80,6 +80,11 @@ var (
 // delivery, instead of treating it as the runner's failure.
 type deliveryError struct{ cause error }
 
+// DeliveryError marks cause, a World error a step function hit while doing
+// the runtime's own work, so the delivery is retried instead of the step
+// recording a failed attempt.
+func DeliveryError(cause error) error { return deliveryError{cause: cause} }
+
 func (e deliveryError) Error() string { return e.cause.Error() }
 func (e deliveryError) Unwrap() error { return e.cause }
 

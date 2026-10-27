@@ -26,10 +26,26 @@ func conformSteps(t *testing.T, world worlds.World) {
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_missing"}})
 	conformExpect(t, err, worlds.ErrStepNotStartable, "start missing step")
 
-	started := conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
+	started := conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", worlds.DataStepStarted{OwnerMessageID: "msg_owner"})
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusRunning || step.Attempt != 1 || step.StartedAt == nil {
 		t.Fatalf("running step = %#v err=%v", step, err)
+	}
+	// The runtime reads an inline attempt's owner and start time back from
+	// its step_started.
+	startedEvent, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: started.EventID})
+	var startedData worlds.DataStepStarted
+	if err != nil || json.Unmarshal(startedEvent.Data, &startedData) != nil || startedData.OwnerMessageID != "msg_owner" || startedEvent.CreatedAt.IsZero() {
+		t.Fatalf("step_started = %#v err=%v", startedEvent, err)
+	}
+	listed, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range listed.Data {
+		if event.EventID == started.EventID && event.CreatedAt.IsZero() {
+			t.Fatalf("listed step_started has no creation time: %#v", event)
+		}
 	}
 	firstStartedAt := *step.StartedAt
 	// Starting a running step records a new attempt, so a delivery can take

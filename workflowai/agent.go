@@ -143,7 +143,9 @@ type CallOptions struct {
 
 // PrepareCallFunc changes the settings of a Stream or Generate call. It runs
 // in workflow context once, before approved calls resume and before the
-// first model call.
+// first model call. It can call
+// workflow.Step or workflow.InlineStep to record side effects and external
+// reads, so replays don't repeat them.
 type PrepareCallFunc func(ctx context.Context, options PrepareCallOptions) (PrepareCallResult, error)
 
 // PrepareCallOptions holds the settings of a call: the agent's
@@ -182,7 +184,9 @@ type PrepareCallResult struct {
 }
 
 // PrepareStepFunc changes the settings of the next model call. It runs in
-// workflow context before every step.
+// workflow context before every step. It can call
+// workflow.Step or workflow.InlineStep to record side effects and external
+// reads, so replays don't repeat them.
 type PrepareStepFunc func(ctx context.Context, info PrepareStepInfo) (PrepareStepResult, error)
 
 // PrepareStepInfo describes the step about to run.

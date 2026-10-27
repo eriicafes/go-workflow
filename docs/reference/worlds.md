@@ -33,6 +33,11 @@ that consumes its result instead of running the step. A non-nil error means the 
 should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
 `NewClientContext`, so a run never uses a Client it inherited.
 
+Set `QueueInput.MessageID` to the ID `Queue` returned for the message before
+calling `Execute`, and keep it the same when the message is redelivered. A
+flow records it as the owner of each step it starts inline, so the
+redelivery of a flow that stopped runs those steps again at once.
+
 A replay that diverges from the event log ends the delivery with an error
 that runner code never sees. `Execute` queues an immediate recovery delivery
 of the same flow or step with `ReplayDivergenceCount` incremented, and once
@@ -209,8 +214,9 @@ type QueueInput struct {
 	IdempotencyKey string     // for implementations that deduplicate
 	DeploymentID   string     // deployment to deliver to; empty uses the World's own
 
-	DeploymentMismatchRetryCount int // re-routes so far, set by the Runtime
-	ReplayDivergenceCount        int // recovery deliveries after divergence, set by the Runtime
+	DeploymentMismatchRetryCount int    // re-routes so far, set by the Runtime
+	ReplayDivergenceCount        int    // recovery deliveries after divergence, set by the Runtime
+	MessageID                    string // the delivered message's ID, set by the World before Execute; Queue ignores it
 }
 ```
 
@@ -351,7 +357,12 @@ type Error struct {
 
 func NewError(err error) *Error
 func DecodeError(data []byte) *Error
+func DeliveryError(cause error) error
 ```
+
+`DeliveryError` marks a World error that a step function hit while doing the
+runtime's own work, such as recording a hook's disposal. The delivery is
+retried, instead of the step recording a failed attempt.
 
 `Error` keeps the type, message, and JSON encoding of every error in the chain
 so `errors.Is` and `errors.As` work after replay.

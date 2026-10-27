@@ -246,7 +246,9 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		}
 	}
 	stop := c.renewLease(ctx, delivery)
-	err = c.runtime.Execute(ctx, record.input())
+	input := record.input()
+	input.MessageID = message.ID
+	err = c.runtime.Execute(ctx, input)
 	stop()
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		// Retrying cannot create the run, so drop the delivery.

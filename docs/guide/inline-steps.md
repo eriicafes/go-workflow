@@ -1,7 +1,8 @@
 # Inline Steps
 
-`workflow.InlineStep` records a result in the current flow delivery. It avoids
-the queue round trip of a regular [step](/guide/steps), making it useful for
+`workflow.InlineStep` records a result in the current flow delivery. It never
+uses the queue, unlike a regular [step](/guide/steps), which only runs inline
+within [a limit](/guide/steps#running-steps-inline). That makes it useful for
 quick work such as generating an ID or reading another run.
 
 ## Recording a value
@@ -32,13 +33,32 @@ use the original input.
 ## Choosing suitable work
 
 Keep inline steps short and idempotent or free of side effects. If a delivery
-stops before recording the result, the next replay calls the function again.
-Concurrent flow deliveries can also execute the function, with the first
-recorded result winning.
+stops before recording the result, the queue redelivers its message, which
+calls the function again. Another flow calls it only when it replays more
+than 15 minutes after the attempt started.
 
 Use `workflow.Step` for longer operations or work that needs a separate
 worker delivery. Both forms can execute more than once, so protect external
 side effects with an idempotency key.
+
+## Running inline steps concurrently
+
+`workflow.InlineStep` waits for its inline step. `workflow.InlineBackground`
+starts one without waiting, like `workflow.Background`, and returns a
+`*workflow.Result`:
+
+```go
+price := workflow.InlineBackground(ctx, currentPrice, input.SKU)
+stock := workflow.InlineBackground(ctx, currentStock, input.SKU)
+if err := workflow.JoinOk(ctx, price, stock); err != nil {
+	return Result{}, err
+}
+```
+
+When the runner waits, the flow delivery runs both at the same time, alongside
+any steps it runs inline, and the runner continues as each one finishes.
+It always runs inline, whatever `SetMaxInlineSteps` allows. Combine its result
+with `Select`, `Join`, and groups like any other.
 
 ## Retrying failures
 
@@ -67,8 +87,8 @@ receives a `*workflow.Error`.
 
 ## Replay behavior
 
-An inline step records `step_created`, followed by `step_started` and the
-attempt's outcome. Storage failures retry the delivery. The
+An inline step records `step_created` and `step_started` in one write,
+followed by the attempt's outcome. Storage failures retry the delivery. The
 [event reference](/reference/events) describes the recorded events.
 
 `workflow.Now` uses an inline step with one attempt. Most `Run` methods also
@@ -76,6 +96,6 @@ use inline steps when called in workflow context, so their reads and changes
 are preserved across replay. See [Starting and Reading Runs](/guide/runs#in-workflow-context).
 
 A step delivery cannot execute an unsettled inline step while replaying toward
-its target. It suspends until a flow delivery records the outcome. Inside a
-step function, `InlineStep` calls the function directly without recording a
-nested step.
+its target. It suspends until a flow delivery records the outcome. Like
+`Step`, `InlineStep` returns `workflow.ErrNoWorkflow` outside workflow
+context, including inside a step function.

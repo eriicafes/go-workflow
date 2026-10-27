@@ -144,11 +144,20 @@ func bookFlight(ctx context.Context, input booking) (Confirmation, error) {
 ```
 
 A tool's input schema comes from its step function's input type, derived when
-the agent first sends the tool to the model. Register the runner like any
+the agent first sends the tool to the model. `ExecuteStep` suits slow work,
+since steps past the inline limit run on other workers. `ExecuteInlineStep`
+runs short work as an inline step that never goes through the queue, and
+`ExecuteFunc` runs tools that combine several operations or wait durably. Register the runner like any
 other with `workflow.Use(flows.Chat)`.
 
-Every replay and step delivery runs the runner again and builds a new model,
-so the model is never serialized or stored.
+Every replay and step delivery runs the runner again and builds a new model, so
+the model is never serialized or stored. Building clients and models in the
+runner is fine as long as building does no I/O. Values read while building,
+such as a key from the environment, are read again on every replay and
+delivery, so rotated credentials are picked up. Credentials that need I/O to
+fetch belong in a provider that resolves them per request, inside the model
+call step. Don't read them in an inline step: its result, and so the secret,
+would be stored in the run's event log.
 
 ### Serve the chat API
 

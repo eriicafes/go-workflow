@@ -26,9 +26,49 @@ return Result{Sources: sources}, nil
 A step function takes a context and one input, and returns an output and an
 error. Its input and output must be JSON-encodable. Use `struct{}` when either is empty.
 
-The first call queues a separate step delivery and suspends the runner. Once
-the step finishes, replay continues with its recorded output. To start work
-without waiting, use `workflow.Background`. See [Concurrency](/guide/concurrency).
+The first call suspends the runner. The flow delivery then runs the step
+itself, or queues a step delivery for it, and replay continues with its
+recorded output once it finishes. To start work without waiting, use
+`workflow.Background`. See [Concurrency](/guide/concurrency).
+
+## Running steps inline
+
+When the runner waits for a result and nothing else is recorded, the flow
+delivery runs the new steps it declared itself, up to three at once by
+default, and queues a step delivery for each of the rest. The waiting runner
+does not stop: as each inline step finishes, its result is recorded and the
+runner continues from where it waited, while the others keep running. A chain
+of steps that each need the previous result finishes in one delivery, with no
+queue round trip, and a `Select`, `All`, or group reacts to the first result
+as it would to a step delivery's.
+
+`workflow.SetMaxInlineSteps` sets how many steps run inline at once, from 1 to
+16, and zero turns it off:
+
+```go
+// For every delivery the worker executes.
+ctx = workflow.SetMaxInlineSteps(ctx, 0)
+
+// In a runner, for the steps declared with the returned ctx.
+ctx = workflow.SetMaxInlineSteps(ctx, 8)
+```
+
+A step that runs inline is recorded with one write that also starts it, so it
+takes two writes instead of three, like the Workflow SDK's
+[lazy inline steps](https://workflow-sdk.dev/docs/changelog/lazy-event-creation).
+A retry is queued as a step delivery after its delay. After two minutes, the
+delivery queues new steps instead of running them, so a long-running flow
+hands its work to other deliveries.
+
+The flow that starts a step inline records its queued message as the step's
+owner. If the flow dies before the step finishes, the queue redelivers that
+message, which runs the step again at once. Any other flow that finds the step
+running leaves it to its owner, and only one that replays more than 15 minutes
+after the step started hands it to a step delivery.
+
+The delivery ends once every step it runs inline has finished, so a slow step
+keeps it open. Turn inline steps off on workers whose queue limits how long a
+delivery may run.
 
 ## Writing reliable steps
 
@@ -62,8 +102,8 @@ handling errors after replay.
 
 ## Inline steps
 
-Use `workflow.InlineStep` for short work that should finish in the current
-flow delivery:
+Use `workflow.InlineStep` for short work that should always finish in the
+current flow delivery:
 
 ```go
 orderID, err := workflow.InlineStep(ctx, newOrderID, struct{}{})
@@ -109,8 +149,7 @@ attempt as attributes. The span uses the global tracer provider, so it is
 recorded once you set one with `otel.SetTracerProvider`, and a failed attempt
 records its error.
 
-A step runs in the replay that delivers it, with the context the runner passed
-to it. So a span context the runner puts in that context becomes the parent of
+A step runs with the context the runner passed to it. So a span context the runner puts in that context becomes the parent of
 the step's span, and the step's own instrumented I/O nests under it. Rebuild
 the span context the same way on every replay, for example from a trace
 context recorded in an [inline step](#inline-steps).

@@ -30,6 +30,8 @@ func Map[In, Out any](ctx context.Context, step func(context.Context, In) (Out, 
 func MapResults[T any](results []*Result[T]) []promise
 func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) ([]Out, error)
 func InlineStep[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error)
+func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) *Result[Out]
+func SetMaxInlineSteps(ctx context.Context, n int) context.Context
 func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions)
 func FatalError(cause error) error
 func RetryableError(cause error, after time.Duration) error
@@ -45,7 +47,9 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
 | `Map` | W | Starts one step per input. |
 | `MapResults` | W, S, O | Converts result handles for combinators or group Add, preserving order. |
 | `All` | W | Collects values in input order. Cancels remaining steps on any failure. |
-| `InlineStep` | W, S | Records work in the flow delivery. See [Inline Steps](/guide/inline-steps). In step context calls `fn` directly. |
+| `InlineStep` | W | Calls an inline step, which the flow delivery runs, and waits for it. `InlineBackground` + `Value`. See [Inline Steps](/guide/inline-steps). |
+| `InlineBackground` | W | Starts an inline step without waiting. The flow runs it when the runner waits. |
+| `SetMaxInlineSteps` | — | Sets how many new steps a flow runs inline at once: 3 by default, 0 for none, at most 16. See [Running steps inline](/guide/steps#running-steps-inline). |
 | `Rollback` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
 | `FatalError` | S | Wraps an error a step returns so the step fails without retrying. Has no effect on a runner's error. |
 | `RetryableError` | S | Wraps an error a step returns so the step retries no sooner than `after`. Has no effect on a runner's error. |

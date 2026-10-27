@@ -23,14 +23,11 @@ type durableStepInput struct{ Value int }
 type durableStepOutput struct{ Value int }
 type fatalStepInput struct{}
 type fatalStepOutput struct{}
-type inlineStepInput struct{}
-type inlineStepOutput struct{ Captured time.Time }
 type panicStepInput struct{}
 type panicStepOutput struct{}
 
 func (durableStepInput) Workflow(durableStepOutput) {}
 func (fatalStepInput) Workflow(fatalStepOutput)     {}
-func (inlineStepInput) Workflow(inlineStepOutput)   {}
 func (panicStepInput) Workflow(panicStepOutput)     {}
 
 func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
@@ -123,35 +120,6 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	}
 }
 
-func TestDurableInlineStepRecordsNowInOneAttempt(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
-		captured, err := workflow.Now(ctx)
-		return inlineStepOutput{Captured: captured}, err
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, inlineStepInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Value(ctx)
-	if err != nil || output.Captured.IsZero() {
-		t.Fatalf("inline output = %#v, %v", output, err)
-	}
-	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts := map[worlds.EventType]int{}
-	for _, event := range events.Data {
-		counts[event.EventType]++
-	}
-	if counts[worlds.EventTypeStepCreated] != 1 || counts[worlds.EventTypeStepStarted] != 1 || counts[worlds.EventTypeStepCompleted] != 1 {
-		t.Fatalf("inline events = %#v", events.Data)
-	}
-}
-
 func TestTargetedStepErrorPanicIsRecordedAsStepFailure(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ panicStepInput) (panicStepOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
@@ -197,7 +165,7 @@ func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
 	})
 	world := testworld.NewManual(runner)
 	defer world.Close()
-	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	ctx := workflow.NewContext(queuedSteps(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, redeliveredStepInput{})
 	if err != nil {
 		t.Fatal(err)

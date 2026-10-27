@@ -222,7 +222,9 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 			}
 		}
 	}()
-	err := runtime.Execute(executeCtx, item.input)
+	input := item.input
+	input.MessageID = item.id
+	err := runtime.Execute(executeCtx, input)
 	stopRenew()
 	<-renewed
 

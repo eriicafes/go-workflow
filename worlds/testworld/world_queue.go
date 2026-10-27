@@ -37,6 +37,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 }
 
 func (w *World) deliver(id string, input worlds.QueueInput) {
+	input.MessageID = id
 	if input.NotBefore != nil {
 		timer := time.NewTimer(time.Until(*input.NotBefore))
 		select {
@@ -113,7 +114,9 @@ func (w *World) QueuedMessages() []QueueMessage {
 	defer w.mu.RUnlock()
 	values := make([]QueueMessage, len(w.queued))
 	for index, message := range w.queued {
-		values[index] = QueueMessage{ID: message.id, Input: cloneQueueInput(message.input)}
+		input := cloneQueueInput(message.input)
+		input.MessageID = message.id
+		values[index] = QueueMessage{ID: message.id, Input: input}
 	}
 	return values
 }

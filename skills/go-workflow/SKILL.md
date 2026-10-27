@@ -35,9 +35,12 @@ step or external application code. Sort map keys before using their order to
 schedule durable operations.
 
 `Step` waits for its result. `Background` returns `*workflow.Result[T]` without
-waiting; read it with `Value(ctx)` or `Unwrap(ctx)`. Use `InlineStep` for short
-recorded operations in the flow delivery. Inline steps follow the same retry
-and idempotency requirements as other steps.
+waiting; read it with `Value(ctx)` or `Unwrap(ctx)`. A flow delivery runs up
+to three new steps inline at once when the runner waits and queues the rest;
+`SetMaxInlineSteps(ctx, n)` changes the limit and 0 turns it off. Use
+`InlineStep` for short recorded operations that always run in the flow
+delivery, and `InlineBackground` to start one without waiting. Inline steps
+follow the same retry and idempotency requirements as other steps.
 
 Step attempts are delivered at least once. Use `workflow.StepID(ctx)` as a
 stable external idempotency key where supported. Omitted `StepOptions` allows

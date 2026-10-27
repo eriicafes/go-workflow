@@ -50,6 +50,11 @@ type (
 		// this delivery again because its replay diverged from the run's
 		// event log.
 		ReplayDivergenceCount int
+		// MessageID identifies the queued message a World delivers, as
+		// QueueResult reported it, and stays the same when the message is
+		// redelivered. The World sets it before Runtime.Execute, and Queue
+		// ignores it.
+		MessageID string
 	}
 	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {

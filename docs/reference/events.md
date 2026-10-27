@@ -78,7 +78,7 @@ and keeps the rest, such as a step's name and position.
 | Type | Records |
 | --- | --- |
 | `step_created` | A step with its name and input. |
-| `step_started` | A delivery started an attempt. Each start is a new attempt. |
+| `step_started` | A delivery started an attempt. Each start is a new attempt. A flow that starts a new step inline records it in the same write as `step_created`, with `ownerMessageId` set to its queued message. |
 | `step_completed` | The step's output. |
 | `step_retrying` | A failed attempt and when the step is retried. |
 | `step_failed` | The step's final error. |

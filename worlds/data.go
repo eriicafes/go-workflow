@@ -152,6 +152,14 @@ type DataStepCreated struct {
 	Cancellation []cancellationReference `json:"cancellation,omitempty"`
 }
 
+// DataStepStarted is the JSON payload of a step_started event.
+type DataStepStarted struct {
+	// OwnerMessageID is the queued message of the flow that started the
+	// attempt inline, which owns it until inlineStepLease passes. It is
+	// empty for an attempt a step delivery started.
+	OwnerMessageID string `json:"ownerMessageId,omitempty"`
+}
+
 // DataStepResult is the JSON payload of a step_completed, step_retrying, or
 // step_failed event.
 type DataStepResult struct {

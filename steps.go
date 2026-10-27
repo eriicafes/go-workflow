@@ -53,6 +53,12 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 		Name:       functionIdentity(fn),
 		MaxRetries: option.MaxRetries,
 	}, fn, input)
+	return stepResult(execution, durable)
+}
+
+// stepResult returns the Result of the step durable declared, which settles
+// when the walk reaches its result.
+func stepResult[Out any](execution *worlds.Execution, durable worlds.DurableStepResult[Out]) *Result[Out] {
 	return &Result[Out]{
 		err:     durable.Err,
 		id:      string(durable.StepID),
@@ -63,38 +69,49 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 	}
 }
 
-// InlineStep calls the step fn with input in workflow context, without a step
-// delivery, and records its result, so replay returns the recorded result
-// instead of calling fn again. Like Step, the step is identified by fn's
-// function name and its position in the runner, records input, and is retried
-// on error according to options, where the last option applies and the
-// default allows 3 retries. It returns the step's final error as an *Error,
-// and ErrNoWorkflow outside a run.
+// InlineStep calls the step fn with input as an inline step and waits for it.
+// It is InlineBackground followed by Value. It behaves like Step, except that
+// the flow always runs it, and its retries, itself, never as a step delivery.
+// It returns the step's final error as an *Error, and ErrNoWorkflow when ctx
+// does not belong to a run.
 //
-// A retry suspends the run and runs on a later replay once it is due. Use
-// InlineStep for short work that rarely fails, such as generating an ID or
+// Use InlineStep for short work that rarely fails, such as generating an ID or
 // reading another run, and Step for anything else. fn is executed at least
-// once, and a delivery that stopped before recording its result calls it
-// again, so it should be idempotent or free of side effects. A World error
-// while recording the step retries the delivery.
-//
-// In step context, InlineStep calls fn without recording it.
+// once, so it should be idempotent or free of side effects.
 func InlineStep[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error) {
+	return InlineBackground(ctx, fn, input, options...).Value(ctx)
+}
+
+// InlineBackground starts the step fn with input as an inline step and returns
+// a promise for its result without waiting for it, like Background. When the
+// runner waits, the flow runs it, at the same time as the other steps it runs
+// inline, and the runner continues as each one finishes. It always runs inline,
+// whatever SetMaxInlineSteps allows, and a retry runs in a later flow once it
+// is due. Outside workflow context, the promise fails with ErrNoWorkflow.
+func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) *Result[Out] {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
-		if _, inStep := worlds.ExecutionFromContext(ctx); inStep {
-			return fn(ctx, input)
-		}
-		var zero Out
-		return zero, ErrNoWorkflow
+		return &Result[Out]{err: ErrNoWorkflow}
 	}
 	option := stepOptions(options)
-	result := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
+	durable := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
 		Execution:  execution,
 		Name:       functionIdentity(fn),
 		MaxRetries: option.MaxRetries,
 	}, fn, input)
-	return result.Data, result.Err
+	return stepResult(execution, durable)
+}
+
+// SetMaxInlineSteps returns a copy of ctx that sets how many new steps a flow
+// runs inline at once, instead of queueing a step delivery for each. The
+// default is 3. Zero runs none inline, and other values are clamped to 1
+// through 16. Steps beyond the limit are queued as usual.
+//
+// Set it on the ctx a World's handler executes deliveries with to set the
+// limit for that worker, or in a runner for the steps it declares with the
+// returned ctx.
+func SetMaxInlineSteps(ctx context.Context, n int) context.Context {
+	return worlds.WithMaxInlineSteps(ctx, n)
 }
 
 // Sleep suspends the run for duration. Use it instead of time.Sleep in a
@@ -150,13 +167,7 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 			return result.Err
 		}
 		// A compensation that fails is recorded and does not stop the others.
-		return Join(ctx, &Result[struct{}]{
-			id:      string(result.StepID),
-			settled: func() bool { return execution.Settled(string(result.StepID)) },
-			outcome: func() (struct{}, error) {
-				return worlds.StepOutcome[struct{}](execution, result.StepID)
-			},
-		})
+		return Join(ctx, stepResult(execution, result))
 	})
 }
 
@@ -169,13 +180,13 @@ func Now(ctx context.Context) (time.Time, error) {
 	if !ok {
 		return time.Time{}, ErrNoWorkflow
 	}
-	result := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
+	durable := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
 		Execution: execution,
 		Name:      "now",
 	}, func(context.Context, struct{}) (time.Time, error) {
 		return time.Now().UTC(), nil
 	}, struct{}{})
-	return result.Data, result.Err
+	return stepResult(execution, durable).Value(ctx)
 }
 
 // Map starts one background step per input, returning results in input order.
@@ -306,8 +317,6 @@ func selectPromise(ctx context.Context, successful bool, results ...promise) (pr
 		if !pending {
 			return nil, firstErr
 		}
-		if !execution.Advance() {
-			execution.Suspend()
-		}
+		execution.Wait()
 	}
 }

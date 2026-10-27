@@ -5,7 +5,8 @@ import (
 )
 
 // Callbacks are called as the agent runs. They run in workflow context, so a
-// replay calls them again for the steps it replays.
+// replay calls them again for the steps it replays. Plain logging may repeat
+// on replay; record side effects with workflow.Step or workflow.InlineStep.
 type Callbacks struct {
 	OnStart              func(ctx context.Context, event StartEvent)
 	OnStepStart          func(ctx context.Context, event StepStartEvent)

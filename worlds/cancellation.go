@@ -75,7 +75,14 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 		if outcome.Err != nil {
 			return outcome.Err
 		}
-		cancel(DecodeError(outcome.Data))
+		for !execution.Settled(string(outcome.StepID)) {
+			execution.Wait()
+		}
+		data, err := StepOutcome[json.RawMessage](execution, outcome.StepID)
+		if err != nil {
+			return err
+		}
+		cancel(DecodeError(data))
 		for _, fn := range execution.continuations {
 			fn()
 		}
@@ -194,8 +201,18 @@ func readCancellation(ctx context.Context, execution *Execution, ref cancellatio
 // StepCancelContext subscribes a running attempt to its cancellation streams.
 // stop releases the readers without cancelling the workflow's cancellation contexts.
 func StepCancelContext(ctx context.Context, execution *Execution, refs []cancellationReference) (context.Context, func()) {
+	cancelCtx, stop, err := stepCancelContext(ctx, execution, refs)
+	if err != nil {
+		panic(execution.exit(deliveryError{cause: err}))
+	}
+	return cancelCtx, stop
+}
+
+// stepCancelContext is StepCancelContext returning the World error that
+// stops it subscribing, for an attempt that runs outside the replay.
+func stepCancelContext(ctx context.Context, execution *Execution, refs []cancellationReference) (context.Context, func(), error) {
 	if len(refs) == 0 {
-		return ctx, func() {}
+		return ctx, func() {}, nil
 	}
 	local, cancel := context.WithCancelCause(ctx)
 	state := &cancellationContext{Context: local, refs: refs, cancel: cancel}
@@ -210,7 +227,7 @@ func StepCancelContext(ctx context.Context, execution *Execution, refs []cancell
 		if err != nil {
 			stop()
 			wg.Wait()
-			panic(execution.exit(deliveryError{cause: err}))
+			return nil, nil, err
 		}
 		for _, chunk := range page.Data {
 			var data cancellationData
@@ -261,5 +278,5 @@ func StepCancelContext(ctx context.Context, execution *Execution, refs []cancell
 			}
 		})
 	}
-	return cancelCtx, func() { stop(); wg.Wait() }
+	return cancelCtx, func() { stop(); wg.Wait() }, nil
 }

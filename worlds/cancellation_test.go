@@ -56,7 +56,7 @@ func (w *cancelRaceWorld) StreamsWrite(ctx context.Context, input worlds.Streams
 }
 
 func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
-	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, stop := context.WithTimeout(queuedSteps(), 3*time.Second)
 	defer stop()
 	base := testworld.NewManual()
 	defer base.Close()
@@ -128,7 +128,7 @@ func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 	for _, failNotification := range []bool{false, true} {
 		t.Run(map[bool]string{false: "notified", true: "notification retry"}[failNotification], func(t *testing.T) {
-			ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, stop := context.WithTimeout(queuedSteps(), 3*time.Second)
 			defer stop()
 			base := testworld.NewManual()
 			defer base.Close()

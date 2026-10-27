@@ -13,10 +13,17 @@ either a flow or a step of one run.
 - A **flow delivery** replays the runner from the beginning. Every operation
   the runner reaches (a step, timer, hook, webhook, or child run) is looked up
   in the event log. If it is already recorded, its recorded result is returned.
-  If it is new, the flow records it, for example with a `step_created` event,
+  If it is new, the flow records it, for example with a `wait_created` event,
   and queues whatever must happen next. When the runner reaches a promise that
-  has not settled, the flow **suspends** and the delivery ends. When the runner
-  returns, the flow records `run_completed` or `run_failed`.
+  has not settled and no step the flow runs inline can settle it, the flow
+  **suspends**. When the runner returns, the flow
+  records `run_completed` or `run_failed`.
+- New steps wait until the runner waits for a result that is not recorded.
+  The flow then records them with one write, runs the first few
+  [inline](/guide/steps#running-steps-inline), and queues a step delivery for
+  each of the rest. Instead of suspending, the runner waits: as each inline
+  step finishes, the flow records its result and the runner continues from
+  where it waited. The flow suspends once nothing it runs inline is left.
 - A **step delivery** replays the runner up to the target step, calls the step
   function with its recorded input, and records the result with
   `step_completed`, `step_retrying`, or `step_failed`. It then queues a flow
@@ -25,9 +32,22 @@ either a flow or a step of one run.
 
 ```
 Start ──► run_created ──► flow delivery
+                            │  replay: Step(findSources) is new, the runner waits
+                            │  record step_created and step_started
+                            │  call findSources, record step_completed
+                            │  the runner continues with the result
+                            │  runner returns
+                            ▼  record run_completed
+```
+
+With inline steps turned off, or past the limit, the step runs in its own
+delivery:
+
+```
+Start ──► run_created ──► flow delivery
                             │  replay: Step(findSources) is new
-                            │  record step_created, queue step delivery
-                            ▼  suspend
+                            │  suspend, record step_created, queue step delivery
+                            ▼
                           step delivery
                             │  replay up to findSources, call it
                             │  record step_completed, queue flow delivery
@@ -42,7 +62,10 @@ Whether a delivery may run is decided by appending events, which the World
 admits or rejects atomically. Duplicate and stale deliveries are therefore
 safe: a delivery for a run or step that is already terminal returns without
 running runner or step code. A delivery that dies before recording its result is
-redelivered by the queue and runs the step again as a new attempt.
+redelivered by the queue and runs the step again as a new attempt. A step that
+ran inline in a flow that died runs again when the queue redelivers that
+flow's message. Another flow takes it over only when it replays after the
+owning message's 15-minute lease on it ends.
 
 ### Concurrent flows
 
@@ -53,9 +76,13 @@ would declare the next operation on its own. The flow's writes are therefore
 every flow write carries the count it last saw. When another flow has written
 since, the World refuses the write with `worlds.ErrInBandSuperseded`. The refused flow
 stops and queues one follow-up flow, which replays the run and sees the other
-flow's declarations. Flows refused by the same write share one
+flow's declarations. Since the write that starts an inline step is fenced too,
+two flows never both run it. Flows refused by the same write share one
 follow-up on a World that deduplicates deliveries. Writes from step deliveries, hook resumes, `WakeUp`, and
 cancellation are out-of-band: they are never fenced and don't move the count.
+So are the results of inline steps, like a step delivery's, so a flow that ran
+a step records its result even when another flow has written since. A step
+whose result is already recorded refuses a second one.
 
 ## Identifying operations
 
@@ -79,10 +106,8 @@ promise. So:
   `WithDeadline` attach a `Then` continuation that cancels their context when
   the timer settles.
 
-[Inline steps](/guide/inline-steps) are the exception: the runner sees them where it declares them,
-because the flow that declares them also settles them. `GetConflict` likewise
-returns a hook conflict as soon as it is called, but `Next` and `Select`
-see it only when the walk reaches it.
+`GetConflict` is the exception: it returns a hook conflict as soon as it is
+called, but `Next` and `Select` see it only when the walk reaches it.
 
 This matches how the Workflow SDK consumes its event log, where a promise
 resolves when the walk reaches its result.
