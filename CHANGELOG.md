@@ -1,5 +1,14 @@
 # go-workflow
 
+## 0.3.0
+
+### Minor Changes
+
+- 2281a0f: Run each step attempt in an OpenTelemetry span, parented under the span context the runner passes to the step.
+- 2281a0f: Add the `workflowai` package to run AI SDK `WorkflowAgent` agents as durable runs with Go AI SDK.
+- c32cc83: Run new steps inline in the flow delivery up to `SetMaxInlineSteps` (default 3), and add `InlineBackground`.
+- c32cc83: Add `workflowai.ExecuteInlineStep` to run a tool's calls as inline steps.
+
 ## 0.2.0
 
 ### Minor Changes
