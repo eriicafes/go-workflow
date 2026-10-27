@@ -62,8 +62,14 @@ func resumeParentHook(ctx context.Context, completion childCompletion) (struct{}
 }
 
 func TestStartedChildRunResumesParentHook(t *testing.T) {
+	// The child finishes only once the parent has read its result, so the
+	// parent reads it unfinished.
+	read := make(chan struct{})
 	child := func(ctx context.Context, input childRunInput) (childRunOutput, error) {
-		value, err := workflow.Step(ctx, func(_ context.Context, _ struct{}) (string, error) { return "child", nil }, struct{}{})
+		value, err := workflow.Step(ctx, func(context.Context, struct{}) (string, error) {
+			<-read
+			return "child", nil
+		}, struct{}{})
 		if err != nil {
 			return childRunOutput{}, err
 		}
@@ -93,6 +99,18 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 	run, err := workflow.Start(ctx, parentRunInput{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for released := false; !released; time.Sleep(time.Millisecond) {
+		steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range steps.Data {
+			if !released && strings.HasSuffix(step.StepName, ".runValue") && step.Status == worlds.StatusCompleted {
+				close(read)
+				released = true
+			}
+		}
 	}
 	result, err := run.Value(ctx)
 	if err != nil {

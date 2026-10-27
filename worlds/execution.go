@@ -38,7 +38,7 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 
 // Execution holds a delivery's run, event log, and target step. Durable operations
 // match declarations by position and read recorded outcomes. Results become
-// visible as Advance walks the event log.
+// visible as Wait walks the event log.
 type Execution struct {
 	world  World
 	ctx    context.Context
@@ -70,7 +70,7 @@ type Execution struct {
 	// suspended marks a runtime exit before the workflow body finishes.
 	suspended bool
 	// pending holds the steps a flow declared or must attempt again, in
-	// declaration order, which Advance starts once every recorded event is
+	// declaration order, which advance starts once every recorded event is
 	// delivered.
 	pending []pendingStep
 	// outcomes receives the result of each step the flow runs inline.
@@ -335,10 +335,10 @@ func (e *Execution) OnAdvance(fn func()) {
 	fn()
 }
 
-// Advance delivers one recorded event and runs newly ready continuations.
+// advance delivers one recorded event and runs newly ready continuations.
 // Once every recorded event is delivered, a flow starts the steps the runner
 // declared, and waits for a step it runs inline to record its result, which
-// it then delivers, so the runner continues without replaying. Advance
+// it then delivers, so the runner continues without replaying. advance
 // reports false when no event can arrive in this delivery.
 func (e *Execution) advance() bool {
 	if e.horizon == len(e.events) {
@@ -368,7 +368,7 @@ func (e *Execution) Wait() {
 	}
 }
 
-// hold adds step to the steps Advance starts once every recorded event is
+// hold adds step to the steps advance starts once every recorded event is
 // delivered.
 func (e *Execution) hold(step pendingStep) {
 	e.pending = append(e.pending, step)

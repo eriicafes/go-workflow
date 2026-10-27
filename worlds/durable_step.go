@@ -38,7 +38,7 @@ type (
 )
 
 // DurableStep declares the step at the next position. On first execution in a
-// flow it holds the step back until the runner waits, when Execution.Advance
+// flow it holds the step back until the runner waits, when Execution.Wait
 // runs it inline or records step_created with input and queues a step
 // delivery, which a step delivery or compensation does at once. On replay it
 // matches the recorded declaration and returns the step's ID, whose result

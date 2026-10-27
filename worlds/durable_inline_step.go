@@ -60,7 +60,7 @@ type DurableInlineStepOptions struct {
 // DurableInlineStep declares the inline step at the next position, which runs
 // fn with input in the flow, never as a step delivery. It reports the step's
 // ID, whose result StepOutcome reads once the walk reaches it. When the runner
-// waits with nothing left to deliver, Execution.Advance records step_created
+// waits with nothing left to deliver, Execution.Wait records step_created
 // with input and step_started in one write, calls fn alongside the other steps
 // it runs inline, records the result, and delivers it. Every attempt uses the
 // recorded input.
@@ -179,9 +179,10 @@ func attemptOwner(execution *Execution, started Event) (string, bool) {
 	return data.OwnerMessageID, started.CreatedAt.IsZero() || time.Now().Before(started.CreatedAt.Add(inlineStepLease))
 }
 
-// pendingStep is a step a flow declared, or must attempt again, that Advance
-// starts once every recorded event is delivered: inline when it is explicit,
-// recovered, or within its limit, and otherwise queued as a step delivery.
+// pendingStep is a step a flow declared, or must attempt again, that
+// Execution.Wait starts once every recorded event is delivered: inline when it
+// is explicit, recovered, or within its limit, and otherwise queued as a step
+// delivery.
 type pendingStep struct {
 	stepID StepID
 	// created is the step's declaration, which is not yet recorded. It is
