@@ -114,6 +114,21 @@ func SetMaxInlineSteps(ctx context.Context, n int) context.Context {
 	return worlds.WithMaxInlineSteps(ctx, n)
 }
 
+// SetMaxInlineStepsDuration returns a copy of ctx that sets how long after a
+// flow delivery starts it may start new steps inline. The default is 2 minutes,
+// and zero starts none inline. After it, new steps are queued, so a
+// long-running flow hands them to other deliveries.
+//
+// A flow also stops starting steps inline halfway to the deadline of the ctx
+// it executes with, so the steps it started can finish before it.
+//
+// Set it like SetMaxInlineSteps: on the ctx a World's handler executes
+// deliveries with, or in a runner for the steps it declares with the returned
+// ctx.
+func SetMaxInlineStepsDuration(ctx context.Context, d time.Duration) context.Context {
+	return worlds.WithMaxInlineStepsDuration(ctx, d)
+}
+
 // Sleep suspends the run for duration. Use it instead of time.Sleep in a
 // workflow. It is Timer followed by Value.
 func Sleep(ctx context.Context, duration time.Duration) error {
