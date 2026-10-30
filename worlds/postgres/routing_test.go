@@ -17,9 +17,6 @@ func TestQueueRoutesWorkflowsToTheQueuesWorkersClaim(t *testing.T) {
 	url, schema := testSchema(t)
 	world := testWorld(t, testPool(t, url, schema), Config{Routes: worlds.Routes(worlds.Route[routedWorkflow]("backfill"))})
 	ctx := context.Background()
-	if !world.Capabilities().QueueRouting {
-		t.Fatal("QueueRouting = false, want true with routes")
-	}
 
 	routed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow]()})
 	if err != nil {

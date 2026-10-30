@@ -137,7 +137,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, QueueRouting: len(w.config.Routes) > 0}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true}
 }
 
 // HTTP returns a handler serving the RPC and webhook endpoints under

@@ -64,9 +64,6 @@ func TestQueueRoutesByWorkflow(t *testing.T) {
 	ctx := context.Background()
 	queue := &fakeSQS{}
 	world := routingWorld(t, queue, newFakeScheduler())
-	if !world.Capabilities().QueueRouting {
-		t.Fatal("a World with routes does not report QueueRouting")
-	}
 
 	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow]()}); err != nil {
 		t.Fatal(err)

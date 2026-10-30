@@ -32,9 +32,7 @@ type (
 		// WorkflowName is the workflow of the run the delivery belongs to,
 		// so a World can route the run's deliveries to a queue of its
 		// choosing. The Runtime and Client set it on every delivery they
-		// queue for a run, reading the run for it only when the World
-		// reports Capabilities.QueueRouting. Worlds that don't route ignore
-		// it.
+		// queue for a run. Worlds that don't route ignore it.
 		WorkflowName string
 		// StepID selects the step a step delivery executes. Nil makes the
 		// delivery a flow.

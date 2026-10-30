@@ -96,7 +96,6 @@ type Capabilities struct {
 	Analytics          bool
 	SetAttributes      bool
 	DeploymentAffinity bool
-	QueueRouting       bool
 }
 ```
 
@@ -110,12 +109,11 @@ deliveries are addressed to the run's deployment through
 `QueueInput.DeploymentID`, and misdelivered ones are re-routed. Of the built-in Worlds, only Vercel reports
 affinity, and only when it has a deployment ID.
 
-With `QueueRouting`, the World chooses a delivery's queue from
-`QueueInput.WorkflowName`. The Runtime and Client set it on every delivery.
-`ResumeHook` takes it from the hook's `ResumeContext`, and other code that
-queues for a run it hasn't loaded, such as wake-ups and cancellation, reads the
-run for it, which it otherwise skips. `RunDelivery(ctx, world, runID)` returns a
-delivery addressed that way.
+A World can choose a delivery's queue from `QueueInput.WorkflowName`, which the
+Runtime and Client set on every delivery. `ResumeHook` takes it from the hook's
+`ResumeContext`, and other code that queues for a run it hasn't loaded, such as
+wake-ups and cancellation, reads the run for it. `RunDelivery(ctx, world,
+runID)` returns a delivery addressed that way.
 
 ## Storage
 
