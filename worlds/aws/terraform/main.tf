@@ -1,6 +1,8 @@
 locals {
   # awsworld names one-time schedules go-workflow-<message ID>.
   schedule_arn = var.enable_scheduler ? "${replace(aws_scheduler_schedule_group.workflows[0].arn, ":schedule-group/", ":schedule/")}/go-workflow-*" : null
+  # The default task queue and every routed queue.
+  queue_arns = concat([aws_sqs_queue.tasks.arn], [for queue in aws_sqs_queue.routed : queue.arn])
 }
 
 resource "aws_dynamodb_table" "workflows" {
@@ -103,6 +105,70 @@ resource "aws_sqs_queue_redrive_allow_policy" "dead_letter" {
   })
 }
 
+# Further queues that awsworld.Config.Routes routes workflows to. A FIFO queue
+# uses content-based deduplication, since Scheduler can't set a message's
+# deduplication ID.
+resource "aws_sqs_queue" "routed_dead_letter" {
+  for_each = var.queues
+
+  name                      = each.value.fifo ? "${var.name}-${each.key}-dlq.fifo" : "${var.name}-${each.key}-dlq"
+  fifo_queue                = each.value.fifo ? true : null
+  message_retention_seconds = var.message_retention_seconds
+  sqs_managed_sse_enabled   = true
+  tags                      = var.tags
+}
+
+resource "aws_sqs_queue" "routed" {
+  for_each = var.queues
+
+  name                        = each.value.fifo ? "${var.name}-${each.key}.fifo" : "${var.name}-${each.key}"
+  fifo_queue                  = each.value.fifo ? true : null
+  content_based_deduplication = each.value.fifo ? true : null
+  visibility_timeout_seconds  = coalesce(each.value.visibility_timeout_seconds, var.visibility_timeout_seconds)
+  message_retention_seconds   = var.message_retention_seconds
+  sqs_managed_sse_enabled     = true
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.routed_dead_letter[each.key].arn
+    maxReceiveCount     = coalesce(each.value.max_receive_count, var.max_receive_count)
+  })
+  tags = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = !each.value.fifo || var.enable_scheduler
+      error_message = "FIFO queues need enable_scheduler, since every delayed delivery to them goes through Scheduler."
+    }
+  }
+}
+
+resource "aws_sqs_queue_redrive_allow_policy" "routed_dead_letter" {
+  for_each = var.queues
+
+  queue_url = aws_sqs_queue.routed_dead_letter[each.key].id
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "byQueue"
+    sourceQueueArns   = [aws_sqs_queue.routed[each.key].arn]
+  })
+}
+
+resource "aws_lambda_event_source_mapping" "routed" {
+  for_each = var.worker_function_name == null ? {} : var.queues
+
+  event_source_arn        = aws_sqs_queue.routed[each.key].arn
+  function_name           = var.worker_function_name
+  batch_size              = each.value.batch_size
+  function_response_types = ["ReportBatchItemFailures"]
+
+  depends_on = [aws_iam_role_policy_attachment.worker]
+
+  dynamic "scaling_config" {
+    for_each = each.value.maximum_concurrency == null ? [] : [each.value.maximum_concurrency]
+    content {
+      maximum_concurrency = scaling_config.value
+    }
+  }
+}
+
 resource "aws_lambda_event_source_mapping" "worker" {
   count = var.worker_function_name == null ? 0 : 1
 
@@ -155,7 +221,7 @@ resource "aws_iam_role_policy" "scheduler" {
     Statement = [{
       Effect   = "Allow"
       Action   = "sqs:SendMessage"
-      Resource = aws_sqs_queue.tasks.arn
+      Resource = local.queue_arns
     }]
   })
 }
@@ -170,7 +236,7 @@ data "aws_iam_policy_document" "worker" {
   statement {
     sid       = "Queue"
     actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
-    resources = [aws_sqs_queue.tasks.arn]
+    resources = local.queue_arns
   }
 
   dynamic "statement" {
@@ -207,7 +273,7 @@ data "aws_iam_policy_document" "api" {
   statement {
     sid       = "Queue"
     actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.tasks.arn]
+    resources = local.queue_arns
   }
 
   dynamic "statement" {

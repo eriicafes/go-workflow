@@ -312,13 +312,14 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	if step.Status.Terminal() {
 		// The delivery that recorded the result may have failed to queue the
 		// flow that consumes it, and its redelivery lands here.
-		_, err := r.world.Queue(ctx, QueueInput{RunID: run.RunID, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
+		_, err := r.world.Queue(ctx, QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 		return err
 	}
 	if step.Status == StatusPending && step.RetryAfter != nil && time.Now().Before(*step.RetryAfter) {
 		// An early or duplicate delivery waits for the scheduled retry
 		// instead of starting it ahead of its backoff.
 		retry := input
+		retry.WorkflowName = run.WorkflowName
 		retry.NotBefore = step.RetryAfter
 		retry.IdempotencyKey = stepRetryKey(step.StepID, step.Attempt)
 		_, err := r.world.Queue(ctx, retry)
@@ -406,7 +407,7 @@ func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID
 	if err != nil || event.EventID == "" {
 		return err
 	}
-	queue := QueueInput{RunID: execution.run.RunID, IdempotencyKey: string(event.EventID), DeploymentID: execution.run.DeploymentID}
+	queue := QueueInput{RunID: execution.run.RunID, WorkflowName: execution.run.WorkflowName, IdempotencyKey: string(event.EventID), DeploymentID: execution.run.DeploymentID}
 	if event.EventType == EventTypeStepRetrying {
 		queue.StepID = &stepID
 		queue.NotBefore = result.RetryAfter
@@ -494,6 +495,7 @@ func (r *Runtime) supersede(ctx context.Context, input QueueInput) error {
 		return nil
 	}
 	followUp := input
+	followUp.WorkflowName = run.WorkflowName
 	followUp.NotBefore = nil
 	followUp.IdempotencyKey = fmt.Sprintf("superseded:%s:%d", run.RunID, run.InBandCount)
 	followUp.DeploymentID = run.DeploymentID
@@ -541,6 +543,7 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 	if attempts < maxDeploymentMismatchRetries {
 		notBefore := time.Now().Add(min(time.Second<<attempts, maxRerouteDelay))
 		input.NotBefore = &notBefore
+		input.WorkflowName = run.WorkflowName
 		input.DeploymentID = run.DeploymentID
 		input.DeploymentMismatchRetryCount = attempts + 1
 		_, err := r.world.Queue(ctx, input)

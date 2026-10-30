@@ -67,12 +67,57 @@ lambdaurl.Start(awsworld.HTTP(world))
 | --- | --- |
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
 | `TableName` | Required. DynamoDB table, laid out as `CreateTable` creates it. |
-| `QueueURL` | Required. SQS standard queue that carries deliveries. |
-| `Scheduler` | Optional. Delivers work due more than 15 minutes ahead. |
+| `QueueURL` | Required. SQS standard queue that carries deliveries of unrouted workflows. |
+| `Queues` | Optional. Further queues by name, standard or FIFO. See [Queue routing](#queue-routing). |
+| `Routes` | Optional. Workflow name to queue name, built with `Routes` and `Route`. |
+| `Scheduler` | Optional. Delivers work due more than 15 minutes ahead, and every delayed delivery to a FIFO queue. |
 
 `SchedulerConfig` requires `Client`, `TargetARN` (the queue's ARN), and
 `RoleARN` (the role Scheduler assumes to send to the queue). `Group` defaults to
 `default`.
+
+## Queue routing
+
+`QueueURL` carries every workflow by default. `Queues` adds further queues by
+name, and `Routes` sends the runs of a workflow to one of them, such as a queue
+with its own worker concurrency for heavy work:
+
+```go
+world, err := awsworld.New(awsworld.Config{
+	// BaseURL, TableName, QueueURL, Scheduler...
+	Queues: map[string]awsworld.QueueConfig{
+		"backfill": {URL: backfillURL, ARN: backfillARN},
+		"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
+	},
+	Routes: awsworld.Routes(
+		awsworld.Route[workflows.Backfill]("backfill"),
+		awsworld.Route[workflows.Ledger]("ordered"),
+	),
+}, dynamoClient, sqsClient)
+```
+
+`Route[W]` names the workflow with `workflow.WorkflowName[W]()`, the name its
+runs are recorded under. Every delivery of a run, flow or step, goes to its
+workflow's queue: the Runtime sets `QueueInput.WorkflowName`, and code that
+queues for a run it hasn't loaded, such as `ResumeHook`, reads the run for it
+because the World reports `Capabilities.QueueRouting`. The record keeps the
+queue name, so a message that arrives early is sent again to the same queue.
+The worker reads messages from every queue; give each its own event source
+mapping.
+
+A `QueueConfig` needs its `URL`, and its `ARN` when `Scheduler` is set or the
+queue is FIFO; the ARN is the Scheduler target for deliveries due later. `New`
+rejects a route to a queue not in `Queues`.
+
+A FIFO queue (`FIFO: true`) runs one delivery of a run at a time: each
+message's `MessageGroupId` is the run ID and its `MessageDeduplicationId` the
+delivery ID. FIFO queues have no per-message delay, so every delayed delivery,
+retries and early arrivals included, goes through Scheduler into the run's
+message group, and `New` rejects a FIFO queue without `Scheduler`. Scheduler
+can't set a deduplication ID, so enable content-based deduplication on the
+queue; scheduled bodies carry a unique `publish` field so they never collide.
+FIFO groups order a run's messages, not separate runs: two runs of a workflow
+still interleave when one waits.
 
 ## Queue delivery
 
@@ -147,7 +192,9 @@ provisions:
 - the DynamoDB table with its indexes (on-demand, encrypted, point-in-time
   recovery and deletion protection on by default).
 - the task queue and its dead-letter queue.
-- optionally, the SQS event source mapping for the worker, with
+- further queues, standard or FIFO, for `Routes`, each with its own
+  dead-letter queue (`queues`).
+- optionally, the SQS event source mappings for the worker, with
   `ReportBatchItemFailures`.
 - the EventBridge Scheduler group and the role Scheduler assumes.
 - least-privilege managed policies for the worker and the API, optionally
@@ -179,8 +226,9 @@ resource "aws_lambda_function" "worker" {
 }
 ```
 
-The `environment` output holds `WORKFLOW_TABLE`, `WORKFLOW_QUEUE_URL`, and, with
-the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
+The `environment` output holds `WORKFLOW_TABLE`, `WORKFLOW_QUEUE_URL`,
+`WORKFLOW_QUEUES` (JSON: `{"<name>":{"url":"...","arn":"...","fifo":false}}`),
+and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
 `WORKFLOW_SCHEDULER_ROLE_ARN`.
 
 | Input | Default | Description |
@@ -198,6 +246,7 @@ the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
 | `maximum_concurrency` | `null` | Cap on concurrent worker invocations (2–1000). |
 | `worker_role_name` | `null` | Attach the worker policy to this role. |
 | `api_role_name` | `null` | Attach the API policy to this role. |
+| `queues` | `{}` | Routed queues by name: `fifo`, `batch_size` (10), `maximum_concurrency`, `visibility_timeout_seconds`, `max_receive_count`. A FIFO queue gets the `.fifo` suffix and content-based deduplication. |
 
 ## IAM
 

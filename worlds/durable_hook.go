@@ -93,11 +93,12 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		result.Err, result.ConflictRunID = ErrHookConflict, created.ConflictingRunID
 	}
 	if created.ForceClaimedFrom != nil {
-		deployment, err := RunDeploymentID(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
+		queue, err := RunDelivery(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
-		_, err = options.Execution.World().Queue(options.Execution.ctx, QueueInput{RunID: created.ForceClaimedFrom.RunID, DeploymentID: deployment, IdempotencyKey: "hook-force:" + string(result.HookID)})
+		queue.IdempotencyKey = "hook-force:" + string(result.HookID)
+		_, err = options.Execution.World().Queue(options.Execution.ctx, queue)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}

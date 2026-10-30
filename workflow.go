@@ -456,7 +456,7 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 	} else if err != nil {
 		return "", err
 	}
-	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, IdempotencyKey: string(id), DeploymentID: deploymentID}); err != nil {
+	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, WorkflowName: input.WorkflowName, IdempotencyKey: string(id), DeploymentID: deploymentID}); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -485,6 +485,12 @@ func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) w
 		return encoded, nil
 	})
 }
+
+// WorkflowName returns the name runs of the workflow type In are recorded
+// under: its package path and type name, as Use and Start record it. Worlds
+// that route deliveries by workflow use it to name a workflow, such as in
+// awsworld.Route.
+func WorkflowName[In any]() string { return typeIdentity[In]() }
 
 func typeIdentity[In any]() string {
 	typeOf := reflect.TypeFor[In]()

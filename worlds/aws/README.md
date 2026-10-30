@@ -52,6 +52,49 @@ The basic example keeps these in `examples/basic/cmd/worker/aws/queue` and
 `examples/basic/cmd/worker/aws/api`. Code that already has the world in
 process can pass it to `workflow.NewContext` directly without the HTTP API.
 
+### Queue routing
+
+`QueueURL` carries every workflow by default. `Queues` adds further queues by
+name, and `Routes` sends the runs of a workflow to one of them, such as a queue
+with its own worker concurrency for heavy work:
+
+```go
+world, err := awsworld.New(awsworld.Config{
+	// BaseURL, TableName, QueueURL, Scheduler...
+	Queues: map[string]awsworld.QueueConfig{
+		"backfill": {URL: backfillURL, ARN: backfillARN},
+		"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
+	},
+	Routes: awsworld.Routes(
+		awsworld.Route[workflows.Backfill]("backfill"),
+		awsworld.Route[workflows.Ledger]("ordered"),
+	),
+}, dynamoClient, sqsClient)
+```
+
+`Route[W]` names the workflow with `workflow.WorkflowName[W]()`, the name its
+runs are recorded under. Every delivery of a run, flow or step, goes to its
+workflow's queue: the Runtime sets `QueueInput.WorkflowName`, and code that
+queues for a run it hasn't loaded, such as `ResumeHook`, reads the run for it
+because the World reports `Capabilities.QueueRouting`. The record keeps the
+queue name, so a message that arrives early is sent again to the same queue.
+The worker reads messages from every queue; give each its own event source
+mapping.
+
+A `QueueConfig` needs its `URL`, and its `ARN` when `Scheduler` is set or the
+queue is FIFO; the ARN is the Scheduler target for deliveries due later. `New`
+rejects a route to a queue not in `Queues`.
+
+A FIFO queue (`FIFO: true`) runs one delivery of a run at a time: each
+message's `MessageGroupId` is the run ID and its `MessageDeduplicationId` the
+delivery ID. FIFO queues have no per-message delay, so every delayed delivery,
+retries and early arrivals included, goes through Scheduler into the run's
+message group, and `New` rejects a FIFO queue without `Scheduler`. Scheduler
+can't set a deduplication ID, so enable content-based deduplication on the
+queue; scheduled bodies carry a unique `publish` field so they never collide.
+FIFO groups order a run's messages, not separate runs: two runs of a workflow
+still interleave when one waits.
+
 ### Queue delivery
 
 `Queue` writes a `QUEUE#<id>` record holding the delivery, then publishes the

@@ -5,7 +5,9 @@ Provisions the infrastructure `awsworld` needs:
 - the DynamoDB table with its `list` and `list_group` indexes (on-demand, encrypted,
   point-in-time recovery and deletion protection on by default);
 - the task queue and its dead-letter queue (SQS-managed encryption);
-- optionally, the SQS event source mapping for the queue worker Lambda, with
+- further queues, standard or FIFO, that `awsworld.Config.Routes` routes
+  workflows to, each with its own dead-letter queue;
+- optionally, the SQS event source mappings for the queue worker Lambda, with
   `ReportBatchItemFailures`;
 - the EventBridge Scheduler group and the role Scheduler assumes to send to
   the queue, for deliveries due more than 15 minutes ahead;
@@ -41,10 +43,55 @@ resource "aws_lambda_function" "worker" {
 ```
 
 `environment` holds the variables the example entrypoints read:
-`WORKFLOW_TABLE`, `WORKFLOW_QUEUE_URL`, and, with the scheduler enabled,
-`WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
+`WORKFLOW_TABLE`, `WORKFLOW_QUEUE_URL`, `WORKFLOW_QUEUES` and, with the
+scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP`, and
 `WORKFLOW_SCHEDULER_ROLE_ARN`. The individual values are also outputs for
 building `awsworld.Config` directly.
+
+## Routed queues
+
+`queues` adds a queue per name, for workflows `awsworld.Config.Routes` routes
+there, such as a queue with its own concurrency for heavy work:
+
+```hcl
+module "workflow" {
+  source = "github.com/eriicafes/go-workflow//worlds/aws/terraform"
+
+  worker_function_name = aws_lambda_function.worker.function_name
+  queues = {
+    backfill = { maximum_concurrency = 5 }
+    ordered  = { fifo = true }
+  }
+}
+```
+
+Each queue gets a dead-letter queue, a redrive policy, and, with
+`worker_function_name`, an event source mapping to the worker. Unset settings
+use the task queue's. A FIFO queue is named with the `.fifo` suffix and uses
+content-based deduplication, since Scheduler, which carries every delayed
+delivery to it, can't set a deduplication ID; it needs `enable_scheduler`.
+
+The `queues` output and `WORKFLOW_QUEUES` (JSON) map each name to its queue:
+
+```json
+{"backfill": {"url": "https://sqs...", "arn": "arn:aws:sqs:...", "fifo": false}}
+```
+
+Decode it into `awsworld.Config.Queues`:
+
+```go
+var queues map[string]struct {
+	URL  string `json:"url"`
+	ARN  string `json:"arn"`
+	FIFO bool   `json:"fifo"`
+}
+json.Unmarshal([]byte(os.Getenv("WORKFLOW_QUEUES")), &queues)
+config.Queues = map[string]awsworld.QueueConfig{}
+for name, queue := range queues {
+	config.Queues[name] = awsworld.QueueConfig{URL: queue.URL, ARN: queue.ARN, FIFO: queue.FIFO}
+}
+config.Routes = awsworld.Routes(awsworld.Route[workflows.Backfill]("backfill"))
+```
 
 ## Inputs
 
@@ -63,12 +110,13 @@ building `awsworld.Config` directly.
 | `maximum_concurrency` | `null` | Cap on concurrent worker invocations (2-1000). |
 | `worker_role_name` | `null` | Attach the worker policy to this role. |
 | `api_role_name` | `null` | Attach the API policy to this role. |
+| `queues` | `{}` | Routed queues by name: `fifo`, `batch_size` (10), `maximum_concurrency`, `visibility_timeout_seconds`, `max_receive_count`. |
 
 ## Permissions
 
 The worker policy grants item reads and writes and `Query` on the table and
 its indexes, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, and
-`GetQueueAttributes` on the task queue, `CreateSchedule` and `DeleteSchedule`
+`GetQueueAttributes` on the task queue and every routed queue, `CreateSchedule` and `DeleteSchedule`
 on the group's `go-workflow-*` schedules, and `iam:PassRole` on the Scheduler
 role, limited to Scheduler. The API policy grants the same table access,
 `SendMessage`, and `DeleteSchedule` for cancelling long timers.

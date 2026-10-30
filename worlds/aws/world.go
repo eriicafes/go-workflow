@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
@@ -25,13 +26,55 @@ type Config struct {
 	// TableName is the DynamoDB table, laid out as CreateTable creates it. It
 	// is required.
 	TableName string
-	// QueueURL is the URL of the SQS standard queue that carries deliveries. It
-	// is required.
+	// QueueURL is the URL of the SQS standard queue that carries deliveries of
+	// workflows Routes doesn't route. It is required.
 	QueueURL string
+	// Queues are further SQS queues, by name, that Routes can route
+	// workflows to.
+	Queues map[string]QueueConfig
+	// Routes maps a workflow name to the name of the queue in Queues that
+	// carries its runs' deliveries. Build it with Routes and Route.
+	Routes map[string]string
 	// Scheduler, when set, delivers work due more than 15 minutes ahead, beyond
-	// the SQS delay limit. Without it, queueing such a delivery returns an
-	// error.
+	// the SQS delay limit, and every delayed delivery to a FIFO queue. Without
+	// it, queueing such a delivery returns an error.
 	Scheduler *SchedulerConfig
+}
+
+// QueueConfig is an SQS queue that deliveries can be routed to.
+type QueueConfig struct {
+	// URL is the queue URL. It is required.
+	URL string
+	// ARN is the queue ARN, the Scheduler target for deliveries due later. It
+	// is required when Config.Scheduler is set or FIFO is true.
+	ARN string
+	// FIFO marks a FIFO queue. Its messages' MessageGroupId is the run ID,
+	// so a run's deliveries never run at once, and their
+	// MessageDeduplicationId is the delivery ID. FIFO queues have no
+	// per-message delay, so every delayed delivery goes through Scheduler,
+	// which needs content-based deduplication enabled on the queue.
+	FIFO bool
+}
+
+// QueueRoute routes the deliveries of one workflow to a named queue.
+type QueueRoute struct {
+	Workflow string
+	Queue    string
+}
+
+// Route routes the deliveries of runs of the workflow type In to the queue
+// named queue in Config.Queues.
+func Route[In any](queue string) QueueRoute {
+	return QueueRoute{Workflow: workflow.WorkflowName[In](), Queue: queue}
+}
+
+// Routes returns Config.Routes for routes.
+func Routes(routes ...QueueRoute) map[string]string {
+	byWorkflow := make(map[string]string, len(routes))
+	for _, route := range routes {
+		byWorkflow[route.Workflow] = route.Queue
+	}
+	return byWorkflow
 }
 
 // SchedulerConfig configures EventBridge Scheduler to deliver work due more
@@ -43,6 +86,7 @@ type SchedulerConfig struct {
 	// Group is the schedule group. Empty uses "default".
 	Group string
 	// TargetARN is the ARN of the SQS queue at Config.QueueURL. It is required.
+	// Deliveries to a queue in Config.Queues target that queue's ARN.
 	TargetARN string
 	// RoleARN is the IAM role Scheduler assumes to send to TargetARN. It is
 	// required.
@@ -60,8 +104,10 @@ type World struct {
 
 // New returns a World that uses the supplied clients, which carry the region,
 // credentials, retry policy, and endpoints. It does not contact AWS. It returns
-// an error when a client, BaseURL, TableName, or QueueURL is missing, or when
-// Scheduler lacks its client, target ARN, or role ARN.
+// an error when a client, BaseURL, TableName, or QueueURL is missing, when
+// Scheduler lacks its client, target ARN, or role ARN, when a queue in Queues
+// lacks its URL, or the ARN Scheduler or FIFO needs, when a FIFO queue has no
+// Scheduler, or when a route names a queue not in Queues.
 func New(config Config, dynamoClient *dynamodb.Client, sqsClient *sqs.Client) (*World, error) {
 	if dynamoClient == nil || sqsClient == nil {
 		return nil, errors.New("workflow/aws: DynamoDB and SQS clients are required")
@@ -85,6 +131,23 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 	if config.Scheduler != nil && (schedulerClient == nil || config.Scheduler.TargetARN == "" || config.Scheduler.RoleARN == "") {
 		return nil, errors.New("workflow/aws: scheduler requires a client, target ARN, and role ARN")
 	}
+	for name, queue := range config.Queues {
+		switch {
+		case name == "":
+			return nil, errors.New("workflow/aws: a queue name is empty")
+		case queue.URL == "":
+			return nil, fmt.Errorf("workflow/aws: queue %q requires a URL", name)
+		case queue.FIFO && config.Scheduler == nil:
+			return nil, fmt.Errorf("workflow/aws: FIFO queue %q requires Scheduler for delayed deliveries", name)
+		case (queue.FIFO || config.Scheduler != nil) && queue.ARN == "":
+			return nil, fmt.Errorf("workflow/aws: queue %q requires an ARN as the Scheduler target", name)
+		}
+	}
+	for workflowName, queue := range config.Routes {
+		if _, ok := config.Queues[queue]; !ok {
+			return nil, fmt.Errorf("workflow/aws: route for %s names unknown queue %q", workflowName, queue)
+		}
+	}
 	return &World{config: config, dynamo: dynamoClient, sqs: sqsClient, scheduler: schedulerClient}, nil
 }
 
@@ -95,8 +158,8 @@ func (w *World) BaseURL() string             { return w.config.BaseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
-func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+func (w *World) Capabilities() worlds.Capabilities {
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, QueueRouting: len(w.config.Routes) > 0}
 }
 
 // HTTP returns a handler serving the RPC and webhook endpoints under

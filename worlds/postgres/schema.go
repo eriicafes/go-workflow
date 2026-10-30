@@ -122,6 +122,8 @@ CREATE TABLE go_workflow_stream_chunks (
 	data bytea NOT NULL,
 	PRIMARY KEY (run_id, name, idx)
 );
+`, `
+ALTER TABLE go_workflow_queue ADD COLUMN workflow_name text NOT NULL DEFAULT '';
 `}
 
 // migrate applies pending migrations in one transaction under a
