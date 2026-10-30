@@ -422,6 +422,12 @@ func (e *Execution) startSteps() {
 			}
 			events = append(events, EventsCreateEvent{EventType: EventTypeStepCreated, CorrelationID: string(step.stepID), Data: data})
 		}
+		if runInline && step.created != nil {
+			// Claimed before the write, so another delivery of this flow's
+			// message that reads the start leaves the attempt to this one.
+			e.running.Store(e.stepKey(step.stepID), true)
+			claimed = append(claimed, e.stepKey(step.stepID))
+		}
 		if runInline && step.created == nil {
 			// Another delivery of this flow's message in this process may
 			// already run the attempt again, and records its result.
@@ -470,7 +476,6 @@ func (e *Execution) startSteps() {
 	}
 	for _, step := range inline {
 		e.inline++
-		e.running.Store(e.stepKey(step.stepID), true)
 		go func() {
 			result, err := step.run(step.attempt)
 			e.outcomes <- inlineOutcome{step: step, result: result, err: err}
