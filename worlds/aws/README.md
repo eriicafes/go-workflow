@@ -74,8 +74,8 @@ world, err := awsworld.New(awsworld.Config{
 
 `Route[W]` names the workflow with `workflow.WorkflowName[W]()`, the name its
 runs are recorded under. Every delivery of a run, flow or step, goes to its
-workflow's queue: the Runtime sets `QueueInput.WorkflowName`, and code that
-queues for a run it hasn't loaded, such as `ResumeHook`, reads the run for it
+workflow's queue: the Runtime sets `QueueInput.WorkflowName`, `ResumeHook`
+takes it from the hook, and wake-ups and cancellation read the run for it
 because the World reports `Capabilities.QueueRouting`. The record keeps the
 queue name, so a message that arrives early is sent again to the same queue.
 The worker reads messages from every queue; give each its own event source

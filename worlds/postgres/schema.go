@@ -67,6 +67,7 @@ CREATE INDEX go_workflow_steps_created_idx ON go_workflow_steps (run_id, created
 CREATE TABLE go_workflow_hooks (
 	hook_id text PRIMARY KEY,
 	run_id text NOT NULL,
+	workflow_name text NOT NULL,
 	token text NOT NULL,
 	created_slot bigint NOT NULL,
 	webhook jsonb,
@@ -122,8 +123,6 @@ CREATE TABLE go_workflow_stream_chunks (
 	data bytea NOT NULL,
 	PRIMARY KEY (run_id, name, idx)
 );
-`, `
-ALTER TABLE go_workflow_queue ADD COLUMN workflow_name text NOT NULL DEFAULT '';
 `}
 
 // migrate applies pending migrations in one transaction under a

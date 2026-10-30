@@ -224,7 +224,7 @@ local function materialize(c, d, slot)
     end
   elseif t == 'hook_created' then
     local data = type(d.hook) == 'table' and d.hook or {}
-    hooks[corr] = {runId = c.id, token = data.token or '', slot = slot, webhook = data.webhook, manual = data.manual, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
+    hooks[corr] = {runId = c.id, wf = c.run.wf, token = data.token or '', slot = slot, webhook = data.webhook, manual = data.manual, retentionUs = data.retentionUs, createdAt = now, updatedAt = now, claimedFrom = data.claimedFrom}
     if tonumber(data.retentionUs or 0) > 0 then hooks[corr].tokenRetentionUntil = fmt(nowN + tonumber(data.retentionUs)) end
     hooksDirty[corr] = true
     table.insert(hooksNew, {corr, c.id})

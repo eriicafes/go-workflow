@@ -111,11 +111,11 @@ deliveries are addressed to the run's deployment through
 affinity, and only when it has a deployment ID.
 
 With `QueueRouting`, the World chooses a delivery's queue from
-`QueueInput.WorkflowName`. The Runtime and Client set it on every delivery,
-and code that queues for a run it hasn't loaded, such as `ResumeHook`, reads
-the run for it, which it otherwise skips. `RunDelivery(ctx, world, runID)`
-returns a delivery addressed that way. Of the built-in Worlds, only AWS reports
-it, when it has routes.
+`QueueInput.WorkflowName`. The Runtime and Client set it on every delivery.
+`ResumeHook` takes it from `Hook.WorkflowName`, and other code that queues for
+a run it hasn't loaded, such as wake-ups and cancellation, reads the run for it,
+which it otherwise skips. `RunDelivery(ctx, world, runID)` returns a delivery
+addressed that way.
 
 ## Storage
 
@@ -187,6 +187,7 @@ type Step struct {
 
 type Hook struct {
 	RunID               RunID
+	WorkflowName        string // workflow of the hook's run
 	HookID              HookID
 	Token               string
 	Metadata            []byte

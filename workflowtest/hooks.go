@@ -26,19 +26,19 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claimed.EventID != worlds.EventIDForSlot(2) || claimed.EventType != worlds.EventTypeHookCreated || claimed.AllocatedEventCount != 1 || claimed.Hook == nil || claimed.Hook.ClaimedFrom != nil || len(claimed.Events) != 1 {
+	if claimed.EventID != worlds.EventIDForSlot(2) || claimed.EventType != worlds.EventTypeHookCreated || claimed.AllocatedEventCount != 1 || claimed.Hook == nil || claimed.Hook.WorkflowName != "conformance" || claimed.Hook.ClaimedFrom != nil || len(claimed.Events) != 1 {
 		t.Fatalf("claim = %#v", claimed)
 	}
 	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
-	if err != nil || hook.RunID != runID || hook.Token != token || string(hook.Metadata) != "meta" || hook.CreatedAt.IsZero() {
+	if err != nil || hook.RunID != runID || hook.WorkflowName != "conformance" || hook.Token != token || string(hook.Metadata) != "meta" || hook.CreatedAt.IsZero() {
 		t.Fatalf("hook = %#v err=%v", hook, err)
 	}
 	stripped, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone})
-	if err != nil || stripped.Metadata != nil {
+	if err != nil || stripped.Metadata != nil || stripped.WorkflowName != "conformance" {
 		t.Fatalf("ResolveDataNone hook = %#v err=%v", stripped, err)
 	}
 	byToken, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
-	if err != nil || byToken.HookID != "hook_a" {
+	if err != nil || byToken.HookID != "hook_a" || byToken.WorkflowName != "conformance" {
 		t.Fatalf("hook by token = %#v err=%v", byToken, err)
 	}
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_missing"})

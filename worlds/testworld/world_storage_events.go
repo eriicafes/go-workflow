@@ -429,7 +429,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, HookID: id, Token: value.Token, Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, WorkflowName: run.WorkflowName, HookID: id, Token: value.Token, Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)
