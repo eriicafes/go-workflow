@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
@@ -650,52 +651,54 @@ func TestStepErrorKeepsIdentityAcrossReplayAndRuns(t *testing.T) {
 }
 
 func TestWorkflowCollectionHelpers(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ collectionInput) (collectionOutput, error) {
-		all, err := workflow.All(ctx, collectionStep, []collectionStepInput{{Value: 1}, {Value: 2}})
+	// Fake time orders the failed and successful steps by their delays.
+	synctest.Test(t, func(t *testing.T) {
+		world := testworld.New(workflow.Use(func(ctx context.Context, _ collectionInput) (collectionOutput, error) {
+			all, err := workflow.All(ctx, collectionStep, []collectionStepInput{{Value: 1}, {Value: 2}})
+			if err != nil {
+				return collectionOutput{}, err
+			}
+			settled := workflow.Map(ctx, collectionStep, []collectionStepInput{{Value: 3}, {Fail: true}})
+			if err := workflow.Join(ctx, settled[0], settled[1]); err != nil {
+				return collectionOutput{}, err
+			}
+			_, settledErr := settled[1].Value(ctx)
+
+			failed := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
+			success := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 4, Delay: 2 * time.Millisecond})
+			selected, selectErr := workflow.Select(ctx, failed, success)
+			if selected == nil {
+				return collectionOutput{}, errors.New("Select returned no promise")
+			}
+
+			failedOK := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
+			successOK := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 5, Delay: 2 * time.Millisecond})
+			selectedOK, err := workflow.SelectOk(ctx, failedOK, successOK)
+			if err != nil {
+				return collectionOutput{}, err
+			}
+			okValue, err := selectedOK.(*workflow.Result[int]).Value(ctx)
+			if err != nil {
+				return collectionOutput{}, err
+			}
+
+			return collectionOutput{All: all, SettledFailed: settledErr != nil, SelectError: selectErr != nil, SelectOK: okValue}, nil
+		}))
+		defer world.Close()
+		ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
+		defer cancel()
+		run, err := workflow.Start(ctx, collectionInput{})
 		if err != nil {
-			return collectionOutput{}, err
+			t.Fatal(err)
 		}
-		settled := workflow.Map(ctx, collectionStep, []collectionStepInput{{Value: 3}, {Fail: true}})
-		if err := workflow.Join(ctx, settled[0], settled[1]); err != nil {
-			return collectionOutput{}, err
-		}
-		_, settledErr := settled[1].Value(ctx)
-
-		failed := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
-		success := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 4, Delay: 2 * time.Millisecond})
-		selected, selectErr := workflow.Select(ctx, failed, success)
-		if selected == nil {
-			return collectionOutput{}, errors.New("Select returned no promise")
-		}
-
-		failedOK := workflow.Background(ctx, collectionStep, collectionStepInput{Fail: true, Delay: time.Millisecond}, workflow.StepOptions{MaxRetries: 0})
-		successOK := workflow.Background(ctx, collectionStep, collectionStepInput{Value: 5, Delay: 2 * time.Millisecond})
-		selectedOK, err := workflow.SelectOk(ctx, failedOK, successOK)
+		output, err := run.Value(ctx)
 		if err != nil {
-			return collectionOutput{}, err
+			t.Fatal(err)
 		}
-		okValue, err := selectedOK.(*workflow.Result[int]).Value(ctx)
-		if err != nil {
-			return collectionOutput{}, err
+		if !slices.Equal(output.All, []int{1, 2}) || !output.SettledFailed || !output.SelectError || output.SelectOK != 5 {
+			t.Fatalf("collection output = %#v", output)
 		}
-
-		return collectionOutput{All: all, SettledFailed: settledErr != nil, SelectError: selectErr != nil, SelectOK: okValue}, nil
-	}))
-	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
-	defer cancel()
-	run, err := workflow.Start(ctx, collectionInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := run.Value(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(output.All, []int{1, 2}) || !output.SettledFailed || !output.SelectError || output.SelectOK != 5 {
-		t.Fatalf("collection output = %#v", output)
-	}
-
+	})
 }
 
 type inlineStepInput struct{}
