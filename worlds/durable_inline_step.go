@@ -20,6 +20,9 @@ const (
 	// to that flow's queued message, whose redelivery runs it again. A flow
 	// that replays after the lease without its result takes it over.
 	inlineStepLease = 15 * time.Minute
+	// retryRecheckDelay is how long a retry's flow that arrived while its
+	// attempt was still being recorded waits before it replays again.
+	retryRecheckDelay = 50 * time.Millisecond
 	// DefaultMaxInlineStepsDuration is how long a flow delivery starts new
 	// steps inline, unless WithMaxInlineStepsDuration sets another duration.
 	// After it, the flow queues them, so a long-running flow hands its steps

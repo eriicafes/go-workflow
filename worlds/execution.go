@@ -402,7 +402,7 @@ func (e *Execution) startSteps() {
 	}
 	var events []EventsCreateEvent
 	var inline, queued []pendingStep
-	var claimed []string
+	var claimed, rechecks []string
 	for _, step := range pending {
 		runInline := step.explicit || step.recovered
 		if step.created != nil && !step.explicit {
@@ -426,6 +426,12 @@ func (e *Execution) startSteps() {
 			// Another delivery of this flow's message in this process may
 			// already run the attempt again, and records its result.
 			if _, running := e.running.LoadOrStore(e.stepKey(step.stepID), true); running {
+				// A retry's flow can arrive while the delivery that queued
+				// it still records the failed attempt, and checks again once
+				// it is recorded.
+				if key := stepRetryKey(step.stepID, step.attempt-1); e.delivery.IdempotencyKey == key {
+					rechecks = append(rechecks, key)
+				}
 				continue
 			}
 			claimed = append(claimed, e.stepKey(step.stepID))
@@ -454,6 +460,10 @@ func (e *Execution) startSteps() {
 	e.inBand = result.InBandCount
 	for _, step := range queued {
 		e.queue(QueueInput{StepID: &step.stepID, IdempotencyKey: string(step.stepID)})
+	}
+	for _, key := range rechecks {
+		notBefore := time.Now().Add(retryRecheckDelay)
+		e.queue(QueueInput{NotBefore: &notBefore, IdempotencyKey: key})
 	}
 	if e.outcomes == nil {
 		e.outcomes = make(chan inlineOutcome)
