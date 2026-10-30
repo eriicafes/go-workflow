@@ -34,14 +34,18 @@ pool and leaves it open on `Close`.
 | `PollInterval` | 250ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1m | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
+| `Routes` | none | The queue of each routed workflow, built with `worlds.Routes(worlds.Route[W]("queue"), ...)`. Other workflows use `DefaultQueue`. |
 
 Entry points:
 
 - `HTTP(world)`: RPC and webhook endpoints under `/v1/workflow`.
 - `HTTPPrefix(world, prefix)`: the same endpoints under `prefix`.
 - `RPC(world)` and `Webhook(world)`: each endpoint alone, to mount yourself.
-- `Worker(ctx, world, runners)`: the queue worker. It returns `ctx.Err()` after
-  in-flight deliveries finish.
+- `Worker(ctx, world, runners, options...)`: the queue worker. It returns
+  `ctx.Err()` after in-flight deliveries finish. `WorkerOptions.Queues` limits
+  the queues it claims (every queue when empty), and
+  `WorkerOptions.Concurrency` overrides `Config.Concurrency`, so each routed
+  queue can have its own workers.
 
 When the application and worker share a process, pass the world directly to
 `workflow.NewClient`. When they are separate, serve `HTTP(world)` from the

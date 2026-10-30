@@ -17,7 +17,10 @@ import (
 // queueRecord is the durable delivery stored at p:queue:<id>. Vercel Queues
 // and QStash messages carry only the ID.
 type queueRecord struct {
-	QueueName       string         `json:"queueName,omitempty"`
+	QueueName string `json:"queueName,omitempty"`
+	// Topic is the Vercel Queues topic the delivery's workflow is routed to;
+	// empty is Config.Topic.
+	Topic           string         `json:"topic,omitempty"`
 	RunID           worlds.RunID   `json:"runId"`
 	StepID          *worlds.StepID `json:"stepId,omitempty"`
 	NotBefore       *time.Time     `json:"notBefore,omitempty"`
@@ -92,7 +95,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if deploymentID == "" {
 		deploymentID = w.config.DeploymentID
 	}
-	record := queueRecord{QueueName: input.QueueName, RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
+	record := queueRecord{QueueName: input.QueueName, Topic: w.config.Topics[w.config.Routes[input.WorkflowName]], RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
 	if _, err := w.putQueueRecord(ctx, id, record, "NX"); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -107,7 +110,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 
 func (w *World) schedule(ctx context.Context, id string, record queueRecord, delay time.Duration, long bool) error {
 	if !long {
-		return w.publishVQS(ctx, id, delay, record.DeploymentID)
+		return w.publishVQS(ctx, id, record.Topic, delay, record.DeploymentID)
 	}
 	// A delay beyond QStash's limit fires early and is scheduled again by
 	// releaseTimer.
@@ -147,9 +150,9 @@ func (w *World) releaseTimer(ctx context.Context, id string) error {
 	if delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second) {
 		return w.schedule(ctx, id, record, delay, true)
 	}
-	err = w.publishVQS(ctx, id, delay, record.DeploymentID)
+	err = w.publishVQS(ctx, id, record.Topic, delay, record.DeploymentID)
 	if errors.Is(err, worlds.ErrDeploymentUnavailable) && record.DeploymentID != w.config.DeploymentID {
-		err = w.publishVQS(ctx, id, delay, w.config.DeploymentID)
+		err = w.publishVQS(ctx, id, record.Topic, delay, w.config.DeploymentID)
 	}
 	if err != nil {
 		return err

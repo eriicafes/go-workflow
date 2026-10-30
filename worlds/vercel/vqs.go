@@ -67,12 +67,15 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	return w.http.Do(request)
 }
 
-// publishVQS sends messageID to the topic, addressed to deploymentID when it
-// is set. The message ID doubles as the idempotency key so only a retried
+// publishVQS sends messageID to topic, or to Config.Topic when it is empty,
+// addressed to deploymentID when it is set. The message ID doubles as the idempotency key so only a retried
 // publish of the same delivery is dropped. Runtime idempotency keys are reused
 // across distinct deliveries and Vercel would silently drop those for up to 24
 // hours.
-func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Duration, deploymentID string) error {
+func (w *World) publishVQS(ctx context.Context, messageID, topic string, delay time.Duration, deploymentID string) error {
+	if topic == "" {
+		topic = w.config.Topic
+	}
 	body, err := json.Marshal(vqsMessage{ID: messageID})
 	if err != nil {
 		return err
@@ -88,7 +91,7 @@ func (w *World) publishVQS(ctx context.Context, messageID string, delay time.Dur
 	if deploymentID != "" {
 		header.Set("Vqs-Deployment-Id", deploymentID)
 	}
-	response, err := w.vqsRequest(ctx, http.MethodPost, "/topic/"+url.PathEscape(w.config.Topic), body, header)
+	response, err := w.vqsRequest(ctx, http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: publish queue message: %w", err)
 	}

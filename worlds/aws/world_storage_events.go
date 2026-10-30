@@ -841,7 +841,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, WorkflowName: run.view.WorkflowName, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName}, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {

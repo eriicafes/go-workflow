@@ -90,7 +90,7 @@ config.Queues = map[string]awsworld.QueueConfig{}
 for name, queue := range queues {
 	config.Queues[name] = awsworld.QueueConfig{URL: queue.URL, ARN: queue.ARN, FIFO: queue.FIFO}
 }
-config.Routes = awsworld.Routes(awsworld.Route[workflows.Backfill]("backfill"))
+config.Routes = worlds.Routes(worlds.Route[workflows.Backfill]("backfill"))
 ```
 
 ## Inputs

@@ -336,16 +336,11 @@ func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (Ev
 	case err != nil:
 		return result, err
 	}
-	// the hook carries its run's workflow name, so only a World with
-	// deployment affinity reads the run
-	queue := QueueInput{RunID: hook.RunID, WorkflowName: hook.WorkflowName}
+	// the hook carries the context of its run, so resuming it reads no run
+	queue := QueueInput{RunID: hook.RunID, WorkflowName: hook.ResumeContext.WorkflowName, IdempotencyKey: key}
 	if world.Capabilities().DeploymentAffinity {
-		var deliveryErr error
-		if queue, deliveryErr = RunDelivery(ctx, world, hook.RunID); deliveryErr != nil {
-			return result, deliveryErr
-		}
+		queue.DeploymentID = hook.ResumeContext.DeploymentID
 	}
-	queue.IdempotencyKey = key
 	_, queueErr := world.Queue(ctx, queue)
 retry:
 	for attempt := 1; queueErr != nil && attempt < resumeQueueAttempts; attempt++ {

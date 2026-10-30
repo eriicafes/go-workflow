@@ -28,10 +28,10 @@ func TestWorkflowNameIsTheRecordedName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name := workflow.WorkflowName[structWorkflowInput](); name != recorded {
+	if name := worlds.WorkflowName[structWorkflowInput](); name != recorded {
 		t.Fatalf("WorkflowName = %q, recorded %q", name, recorded)
 	}
-	if pointer := workflow.WorkflowName[*structWorkflowInput](); pointer != recorded {
+	if pointer := worlds.WorkflowName[*structWorkflowInput](); pointer != recorded {
 		t.Fatalf("WorkflowName of a pointer = %q, want %q", pointer, recorded)
 	}
 }
@@ -89,7 +89,7 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 	if output.Value != "step:hook" {
 		t.Fatalf("output = %#v", output)
 	}
-	want := workflow.WorkflowName[routedInput]()
+	want := worlds.WorkflowName[routedInput]()
 	steps := 0
 	for _, message := range world.QueuedMessages() {
 		if message.Input.WorkflowName != want {

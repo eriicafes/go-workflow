@@ -142,10 +142,10 @@ func TestPublishVQS(t *testing.T) {
 	world, _ := newQueueWorld(t, server, false)
 	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
 	world.config.DeploymentID = "dpl_1"
-	if err := world.publishVQS(context.Background(), "01ID", 90*time.Second+time.Millisecond, ""); err != nil {
+	if err := world.publishVQS(context.Background(), "01ID", "", 90*time.Second+time.Millisecond, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.publishVQS(context.Background(), "02ID", 0, "dpl_run"); err != nil {
+	if err := world.publishVQS(context.Background(), "02ID", "", 0, "dpl_run"); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.all()
@@ -183,7 +183,7 @@ func TestPublishVQSReportsUnavailableDeployment(t *testing.T) {
 	t.Cleanup(unavailable.Close)
 	world.config.QueueURL = unavailable.URL + "/api/v3"
 
-	err := world.publishVQS(context.Background(), "01ID", 0, "dpl_gone")
+	err := world.publishVQS(context.Background(), "01ID", "", 0, "dpl_gone")
 	if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 		t.Fatalf("publish error = %v, want ErrDeploymentUnavailable", err)
 	}

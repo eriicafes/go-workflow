@@ -41,9 +41,16 @@ type Config struct {
 	// Queues request because Vercel rotates the token. Nil uses
 	// OIDCTokenFromEnv(DefaultOIDCTokenEnv).
 	OIDCToken func(context.Context) (string, error)
-	// Topic is the Vercel Queues topic that deliveries are published to and
-	// that Queue(world, runners) consumes. It is required.
+	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
+	// are published to. It is required.
 	Topic string
+	// Topics names further Vercel Queues topics by queue name, for Routes.
+	Topics map[string]string
+	// Routes publishes the deliveries of each workflow named by workflow
+	// name, as worlds.Routes builds it, to the topic of its queue in Topics.
+	// Queue(world, runners) consumes any topic its function is triggered by,
+	// so each topic can have its own trigger and concurrency.
+	Routes map[string]string
 	// Prefix namespaces Redis keys. Empty uses go-workflow.
 	Prefix string
 	// QStash, when set, delivers work due more than six days ahead. Without
@@ -73,11 +80,17 @@ type World struct {
 }
 
 // New returns a World for config without contacting Redis or Vercel. It returns
-// an error when BaseURL, QueueURL, Topic, or a Redis transport is missing, or
-// when QStash lacks its token, its signing keys, or an HTTPS callback URL.
+// an error when BaseURL, QueueURL, Topic, or a Redis transport is missing, when
+// a route names a queue without a topic, or when QStash lacks its token, its
+// signing keys, or an HTTPS callback URL.
 func New(config Config) (*World, error) {
 	if config.BaseURL == "" || config.QueueURL == "" || config.Topic == "" {
 		return nil, errors.New("workflow/vercel: base URL, queue URL, and topic are required")
+	}
+	for workflow, queue := range config.Routes {
+		if config.Topics[queue] == "" {
+			return nil, fmt.Errorf("workflow/vercel: workflow %s is routed to queue %q, which has no topic", workflow, queue)
+		}
 	}
 	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
 	if err != nil {
@@ -129,7 +142,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (w *World) DeploymentID() string        { return w.config.DeploymentID }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != ""}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", QueueRouting: len(w.config.Routes) > 0}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the

@@ -80,6 +80,7 @@ type stepView struct {
 type hookView struct {
 	RunID               worlds.RunID           `json:"runId"`
 	WorkflowName        string                 `json:"wf,omitempty"`
+	DeploymentID        string                 `json:"dep,omitempty"`
 	Token               string                 `json:"token"`
 	Slot                uint64                 `json:"slot"`
 	Webhook             string                 `json:"webhook,omitempty"`
@@ -245,7 +246,7 @@ func decodeHook(hookID worlds.HookID, raw string) (worlds.Hook, hookView, error)
 	if err := json.Unmarshal([]byte(raw), &view); err != nil {
 		return worlds.Hook{}, hookView{}, fmt.Errorf("workflow/vercel: decode hook %s: %w", hookID, err)
 	}
-	hook := worlds.Hook{RunID: view.RunID, WorkflowName: view.WorkflowName, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
+	hook := worlds.Hook{RunID: view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: view.DeploymentID, WorkflowName: view.WorkflowName}, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
 	if view.ReceivedSlot != 0 {
 		hook.WebhookEventID = worlds.EventIDForSlot(view.ReceivedSlot)
 	}

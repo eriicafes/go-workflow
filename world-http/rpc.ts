@@ -103,6 +103,7 @@ export namespace RPC {
 	};
 	export type Hook = {
 		runId: string;
+		resumeContext: { deploymentId: string; workflowName: string };
 		hookId: string;
 		token: string;
 		metadata: Uint8Array;

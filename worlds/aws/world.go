@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
@@ -54,27 +53,6 @@ type QueueConfig struct {
 	// per-message delay, so every delayed delivery goes through Scheduler,
 	// which needs content-based deduplication enabled on the queue.
 	FIFO bool
-}
-
-// QueueRoute routes the deliveries of one workflow to a named queue.
-type QueueRoute struct {
-	Workflow string
-	Queue    string
-}
-
-// Route routes the deliveries of runs of the workflow type In to the queue
-// named queue in Config.Queues.
-func Route[In any](queue string) QueueRoute {
-	return QueueRoute{Workflow: workflow.WorkflowName[In](), Queue: queue}
-}
-
-// Routes returns Config.Routes for routes.
-func Routes(routes ...QueueRoute) map[string]string {
-	byWorkflow := make(map[string]string, len(routes))
-	for _, route := range routes {
-		byWorkflow[route.Workflow] = route.Queue
-	}
-	return byWorkflow
 }
 
 // SchedulerConfig configures EventBridge Scheduler to deliver work due more
