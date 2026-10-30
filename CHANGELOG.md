@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.5.1
+
+### Patch Changes
+
+- 3b5641b: Fix concurrent deliveries of one flow message in a process both running a step the first started inline.
+
 ## 0.5.0
 
 ### Minor Changes
