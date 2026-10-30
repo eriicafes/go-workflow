@@ -18,9 +18,6 @@ func TestQueuePublishesRoutedWorkflowsToTheirTopic(t *testing.T) {
 	world, _ := newQueueWorld(t, server, false)
 	world.config.Topics = map[string]string{"backfill": "workflow-backfill"}
 	world.config.Routes = worlds.Routes(worlds.Route[routedWorkflow]("backfill"))
-	if !world.Capabilities().QueueRouting {
-		t.Fatal("QueueRouting = false, want true with routes")
-	}
 
 	routed, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", WorkflowName: worlds.WorkflowName[routedWorkflow]()})
 	if err != nil {

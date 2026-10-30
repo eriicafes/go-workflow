@@ -58,15 +58,10 @@ type World interface {
 // the World's Client are then pinned to World.DeploymentID, and the Runtime
 // replays a run only on the deployment it is pinned to, re-routing other
 // deliveries there.
-//
-// QueueRouting reports that the World chooses a delivery's queue from its
-// QueueInput.WorkflowName. Code that queues a delivery for a run it has not
-// loaded then reads the run for its workflow name.
 type Capabilities struct {
 	Analytics          bool `cbor:"analytics"`
 	SetAttributes      bool `cbor:"setAttributes"`
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
-	QueueRouting       bool `cbor:"queueRouting"`
 }
 
 // NormalizeBaseURL validates an HTTP handler's public URL and removes its
@@ -378,20 +373,15 @@ func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, err
 }
 
 // RunDelivery returns a delivery for runID addressed as the Runtime addresses
-// its own: to the run's deployment when the World reports DeploymentAffinity,
-// and with the run's workflow name when it reports QueueRouting. It reads the
-// run only when one of them needs it.
+// its own: with the run's workflow name, and to the run's deployment when the
+// World reports DeploymentAffinity. It reads the run.
 func RunDelivery(ctx context.Context, world World, runID RunID) (QueueInput, error) {
 	input := QueueInput{RunID: runID}
-	capabilities := world.Capabilities()
-	if !capabilities.DeploymentAffinity && !capabilities.QueueRouting {
-		return input, nil
-	}
 	run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone})
 	if err != nil {
 		return input, err
 	}
-	if capabilities.DeploymentAffinity {
+	if world.Capabilities().DeploymentAffinity {
 		input.DeploymentID = run.DeploymentID
 	}
 	input.WorkflowName = run.WorkflowName

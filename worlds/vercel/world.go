@@ -142,7 +142,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (w *World) DeploymentID() string        { return w.config.DeploymentID }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", QueueRouting: len(w.config.Routes) > 0}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != ""}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the

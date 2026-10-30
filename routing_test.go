@@ -36,16 +36,6 @@ func TestWorkflowNameIsTheRecordedName(t *testing.T) {
 	}
 }
 
-// routingWorld is a manual World that routes deliveries by workflow, so code
-// that queues for a run it hasn't loaded reads the run's workflow name.
-type routingWorld struct{ *testworld.World }
-
-func (w routingWorld) Capabilities() worlds.Capabilities {
-	capabilities := w.World.Capabilities()
-	capabilities.QueueRouting = true
-	return capabilities
-}
-
 func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 	runner := workflow.Use(func(ctx context.Context, _ routedInput) (routedOutput, error) {
 		ctx = workflow.SetMaxInlineSteps(ctx, 0)
@@ -58,7 +48,7 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 		resumed, err := hook.Next(ctx)
 		return routedOutput{Value: value + ":" + resumed}, err
 	})
-	world := routingWorld{testworld.NewManual(runner)}
+	world := testworld.NewManual(runner)
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 	runtime := worlds.NewRuntime(world, worlds.Runners(runner))

@@ -87,8 +87,7 @@ Persist every QueueInput field, including StepID, QueueName, DeploymentID,
 DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
 fields to select work, route pinned runs, and bound recovery. Do not reset them
 while wrapping or serializing a message. A World that chooses a queue by
-WorkflowName persists it too and reports Capabilities.QueueRouting, so
-deliveries queued for a run nobody loaded still carry it. Every World copies
+WorkflowName persists it too. Every World copies
 the run's deployment and workflow name onto the hooks it creates
 (Hook.ResumeContext), which ResumeHook uses instead of reading the run.
 
