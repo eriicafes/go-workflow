@@ -1,5 +1,16 @@
 # go-workflow
 
+## 0.5.0
+
+### Minor Changes
+
+- e4564ee: Add `SetMaxInlineStepsDuration`, and stop running new steps inline halfway to the delivery's ctx deadline.
+
+### Patch Changes
+
+- e4564ee: Leave the rest of an SQS batch to another invocation once the AWS world's `Queue` handler is halfway to the Lambda deadline.
+- 602e63d: Fix an inline step's retry never running when its flow arrives while the failed attempt is still being recorded.
+
 ## 0.4.0
 
 ### Minor Changes
