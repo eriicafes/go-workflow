@@ -71,10 +71,11 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 			// A flow holds the step back until the runner waits, and then
 			// runs it inline or queues it.
 			options.Execution.hold(pendingStep{
-				stepID:  stepID,
-				created: &created,
-				limit:   MaxInlineSteps(ctx),
-				run:     pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, created.Cancellation, fn, input),
+				stepID:   stepID,
+				created:  &created,
+				limit:    MaxInlineSteps(ctx),
+				duration: MaxInlineStepsDuration(ctx),
+				run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, created.Cancellation, fn, input),
 			})
 			return DurableStepResult[Out]{StepID: stepID}
 		}

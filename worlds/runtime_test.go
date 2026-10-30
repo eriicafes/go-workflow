@@ -1562,6 +1562,66 @@ func TestMaxInlineStepsSetsTheLimit(t *testing.T) {
 	}
 }
 
+// chainSteps runs two steps one after the other, the first taking slow.
+func chainSteps(slow time.Duration) worlds.Runner {
+	return workflow.Use(func(ctx context.Context, _ inlineInput) (inlineOutput, error) {
+		first, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
+			time.Sleep(slow)
+			return value, nil
+		}, 1)
+		if err != nil {
+			return inlineOutput{}, err
+		}
+		second, err := workflow.Step(ctx, double, first)
+		return inlineOutput{Values: []int{first, second}}, err
+	})
+}
+
+func TestMaxInlineStepsDurationSetsTheWindow(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		duration time.Duration
+		want     int
+	}{
+		{name: "default", duration: -1, want: 2},
+		{name: "passed", duration: 50 * time.Millisecond, want: 1},
+		{name: "zero", duration: 0, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := t.Context()
+				world, runtime, runID, delivery := startInline(t, ctx, chainSteps(time.Second), inlineInput{})
+				if test.duration >= 0 {
+					ctx = workflow.SetMaxInlineStepsDuration(ctx, test.duration)
+				}
+				if err := runtime.Execute(ctx, delivery.Input); err != nil {
+					t.Fatal(err)
+				}
+				if promoted := inlineSteps(t, ctx, world, runID); promoted != test.want {
+					t.Fatalf("inline = %d, want %d", promoted, test.want)
+				}
+			})
+		})
+	}
+}
+
+func TestFlowStopsRunningStepsInlineHalfwayToItsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		world, runtime, runID, delivery := startInline(t, t.Context(), chainSteps(6*time.Second), inlineInput{})
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if err := runtime.Execute(ctx, delivery.Input); err != nil {
+			t.Fatal(err)
+		}
+		if promoted := inlineSteps(t, ctx, world, runID); promoted != 1 {
+			t.Fatalf("inline = %d, want the step after halfway queued", promoted)
+		}
+		if deliveries := stepDeliveries(world); len(deliveries) != 1 {
+			t.Fatalf("step deliveries = %d, want 1", len(deliveries))
+		}
+	})
+}
+
 func TestConcurrentFlowsRunAPromotedStepOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

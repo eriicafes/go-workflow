@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -93,6 +94,45 @@ func TestConsumer(t *testing.T) {
 	if resent := sent[len(sent)-1]; resent.DelaySeconds < 590 || resent.DelaySeconds > 600 {
 		t.Fatalf("re-sent delay = %d", resent.DelaySeconds)
 	}
+}
+
+func TestConsumerLeavesRecordsToAnotherInvocationNearTheDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dynamo, queue := newFakeDynamo(), &fakeSQS{}
+		world := testWorld(t, dynamo, queue, nil)
+		now := time.Now().UTC()
+		done := runView{Run: worlds.Run{RunID: "wrun_done", WorkflowName: "flow", Status: worlds.StatusCompleted, Attributes: map[string]string{}, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 2}
+		dynamo.items[itemID(runKey("wrun_done"))] = runItem(done)
+		var records []events.SQSMessage
+		for range 3 {
+			queued, err := world.Queue(t.Context(), worlds.QueueInput{RunID: "wrun_done"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			records = append(records, sqsRecord(t, queued.MessageID, worlds.QueueInput{RunID: "wrun_done"}))
+		}
+
+		// The first delivery passes halfway to the deadline.
+		dynamo.getDelay = 6 * time.Second
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		response, err := Queue(world, worlds.Runners())(ctx, events.SQSEvent{Records: records})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.BatchItemFailures) != 2 || response.BatchItemFailures[0].ItemIdentifier != records[1].MessageId || response.BatchItemFailures[1].ItemIdentifier != records[2].MessageId {
+			t.Fatalf("batch item failures = %#v, want the records after the first", response.BatchItemFailures)
+		}
+		var visibility []int32
+		for _, change := range queue.visibility {
+			if *change.ReceiptHandle != records[0].ReceiptHandle {
+				visibility = append(visibility, change.VisibilityTimeout)
+			}
+		}
+		if len(visibility) != 2 || visibility[0] != 0 || visibility[1] != 0 {
+			t.Fatalf("visibility changes = %v, want the deferred records visible at once", visibility)
+		}
+	})
 }
 
 func TestConsumerStoreError(t *testing.T) {

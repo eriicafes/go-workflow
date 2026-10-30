@@ -32,6 +32,7 @@ func All[In, Out any](ctx context.Context, step func(context.Context, In) (Out, 
 func InlineStep[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) (Out, error)
 func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) *Result[Out]
 func SetMaxInlineSteps(ctx context.Context, n int) context.Context
+func SetMaxInlineStepsDuration(ctx context.Context, d time.Duration) context.Context
 func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions)
 func FatalError(cause error) error
 func RetryableError(cause error, after time.Duration) error
@@ -50,6 +51,7 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
 | `InlineStep` | W | Calls an inline step, which the flow delivery runs, and waits for it. `InlineBackground` + `Value`. See [Inline Steps](/guide/inline-steps). |
 | `InlineBackground` | W | Starts an inline step without waiting. The flow runs it when the runner waits. |
 | `SetMaxInlineSteps` | — | Sets how many new steps a flow runs inline at once: 3 by default, 0 for none, at most 16. See [Running steps inline](/guide/steps#running-steps-inline). |
+| `SetMaxInlineStepsDuration` | — | Sets how long after a flow delivery starts it runs new steps inline: 2 minutes by default, 0 for none. A delivery also stops halfway to its ctx deadline. See [Running steps inline](/guide/steps#running-steps-inline). |
 | `Rollback` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
 | `FatalError` | S | Wraps an error a step returns so the step fails without retrying. Has no effect on a runner's error. |
 | `RetryableError` | S | Wraps an error a step returns so the step retries no sooner than `after`. Has no effect on a runner's error. |

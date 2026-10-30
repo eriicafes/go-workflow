@@ -20,13 +20,16 @@ const (
 	// to that flow's queued message, whose redelivery runs it again. A flow
 	// that replays after the lease without its result takes it over.
 	inlineStepLease = 15 * time.Minute
-	// maxInlineDuration is how long a flow delivery starts new steps inline.
+	// DefaultMaxInlineStepsDuration is how long a flow delivery starts new
+	// steps inline, unless WithMaxInlineStepsDuration sets another duration.
 	// After it, the flow queues them, so a long-running flow hands its steps
 	// to other deliveries.
-	maxInlineDuration = 2 * time.Minute
+	DefaultMaxInlineStepsDuration = 2 * time.Minute
 )
 
 type maxInlineStepsKey struct{}
+
+type maxInlineStepsDurationKey struct{}
 
 // WithMaxInlineSteps returns a copy of ctx that sets how many new steps a
 // flow runs inline at once. Zero runs none inline, and other
@@ -47,6 +50,23 @@ func MaxInlineSteps(ctx context.Context) int {
 		return n
 	}
 	return DefaultMaxInlineSteps
+}
+
+// WithMaxInlineStepsDuration returns a copy of ctx that sets how long after a
+// flow delivery starts it may start new steps inline. Zero or less starts none
+// inline. Steps declared with the returned ctx use the duration, and a ctx
+// passed to Runtime.Execute sets it for every step of the delivery.
+func WithMaxInlineStepsDuration(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, maxInlineStepsDurationKey{}, max(d, 0))
+}
+
+// MaxInlineStepsDuration returns the duration WithMaxInlineStepsDuration set
+// in ctx, or DefaultMaxInlineStepsDuration.
+func MaxInlineStepsDuration(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(maxInlineStepsDurationKey{}).(time.Duration); ok {
+		return d
+	}
+	return DefaultMaxInlineStepsDuration
 }
 
 // DurableInlineStepOptions holds the arguments to DurableInlineStep. A failed
@@ -196,6 +216,9 @@ type pendingStep struct {
 	recovered bool
 	// limit is the number of steps the flow may promote to run inline.
 	limit int
+	// duration is how long after the delivery started the flow may promote
+	// the step to run inline.
+	duration time.Duration
 	// attempt is the attempt that runs.
 	attempt int
 	// run calls the step function as attempt, and returns its result to

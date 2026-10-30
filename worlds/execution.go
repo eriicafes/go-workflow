@@ -82,8 +82,13 @@ type Execution struct {
 	// outside a flow.
 	running *sync.Map
 	// startedAt is when the delivery started. A flow stops running new steps
-	// inline after maxInlineDuration.
+	// inline after each step's duration.
 	startedAt time.Time
+	// inlineUntil is halfway from startedAt to the deadline of the
+	// delivery's ctx, after which a flow stops running new steps inline, so
+	// they and the steps already running can finish before it. It is zero
+	// when ctx has no deadline.
+	inlineUntil time.Time
 }
 
 func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) *Execution {
@@ -97,6 +102,9 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 		settles:   make(map[string]int),
 		inBand:    run.InBandCount,
 		startedAt: time.Now(),
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		execution.inlineUntil = execution.startedAt.Add(deadline.Sub(execution.startedAt) / 2)
 	}
 	for index, event := range events {
 		execution.trackEvent(index, event)
@@ -400,7 +408,8 @@ func (e *Execution) startSteps() {
 		if step.created != nil && !step.explicit {
 			// A new step runs inline only when this flow's message, whose
 			// redelivery runs it again, owns it.
-			runInline = e.delivery.MessageID != "" && e.promoted < step.limit && time.Since(e.startedAt) < maxInlineDuration
+			runInline = e.delivery.MessageID != "" && e.promoted < step.limit && time.Since(e.startedAt) < step.duration &&
+				(e.inlineUntil.IsZero() || time.Now().Before(e.inlineUntil))
 			if runInline {
 				e.promoted++
 				step.attempt = 1

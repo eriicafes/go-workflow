@@ -195,6 +195,8 @@ type fakeDynamo struct {
 	unprocessed int
 	batchCalls  int
 	getErr      error
+	// getDelay delays the next GetItem once.
+	getDelay time.Duration
 }
 
 func newFakeDynamo() *fakeDynamo {
@@ -202,6 +204,11 @@ func newFakeDynamo() *fakeDynamo {
 }
 
 func (f *fakeDynamo) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.mu.Lock()
+	delay := f.getDelay
+	f.getDelay = 0
+	f.mu.Unlock()
+	time.Sleep(delay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.getErr != nil {

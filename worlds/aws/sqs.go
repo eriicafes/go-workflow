@@ -120,10 +120,25 @@ func scheduled(queue target, delay time.Duration) bool {
 // the remaining delay. A failed record is retried by SQS after a backoff that
 // grows with its receive count, so a redrive policy still moves it to a
 // dead-letter queue.
+//
+// When ctx has a deadline, records not started by halfway to it are made
+// visible again and reported as failures, so a slow batch leaves them to
+// another invocation instead of timing out with them.
 func (w *World) consume(ctx context.Context, runtime *worlds.Runtime, event events.SQSEvent) events.SQSEventResponse {
 	response := events.SQSEventResponse{}
-	for _, record := range event.Records {
+	var cutoff time.Time
+	if deadline, ok := ctx.Deadline(); ok {
+		now := time.Now()
+		cutoff = now.Add(deadline.Sub(now) / 2)
+	}
+	for i, record := range event.Records {
 		queueURL := w.sourceURL(record.EventSourceARN)
+		if i > 0 && !cutoff.IsZero() && !time.Now().Before(cutoff) {
+			log.Printf("workflow/aws: delivery %s left to another invocation near the deadline", record.MessageId)
+			w.setVisibility(ctx, queueURL, record.ReceiptHandle, 0)
+			response.BatchItemFailures = append(response.BatchItemFailures, events.SQSBatchItemFailure{ItemIdentifier: record.MessageId})
+			continue
+		}
 		stop := w.holdVisibility(ctx, queueURL, record.ReceiptHandle)
 		err := w.deliver(ctx, runtime, record.Body)
 		stop()

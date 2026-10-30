@@ -140,6 +140,13 @@ and deletes the record on success. On failure it reports the message in
 doubles from one second with each receive up to 15 minutes. Configure a
 dead-letter queue to collect deliveries that keep failing.
 
+Lambda runs the handler with the invocation's deadline. Once a batch is
+halfway to it, the handler starts no further messages and reports them in
+`BatchItemFailures` with their visibility reset, so another invocation
+delivers them at once, and each delivery queues new steps instead of running
+them inline. A handed-off message counts as a receive toward the dead-letter
+queue's `max_receive_count`.
+
 Give the queue a message retention period of at least one hour. Each message
 waits at most 15 minutes before it is due or sent again, and a retention period
 shorter than that drops deliveries.
