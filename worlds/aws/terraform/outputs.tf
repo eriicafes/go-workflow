@@ -45,12 +45,31 @@ output "api_policy_arn" {
   value       = aws_iam_policy.api.arn
 }
 
+output "queues" {
+  description = "Routed queues by name, for awsworld.Config.Queues."
+  value = {
+    for name, queue in aws_sqs_queue.routed : name => {
+      url  = queue.id
+      arn  = queue.arn
+      fifo = var.queues[name].fifo
+    }
+  }
+}
+
 output "environment" {
   description = "Environment variables read by the example worker and API entrypoints."
   value = merge(
     tomap({
       WORKFLOW_TABLE     = aws_dynamodb_table.workflows.name
       WORKFLOW_QUEUE_URL = aws_sqs_queue.tasks.id
+      # {"<name>":{"url":"...","arn":"...","fifo":false}}, for awsworld.Config.Queues.
+      WORKFLOW_QUEUES = jsonencode({
+        for name, queue in aws_sqs_queue.routed : name => {
+          url  = queue.id
+          arn  = queue.arn
+          fifo = var.queues[name].fifo
+        }
+      })
     }),
     var.enable_scheduler ? tomap({
       WORKFLOW_QUEUE_ARN          = aws_sqs_queue.tasks.arn

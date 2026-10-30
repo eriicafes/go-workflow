@@ -130,11 +130,12 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 	if err := world.StreamsClose(ctx, StreamsCloseInput{RunID: runID, Name: stream}); err != nil {
 		return nil, err
 	}
-	deployment, err := RunDeploymentID(ctx, world, runID)
+	queue, err := RunDelivery(ctx, world, runID)
 	if err != nil {
 		return nil, err
 	}
-	_, err = world.Queue(ctx, QueueInput{RunID: runID, DeploymentID: deployment, IdempotencyKey: stream})
+	queue.IdempotencyKey = stream
+	_, err = world.Queue(ctx, queue)
 	return data.Cause, err
 }
 

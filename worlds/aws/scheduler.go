@@ -8,6 +8,7 @@ import (
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	sch "github.com/aws/aws-sdk-go-v2/service/scheduler/types"
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 // schedulerAPI is the subset of the EventBridge Scheduler client used by World.
@@ -23,19 +24,28 @@ func (w *World) scheduleGroup() string {
 	return w.config.Scheduler.Group
 }
 
-func (w *World) createSchedule(ctx context.Context, name string, due time.Time, body string) error {
+// createSchedule creates a one-time schedule that sends body to queue when
+// due. A FIFO queue's message joins runID's message group.
+func (w *World) createSchedule(ctx context.Context, name string, due time.Time, body string, queue target, runID worlds.RunID) error {
+	if w.scheduler == nil {
+		return errors.New("workflow/aws: a delayed delivery to this queue requires Config.Scheduler")
+	}
+	target := &sch.Target{
+		Arn:     awsv2.String(queue.arn),
+		RoleArn: awsv2.String(w.config.Scheduler.RoleARN),
+		Input:   awsv2.String(body),
+	}
+	if queue.fifo {
+		target.SqsParameters = &sch.SqsParameters{MessageGroupId: awsv2.String(string(runID))}
+	}
 	_, err := w.scheduler.CreateSchedule(ctx, &scheduler.CreateScheduleInput{
 		Name:                       awsv2.String(name),
 		GroupName:                  awsv2.String(w.scheduleGroup()),
 		ScheduleExpression:         awsv2.String(scheduleExpression(due)),
 		ScheduleExpressionTimezone: awsv2.String("UTC"),
 		FlexibleTimeWindow:         &sch.FlexibleTimeWindow{Mode: sch.FlexibleTimeWindowModeOff},
-		Target: &sch.Target{
-			Arn:     awsv2.String(w.config.Scheduler.TargetARN),
-			RoleArn: awsv2.String(w.config.Scheduler.RoleARN),
-			Input:   awsv2.String(body),
-		},
-		ActionAfterCompletion: sch.ActionAfterCompletionDelete,
+		Target:                     target,
+		ActionAfterCompletion:      sch.ActionAfterCompletionDelete,
 	})
 	return err
 }

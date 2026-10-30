@@ -96,6 +96,7 @@ type Capabilities struct {
 	Analytics          bool
 	SetAttributes      bool
 	DeploymentAffinity bool
+	QueueRouting       bool
 }
 ```
 
@@ -108,6 +109,13 @@ execute, or `""`. Runs created through the World's Client record it on
 deliveries are addressed to the run's deployment through
 `QueueInput.DeploymentID`, and misdelivered ones are re-routed. Of the built-in Worlds, only Vercel reports
 affinity, and only when it has a deployment ID.
+
+With `QueueRouting`, the World chooses a delivery's queue from
+`QueueInput.WorkflowName`. The Runtime and Client set it on every delivery,
+and code that queues for a run it hasn't loaded, such as `ResumeHook`, reads
+the run for it, which it otherwise skips. `RunDelivery(ctx, world, runID)`
+returns a delivery addressed that way. Of the built-in Worlds, only AWS reports
+it, when it has routes.
 
 ## Storage
 
@@ -208,6 +216,7 @@ type Queue interface {
 
 type QueueInput struct {
 	QueueName      string // empty selects the default queue
+	WorkflowName   string // workflow of the run, for Worlds that route by it
 	RunID          RunID
 	StepID         *StepID    // nil makes the delivery a flow
 	NotBefore      *time.Time // nil allows immediate delivery

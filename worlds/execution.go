@@ -265,6 +265,7 @@ func (e *Execution) AddRollback(fn func(context.Context, *Execution) error) {
 // error ends the replay so the queue retries the delivery.
 func (e *Execution) queue(input QueueInput) QueueResult {
 	input.RunID = e.run.RunID
+	input.WorkflowName = e.run.WorkflowName
 	input.DeploymentID = e.run.DeploymentID
 	result, err := e.world.Queue(e.ctx, input)
 	if err != nil {
@@ -478,7 +479,7 @@ func (e *Execution) recordNext() error {
 // retry of an inline step as a flow that runs it again, queued before the
 // retry is recorded.
 func (e *Execution) completeInlineStep(step pendingStep, result DataStepResult) error {
-	retry := QueueInput{RunID: e.run.RunID, NotBefore: result.RetryAfter, IdempotencyKey: stepRetryKey(step.stepID, step.attempt), DeploymentID: e.run.DeploymentID}
+	retry := QueueInput{RunID: e.run.RunID, WorkflowName: e.run.WorkflowName, NotBefore: result.RetryAfter, IdempotencyKey: stepRetryKey(step.stepID, step.attempt), DeploymentID: e.run.DeploymentID}
 	if result.RetryAfter != nil && step.explicit {
 		if _, err := e.world.Queue(e.ctx, retry); err != nil {
 			return err

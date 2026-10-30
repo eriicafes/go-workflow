@@ -15,11 +15,13 @@ The **Context** column says where a function can be called:
 
 ```go
 func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner
+func WorkflowName[In any]() string
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
 | `Use` | — | Registers `fn` as the runner of workflow `In`. Pass the result to `worlds.Runners`. |
+| `WorkflowName` | — | The name runs of workflow `In` are recorded under, its package path and type name; Worlds that route by workflow use it, as in `awsworld.Route`. |
 
 ## Steps
 
