@@ -18,7 +18,6 @@ import (
 // and QStash messages carry only the ID.
 type queueRecord struct {
 	QueueName       string         `json:"queueName,omitempty"`
-	WorkflowName    string         `json:"workflowName,omitempty"`
 	RunID           worlds.RunID   `json:"runId"`
 	StepID          *worlds.StepID `json:"stepId,omitempty"`
 	NotBefore       *time.Time     `json:"notBefore,omitempty"`
@@ -32,7 +31,7 @@ type queueRecord struct {
 }
 
 func (record queueRecord) input() worlds.QueueInput {
-	return worlds.QueueInput{QueueName: record.QueueName, WorkflowName: record.WorkflowName, RunID: record.RunID, StepID: record.StepID, NotBefore: record.NotBefore, IdempotencyKey: record.IdempotencyKey, DeploymentID: record.DeploymentID, DeploymentMismatchRetryCount: record.DeploymentMismatchRetryCount, ReplayDivergenceCount: record.ReplayDivergenceCount}
+	return worlds.QueueInput{QueueName: record.QueueName, RunID: record.RunID, StepID: record.StepID, NotBefore: record.NotBefore, IdempotencyKey: record.IdempotencyKey, DeploymentID: record.DeploymentID, DeploymentMismatchRetryCount: record.DeploymentMismatchRetryCount, ReplayDivergenceCount: record.ReplayDivergenceCount}
 }
 
 func (w *World) putQueueRecord(ctx context.Context, id string, record queueRecord, mode string) (bool, error) {
@@ -93,7 +92,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if deploymentID == "" {
 		deploymentID = w.config.DeploymentID
 	}
-	record := queueRecord{QueueName: input.QueueName, WorkflowName: input.WorkflowName, RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
+	record := queueRecord{QueueName: input.QueueName, RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
 	if _, err := w.putQueueRecord(ctx, id, record, "NX"); err != nil {
 		return worlds.QueueResult{}, err
 	}

@@ -83,12 +83,14 @@ IdempotencyKey deduplication is optional; runtime replay still needs to be safe
 without it. QueueBatch can report items published before an error, unlike an
 atomic event batch.
 
-Persist every QueueInput field, including StepID, QueueName, WorkflowName,
-DeploymentID, DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime
-uses these fields to select work, route pinned runs, and bound recovery. Do not
-reset them while wrapping or serializing a message. A World that chooses a
-queue by WorkflowName reports Capabilities.QueueRouting, so deliveries queued
-for a run nobody loaded still carry it.
+Persist every QueueInput field, including StepID, QueueName, DeploymentID,
+DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
+fields to select work, route pinned runs, and bound recovery. Do not reset them
+while wrapping or serializing a message. A World that chooses a queue by
+WorkflowName persists it too and reports Capabilities.QueueRouting, so
+deliveries queued for a run nobody loaded still carry it. Every World records
+the run's workflow name on the hooks it creates (Hook.WorkflowName), which
+ResumeHook uses instead of reading the run.
 
 ## Streams
 

@@ -506,8 +506,8 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int6
 	}
 
 	claimed, _ := json.Marshal(value.ForceClaimedFrom)
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, token, created_slot, webhook, created_at, updated_at, token_retention_until, claimed_from)
- VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8)`, event.CorrelationID, event.RunID, value.Token, slot, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, token, created_slot, webhook, created_at, updated_at, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)`, event.CorrelationID, event.RunID, a.run.WorkflowName, value.Token, slot, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
 		return err
 	}
 
@@ -646,9 +646,9 @@ func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, err
 	a := &appender{tx: tx}
 	var attributes []byte
 	var count, inBandCount int64
-	err := tx.QueryRow(ctx, `SELECT run_id, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
+	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
+		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}

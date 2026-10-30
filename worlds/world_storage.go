@@ -275,9 +275,12 @@ type Webhook struct {
 
 // Hook is the view of one hook derived from its run's event log.
 type Hook struct {
-	RunID  RunID
-	HookID HookID
-	Token  string
+	RunID RunID
+	// WorkflowName is the workflow of the run that created the hook, so a
+	// delivery queued for its payloads can be routed without reading the run.
+	WorkflowName string
+	HookID       HookID
+	Token        string
 	// Metadata is the JSON-encoded metadata recorded when the hook was
 	// created.
 	Metadata []byte
