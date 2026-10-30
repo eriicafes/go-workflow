@@ -389,7 +389,9 @@ func dynamoClient(t *testing.T) *dynamodb.Client {
 		Credentials: awsv2.CredentialsProviderFunc(func(context.Context) (awsv2.Credentials, error) {
 			return awsv2.Credentials{AccessKeyID: "test", SecretAccessKey: "test"}, nil
 		}),
-		RetryMaxAttempts: 1,
+		// DynamoDB Local occasionally closes a connection mid-response, which
+		// the SDK retries as a transient error.
+		RetryMaxAttempts: 5,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
