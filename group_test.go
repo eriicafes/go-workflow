@@ -155,7 +155,10 @@ func TestErrGroupCancelsAfterObservationAndStillWaitsForAll(t *testing.T) {
 			if err := workflow.Sleep(ctx, time.Hour); err != nil {
 				return groupOutput{}, err
 			}
-			if !cancelled.Load() {
+			// The blocked step settles with the cancellation, which must not
+			// wait for group.Wait.
+			winner, err = workflow.Select(ctx, blocked, workflow.Timer(ctx, time.Hour))
+			if winner != blocked || !errors.Is(err, context.Canceled) || !cancelled.Load() {
 				return groupOutput{}, errors.New("cancellation waited for group.Wait")
 			}
 			if err := group.Wait(ctx); !errors.Is(err, failure) {
