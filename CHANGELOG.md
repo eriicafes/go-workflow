@@ -1,5 +1,15 @@
 # go-workflow
 
+## 0.4.0
+
+### Minor Changes
+
+- 1844cc8: Route workflows to further standard or FIFO SQS queues in the AWS world with `Config.Queues` and `Config.Routes`, provisioned by the Terraform module's `queues`.
+- 1844cc8: Add `Hook.ResumeContext` with the run's deployment and workflow, so `ResumeHook` no longer reads the run.
+- 1844cc8: Route workflows to named queues in the Postgres world with `Config.Routes`, and claim them with `WorkerOptions.Queues`.
+- 1844cc8: Route workflows to further topics in the Vercel world with `Config.Topics` and `Config.Routes`.
+- 1844cc8: Add `worlds.WorkflowName`, `worlds.Route`, and `worlds.Routes` to route workflows to queues, and `QueueInput.WorkflowName` for Worlds that route.
+
 ## 0.3.0
 
 ### Minor Changes
