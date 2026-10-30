@@ -65,7 +65,8 @@ QStash callback, or clients in other processes.
 | `RedisURL` | TCP transport. `rediss://` uses TLS (minimum TLS 1.2). `redis://` is plain TCP. |
 | `RedisRESTURL`, `RedisRESTToken` | Upstash REST transport, used when `RedisURL` is empty. |
 | `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
-| `Topic` | Required. Topic the consumer is subscribed to. |
+| `Topic` | Required. Topic deliveries of unrouted workflows are published to. |
+| `Topics`, `Routes` | Further topics by queue name, and the queue of each routed workflow. See [routing](#routing-workflows-to-topics). |
 | `OIDCToken` | Returns the Vercel OIDC token for each Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `Prefix` | Redis key prefix. Default `go-workflow`. |
 | `QStash` | Optional long-timer configuration. |
@@ -82,6 +83,24 @@ each call. The default reads `VERCEL_OIDC_TOKEN`.
 When a deployment ID is set, Queues requests send `Vqs-Deployment-Id`. A
 delivery is published to its run's deployment, or to this World's when the run
 has none.
+
+## Routing workflows to topics
+
+```go
+world, err := vercelworld.New(vercelworld.Config{
+	// BaseURL, RedisURL, QueueURL...
+	Topic:  "workflow",
+	Topics: map[string]string{"backfill": "workflow-backfill"},
+	Routes: worlds.Routes(worlds.Route[workflows.Backfill]("backfill")),
+})
+```
+
+Every delivery of a routed workflow's runs is published to its queue's topic,
+and other workflows' to `Topic`. The queue record keeps the topic, so a QStash
+timer is released onto it. `Queue(world, runners)` consumes whichever topics
+its function is triggered by, so give each topic its own trigger, with its own
+concurrency, or one function several triggers. `New` rejects a route to a queue
+without a topic.
 
 ## Entry points
 

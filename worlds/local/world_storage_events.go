@@ -284,7 +284,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, WorkflowName: run.WorkflowName, HookID: id, Token: value.Token, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName}, HookID: id, Token: value.Token, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})

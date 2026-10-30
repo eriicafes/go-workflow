@@ -256,7 +256,8 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		"runId":         avs(string(hook.RunID)),
 		"hookId":        avs(string(hook.HookID)),
 		"token":         avs(hook.Token),
-		"workflowName":  avs(hook.WorkflowName),
+		"workflowName":  avs(hook.ResumeContext.WorkflowName),
+		"deploymentId":  avs(hook.ResumeContext.DeploymentID),
 		"createdAt":     avs(stamp(hook.CreatedAt)),
 		"updatedAt":     avs(stamp(hook.UpdatedAt)),
 		"list_pk":       avs("HOOKS"),
@@ -289,7 +290,7 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	hook := worlds.Hook{
 		RunID:               worlds.RunID(read(item, "runId")),
-		WorkflowName:        read(item, "workflowName"),
+		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName")},
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),
 		WebhookEventID:      worlds.EventID(read(item, "webhookEventId")),

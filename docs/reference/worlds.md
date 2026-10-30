@@ -112,10 +112,10 @@ affinity, and only when it has a deployment ID.
 
 With `QueueRouting`, the World chooses a delivery's queue from
 `QueueInput.WorkflowName`. The Runtime and Client set it on every delivery.
-`ResumeHook` takes it from `Hook.WorkflowName`, and other code that queues for
-a run it hasn't loaded, such as wake-ups and cancellation, reads the run for it,
-which it otherwise skips. `RunDelivery(ctx, world, runID)` returns a delivery
-addressed that way.
+`ResumeHook` takes it from the hook's `ResumeContext`, and other code that
+queues for a run it hasn't loaded, such as wake-ups and cancellation, reads the
+run for it, which it otherwise skips. `RunDelivery(ctx, world, runID)` returns a
+delivery addressed that way.
 
 ## Storage
 
@@ -187,7 +187,7 @@ type Step struct {
 
 type Hook struct {
 	RunID               RunID
-	WorkflowName        string // workflow of the hook's run
+	ResumeContext       HookResumeContext // copied from the run when the hook is created
 	HookID              HookID
 	Token               string
 	Metadata            []byte
@@ -200,6 +200,11 @@ type Hook struct {
 	ClaimedFrom         *HookForceClaim
 	ForceClaimedBy      *HookForceClaim
 	DisposedAt          *time.Time
+}
+
+type HookResumeContext struct {
+	DeploymentID string
+	WorkflowName string
 }
 ```
 
@@ -233,6 +238,21 @@ type QueueInput struct {
 Delivery is at least once. `QueueCancel` returns `ErrQueueMessageNotFound` for
 an unknown message. A World with deployment affinity returns an error wrapping
 `ErrDeploymentUnavailable` when the addressed deployment no longer exists.
+
+### Routing
+
+```go
+type Workflow[Out any] interface{ Workflow(Out) }
+
+func WorkflowName[In Workflow[Out], Out any]() string
+func Route[In Workflow[Out], Out any](queue string) QueueRoute
+func Routes(routes ...QueueRoute) map[string]string
+```
+
+`Workflow` is satisfied by a workflow type, such as one embedding
+`workflow.Struct`. `WorkflowName` returns the name its runs are recorded under,
+its package path and type name. `Routes(Route[W](queue), ...)` builds the
+`Config.Routes` of a World that routes deliveries by workflow.
 
 ## Streamer
 

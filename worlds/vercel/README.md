@@ -45,7 +45,9 @@ world, err := vercelworld.New(vercelworld.Config{
 | `RedisURL` | TCP transport. `rediss://` uses TLS (minimum TLS 1.2); `redis://` is plain TCP. |
 | `RedisRESTURL`, `RedisRESTToken` | Upstash REST transport, used when `RedisURL` is empty. |
 | `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
-| `Topic` | Required. Topic the consumer is subscribed to. |
+| `Topic` | Required. Topic deliveries of unrouted workflows are published to. |
+| `Topics` | Further topics by queue name. |
+| `Routes` | The queue of each routed workflow, built with `worlds.Routes(worlds.Route[W]("queue"), ...)`. Its deliveries are published to the queue's topic, which the queue record keeps for QStash timers. `Queue(world, runners)` consumes whichever topics its function is triggered by. |
 | `OIDCToken` | Function returning the Vercel OIDC token, called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `DeploymentID` | Deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them, and every delivery is published to the run's deployment. |
 | `Prefix` | Redis key prefix, default `go-workflow`. |
@@ -129,7 +131,8 @@ ends, as a backstop.
 "<ULID>"}`. If the publish fails, the record is deleted and the error is
 returned.
 
-- Delays up to 7 days go to Vercel Queues as `POST {QueueURL}/topic/{Topic}`.
+- Delays up to 7 days go to Vercel Queues as `POST {QueueURL}/topic/{topic}`,
+  the topic of the workflow's route or `Topic`.
   The request sets `Vqs-Delay-Seconds`, rounded up, and
   `Vqs-Retention-Seconds: 604800`, so a delayed or retried message outlives
   its delay. `Vqs-Idempotency-Key` is the message ID. Runtime idempotency keys

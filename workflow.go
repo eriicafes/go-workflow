@@ -100,10 +100,6 @@ const (
 // clock to the next timer. The HTTP client caps it per request.
 const clientWait = time.Hour
 
-// workflow is satisfied by a workflow, a struct type whose Workflow(Out)
-// method declares the workflow's output type.
-type workflow[Out any] interface{ Workflow(Out) }
-
 // Struct declares a workflow's output type when embedded in the workflow
 // struct, in place of writing its Workflow(Out) method:
 //
@@ -391,8 +387,8 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 // worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Cancellation of ctx
 // does not cancel the child; use Run.Cancel explicitly. Called elsewhere,
 // it uses the Client in ctx and returns ErrNoClient when ctx carries none.
-func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
-	name := typeIdentity[In]()
+func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
+	name := worlds.WorkflowName[In]()
 	client, err := clientFromContext(ctx)
 	if err != nil {
 		return nil, err
@@ -467,8 +463,8 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 // the package path and type name of In. fn replays on every delivery, so it
 // must be deterministic. It does side effects only through steps and reads
 // time only through Now.
-func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
-	name := typeIdentity[In]()
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
+	name := worlds.WorkflowName[In]()
 	return worlds.NewRunner(name, func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 		var input In
 		if err := json.Unmarshal(raw, &input); err != nil {
@@ -484,20 +480,6 @@ func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) w
 		}
 		return encoded, nil
 	})
-}
-
-// WorkflowName returns the name runs of the workflow type In are recorded
-// under: its package path and type name, as Use and Start record it. Worlds
-// that route deliveries by workflow use it to name a workflow, such as in
-// awsworld.Route.
-func WorkflowName[In any]() string { return typeIdentity[In]() }
-
-func typeIdentity[In any]() string {
-	typeOf := reflect.TypeFor[In]()
-	for typeOf.Kind() == reflect.Pointer {
-		typeOf = typeOf.Elem()
-	}
-	return typeOf.PkgPath() + "." + typeOf.Name()
 }
 
 func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) string {

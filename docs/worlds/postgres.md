@@ -41,11 +41,14 @@ context before calling `Close`.
 | `PollInterval` | 250 ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
+| `Routes` | none | The queue of each routed workflow. See [routing](#routing-workflows-to-queues). |
 
 ## Entry points
 
-- **`Worker(ctx, world, runners)`**: the queue worker. It blocks until `ctx` is
-  cancelled, waits for in-flight deliveries, and returns `ctx.Err()`.
+- **`Worker(ctx, world, runners, options...)`**: the queue worker. It blocks
+  until `ctx` is cancelled, waits for in-flight deliveries, and returns
+  `ctx.Err()`. `WorkerOptions.Queues` limits the queues it claims, and
+  `WorkerOptions.Concurrency` overrides `Config.Concurrency`.
 - **`HTTP(world)`**: RPC and webhook endpoints under `/v1/workflow`.
 - **`HTTPPrefix(world, prefix)`**: the same endpoints under `prefix`.
 - **`RPC(world)`** and **`Webhook(world)`**: each endpoint alone.
@@ -90,6 +93,21 @@ processes, slots are contiguous, and a batch is all-or-nothing.
 the owner's run, taking run locks in run ID order to avoid deadlocks. Exactly
 one concurrent claimant wins a free token. Transactions are retried on
 serialization failures and deadlocks.
+
+## Routing workflows to queues
+
+```go
+world, err := postgresworld.Open(ctx, postgresworld.Config{
+	// BaseURL, URL...
+	Routes: worlds.Routes(worlds.Route[workflows.Backfill]("backfill")),
+})
+
+go postgresworld.Worker(ctx, world, runners, postgresworld.WorkerOptions{Queues: []string{postgresworld.DefaultQueue}})
+go postgresworld.Worker(ctx, world, runners, postgresworld.WorkerOptions{Queues: []string{"backfill"}, Concurrency: 2})
+```
+
+Every delivery of a routed workflow's runs is stored on its queue, and other
+workflows' on `DefaultQueue`. A worker without `Queues` claims every queue.
 
 ## Worker model
 

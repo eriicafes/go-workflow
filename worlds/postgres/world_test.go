@@ -191,7 +191,7 @@ func TestQueueIdempotencyKey(t *testing.T) {
 	if _, err := world.pool.Exec(ctx, `UPDATE go_workflow_queue SET not_before = now() WHERE id = $1`, first.MessageID); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := world.claim(ctx, 10)
+	claimed, err := world.claim(ctx, 10, nil)
 	if err != nil || len(claimed) != 1 || claimed[0].id != first.MessageID || claimed[0].input.IdempotencyKey != "key" {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
 	}
@@ -199,7 +199,7 @@ func TestQueueIdempotencyKey(t *testing.T) {
 	if err != nil || fresh.MessageID == first.MessageID {
 		t.Fatalf("key after claim = %#v err=%v", fresh, err)
 	}
-	if again, err := world.claim(ctx, 10); err != nil || len(again) != 0 {
+	if again, err := world.claim(ctx, 10, nil); err != nil || len(again) != 0 {
 		t.Fatalf("leased delivery claimed again: %#v err=%v", again, err)
 	}
 }
@@ -213,7 +213,7 @@ func TestQueueKeepsReplayDivergenceCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	claimed, err := world.claim(ctx, 10)
+	claimed, err := world.claim(ctx, 10, nil)
 	if err != nil || len(claimed) != 1 || claimed[0].input.ReplayDivergenceCount != 2 || *claimed[0].input.StepID != stepID {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
 	}
@@ -226,7 +226,7 @@ func TestQueueKeepsDeploymentFields(t *testing.T) {
 	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3}); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := world.claim(ctx, 10)
+	claimed, err := world.claim(ctx, 10, nil)
 	if err != nil || len(claimed) != 1 || claimed[0].input.DeploymentID != "dpl_1" || claimed[0].input.DeploymentMismatchRetryCount != 3 {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
 	}

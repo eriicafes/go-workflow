@@ -14,14 +14,12 @@ The **Context** column says where a function can be called:
 ## Registration
 
 ```go
-func Use[In workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner
-func WorkflowName[In any]() string
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
 | `Use` | — | Registers `fn` as the runner of workflow `In`. Pass the result to `worlds.Runners`. |
-| `WorkflowName` | — | The name runs of workflow `In` are recorded under, its package path and type name; Worlds that route by workflow use it, as in `awsworld.Route`. |
 
 ## Steps
 
@@ -185,7 +183,7 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 ## Runs
 
 ```go
-func Start[In workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error)
+func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error)
 func Get[Out any](ctx context.Context, runID string) (*Run[Out], error)
 ```
 

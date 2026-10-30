@@ -34,7 +34,15 @@ type Config struct {
 	// workers. Workers renew it while executing, so it only bounds how soon a
 	// crashed worker's delivery is retried. Zero uses 1 minute.
 	LeaseDuration time.Duration
+	// Routes queues the deliveries of each workflow named by workflow name,
+	// as worlds.Routes builds it, on the queue it names, for workers that
+	// claim that queue (WorkerOptions.Queues). Other workflows are queued on
+	// DefaultQueue.
+	Routes map[string]string
 }
+
+// DefaultQueue is the queue of workflows Config.Routes doesn't route.
+const DefaultQueue = ""
 
 // World is the Postgres World. It is safe for concurrent use, and any number
 // of Worlds in any number of processes may share one database.
@@ -46,6 +54,7 @@ type World struct {
 	concurrency int
 	lease       time.Duration
 	notifier    *notifier
+	routes      map[string]string
 }
 
 // Open connects to config.URL, migrates the schema, and returns a World that
@@ -99,6 +108,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		concurrency: config.Concurrency,
 		lease:       config.LeaseDuration,
 		notifier:    newNotifier(pool),
+		routes:      config.Routes,
 	}, nil
 }
 
@@ -116,8 +126,8 @@ func (w *World) BaseURL() string             { return w.baseURL }
 func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
-func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+func (w *World) Capabilities() worlds.Capabilities {
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, QueueRouting: len(w.routes) > 0}
 }
 
 // HTTP returns a handler serving the RPC and webhook endpoints under
@@ -138,10 +148,29 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
+// WorkerOptions configures one Worker.
+type WorkerOptions struct {
+	// Queues are the queues the worker claims deliveries from, such as
+	// DefaultQueue and the queues Config.Routes names. Empty claims every
+	// queue.
+	Queues []string
+	// Concurrency is the most deliveries the worker executes at once. Zero
+	// uses Config.Concurrency.
+	Concurrency int
+}
+
 // Worker runs the loop that executes deliveries for the workflows of runners.
 // It blocks until ctx is cancelled, waits for in-flight deliveries to return,
 // and returns ctx.Err(). Any number of workers in any number of processes may
-// share one database, and each delivery runs on one worker at a time.
-func Worker(ctx context.Context, world *World, runners worlds.RunnerSet) error {
-	return world.work(ctx, worlds.NewRuntime(world, runners))
+// share one database, and each delivery runs on one worker at a time. The
+// last options apply.
+func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options ...WorkerOptions) error {
+	var option WorkerOptions
+	if len(options) > 0 {
+		option = options[len(options)-1]
+	}
+	if option.Concurrency <= 0 {
+		option.Concurrency = world.concurrency
+	}
+	return world.work(ctx, worlds.NewRuntime(world, runners), option)
 }

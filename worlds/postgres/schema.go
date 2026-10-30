@@ -68,6 +68,7 @@ CREATE TABLE go_workflow_hooks (
 	hook_id text PRIMARY KEY,
 	run_id text NOT NULL,
 	workflow_name text NOT NULL,
+	deployment_id text NOT NULL,
 	token text NOT NULL,
 	created_slot bigint NOT NULL,
 	webhook jsonb,
@@ -104,6 +105,7 @@ CREATE TABLE go_workflow_queue (
 	created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX go_workflow_queue_claim_idx ON go_workflow_queue (not_before, id);
+CREATE INDEX go_workflow_queue_routed_claim_idx ON go_workflow_queue (queue_name, not_before, id);
 CREATE UNIQUE INDEX go_workflow_queue_dedupe_idx ON go_workflow_queue (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
 
 CREATE TABLE go_workflow_streams (

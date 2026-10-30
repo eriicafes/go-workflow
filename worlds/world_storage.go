@@ -274,13 +274,20 @@ type Webhook struct {
 }
 
 // Hook is the view of one hook derived from its run's event log.
+// HookResumeContext is the part of a hook's run that addresses the
+// deliveries its payloads queue: the run's deployment and workflow.
+type HookResumeContext struct {
+	DeploymentID string
+	WorkflowName string
+}
+
 type Hook struct {
 	RunID RunID
-	// WorkflowName is the workflow of the run that created the hook, so a
-	// delivery queued for its payloads can be routed without reading the run.
-	WorkflowName string
-	HookID       HookID
-	Token        string
+	// ResumeContext is copied from the hook's run when the hook is created, so
+	// a delivery queued for its payloads is addressed without reading the run.
+	ResumeContext HookResumeContext
+	HookID        HookID
+	Token         string
 	// Metadata is the JSON-encoded metadata recorded when the hook was
 	// created.
 	Metadata []byte

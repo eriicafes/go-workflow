@@ -89,17 +89,17 @@ world, err := awsworld.New(awsworld.Config{
 		"backfill": {URL: backfillURL, ARN: backfillARN},
 		"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
 	},
-	Routes: awsworld.Routes(
-		awsworld.Route[workflows.Backfill]("backfill"),
-		awsworld.Route[workflows.Ledger]("ordered"),
+	Routes: worlds.Routes(
+		worlds.Route[workflows.Backfill]("backfill"),
+		worlds.Route[workflows.Ledger]("ordered"),
 	),
 }, dynamoClient, sqsClient)
 ```
 
-`Route[W]` names the workflow with `workflow.WorkflowName[W]()`, the name its
-runs are recorded under. Every delivery of a run, flow or step, goes to its
+`worlds.Route[W]` names the workflow with `worlds.WorkflowName[W]()`, the name
+its runs are recorded under. Every delivery of a run, flow or step, goes to its
 workflow's queue: the Runtime sets `QueueInput.WorkflowName`, `ResumeHook`
-takes it from the hook, and wake-ups and cancellation read the run for it
+takes it from the hook's `ResumeContext`, and wake-ups and cancellation read the run for it
 because the World reports `Capabilities.QueueRouting`. The record keeps the
 queue name, so a message that arrives early is sent again to the same queue.
 The worker reads messages from every queue; give each its own event source

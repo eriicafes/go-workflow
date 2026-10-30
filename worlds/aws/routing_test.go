@@ -41,9 +41,9 @@ func routingWorld(t *testing.T, queue *fakeSQS, schedules *fakeScheduler) *World
 			"backfill": {URL: backfillURL, ARN: backfillARN},
 			"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
 		},
-		Routes: Routes(
-			Route[routedWorkflow]("backfill"),
-			Route[*orderedWorkflow]("ordered"),
+		Routes: worlds.Routes(
+			worlds.Route[routedWorkflow]("backfill"),
+			worlds.Route[*orderedWorkflow]("ordered"),
 		),
 		Scheduler: &SchedulerConfig{TargetARN: defaultARN, RoleARN: schedARN},
 	}, newFakeDynamo(), queue, schedules)
@@ -54,8 +54,8 @@ func routingWorld(t *testing.T, queue *fakeSQS, schedules *fakeScheduler) *World
 }
 
 func TestRoutesNameWorkflowsByType(t *testing.T) {
-	routes := Routes(Route[routedWorkflow]("backfill"), Route[*orderedWorkflow]("ordered"))
-	if routes[workflow.WorkflowName[routedWorkflow]()] != "backfill" || routes[workflow.WorkflowName[orderedWorkflow]()] != "ordered" || len(routes) != 2 {
+	routes := worlds.Routes(worlds.Route[routedWorkflow]("backfill"), worlds.Route[*orderedWorkflow]("ordered"))
+	if routes[worlds.WorkflowName[routedWorkflow]()] != "backfill" || routes[worlds.WorkflowName[orderedWorkflow]()] != "ordered" || len(routes) != 2 {
 		t.Fatalf("routes = %v", routes)
 	}
 }
@@ -68,14 +68,14 @@ func TestQueueRoutesByWorkflow(t *testing.T) {
 		t.Fatal("a World with routes does not report QueueRouting")
 	}
 
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: workflow.WorkflowName[routedWorkflow]()}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow]()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_other", WorkflowName: "unrouted"}); err != nil {
 		t.Fatal(err)
 	}
 	later := time.Now().Add(time.Minute)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: workflow.WorkflowName[routedWorkflow](), NotBefore: &later}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestQueueSchedulesLongDelaysToTheRoutedQueue(t *testing.T) {
 	schedules := newFakeScheduler()
 	world := routingWorld(t, &fakeSQS{}, schedules)
 	later := time.Now().Add(time.Hour)
-	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_routed", WorkflowName: workflow.WorkflowName[routedWorkflow](), NotBefore: &later})
+	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestQueueFIFO(t *testing.T) {
 	ctx := context.Background()
 	queue, schedules := &fakeSQS{}, newFakeScheduler()
 	world := routingWorld(t, queue, schedules)
-	name := workflow.WorkflowName[orderedWorkflow]()
+	name := worlds.WorkflowName[orderedWorkflow]()
 
 	now, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: name})
 	if err != nil {
@@ -153,12 +153,12 @@ func TestConsumerResendsAnEarlyDeliveryToItsQueue(t *testing.T) {
 	handler := Queue(world, worlds.Runners())
 
 	later := time.Now().Add(10 * time.Minute)
-	standard := worlds.QueueInput{RunID: "wrun_routed", WorkflowName: workflow.WorkflowName[routedWorkflow](), NotBefore: &later}
+	standard := worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later}
 	standardResult, err := world.Queue(ctx, standard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fifo := worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: workflow.WorkflowName[orderedWorkflow](), NotBefore: &later}
+	fifo := worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: worlds.WorkflowName[orderedWorkflow](), NotBefore: &later}
 	fifoResult, err := world.Queue(ctx, fifo)
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestConsumerChangesVisibilityOnTheSourceQueue(t *testing.T) {
 func TestNewValidatesQueues(t *testing.T) {
 	scheduler := &SchedulerConfig{TargetARN: defaultARN, RoleARN: schedARN}
 	tests := map[string]Config{
-		"unknown route queue": {Routes: Routes(Route[routedWorkflow]("missing"))},
+		"unknown route queue": {Routes: worlds.Routes(worlds.Route[routedWorkflow]("missing"))},
 		"queue without URL":   {Queues: map[string]QueueConfig{"backfill": {ARN: backfillARN}}},
 		"FIFO without Scheduler": {
 			Queues: map[string]QueueConfig{"ordered": {URL: orderedURL, ARN: orderedARN, FIFO: true}},
@@ -236,7 +236,7 @@ func TestNewValidatesQueues(t *testing.T) {
 		}
 	}
 	// a standard queue needs no ARN without Scheduler
-	if _, err := newWorld(Config{BaseURL: testBaseURL, TableName: "workflow", QueueURL: testQueueURL, Queues: map[string]QueueConfig{"backfill": {URL: backfillURL}}, Routes: Routes(Route[routedWorkflow]("backfill"))}, newFakeDynamo(), &fakeSQS{}, nil); err != nil {
+	if _, err := newWorld(Config{BaseURL: testBaseURL, TableName: "workflow", QueueURL: testQueueURL, Queues: map[string]QueueConfig{"backfill": {URL: backfillURL}}, Routes: worlds.Routes(worlds.Route[routedWorkflow]("backfill"))}, newFakeDynamo(), &fakeSQS{}, nil); err != nil {
 		t.Fatalf("standard queue without Scheduler: %v", err)
 	}
 }

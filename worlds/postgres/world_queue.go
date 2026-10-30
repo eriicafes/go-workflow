@@ -50,7 +50,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 				UNION ALL
 				SELECT id, false FROM go_workflow_queue WHERE run_id = $3 AND dedupe_key = $6
 				LIMIT 1`,
-				ulid.Make().String(), input.QueueName, input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore, input.ReplayDivergenceCount, input.DeploymentID, input.DeploymentMismatchRetryCount).Scan(&id, &inserted)
+				ulid.Make().String(), w.queueName(input), input.RunID, stepID, input.IdempotencyKey, dedupe, input.NotBefore, input.ReplayDivergenceCount, input.DeploymentID, input.DeploymentMismatchRetryCount).Scan(&id, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -105,10 +105,11 @@ type delivery struct {
 
 // claim leases up to limit due rows that are not leased by a live worker.
 // The attempts counter doubles as a fencing token for later updates.
-func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
+func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delivery, error) {
 	rows, err := w.pool.Query(ctx, `WITH candidate AS (
 			SELECT id FROM go_workflow_queue
 			WHERE not_before <= now() AND (lease_until IS NULL OR lease_until < now())
+				AND ($3::text[] IS NULL OR queue_name = ANY($3))
 			ORDER BY not_before, id
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -117,7 +118,7 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 		SET lease_until = now() + make_interval(secs => $2), attempts = q.attempts + 1, dedupe_key = NULL
 		FROM candidate WHERE q.id = candidate.id
 		RETURNING q.id, q.attempts, q.queue_name, q.run_id, q.step_id, q.idempotency_key, q.replay_divergence_count, q.deployment_id, q.deployment_mismatch_retry_count`,
-		limit, w.lease.Seconds())
+		limit, w.lease.Seconds(), queuesArg(queues))
 	if err != nil {
 		return nil, err
 	}
@@ -138,16 +139,16 @@ func (w *World) claim(ctx context.Context, limit int) ([]delivery, error) {
 // work is the Worker loop. It claims as many due rows as there are free slots,
 // executes each in its own goroutine, and sleeps until a notification, a free
 // slot, or PollInterval.
-func (w *World) work(ctx context.Context, runtime *worlds.Runtime) error {
+func (w *World) work(ctx context.Context, runtime *worlds.Runtime, options WorkerOptions) error {
 	var group sync.WaitGroup
 	defer group.Wait()
-	finished := make(chan struct{}, w.concurrency)
+	finished := make(chan struct{}, options.Concurrency)
 	inflight := 0
 	for {
 		wake, release := w.notifier.wait(channelQueue, "")
 		claimedAll := false
-		if free := w.concurrency - inflight; free > 0 {
-			deliveries, err := w.claim(ctx, free)
+		if free := options.Concurrency - inflight; free > 0 {
+			deliveries, err := w.claim(ctx, free, options.Queues)
 			if err != nil && ctx.Err() == nil {
 				log.Printf("workflow/postgres: claim: %v", err)
 			}
@@ -257,4 +258,21 @@ func backoff(attempts int) time.Duration {
 		return backoffMax
 	}
 	return min(backoffBase<<(attempts-1), backoffMax)
+}
+
+// queueName returns the queue a delivery is stored on: its workflow's route,
+// or the queue it names.
+func (w *World) queueName(input worlds.QueueInput) string {
+	if queue, ok := w.routes[input.WorkflowName]; ok {
+		return queue
+	}
+	return input.QueueName
+}
+
+// queuesArg returns the claim query's queue filter, nil for every queue.
+func queuesArg(queues []string) []string {
+	if len(queues) == 0 {
+		return nil
+	}
+	return queues
 }
