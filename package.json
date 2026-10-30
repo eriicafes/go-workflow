@@ -1,6 +1,6 @@
 {
   "name": "go-workflow",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Event-sourced durable workflows for Go worlds.",
   "type": "module",
   "exports": {
