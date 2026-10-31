@@ -19,12 +19,14 @@ reload.
 
 ### Registration
 
-Every function passed to `workflow.Use` must be a valid runner.
+Every function passed to `workflow.Use` must be a valid runner: a named
+function, or a method value such as `f.Report` whose receiver holds the
+runner's dependencies. Method runners' bodies are checked like functions'.
 
 | Diagnostic | Cause |
 | --- | --- |
 | `workflow.Use requires one workflow function` | `Use` called with the wrong number of arguments. |
-| `workflow.Use requires a named package-level workflow function` | A closure or function variable passed to `Use`. |
+| `workflow.Use requires a named workflow function or method` | A closure or function variable passed to `Use`. |
 | `workflow function must be func(context.Context, NamedInput) (Output, error)` | Wrong runner signature. |
 | `workflow input must be a named package type` | Input is not a named type. |
 | `<Input> must declare Workflow(<Output>)` | Input type does not embed `workflow.Struct[<Output>]` or have a matching `Workflow` method. |
