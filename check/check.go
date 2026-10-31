@@ -15,7 +15,7 @@ import (
 const workflowPackage = "github.com/eriicafes/go-workflow"
 
 // Analyzer checks that every function passed to workflow.Use is a named runner
-// whose input type is a workflow.
+// function or method whose input type is a workflow.
 //
 // In runners, it reports operations that break replay, such as goroutines,
 // select, ranging over maps, time.Now, and I/O or randomness outside steps. It
@@ -28,7 +28,7 @@ func run(pass *analysis.Pass) (any, error) {
 	for _, file := range pass.Files {
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Recv != nil {
+			if !ok || function.Body == nil {
 				continue
 			}
 			if object, ok := pass.TypesInfo.Defs[function.Name].(*types.Func); ok {
@@ -54,7 +54,7 @@ func run(pass *analysis.Pass) (any, error) {
 			for _, argument := range call.Args {
 				function := namedFunction(pass, argument)
 				if function == nil {
-					pass.Reportf(argument.Pos(), "workflow.Use requires a named package-level workflow function")
+					pass.Reportf(argument.Pos(), "workflow.Use requires a named workflow function or method")
 					continue
 				}
 				validateWorkflow(pass, argument, function)

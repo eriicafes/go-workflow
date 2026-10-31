@@ -42,8 +42,8 @@ or their dependencies.
 
 ## Runners
 
-A runner is a named, package-level function that executes a workflow, kept in
-`workflows/flows`. Its input and output types match the workflow declaration:
+A runner is a named function, or a method whose receiver holds the runner's
+dependencies, that executes a workflow, kept in `workflows/flows`. Its input and output types match the workflow declaration:
 
 ```go
 package flows

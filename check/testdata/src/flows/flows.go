@@ -65,3 +65,20 @@ func Report(ctx context.Context, in Input) (Output, error) {
 	})
 	return out, nil
 }
+
+// A method runner's body is checked like a function's.
+type Flows struct{ Prefix string }
+
+var _ = workflow.Use((&Flows{}).Run)
+
+func (f *Flows) Run(ctx context.Context, in Input) (Output, error) {
+	_ = time.Now() // want `workflow body calls time.Now, use workflow.Now instead`
+	return workflow.Step(ctx, f.step, in)
+}
+
+func (f *Flows) step(ctx context.Context, in Input) (Output, error) {
+	return Output{Name: f.Prefix + in.Name}, nil
+}
+
+// A closure is not a named runner.
+var _ = workflow.Use(func(ctx context.Context, in Input) (Output, error) { return Output{}, nil }) // want `workflow.Use requires a named workflow function or method`
