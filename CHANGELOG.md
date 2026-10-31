@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.5.2
+
+### Patch Changes
+
+- 9b61bcf: Check the bodies of method runners passed to `workflow.Use`, such as `workflow.Use(f.Report)`, like function runners.
+
 ## 0.5.1
 
 ### Patch Changes
