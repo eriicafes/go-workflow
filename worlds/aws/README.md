@@ -168,6 +168,26 @@ Create the table with the [Terraform module](#infrastructure), or with
 on demand and waits until it is active (handy for DynamoDB Local
 and tests).
 
+## Retention
+
+With `Config.Retention` set, appending a run's `run_completed`, `run_failed`
+or `run_cancelled` also queues an expiry delivery due its workflow's retention
+(`Config.Retentions`, else `Retention`) later, as a
+`QUEUE#expire-<runID>` record published like any delivery (through Scheduler
+beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
+ID is fixed per run, so an append retried after publishing failed schedules
+it again rather than twice, and a retried append of a terminal event does so
+too.
+
+When the delivery is due, the `Queue` handler deletes the run's hooks (found
+through `HOOKS#<runID>` on `list_group`), the tokens they still own, and every
+item of the `RUN#<runID>` partition with `BatchWriteItem`, the run's view last,
+so a cleanup cut short is retried by SQS while the run still exists. Index
+entries are attributes of these items, so the run leaves `RunsList` and
+`HooksList` with them. A hook whose token retention has not ended defers the
+expiry until it ends. Runs that are still pending or running never expire,
+and runs that finished before `Retention` was set are kept.
+
 ## Infrastructure
 
 [`terraform/`](terraform) is a Terraform module that provisions the table,
@@ -200,7 +220,10 @@ minutes ahead. The queue worker is the component that creates long timers.
 Both Lambda roles need, on the table and its indexes (`<table-arn>` and
 `<table-arn>/index/*`): `dynamodb:GetItem`, `PutItem`, `UpdateItem`,
 `DeleteItem`, `Query` and `BatchGetItem` (transactions are authorized per
-action). Both need `sqs:SendMessage` on the queue.
+action). Both need `sqs:SendMessage` on the queue. With `Retention`, the queue
+worker also needs `dynamodb:BatchWriteItem` to delete expired runs, and the API
+role needs `scheduler:CreateSchedule` if it cancels runs, since a finished run
+schedules its own expiry.
 
 The queue worker additionally needs `sqs:ReceiveMessage`, `DeleteMessage`
 and `GetQueueAttributes` (for the event source mapping), and, with

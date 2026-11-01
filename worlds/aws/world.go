@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -38,6 +39,17 @@ type Config struct {
 	// the SQS delay limit, and every delayed delivery to a FIFO queue. Without
 	// it, queueing such a delivery returns an error.
 	Scheduler *SchedulerConfig
+	// Retention is how long a run's data is kept after the run completes,
+	// fails, or is cancelled. Finishing a run queues a delivery due Retention
+	// later, which deletes its run partition and its hooks. A run with a hook
+	// whose token retention has not ended is kept until it ends. Zero keeps
+	// runs forever. Retention over 15 minutes, the SQS delay limit, requires
+	// Scheduler.
+	Retention time.Duration
+	// Retentions overrides Retention for the workflows it names, by workflow
+	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
+	// forever. Any retention over 15 minutes requires Scheduler.
+	Retentions map[string]time.Duration
 }
 
 // QueueConfig is an SQS queue that deliveries can be routed to.
@@ -125,6 +137,12 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 		if _, ok := config.Queues[queue]; !ok {
 			return nil, fmt.Errorf("workflow/aws: route for %s names unknown queue %q", workflowName, queue)
 		}
+	}
+	switch longest, negative := worlds.MaxRetention(config.Retention, config.Retentions); {
+	case negative:
+		return nil, errors.New("workflow/aws: retention cannot be negative")
+	case longest > maxSQSDelay && config.Scheduler == nil:
+		return nil, errors.New("workflow/aws: retention over 15 minutes requires Scheduler")
 	}
 	return &World{config: config, dynamo: dynamoClient, sqs: sqsClient, scheduler: schedulerClient}, nil
 }

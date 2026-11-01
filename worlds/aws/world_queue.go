@@ -21,6 +21,8 @@ type queueRecord struct {
 	// queue is the name of the queue in Config.Queues the delivery was
 	// routed to, or empty for the default queue.
 	queue string
+	// expire marks the delivery that deletes a finished run's data.
+	expire bool
 }
 
 // Queue returns an error for a delivery due more than 15 minutes ahead, or
@@ -121,7 +123,7 @@ func (w *World) queueRecord(ctx context.Context, id string) (queueRecord, bool, 
 	if err != nil || !found {
 		return queueRecord{}, false, err
 	}
-	record := queueRecord{notBefore: readTimePtr(item, "notBefore"), schedule: read(item, "schedule"), queue: read(item, "queue")}
+	record := queueRecord{notBefore: readTimePtr(item, "notBefore"), schedule: read(item, "schedule"), queue: read(item, "queue"), expire: readBool(item, "expire")}
 	if err := json.Unmarshal([]byte(read(item, "input")), &record.input); err != nil {
 		return queueRecord{}, false, fmt.Errorf("workflow/aws: decode queue record %s: %w", id, err)
 	}

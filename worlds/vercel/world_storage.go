@@ -169,7 +169,7 @@ func (w *World) resolvePayloads(ctx context.Context, refs []payloadRef) error {
 		return nil
 	}
 	args := make([]string, 0, 1+2*len(refs))
-	args = append(args, w.prefix)
+	args = append(args, w.scripts)
 	for _, ref := range refs {
 		args = append(args, string(ref.runID), strconv.FormatUint(ref.slot, 10))
 	}

@@ -52,7 +52,7 @@ func (w *World) streamScript(ctx context.Context, script *redisScript, runID wor
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err := scriptReply(w.redis.Run(ctx, script, append([]string{w.prefix, string(runID), name}, args...)...))
+	_, err := scriptReply(w.redis.Run(ctx, script, append([]string{w.scripts, string(runID), name}, args...)...))
 	return err
 }
 
@@ -92,7 +92,7 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 // readStream returns the done flag, chunk count, and up to count chunks from
 // start in one consistent read.
 func (w *World) readStream(ctx context.Context, runID worlds.RunID, name string, start, count int) (bool, int, [][]byte, error) {
-	result, err := w.redis.Run(ctx, scriptStreamRead, w.prefix, string(runID), name, strconv.Itoa(start), strconv.Itoa(count))
+	result, err := w.redis.Run(ctx, scriptStreamRead, w.scripts, string(runID), name, strconv.Itoa(start), strconv.Itoa(count))
 	if err != nil {
 		return false, 0, nil, err
 	}

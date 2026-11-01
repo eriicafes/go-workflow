@@ -116,6 +116,19 @@ Delivery is at least once. The runtime's event admission makes duplicate
 deliveries inert. `QueueCancel` deletes the row; a row cancelled while being
 executed is simply not found when the worker settles it.
 
+## Retention
+
+With `Config.Retention` set, each `Worker` deletes expired runs in the
+background: at start and then every minute, in batches of 100, until no
+expired run is left. One statement per batch picks runs that completed,
+failed or were cancelled longer ago than their workflow's retention
+(`Config.Retentions`, else `Retention`) and deletes their events,
+steps, hooks and the tokens those hooks own, queued deliveries, streams and
+chunks, and finally the runs, so a batch is all or nothing. Its `FOR UPDATE
+SKIP LOCKED` lets every worker sharing the database run it without waiting on
+each other. A run with a hook whose token retention has not ended is kept
+until it ends, and runs that are still pending or running never expire.
+
 ## LISTEN/NOTIFY
 
 Each World opens one dedicated connection (taken out of the pool) on first

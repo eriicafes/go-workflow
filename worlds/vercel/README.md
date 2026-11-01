@@ -51,6 +51,8 @@ world, err := vercelworld.New(vercelworld.Config{
 | `OIDCToken` | Function returning the Vercel OIDC token, called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `DeploymentID` | Deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them, and every delivery is published to the run's deployment. |
 | `Prefix` | Redis key prefix, default `go-workflow`. |
+| `Retention` | How long a finished run's data is kept (see [Retention](#retention)). Zero, the default, keeps runs forever. |
+| `Retentions` | `Retention` per workflow name, from `worlds.Retentions`. Zero keeps that workflow's runs. |
 | `QStash` | Optional long-timer configuration (below). |
 | `HTTPClient` | Client for Redis REST, Vercel Queues and QStash. Default `http.DefaultClient`. |
 
@@ -98,6 +100,7 @@ Redis Cluster. Upstash regional and global databases are fine.
 | `p:events:<run>` | list | Event records; index = slot − 1 |
 | `p:last:<run>` | hash | Last slot per event type (and correlation ID), used for idempotent replays |
 | `p:corr:<run>:<hex(cid)>` | zset | Slots of one correlation ID |
+| `p:corrs:<run>` | set | `hex(cid)` of every correlation ID of the run, so retention can find their keys |
 | `p:steps:<run>`, `p:steporder:<run>` | hash, zset | Step JSON; step IDs ordered by creation slot |
 | `p:hook:<hook>`, `p:token:<token>` | string | Hook JSON; owning hook of a token |
 | `p:hooks`, `p:runhooks:<run>` | zset | Hook IDs by creation |
@@ -105,6 +108,7 @@ Redis Cluster. Upstash regional and global databases are fine.
 | `p:streams:<run>` | set | Stream names |
 | `p:stream:<run>:<hex(name)>`, `p:chunks:<run>:<hex(name)>` | hash, list | Stream session state; base64 chunks |
 | `p:queue:<id>` | string | Queue record |
+| `p:expiring` | zset | Finished runs by the time their data expires (ms), with their workflow, status, and hooks, for removal from the indexes |
 
 Encoding works as follows:
 
@@ -121,6 +125,27 @@ Encoding works as follows:
 Token retention expires lazily: on a claim, on a conflicting `hook_created`, and
 in `HooksGetByToken`. Redis also expires the token key a minute after retention
 ends, as a backstop.
+
+## Retention
+
+With `Config.Retention` set, the script that appends a run's
+`run_completed`, `run_failed`, or `run_cancelled` sets every key of that run to
+expire at `completedAt` plus its workflow's retention (`Config.Retentions`,
+else `Retention`) with `PEXPIREAT`: its view, attributes,
+event log, `last` and correlation keys, steps, hooks, and streams. Redis then
+deletes them on its own, with no sweep over the data. A hook kept by its
+token's retention expires when that ends instead, if later. The expiry is an
+absolute time, so writes that still reach a finished run, such as a late step
+result, reapply it rather than extend it, and stream keys created then take
+the run's remaining time.
+
+Index sorted sets cannot expire per member, so the same script also adds the
+run to `p:expiring`. Each `EventsCreateRun` removes up to 100 runs whose data
+is gone from `p:runs`, its workflow and status indexes, and its hooks from
+`p:hooks`. Until then, `RunsList` skips a listed run whose data has expired.
+
+Runs that are still pending or running never expire, however old, and runs
+that finished before `Retention` was set are kept.
 
 `RunsWaitForTerminalStatus` and `StreamsGetChunks` poll with a backoff from
 50 ms to 500 ms, because REST has no blocking reads.

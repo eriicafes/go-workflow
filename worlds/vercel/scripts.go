@@ -1,14 +1,31 @@
 package vercelworld
 
 // Every mutation is one Lua script, so it is atomic over TCP and REST. Scripts
-// receive no KEYS. ARGV[1] is the key prefix and keys are derived as in
-// world_storage.go. Binary payloads are base64 text built in Go, and Go passes
+// receive no KEYS. ARGV[1] is the key prefix, followed, when retention is
+// configured, by a newline, Config.Retention in microseconds, another newline,
+// and a JSON object of Config.Retentions in microseconds by workflow name.
+// Keys are derived as in world_storage.go. Binary payloads are base64 text built in Go, and Go passes
 // any field parsed from event data in a JSON descriptor, so Lua only decodes
 // JSON that Go produced. Timestamps are Unix microseconds passed from Go.
 // Results are arrays whose first element is "ok" or "err" followed by a code.
 
 const luaPrelude = `
-local P = ARGV[1]
+local P, RET, RETWF, RETON = ARGV[1], 0, {}, false
+do
+  local nl = string.find(P, '\n', 1, true)
+  if nl then
+    local rest = string.sub(P, nl + 1)
+    local nl2 = string.find(rest, '\n', 1, true)
+    P, RET, RETWF, RETON = string.sub(P, 1, nl - 1), tonumber(string.sub(rest, 1, nl2 - 1)), cjson.decode(string.sub(rest, nl2 + 1)), true
+  end
+end
+-- retentionFor returns the retention of workflow wf in microseconds, 0 to
+-- keep its runs.
+local function retentionFor(wf)
+  local ret = RETWF[wf]
+  if ret == nil then ret = RET end
+  return tonumber(ret)
+end
 local function hex(s) return (string.gsub(s, '.', function(c) return string.format('%02x', string.byte(c)) end)) end
 local function k(kind, id) return P .. ':' .. kind .. ':' .. id end
 local function terminal(s) return s == 'completed' or s == 'failed' or s == 'cancelled' end
@@ -24,6 +41,55 @@ local function rpush(key, values)
   for i = 1, #values, 1000 do
     redis.call('RPUSH', key, unpack(values, i, math.min(i + 999, #values)))
   end
+end
+
+-- Retention. A terminal run's keys expire at completedAt plus its
+-- workflow's retention, an absolute
+-- time, so applying it again after a late write keeps it. P:expiring
+-- schedules each run's removal from the run and hook indexes, which Redis
+-- expiry cannot reach.
+local runKinds = {'run', 'attrs', 'events', 'last', 'steps', 'steporder', 'runhooks', 'streams', 'corrs'}
+local function expiresAt(completedAt, ret) return math.floor((tonumber(completedAt) + ret) / 1000) end
+local function expireHook(id, at)
+  local key = k('hook', id)
+  local raw = redis.call('GET', key)
+  if not raw then return end
+  local retainUntil = cjson.decode(raw).tokenRetentionUntil
+  if retainUntil then at = math.max(at, math.ceil(tonumber(retainUntil) / 1000)) end
+  redis.call('PEXPIREAT', key, at)
+end
+local function expireRun(id, at)
+  for _, hook in ipairs(redis.call('ZRANGE', k('runhooks', id), 0, -1)) do expireHook(hook, at) end
+  for _, name in ipairs(redis.call('SMEMBERS', k('streams', id))) do
+    redis.call('PEXPIREAT', k('stream', id .. ':' .. hex(name)), at)
+    redis.call('PEXPIREAT', k('chunks', id .. ':' .. hex(name)), at)
+  end
+  for _, corr in ipairs(redis.call('SMEMBERS', k('corrs', id))) do redis.call('PEXPIREAT', k('corr', id .. ':' .. corr), at) end
+  for _, kind in ipairs(runKinds) do redis.call('PEXPIREAT', k(kind, id), at) end
+end
+local function scheduleRemoval(id, wf, status, at)
+  local hooks = redis.call('ZRANGE', k('runhooks', id), 0, -1)
+  redis.call('ZADD', P .. ':expiring', at, cjson.encode({id = id, wf = wf, s = status, hooks = hooks}))
+end
+-- sweep removes up to 100 runs whose data expired from the indexes.
+local function sweep(nowMs)
+  for _, member in ipairs(redis.call('ZRANGEBYSCORE', P .. ':expiring', '-inf', nowMs, 'LIMIT', 0, 100)) do
+    local e = cjson.decode(member)
+    if redis.call('EXISTS', k('run', e.id)) == 0 then
+      redis.call('ZREM', P .. ':runs', e.id)
+      redis.call('ZREM', P .. ':runs:wf:' .. e.wf, e.id)
+      redis.call('ZREM', P .. ':runs:status:' .. e.s, e.id)
+      redis.call('ZREM', P .. ':runs:wfstatus:' .. e.s .. ':' .. e.wf, e.id)
+      for _, hook in ipairs(e.hooks or {}) do redis.call('ZREM', P .. ':hooks', hook) end
+    end
+    redis.call('ZREM', P .. ':expiring', member)
+  end
+end
+-- follow gives keys created for a terminal run the run's remaining time.
+local function follow(id, keys)
+  if not RETON then return end
+  local ttl = redis.call('PTTL', k('run', id))
+  if ttl > 0 then for _, key in ipairs(keys) do redis.call('PEXPIRE', key, ttl) end end
 end
 `
 
@@ -43,6 +109,7 @@ redis.call('ZADD', P .. ':runs', score, id)
 redis.call('ZADD', P .. ':runs:wf:' .. wf, score, id)
 redis.call('ZADD', P .. ':runs:status:pending', score, id)
 redis.call('ZADD', P .. ':runs:wfstatus:pending:' .. wf, score, id)
+sweep(math.floor(tonumber(now) / 1000))
 return {'ok'}
 `)
 
@@ -298,7 +365,10 @@ local function flush()
   for _, c in pairs(contexts) do
     if #c.records > 0 then
       rpush(k('events', c.id), c.records)
-      for _, e in ipairs(c.corr) do redis.call('ZADD', k('corr', c.id .. ':' .. hex(e[1])), e[2], e[2]) end
+      for _, e in ipairs(c.corr) do
+        redis.call('ZADD', k('corr', c.id .. ':' .. hex(e[1])), e[2], e[2])
+        redis.call('SADD', k('corrs', c.id), hex(e[1]))
+      end
       for field in pairs(c.lastDirty) do redis.call('HSET', k('last', c.id), field, c.last[field]) end
       setRun(c, 'count', fmt(c.count))
       for field, value in pairs(c.set) do redis.call('HSET', k('run', c.id), field, value) end
@@ -330,6 +400,26 @@ local function flush()
     local h = hooks[id]
     if tokens[token] == id and h and h.tokenRetentionUntil then
       redis.call('PEXPIRE', k('token', token), math.ceil((tonumber(h.tokenRetentionUntil) - nowN) / 1000))
+    end
+  end
+  if RETON then
+    for _, c in pairs(contexts) do
+      local ret = retentionFor(c.run.wf)
+      if ret > 0 and #c.records > 0 and terminal(c.run.status) and c.run.completedAt then
+        local at = expiresAt(c.run.completedAt, ret)
+        -- Schedule first: expiry may already be due and hide the run's hooks.
+        if not terminal(c.status0) then scheduleRemoval(c.id, c.run.wf, c.run.status, at) end
+        expireRun(c.id, at)
+      end
+    end
+    -- A hook of another terminal run rewritten here lost its expiry.
+    for id in pairs(hooksDirty) do
+      local h = hooks[id]
+      if h and not contexts[h.runId] then
+        local fields = redis.call('HMGET', k('run', h.runId), 'status', 'completedAt', 'wf')
+        local ret = retentionFor(fields[3])
+        if ret > 0 and terminal(fields[1]) and fields[2] then expireHook(id, expiresAt(fields[2], ret)) end
+      end
     end
   end
 end
@@ -462,6 +552,7 @@ var scriptStreamCreateSession = newRedisScript(luaPrelude + luaStream + `
 if closed then return {'err', 'run_terminal'} end
 if session ~= '' then return {'err', 'stream_locked'} end
 redis.call('HSET', meta, 'session', ARGV[4], 'seq', '0')
+follow(run, {meta, k('streams', run)})
 return {'ok'}
 `)
 
@@ -474,6 +565,7 @@ local values = {}
 for i = 6, #ARGV do table.insert(values, ARGV[i]) end
 rpush(chunks, values)
 redis.call('HINCRBY', meta, 'seq', 1)
+follow(run, {meta, chunks, k('streams', run)})
 return {'ok'}
 `)
 
@@ -494,6 +586,7 @@ if closed or session ~= '' then return {'err', 'stream_locked'} end
 local values = {}
 for i = 4, #ARGV do table.insert(values, ARGV[i]) end
 rpush(chunks, values)
+follow(run, {meta, chunks, k('streams', run)})
 return {'ok'}
 `)
 

@@ -233,8 +233,15 @@ func (f *fakeDynamo) DeleteItem(_ context.Context, input *dynamodb.DeleteItemInp
 	defer f.mu.Unlock()
 	id := itemID(input.Key)
 	old := f.items[id]
-	if awsv2.ToString(input.ConditionExpression) == "attribute_exists(pk)" && old == nil {
-		return nil, &ddb.ConditionalCheckFailedException{}
+	switch awsv2.ToString(input.ConditionExpression) {
+	case "attribute_exists(pk)":
+		if old == nil {
+			return nil, &ddb.ConditionalCheckFailedException{}
+		}
+	case "hookId = :hook":
+		if old == nil || read(old, "hookId") != read(input.ExpressionAttributeValues, ":hook") {
+			return nil, &ddb.ConditionalCheckFailedException{}
+		}
 	}
 	delete(f.items, id)
 	output := &dynamodb.DeleteItemOutput{}
@@ -278,9 +285,40 @@ func (f *fakeDynamo) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...f
 	return nil, errUnsupported
 }
 
-// Query returns no items; the queue tests only need an empty event log.
-func (f *fakeDynamo) Query(context.Context, *dynamodb.QueryInput, ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	return &dynamodb.QueryOutput{}, nil
+// Query returns the items whose partition key, or list_group_pk on the
+// list_group index, equals :pk, in no particular order.
+func (f *fakeDynamo) Query(_ context.Context, input *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	attribute := "pk"
+	if awsv2.ToString(input.IndexName) == listGroupIndex {
+		attribute = "list_group_pk"
+	}
+	want := read(input.ExpressionAttributeValues, ":pk")
+	output := &dynamodb.QueryOutput{}
+	for _, item := range f.items {
+		if read(item, attribute) == want {
+			output.Items = append(output.Items, item)
+		}
+	}
+	return output, nil
+}
+
+func (f *fakeDynamo) BatchWriteItem(_ context.Context, input *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, requests := range input.RequestItems {
+		if len(requests) > maxBatchWrite {
+			return nil, errors.New("fake: more than 25 writes")
+		}
+		for _, request := range requests {
+			if request.DeleteRequest == nil {
+				return nil, errUnsupported
+			}
+			delete(f.items, itemID(request.DeleteRequest.Key))
+		}
+	}
+	return &dynamodb.BatchWriteItemOutput{}, nil
 }
 
 func (f *fakeDynamo) TransactWriteItems(context.Context, *dynamodb.TransactWriteItemsInput, ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {

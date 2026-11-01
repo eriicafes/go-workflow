@@ -5,11 +5,14 @@ package vercelworld
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -53,6 +56,16 @@ type Config struct {
 	Routes map[string]string
 	// Prefix namespaces Redis keys. Empty uses go-workflow.
 	Prefix string
+	// Retention is how long a run's data is kept after the run completes,
+	// fails, or is cancelled. Redis then deletes its event log, steps, hooks,
+	// and streams, and the run drops out of RunsList shortly after. A hook's
+	// token retention extends its hook's data. Zero keeps runs forever.
+	// Runs that finished before Retention was set are kept.
+	Retention time.Duration
+	// Retentions overrides Retention for the workflows it names, by workflow
+	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
+	// forever.
+	Retentions map[string]time.Duration
 	// QStash, when set, delivers work due more than six days ahead. Without
 	// it, queueing such a delivery returns an error.
 	QStash *QStashConfig
@@ -75,6 +88,9 @@ type World struct {
 	http   *http.Client
 	redis  redisStore
 	prefix string
+	// scripts is the first argument of every script: the prefix, and the
+	// retention in microseconds when it is set.
+	scripts string
 	// qstashURL is the public URL QStash delivers long timers to.
 	qstashURL string
 }
@@ -104,13 +120,27 @@ func New(config Config) (*World, error) {
 	if config.Prefix == "" {
 		config.Prefix = defaultPrefix
 	}
+	if _, negative := worlds.MaxRetention(config.Retention, config.Retentions); negative {
+		return nil, errors.New("workflow/vercel: retention cannot be negative")
+	}
 	if config.OIDCToken == nil {
 		config.OIDCToken = OIDCTokenFromEnv(DefaultOIDCTokenEnv)
 	}
 	if config.DeploymentID == "" {
 		config.DeploymentID = os.Getenv("VERCEL_DEPLOYMENT_ID")
 	}
-	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix}
+	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix, scripts: config.Prefix}
+	if longest, _ := worlds.MaxRetention(config.Retention, config.Retentions); longest > 0 {
+		byWorkflow := make(map[string]int64, len(config.Retentions))
+		for workflow, retention := range config.Retentions {
+			byWorkflow[workflow] = retention.Microseconds()
+		}
+		encoded, err := json.Marshal(byWorkflow)
+		if err != nil {
+			return nil, err
+		}
+		world.scripts += "\n" + strconv.FormatInt(config.Retention.Microseconds(), 10) + "\n" + string(encoded)
+	}
 	if config.QStash != nil {
 		qstash := *config.QStash
 		if qstash.Token == "" || qstash.CurrentSigningKey == "" || qstash.NextSigningKey == "" {
