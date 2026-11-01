@@ -135,7 +135,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, inBandArg(input.Options.InBandCount), desc, base64.StdEncoding.EncodeToString(disposed)))
+	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.scripts, string(input.RunID), micros(now), "claim", deltaStart(input.Options), force, inBandArg(input.Options.InBandCount), desc, base64.StdEncoding.EncodeToString(disposed)))
 	if err != nil {
 		return worlds.EventResult{}, err
 	}

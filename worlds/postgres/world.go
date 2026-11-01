@@ -39,6 +39,16 @@ type Config struct {
 	// claim that queue (WorkerOptions.Queues). Other workflows are queued on
 	// DefaultQueue.
 	Routes map[string]string
+	// Retention is how long a run's data is kept after the run completes,
+	// fails, or is cancelled. Worker then deletes its run, events, steps,
+	// hooks, queued deliveries, and streams in the background. A run with a
+	// hook whose token retention has not ended is kept until it ends. Zero
+	// keeps runs forever.
+	Retention time.Duration
+	// Retentions overrides Retention for the workflows it names, by workflow
+	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
+	// forever.
+	Retentions map[string]time.Duration
 }
 
 // DefaultQueue is the queue of workflows Config.Routes doesn't route.
@@ -55,6 +65,8 @@ type World struct {
 	lease       time.Duration
 	notifier    *notifier
 	routes      map[string]string
+	retention   time.Duration
+	retentions  map[string]time.Duration
 }
 
 // Open connects to config.URL, migrates the schema, and returns a World that
@@ -98,6 +110,9 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 	if config.LeaseDuration <= 0 {
 		config.LeaseDuration = time.Minute
 	}
+	if _, negative := worlds.MaxRetention(config.Retention, config.Retentions); negative {
+		return nil, errors.New("workflow/postgres: retention cannot be negative")
+	}
 	if err := migrate(ctx, pool); err != nil {
 		return nil, err
 	}
@@ -109,6 +124,8 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		lease:       config.LeaseDuration,
 		notifier:    newNotifier(pool),
 		routes:      config.Routes,
+		retention:   config.Retention,
+		retentions:  config.Retentions,
 	}, nil
 }
 
@@ -162,7 +179,8 @@ type WorkerOptions struct {
 // Worker runs the loop that executes deliveries for the workflows of runners.
 // It blocks until ctx is cancelled, waits for in-flight deliveries to return,
 // and returns ctx.Err(). Any number of workers in any number of processes may
-// share one database, and each delivery runs on one worker at a time. The
+// share one database, and each delivery runs on one worker at a time. With
+// Config.Retention set, it also deletes expired runs in the background. The
 // last options apply.
 func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options ...WorkerOptions) error {
 	var option WorkerOptions
@@ -171,6 +189,14 @@ func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options
 	}
 	if option.Concurrency <= 0 {
 		option.Concurrency = world.concurrency
+	}
+	if longest, _ := worlds.MaxRetention(world.retention, world.retentions); longest > 0 {
+		done := make(chan struct{})
+		defer func() { <-done }()
+		go func() {
+			defer close(done)
+			world.expireLoop(ctx)
+		}()
 	}
 	return world.work(ctx, worlds.NewRuntime(world, runners), option)
 }

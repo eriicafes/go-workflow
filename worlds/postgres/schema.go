@@ -35,6 +35,7 @@ CREATE TABLE go_workflow_runs (
 CREATE INDEX go_workflow_runs_created_idx ON go_workflow_runs (created_at, run_id);
 CREATE INDEX go_workflow_runs_workflow_idx ON go_workflow_runs (workflow_name, created_at, run_id);
 CREATE INDEX go_workflow_runs_status_idx ON go_workflow_runs (status, created_at, run_id);
+CREATE INDEX go_workflow_runs_completed_idx ON go_workflow_runs (completed_at) WHERE completed_at IS NOT NULL;
 
 CREATE TABLE go_workflow_events (
 	run_id text NOT NULL,
@@ -88,6 +89,7 @@ CREATE TABLE go_workflow_hook_tokens (
 	token text PRIMARY KEY,
 	hook_id text NOT NULL
 );
+CREATE INDEX go_workflow_hook_tokens_hook_idx ON go_workflow_hook_tokens (hook_id);
 
 CREATE TABLE go_workflow_queue (
 	id text PRIMARY KEY,
@@ -107,6 +109,7 @@ CREATE TABLE go_workflow_queue (
 CREATE INDEX go_workflow_queue_claim_idx ON go_workflow_queue (not_before, id);
 CREATE INDEX go_workflow_queue_routed_claim_idx ON go_workflow_queue (queue_name, not_before, id);
 CREATE UNIQUE INDEX go_workflow_queue_dedupe_idx ON go_workflow_queue (run_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX go_workflow_queue_run_idx ON go_workflow_queue (run_id);
 
 CREATE TABLE go_workflow_streams (
 	run_id text NOT NULL,

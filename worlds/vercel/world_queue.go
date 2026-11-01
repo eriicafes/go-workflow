@@ -42,7 +42,7 @@ func (w *World) putQueueRecord(ctx context.Context, id string, record queueRecor
 	if err != nil {
 		return false, err
 	}
-	result, err := w.redis.Run(ctx, scriptQueuePut, w.prefix, id, string(data), mode)
+	result, err := w.redis.Run(ctx, scriptQueuePut, w.scripts, id, string(data), mode)
 	return replyInt(result) == 1, err
 }
 
@@ -59,7 +59,7 @@ func (w *World) getQueueRecord(ctx context.Context, id string) (queueRecord, boo
 }
 
 func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bool, error) {
-	result, err := w.redis.Run(ctx, scriptQueueTake, w.prefix, id)
+	result, err := w.redis.Run(ctx, scriptQueueTake, w.scripts, id)
 	if err != nil || result == nil {
 		return queueRecord{}, false, err
 	}

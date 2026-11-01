@@ -68,7 +68,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	now := time.Now().UTC()
 	record := newEventRecord(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated, Data: payload}, now)
-	args := []string{w.prefix, string(input.RunID), micros(now), input.WorkflowName, record, input.DeploymentID}
+	args := []string{w.scripts, string(input.RunID), micros(now), input.WorkflowName, record, input.DeploymentID}
 	keys := make([]string, 0, len(input.Attributes))
 	for key := range input.Attributes {
 		keys = append(keys, key)
@@ -98,7 +98,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.prefix, string(input.RunID), micros(now), "append", deltaStart(input.Options), "0", inBandArg(input.Options.InBandCount), desc))
+	values, err := scriptReply(w.redis.Run(ctx, scriptAppend, w.scripts, string(input.RunID), micros(now), "append", deltaStart(input.Options), "0", inBandArg(input.Options.InBandCount), desc))
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -114,7 +114,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, nil
 	}
 	now := time.Now().UTC()
-	args := []string{w.prefix, string(input.RunID), micros(now), "batch", "-1", "0", inBandArg(input.InBandCount)}
+	args := []string{w.scripts, string(input.RunID), micros(now), "batch", "-1", "0", inBandArg(input.InBandCount)}
 	for _, event := range input.Events {
 		desc, err := describeEvent(event, now)
 		if err != nil {
@@ -286,7 +286,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 		return worlds.Page[worlds.Event]{Data: []worlds.Event{}}, nil
 	}
 	members, _, hasMore := trimPage(members, input.Pagination.Limit)
-	args := []string{w.prefix}
+	args := []string{w.scripts}
 	for _, member := range members {
 		args = append(args, string(input.RunID), member.Member)
 	}

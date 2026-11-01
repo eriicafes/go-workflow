@@ -183,6 +183,7 @@ log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
 Vercel Queues delays deliveries by at most seven days. Set `Config.QStash` to
 deliver work due later.
 
+
 ### AWS
 
 Install `Queue` as the SQS handler of one Lambda function and `HTTP` behind a
@@ -205,6 +206,26 @@ lambdaurl.Start(awsworld.HTTP(world))
 
 SQS delays deliveries by at most 15 minutes. Set `Config.Scheduler` to deliver
 work due later through EventBridge Scheduler.
+
+### Retention
+
+Runs are kept forever by default. A World that supports retention deletes a
+run's data `Config.Retention` after it completes, fails, or is cancelled, so
+storage stays bounded. `Config.Retentions` sets it per workflow, where zero
+keeps that workflow's runs forever:
+
+```go
+config.Retention = 24 * time.Hour
+config.Retentions = worlds.Retentions(
+	worlds.Retain[workflows.Chat](10 * time.Minute),
+	worlds.Retain[workflows.Invoice](0),
+)
+```
+
+Runs still pending or running are never deleted, and a hook's token retention
+keeps its run until it ends. A few minutes is the shortest practical
+retention, since callers read a run's result and streams right after it
+finishes. Each World's README describes how and when it deletes.
 
 ## Application and worker
 

@@ -64,6 +64,14 @@ func TestConformanceRedisREST(t *testing.T) {
 	runConformance(t, redisRESTConfig())
 }
 
+// TestConformanceRetention checks that expiring finished runs changes
+// nothing a World does while runs are kept.
+func TestConformanceRetention(t *testing.T) {
+	config := redisTCPConfig()
+	config.Retention = time.Hour
+	runConformance(t, config)
+}
+
 // newWorldPair returns count Worlds sharing a unique prefix on the backend
 // described by config, and removes the prefix's keys after the test.
 func newWorlds(t *testing.T, config Config, count int) ([]*World, *fakeVQS) {

@@ -59,6 +59,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	var result worlds.EventResult
+	var finished worlds.Run
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
 		if err := tx.preload(ctx, input.RunID, []worlds.EventsCreateEvent{input.Event}); err != nil {
 			return err
@@ -67,6 +68,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err != nil {
 			return err
 		}
+		defer func() { finished = run.view.Run }()
 		if err := fence(run, input.Options.InBandCount); err != nil {
 			return err
 		}
@@ -94,6 +96,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	// Also on a replay, so a retried append queues the expiry a failed one
+	// could not.
+	if finishes(input.Event.EventType) {
+		if err := w.scheduleExpiry(ctx, finished); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
 	return result, nil
 }
 
@@ -106,6 +115,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	}
 	var results []worlds.EventResult
 	var inBandCount int
+	var finished worlds.Run
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
 		results = make([]worlds.EventResult, 0, len(input.Events))
 		if err := tx.preload(ctx, input.RunID, input.Events); err != nil {
@@ -115,6 +125,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err != nil {
 			return err
 		}
+		defer func() { finished = run.view.Run }()
 		if err := fence(run, input.InBandCount); err != nil {
 			return err
 		}
@@ -141,6 +152,11 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	})
 	if err != nil {
 		return worlds.EventBatchResult{}, err
+	}
+	if slices.ContainsFunc(input.Events, func(event worlds.EventsCreateEvent) bool { return finishes(event.EventType) }) {
+		if err := w.scheduleExpiry(ctx, finished); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
 	}
 	return worlds.EventBatchResult{Events: results, InBandCount: inBandCount}, nil
 }

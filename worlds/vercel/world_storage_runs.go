@@ -34,7 +34,7 @@ func (w *World) loadRuns(ctx context.Context, ids []string, resolve worlds.Resol
 	if resolve == worlds.ResolveDataNone {
 		all = "0"
 	}
-	result, err := w.redis.Run(ctx, scriptLoadRuns, append([]string{w.prefix, all}, ids...)...)
+	result, err := w.redis.Run(ctx, scriptLoadRuns, append([]string{w.scripts, all}, ids...)...)
 	if err != nil {
 		return nil, err
 	}

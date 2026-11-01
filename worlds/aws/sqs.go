@@ -223,6 +223,13 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body strin
 			return w.publish(ctx, queue, message.ID, record.input, delay, scheduleName(ulid.Make().String()))
 		}
 	}
+	if record.expire {
+		rescheduled, err := w.expireRun(ctx, record.input)
+		if err != nil || rescheduled {
+			return err
+		}
+		return w.deleteQueueRecord(ctx, message.ID)
+	}
 	input := record.input
 	input.MessageID = message.ID
 	if err := runtime.Execute(ctx, input); err != nil {
