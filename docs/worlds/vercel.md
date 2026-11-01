@@ -69,6 +69,7 @@ QStash callback, or clients in other processes.
 | `Topics`, `Routes` | Further topics by queue name, and the queue of each routed workflow. See [routing](#routing-workflows-to-topics). |
 | `OIDCToken` | Returns the Vercel OIDC token for each Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `Prefix` | Redis key prefix. Default `go-workflow`. |
+| `Retention`, `Retentions` | How long finished runs are kept, by default and per workflow. Zero keeps them. See [retention](#retention). |
 | `QStash` | Optional long-timer configuration. |
 | `HTTPClient` | Client for Redis REST, Vercel Queues, and QStash. Default `http.DefaultClient`. |
 | `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
@@ -141,6 +142,27 @@ it to your QStash plan's maximum delay) fires after `MaxDelay` and is scheduled
 again for the rest. When the deployment a timer is pinned to has been deleted,
 the delivery goes to the current deployment instead, whose runtime fails the run
 with `worlds.ErrDeploymentMismatch`.
+
+## Retention
+
+With `Config.Retention` set, the script that appends a run's
+`run_completed`, `run_failed`, or `run_cancelled` sets every key of that run to
+expire at `completedAt` plus its workflow's retention (`Config.Retentions`,
+else `Retention`) with `PEXPIREAT`: its view, attributes,
+event log, `last` and correlation keys, steps, hooks, and streams. Redis then
+deletes them on its own, with no sweep over the data. A hook kept by its
+token's retention expires when that ends instead, if later. The expiry is an
+absolute time, so writes that still reach a finished run, such as a late step
+result, reapply it rather than extend it, and stream keys created then take
+the run's remaining time.
+
+Index sorted sets cannot expire per member, so the same script also adds the
+run to `p:expiring`. Each `EventsCreateRun` removes up to 100 runs whose data
+is gone from `p:runs`, its workflow and status indexes, and its hooks from
+`p:hooks`. Until then, `RunsList` skips a listed run whose data has expired.
+
+Runs that are still pending or running never expire, however old, and runs
+that finished before `Retention` was set are kept.
 
 ## Storage
 

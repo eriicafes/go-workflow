@@ -72,6 +72,13 @@ type World interface {
   `worlds.NewRuntime(world, runners).Execute(ctx, input)` for each delivery,
   acknowledges it when `Execute` returns nil, and retries it otherwise.
 
+Supporting [retention](/worlds/#retention) is optional. A World that supports
+it takes `Retention` and `Retentions` in its configuration, resolves each run's
+retention with `worlds.RetentionFor` from the run's workflow name, and deletes
+everything recorded for a run, including its index entries and its hooks'
+tokens, only once the run is terminal, the retention has passed since it
+completed, and no hook of the run still retains its token.
+
 See the [Event Log](/reference/events) reference for event types and the
 [`worlds` reference](/reference/worlds) for every method's contract.
 

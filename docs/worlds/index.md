@@ -55,6 +55,31 @@ it. It is required except on the local World, which defaults to
 `workflow.NewHTTPClient` takes the same kind of URL: the server's address
 followed by the prefix, such as `http://workflow-worker:8081/v1/workflow`.
 
+## Retention
+
+Runs are kept forever by default. A World that supports retention deletes a
+run's data `Config.Retention` after the run completes, fails, or is cancelled,
+so storage stays bounded. `Config.Retentions` sets it per workflow, by workflow
+name, and zero keeps that workflow's runs forever:
+
+```go
+config.Retention = 24 * time.Hour
+config.Retentions = worlds.Retentions(
+	worlds.Retain[workflows.Chat](10 * time.Minute),
+	worlds.Retain[workflows.Invoice](0),
+)
+```
+
+Every World that supports retention follows the same rules:
+
+- Runs that are still pending or running are never deleted, however old.
+- A hook whose token retention has not ended keeps its run until it ends.
+- Runs that finished before retention was set are kept.
+
+Callers read a run's result and streams right after it finishes, so a few
+minutes is the shortest practical retention. Each World's page describes how
+and when it deletes.
+
 ## Delivery guarantees
 
 Every World delivers **at least once**. The runtime decides whether a delivery

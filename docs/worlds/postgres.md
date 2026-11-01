@@ -42,6 +42,7 @@ context before calling `Close`.
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
 | `Routes` | none | The queue of each routed workflow. See [routing](#routing-workflows-to-queues). |
+| `Retention`, `Retentions` | keep forever | How long finished runs are kept, by default and per workflow. See [retention](#retention). |
 
 ## Entry points
 
@@ -123,6 +124,19 @@ increments `attempts`, and executes each:
 - failure keeps it and sets `not_before` to now plus a capped exponential
   backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
+
+## Retention
+
+With `Config.Retention` set, each `Worker` deletes expired runs in the
+background: at start and then every minute, in batches of 100, until no
+expired run is left. One statement per batch picks runs that completed,
+failed or were cancelled longer ago than their workflow's retention
+(`Config.Retentions`, else `Retention`) and deletes their events,
+steps, hooks and the tokens those hooks own, queued deliveries, streams and
+chunks, and finally the runs, so a batch is all or nothing. Its `FOR UPDATE
+SKIP LOCKED` lets every worker sharing the database run it without waiting on
+each other. A run with a hook whose token retention has not ended is kept
+until it ends, and runs that are still pending or running never expire.
 
 ## LISTEN/NOTIFY
 

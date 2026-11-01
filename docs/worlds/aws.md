@@ -71,6 +71,7 @@ lambdaurl.Start(awsworld.HTTP(world))
 | `Queues` | Optional. Further queues by name, standard or FIFO. See [Queue routing](#queue-routing). |
 | `Routes` | Optional. Workflow name to queue name, built with `Routes` and `Route`. |
 | `Scheduler` | Optional. Delivers work due more than 15 minutes ahead, and every delayed delivery to a FIFO queue. |
+| `Retention`, `Retentions` | Optional. How long finished runs are kept, by default and per workflow. Over 15 minutes requires `Scheduler`. See [Retention](#retention). |
 
 `SchedulerConfig` requires `Client`, `TargetARN` (the queue's ARN), and
 `RoleARN` (the role Scheduler assumes to send to the queue). `Group` defaults to
@@ -159,6 +160,26 @@ deletes every message, so failed deliveries are not retried.
 
 `Scheduler` can be omitted when the World only serves HTTP requests, or when no
 delay is longer than 15 minutes.
+
+## Retention
+
+With `Config.Retention` set, appending a run's `run_completed`, `run_failed`
+or `run_cancelled` also queues an expiry delivery due its workflow's retention
+(`Config.Retentions`, else `Retention`) later, as a
+`QUEUE#expire-<runID>` record published like any delivery (through Scheduler
+beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
+ID is fixed per run, so an append retried after publishing failed schedules
+it again rather than twice, and a retried append of a terminal event does so
+too.
+
+When the delivery is due, the `Queue` handler deletes the run's hooks (found
+through `HOOKS#<runID>` on `list_group`), the tokens they still own, and every
+item of the `RUN#<runID>` partition with `BatchWriteItem`, the run's view last,
+so a cleanup cut short is retried by SQS while the run still exists. Index
+entries are attributes of these items, so the run leaves `RunsList` and
+`HooksList` with them. A hook whose token retention has not ended defers the
+expiry until it ends. Runs that are still pending or running never expire,
+and runs that finished before `Retention` was set are kept.
 
 ## Table
 
@@ -259,7 +280,9 @@ and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP
 Both roles need, on the table and its indexes (`<table-arn>` and
 `<table-arn>/index/*`): `dynamodb:GetItem`, `PutItem`, `UpdateItem`,
 `DeleteItem`, `Query`, and `BatchGetItem`. Both need `sqs:SendMessage` on the
-queue.
+queue. With `Retention`, the worker also needs `dynamodb:BatchWriteItem` to
+delete expired runs, and the API role needs `scheduler:CreateSchedule` if it
+cancels runs, since a finished run schedules its own expiry.
 
 The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 `ChangeMessageVisibility`, and `GetQueueAttributes`, and, with `Scheduler`, `scheduler:CreateSchedule` and

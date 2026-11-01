@@ -126,6 +126,9 @@ Token retention expires lazily: on a claim, on a conflicting `hook_created`, and
 in `HooksGetByToken`. Redis also expires the token key a minute after retention
 ends, as a backstop.
 
+`RunsWaitForTerminalStatus` and `StreamsGetChunks` poll with a backoff from
+50 ms to 500 ms, because REST has no blocking reads.
+
 ## Retention
 
 With `Config.Retention` set, the script that appends a run's
@@ -146,9 +149,6 @@ is gone from `p:runs`, its workflow and status indexes, and its hooks from
 
 Runs that are still pending or running never expire, however old, and runs
 that finished before `Retention` was set are kept.
-
-`RunsWaitForTerminalStatus` and `StreamsGetChunks` poll with a backoff from
-50 ms to 500 ms, because REST has no blocking reads.
 
 ## Queue and timers
 
