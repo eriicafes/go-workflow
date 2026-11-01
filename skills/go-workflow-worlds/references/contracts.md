@@ -102,3 +102,19 @@ For a reader draining data, stop only after processing the returned chunks
 and observing `Done && !HasMore`: a closed stream may still have unread
 chunks. Keep long-poll cancellation and RetryAfter behavior consistent with
 the Streamer contract.
+
+## Retention
+
+Retention is optional. A World that supports it takes `Retention` and
+`Retentions` in its Config, validates them with `worlds.MaxRetention`, and
+resolves a run's retention with `worlds.RetentionFor` from its workflow name.
+Zero keeps runs forever, globally or for one workflow.
+
+Delete a run only once it is terminal and its retention has passed since
+`CompletedAt`. Never delete a pending or running run, however old. A hook whose
+`TokenRetentionUntil` has not passed keeps its run until then. Delete
+everything recorded for the run together: its event log, views, hooks and the
+tokens those hooks still own, streams, queued deliveries, and index entries,
+so a read finds the whole run or none of it. Make the deletion safe to repeat
+and to interrupt, since it runs at least once, and keep late writes to a
+finished run from extending or escaping its expiry.

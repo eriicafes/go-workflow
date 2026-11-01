@@ -12,6 +12,14 @@ HTTP routes in `workflow.Middleware(handler, client)`. Use `NewClient(world)`
 for direct access or `NewHTTPClient(endpoint)` for a remote worker. A request
 handler can `Start` a shared workflow type without importing runners.
 
+Persistent Worlds keep finished runs forever unless retention is set. Set
+`Config.Retention`, and `Config.Retentions` built with
+`worlds.Retentions(worlds.Retain[W](d), ...)` for per-workflow overrides,
+where zero keeps that workflow's runs. Keep it at least a few minutes, since
+callers read a run's result and streams after it finishes, and longer for
+workflows whose finished runs are inspected or read later. Check the selected
+World's documentation for whether it supports retention and what it needs.
+
 Mount the World's HTTP handler when providing webhooks or remote RPC, and set
 BaseURL to its absolute public URL including the path prefix. Follow the
 selected adapter's setup for its worker. The RPC handler has no built-in

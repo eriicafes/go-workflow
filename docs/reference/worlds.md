@@ -252,6 +252,26 @@ func Routes(routes ...QueueRoute) map[string]string
 its package path and type name. `Routes(Route[W](queue), ...)` builds the
 `Config.Routes` of a World that routes deliveries by workflow.
 
+### Retention
+
+```go
+type WorkflowRetention struct {
+	Workflow  string
+	Retention time.Duration
+}
+
+func Retain[In Workflow[Out], Out any](retention time.Duration) WorkflowRetention
+func Retentions(retentions ...WorkflowRetention) map[string]time.Duration
+func RetentionFor(fallback time.Duration, retentions map[string]time.Duration, workflow string) time.Duration
+func MaxRetention(fallback time.Duration, retentions map[string]time.Duration) (longest time.Duration, negative bool)
+```
+
+`Retentions(Retain[W](retention), ...)` builds the `Config.Retentions` of a
+World that supports [retention](/worlds/#retention). `RetentionFor` returns how
+long finished runs of a workflow are kept, its entry or else the fallback, where
+zero keeps them. `MaxRetention` returns the longest retention and whether any
+is negative, for validating a configuration.
+
 ## Streamer
 
 | Method | Description |

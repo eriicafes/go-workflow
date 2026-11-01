@@ -22,7 +22,7 @@ optional capabilities. Unsupported attribute writes are successful no-ops;
 unsupported analytics returns nil.
 
 Read [backend contracts](references/contracts.md) for the transaction,
-ownership, delivery, and stream invariants. Reuse the SDK's exported `Data*`
+ownership, delivery, stream, and retention invariants. Reuse the SDK's exported `Data*`
 event payload types when recording or reading events.
 
 ## Validate the implementation
