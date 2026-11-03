@@ -1,41 +1,37 @@
 package vercelworld
 
 import (
-	"cmp"
 	"context"
-	"os"
-	"strconv"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// latestDeploymentTTL is how long a World reuses the latest deployment it
-// read before reading it again.
-const latestDeploymentTTL = time.Minute
+const (
+	// latestDeploymentTTL is how long a World reuses the latest deployment it
+	// read. Chains of runs hand off far less often, so a stale answer delays a
+	// chain's move to a new deployment by one handoff at most.
+	latestDeploymentTTL = time.Hour
 
-// keptDeployments is how many of a scope's newest deployments are recorded.
-const keptDeployments = 20
+	// latestDeploymentTimeout bounds one request to the deployment route.
+	latestDeploymentTimeout = 5 * time.Second
+)
 
 var _ worlds.LatestDeployments = (*World)(nil)
 
-// scriptRecordDeployment records deployment ARGV[3] in scope ARGV[2] at
-// ARGV[4], unless it is recorded already, keeps the scope's newest
-// deployments, and returns the newest.
-var scriptRecordDeployment = newRedisScript(luaPrelude + `
-local key = k('deployments', ARGV[2])
-redis.call('ZADD', key, 'NX', ARGV[4], ARGV[3])
-redis.call('ZREMRANGEBYRANK', key, 0, -` + strconv.Itoa(keptDeployments+1) + `)
-return redis.call('ZRANGE', key, -1, -1)[1]
-`)
-
-// LatestDeploymentID returns the newest deployment of this World's
-// deployment scope, or "" when the World has no deployment ID or scope.
-// Deployments are ordered by when a World of theirs first used Redis for
-// them, so this World's deployment counts once it has queued a delivery or
-// read the latest deployment. The result is reused for a minute.
+// LatestDeploymentID returns the deployment the production domain serves, by
+// requesting the deployment route at Config.BaseURL, which Vercel routes to
+// the current production deployment and HTTP or Deployment must serve there.
+// It returns "" outside a production deployment, so preview and custom
+// environment runs stay on the deployment that starts them, and when the
+// request fails, which it logs. The result is reused for an hour.
 func (w *World) LatestDeploymentID(ctx context.Context) (string, error) {
-	if w.config.DeploymentID == "" || w.config.DeploymentScope == "" {
+	if w.latestURL == "" {
 		return "", nil
 	}
 	w.latest.Lock()
@@ -43,38 +39,34 @@ func (w *World) LatestDeploymentID(ctx context.Context) (string, error) {
 	if w.latestID != "" && time.Since(w.latestAt) < latestDeploymentTTL {
 		return w.latestID, nil
 	}
-	result, err := w.redis.Run(ctx, scriptRecordDeployment, w.scripts, w.config.DeploymentScope, w.config.DeploymentID, micros(time.Now()))
+	id, err := w.fetchLatestDeployment(ctx)
+	if err != nil {
+		log.Printf("workflow/vercel: find the latest deployment at %s: %v", w.latestURL, err)
+		return "", nil
+	}
+	w.latestID, w.latestAt = id, time.Now()
+	return id, nil
+}
+
+func (w *World) fetchLatestDeployment(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, latestDeploymentTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, w.latestURL, nil)
 	if err != nil {
 		return "", err
 	}
-	w.latestID, w.latestAt = cmp.Or(replyString(result), w.config.DeploymentID), time.Now()
-	return w.latestID, nil
-}
-
-// recordDeployment records this World's deployment the first time the
-// process queues a delivery, so a new deployment counts as the latest once
-// it does any work, not only once it starts a run of a workflow marked
-// workflow.StartOnLatest. Errors are ignored: the next delivery tries again.
-func (w *World) recordDeployment(ctx context.Context) {
-	w.latest.Lock()
-	recorded := w.latestID != ""
-	w.latest.Unlock()
-	if !recorded {
-		_, _ = w.LatestDeploymentID(ctx)
+	response, err := w.http.Do(request)
+	if err != nil {
+		return "", err
 	}
-}
-
-// deploymentScopeFromEnv returns the scope of the Vercel deployment this
-// process runs in: its target environment, and for previews also its git
-// branch, so runs move between the deployments of one branch. It returns ""
-// outside Vercel and for previews without a branch.
-func deploymentScopeFromEnv() string {
-	env := cmp.Or(os.Getenv("VERCEL_TARGET_ENV"), os.Getenv("VERCEL_ENV"))
-	if env != "preview" {
-		return env
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 256))
+	if err != nil {
+		return "", err
 	}
-	if branch := os.Getenv("VERCEL_GIT_COMMIT_REF"); branch != "" {
-		return "preview:" + branch
+	id := strings.TrimSpace(string(body))
+	if response.StatusCode != http.StatusOK || id == "" {
+		return "", fmt.Errorf("unexpected response %s: %q", response.Status, id)
 	}
-	return ""
+	return id, nil
 }

@@ -55,7 +55,8 @@ Give the consumer a `queue/v2beta` trigger for the topic:
 
 When the code that starts workflows has the World in process, pass it to
 `workflow.NewClient`. The HTTP function is then needed only for webhooks, the
-QStash callback, or clients in other processes.
+QStash callback, clients in other processes, or `workflow.StartOnLatest`, which
+needs the [deployment route](#latest-deployment).
 
 ## Configuration
 
@@ -72,8 +73,7 @@ QStash callback, or clients in other processes.
 | `Retention`, `Retentions` | How long finished runs are kept, by default and per workflow. Zero keeps them. See [retention](#retention). |
 | `QStash` | Optional long-timer configuration. |
 | `HTTPClient` | Client for Redis REST, Vercel Queues, and QStash. Default `http.DefaultClient`. |
-| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
-| `DeploymentScope` | The deployments that runs of workflows marked `workflow.StartOnLatest` move between. Default the Vercel environment, plus the branch for previews. See [latest deployment](#latest-deployment). |
+| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](/guide/replay#pinning-runs-to-a-deployment) and [latest deployment](#latest-deployment). |
 
 `New` does not contact Redis or Vercel. `Close` closes the Redis TCP pool and
 does nothing with the REST transport.
@@ -108,13 +108,21 @@ without a topic.
 
 - **`Queue(world, runners)`**: the Vercel Queues push consumer. It executes
   workflows and steps.
-- **`HTTP(world)`**: the RPC endpoint, token webhooks, and, when QStash is
-  configured, the signed timer callback `/v1/workflow/callbacks/qstash`.
+- **`HTTP(world, options...)`**: the RPC endpoint, token webhooks, the
+  [deployment route](#latest-deployment) `/v1/workflow/deployment`, and, when
+  QStash is configured, the signed timer callback
+  `/v1/workflow/callbacks/qstash`. Options such as `worlds.WithRPCToken`
+  protect the RPC endpoint.
 - **`HTTPPrefix(world, prefix)`**: the same routes, including the QStash
   callback, under `prefix`.
-- **`RPC(world)`** and **`Webhook(world)`**: each endpoint alone.
+- **`RPC(world)`**: the RPC endpoint alone. Mount it at
+  `POST <Config.BaseURL>/rpc`.
+- **`Webhook(world)`**: the token webhooks alone. Mount it at
+  `<Config.BaseURL>/webhooks/{token}`.
 - **`QStash(world)`**: the signed timer callback alone. Requires `Config.QStash`;
   mount it at `POST <Config.BaseURL>/callbacks/qstash`.
+- **`Deployment(world)`**: the deployment route alone. Mount it at
+  `GET <Config.BaseURL>/deployment`.
 
 ## Long timers with QStash
 
@@ -133,8 +141,9 @@ config.QStash = &vercelworld.QStashConfig{
 
 The timer is published to `<Config.BaseURL>/callbacks/qstash` with
 `Upstash-Not-Before`, so `BaseURL` must be HTTPS. The callback is mounted under
-the same prefix as the rest of the handler, so custom prefixes work. When QStash calls it, `HTTP(world)` verifies the `Upstash-Signature`
-JWT (HS256 with the current or next signing key, issuer `Upstash`, subject equal
+the same prefix as the rest of the handler, so custom prefixes work. When
+QStash calls it, `HTTP(world)` verifies the `Upstash-Signature` JWT (HS256
+with the current or next signing key, issuer `Upstash`, subject equal
 to the URL, within its `nbf`/`exp` window, and a matching body SHA-256), then
 publishes the delivery to Vercel Queues with the remaining delay.
 
@@ -167,26 +176,25 @@ that finished before `Retention` was set are kept.
 
 ## Latest deployment
 
-New runs of workflows that embed
+In a production deployment, new runs of workflows that embed
 [`workflow.StartOnLatest`](/guide/replay#moving-chains-to-the-latest-deployment)
-start on the latest deployment of this World's `DeploymentScope`, instead of
-the deployment that starts them.
+start on the deployment the production domain serves, instead of the
+deployment that starts them.
 
-- **Recorded on first use.** Each deployment records itself in Redis the first
-  time a process queues a delivery or starts a marked run. A new deployment
-  counts once it does work, such as handling a webhook, not when it is built.
-- **Latest is the last recorded.** The latest deployment is the one recorded
-  most recently, so an older deployment never takes it back from a newer one.
-  A rollback is not followed until the rolled-back deployment is replaced, and
-  an older deployment that never ran before counts as new the first time it
-  does. Each process reuses the latest it read for a minute, and Redis keeps a
-  scope's 20 newest deployments.
-- **Scoped by environment.** `DeploymentScope` defaults to
-  `VERCEL_TARGET_ENV` or `VERCEL_ENV`, and for previews adds
-  `VERCEL_GIT_COMMIT_REF`, so runs never move between production, previews of
-  different branches, or custom environments. With no scope, as outside
-  Vercel or for a preview without a branch, or no `DeploymentID`, marked runs
-  stay on the deployment that starts them.
+- **Asked of the production domain.** The World requests
+  `GET <BaseURL>/deployment`, which answers with the deployment serving it.
+  Vercel routes the request to the current production deployment, so the
+  answer follows new deployments and rollbacks.
+- **Needs the deployment route.** `BaseURL` must be on the production domain,
+  with `HTTP(world)` or `Deployment(world)` mounted there. `Deployment` serves
+  the route alone, without exposing the RPC endpoint. Without the route,
+  marked runs stay on the deployment that starts them.
+- **Reused for an hour.** Each process reuses the answer for an hour, so a
+  chain that hands off within that hour may start one more run on the
+  previous deployment before it moves.
+- **Production only.** Previews and custom environments keep marked runs on
+  the deployment that starts them, since their `BaseURL` names another
+  deployment or is protected. So does a failed request, which is logged.
 
 ## Storage
 
@@ -252,9 +260,12 @@ message cannot be recalled. Its delivery finds no record and is acknowledged.
   run an already-queued item early.
 - **The QStash route** is public and rejects requests without a valid QStash
   signature for its exact URL.
-- **`HTTP` / `RPC`** perform no authentication. Keep them internal or put your
-  own authentication in front of them.
+- **The RPC endpoint** is unauthenticated unless `HTTP` is given
+  `worlds.WithRPCToken` or `worlds.WithRPCMiddleware`. Without them, keep it
+  internal or put your own authentication in front of it.
 - **Webhooks** are authorized only by the token in the URL.
+- **The deployment route** is public and read-only: it answers with the
+  serving deployment's ID and nothing else.
 
 ::: info Vercel Queues is in beta
 Vercel Queues is in public beta and its push request format is defined by its

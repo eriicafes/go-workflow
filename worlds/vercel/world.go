@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,6 +24,9 @@ const (
 	// qstashRouteSuffix is the QStash route under the HTTP prefix, among the
 	// callbacks a World mounts for its own use.
 	qstashRouteSuffix = "/callbacks/qstash"
+	// deploymentRouteSuffix is the route under the HTTP prefix that answers
+	// with the deployment serving it.
+	deploymentRouteSuffix = "/deployment"
 )
 
 // Config configures the Vercel World.
@@ -79,15 +83,6 @@ type Config struct {
 	// environment variable, which Vercel sets in every deployment. With
 	// neither, deployment affinity is off.
 	DeploymentID string
-	// DeploymentScope groups the deployments that runs of workflows marked
-	// workflow.StartOnLatest move between: new runs of those workflows are
-	// pinned to the scope's newest deployment that has used this Redis
-	// database. Empty uses the deployment's Vercel environment, from
-	// VERCEL_TARGET_ENV or VERCEL_ENV, and for previews also its branch, from
-	// VERCEL_GIT_COMMIT_REF, so runs never move between environments or
-	// branches. With neither, or for a preview without a branch, those runs
-	// stay on the deployment that starts them.
-	DeploymentScope string
 }
 
 // World is the Vercel World. It is safe for concurrent use, and any number of
@@ -97,11 +92,13 @@ type World struct {
 	http   *http.Client
 	redis  redisStore
 	prefix string
-	// latest guards latestID, the deployment LatestDeploymentID last read,
-	// and latestAt, when it read it.
-	latest   sync.Mutex
-	latestID string
-	latestAt time.Time
+	// latestURL is the deployment route LatestDeploymentID asks for the
+	// latest deployment, or "" when it reports none. latest guards latestID,
+	// the deployment it last read, and latestAt, when it read it.
+	latestURL string
+	latest    sync.Mutex
+	latestID  string
+	latestAt  time.Time
 	// scripts is the first argument of every script: the prefix, and the
 	// retention in microseconds when it is set.
 	scripts string
@@ -143,10 +140,10 @@ func New(config Config) (*World, error) {
 	if config.DeploymentID == "" {
 		config.DeploymentID = os.Getenv("VERCEL_DEPLOYMENT_ID")
 	}
-	if config.DeploymentScope == "" {
-		config.DeploymentScope = deploymentScopeFromEnv()
-	}
 	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix, scripts: config.Prefix}
+	if config.DeploymentID != "" && os.Getenv("VERCEL_ENV") == "production" {
+		world.latestURL = baseURL + deploymentRouteSuffix
+	}
 	if longest, _ := worlds.MaxRetention(config.Retention, config.Retentions); longest > 0 {
 		byWorkflow := make(map[string]int64, len(config.Retentions))
 		for workflow, retention := range config.Retentions {
@@ -210,18 +207,21 @@ func OIDCTokenFromEnv(name string) func(context.Context) (string, error) {
 
 // HTTP returns a handler serving the RPC and webhook endpoints under
 // /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
-// it, such as worlds.WithRPCToken. When Config.QStash is set,
+// it, such as worlds.WithRPCToken. It also serves GET /v1/workflow/deployment,
+// which answers with the deployment serving it, so a World in an older
+// production deployment can find the latest one. When Config.QStash is set,
 // it also serves the QStash callback at /v1/workflow/callbacks/qstash, which
 // accepts only requests signed by QStash.
 func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
 	return HTTPPrefix(world, "", options...)
 }
 
-// HTTPPrefix is like HTTP but serves the endpoints, and the QStash callback,
-// under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
+// HTTPPrefix is like HTTP but serves the endpoints, the deployment route, and
+// the QStash callback, under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
 // Config.BaseURL must end with the same prefix.
 func HTTPPrefix(world *World, prefix string, options ...worlds.HTTPOption) http.Handler {
 	mux := worlds.HTTPHandler(world, prefix, options...)
+	mux.Handle("GET "+worlds.HTTPPrefixPath(prefix)+deploymentRouteSuffix, Deployment(world))
 	if world.config.QStash != nil {
 		mux.Handle("POST "+worlds.HTTPPrefixPath(prefix)+qstashRouteSuffix, QStash(world))
 	}
@@ -244,4 +244,15 @@ func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 // authenticate requests.
 func Queue(world *World, runners worlds.RunnerSet) http.Handler {
 	return &consumer{world: world, runtime: worlds.NewRuntime(world, runners)}
+}
+
+// Deployment returns a handler serving only the deployment route, which
+// answers with the ID of the deployment serving it. Mount it at
+// GET <Config.BaseURL>/deployment.
+func Deployment(world *World) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(writer, world.config.DeploymentID)
+	})
 }
