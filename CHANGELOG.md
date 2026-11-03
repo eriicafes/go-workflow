@@ -1,5 +1,12 @@
 # go-workflow
 
+## 0.7.0
+
+### Minor Changes
+
+- 6f133e3: Add `workflow.StartOnLatest` to start a workflow's new runs on the latest deployment.
+- 6f133e3: Support `workflow.StartOnLatest` in the Vercel World.
+
 ## 0.6.0
 
 ### Minor Changes
