@@ -1,5 +1,12 @@
 # go-workflow
 
+## 0.6.0
+
+### Minor Changes
+
+- cef51ec: Add `worlds.WithRPCToken` and `worlds.WithRPCMiddleware` to protect the RPC endpoint, and send `WORKFLOW_HTTP_TOKEN` as a bearer token from world-http.
+- 0060621: Add `Config.Retention` and per-workflow `Config.Retentions` to the Postgres, Vercel, and AWS Worlds, which delete a finished run's data that long after it completes.
+
 ## 0.5.2
 
 ### Patch Changes
