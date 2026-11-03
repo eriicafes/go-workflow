@@ -382,3 +382,33 @@ test("waits for a terminal run across bounded requests", async () => {
 	expect(run.status).toBe("completed");
 	expect(timeouts).toEqual([10_000_000_000, 10_000_000_000, 10_000_000_000]);
 });
+
+test("sends a bearer token from the option or WORKFLOW_HTTP_TOKEN", async () => {
+	const authorization = async (options: Parameters<typeof createWorld>[0]) => {
+		let header: string | null = null;
+		await createWorld({
+			baseURL: "https://workflow.example/v1/workflow",
+			...options,
+			fetch: async (_url, init) => {
+				header = new Headers(init?.headers).get("Authorization");
+				return rpcResponse({ SpecVersion: 1, Capabilities: {} });
+			},
+		});
+		return header;
+	};
+
+	const previous = process.env.WORKFLOW_HTTP_TOKEN;
+	try {
+		delete process.env.WORKFLOW_HTTP_TOKEN;
+		expect(await authorization({})).toBeNull();
+		expect(await authorization({ token: "option" })).toBe("Bearer option");
+
+		process.env.WORKFLOW_HTTP_TOKEN = "env";
+		expect(await authorization({})).toBe("Bearer env");
+		expect(await authorization({ token: "option" })).toBe("Bearer option");
+		expect(await authorization({ headers: { Authorization: "Basic custom" } })).toBe("Basic custom");
+	} finally {
+		if (previous === undefined) delete process.env.WORKFLOW_HTTP_TOKEN;
+		else process.env.WORKFLOW_HTTP_TOKEN = previous;
+	}
+});

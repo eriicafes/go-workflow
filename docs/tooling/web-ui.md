@@ -29,6 +29,8 @@ The CLI loads [`go-workflow/world-http`](/tooling/world-http), which
 talks to your handler's RPC endpoint. You don't import it yourself.
 
 ::: warning
-The RPC endpoint is unauthenticated. Only point the web UI at Worlds on a
-trusted network, or put authentication in front of the endpoint.
+The RPC endpoint is unauthenticated unless you protect it. To point the web UI
+at a deployed World, [protect the RPC path](/worlds/#protecting-the-rpc-path)
+with `worlds.WithRPCToken` and export the same `WORKFLOW_HTTP_TOKEN` before
+running `npx workflow web`.
 :::

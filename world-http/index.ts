@@ -39,6 +39,12 @@ export interface HTTPWorldOptions {
 	 * Defaults to `WORKFLOW_HTTP_BASE_URL`.
 	 */
 	baseURL?: string;
+	/**
+	 * Sent as a bearer token with every RPC request, for a server protected
+	 * with `worlds.WithRPCToken`. Defaults to `WORKFLOW_HTTP_TOKEN`. An
+	 * `Authorization` header in `headers` takes precedence.
+	 */
+	token?: string;
 	fetch?: typeof globalThis.fetch;
 	headers?: HeadersInit;
 }
@@ -49,8 +55,14 @@ export interface HTTPWorldOptions {
  * `https://workflows.example.com/v1/workflow`.
  */
 export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPWorld> {
+	const { token = environment("WORKFLOW_HTTP_TOKEN"), ...rest } = options;
+	const headers = new Headers(options.headers);
+	if (token && !headers.has("Authorization")) {
+		headers.set("Authorization", `Bearer ${token}`);
+	}
 	const client = new RPCClient({
-		...options,
+		...rest,
+		headers,
 		baseURL: options.baseURL ?? environment("WORKFLOW_HTTP_BASE_URL"),
 	});
 	// The first request already carries the protocol version, so a mismatched

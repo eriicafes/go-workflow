@@ -22,7 +22,9 @@ const world = await createWorld({
 ```
 
 `baseURL` is the prefix passed to Go's `worlds.HTTPHandler`. When omitted,
-`createWorld()` reads `WORKFLOW_HTTP_BASE_URL`.
+`createWorld()` reads `WORKFLOW_HTTP_BASE_URL`. When the Go handler protects
+its RPC path with `worlds.WithRPCToken`, set `WORKFLOW_HTTP_TOKEN` or pass
+`token`, and the adapter sends it as a bearer token.
 
 To load this package through the Workflow SDK runtime, set
 `WORKFLOW_TARGET_WORLD=go-workflow/world-http` alongside

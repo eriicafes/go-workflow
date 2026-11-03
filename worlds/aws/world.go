@@ -159,14 +159,17 @@ func (w *World) Capabilities() worlds.Capabilities {
 }
 
 // HTTP returns a handler serving the RPC and webhook endpoints under
-// /v1/workflow. It does not authenticate requests.
-func HTTP(world *World) http.Handler { return HTTPPrefix(world, "") }
+// /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
+// it, such as worlds.WithRPCToken.
+func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
+	return HTTPPrefix(world, "", options...)
+}
 
 // HTTPPrefix is like HTTP but serves the endpoints under prefix, such as
 // /internal/workflow. An empty prefix uses /v1/workflow. Config.BaseURL must
 // end with the same prefix.
-func HTTPPrefix(world *World, prefix string) http.Handler {
-	return worlds.HTTPHandler(world, prefix)
+func HTTPPrefix(world *World, prefix string, options ...worlds.HTTPOption) http.Handler {
+	return worlds.HTTPHandler(world, prefix, options...)
 }
 
 // RPC returns a handler serving only the RPC endpoint.
