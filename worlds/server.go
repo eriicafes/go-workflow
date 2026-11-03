@@ -18,17 +18,23 @@ const (
 	webhookResponsePollInterval = 50 * time.Millisecond
 )
 
-// HTTPHandler returns the HTTP handler that exposes world to clients and
+// HTTPPrefixPath returns the path HTTPHandler serves under for prefix: a
+// leading slash and no trailing slash, or /v1/workflow when prefix is empty.
+func HTTPPrefixPath(prefix string) string {
+	if prefix == "" {
+		return defaultHTTPPrefix
+	}
+	return "/" + strings.Trim(prefix, "/")
+}
+
+// HTTPHandler returns the mux that exposes world to clients and
 // webhook callers. It serves RPCHandler at POST <prefix>/rpc and
 // WebhookHandler at <prefix>/webhooks/{token}. An empty prefix uses
-// /v1/workflow. It does not execute deliveries.
-func HTTPHandler(world World, prefix string) http.Handler {
+// /v1/workflow. It does not execute deliveries. Worlds can register their own
+// routes, such as delivery callbacks, on the returned mux.
+func HTTPHandler(world World, prefix string) *http.ServeMux {
 	mux := http.NewServeMux()
-	if prefix == "" {
-		prefix = defaultHTTPPrefix
-	} else {
-		prefix = "/" + strings.Trim(prefix, "/")
-	}
+	prefix = HTTPPrefixPath(prefix)
 	mux.Handle(prefix+"/webhooks/{token}", WebhookHandler(world))
 	mux.Handle("POST "+prefix+"/rpc", RPCHandler(world))
 	return mux

@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	defaultPrefix     = "go-workflow"
-	defaultHTTPPrefix = "/v1/workflow"
+	defaultPrefix = "go-workflow"
 	// qstashRouteSuffix is the QStash route under the HTTP prefix, among the
 	// callbacks a World mounts for its own use.
 	qstashRouteSuffix = "/callbacks/qstash"
@@ -201,15 +200,9 @@ func HTTP(world *World) http.Handler { return HTTPPrefix(world, "") }
 // under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
 // Config.BaseURL must end with the same prefix.
 func HTTPPrefix(world *World, prefix string) http.Handler {
-	if prefix == "" {
-		prefix = defaultHTTPPrefix
-	} else {
-		prefix = "/" + strings.Trim(prefix, "/")
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/", worlds.HTTPHandler(world, prefix))
+	mux := worlds.HTTPHandler(world, prefix)
 	if world.config.QStash != nil {
-		mux.Handle("POST "+prefix+qstashRouteSuffix, QStash(world))
+		mux.Handle("POST "+worlds.HTTPPrefixPath(prefix)+qstashRouteSuffix, QStash(world))
 	}
 	return mux
 }
