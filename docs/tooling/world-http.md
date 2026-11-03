@@ -51,6 +51,7 @@ const finished = await world.runs.waitForTerminalStatus(run.runId, { timeoutMs: 
 | Option | Default | Description |
 | --- | --- | --- |
 | `baseURL` | `WORKFLOW_HTTP_BASE_URL` | The handler's URL, including `/v1/workflow`. |
+| `token` | `WORKFLOW_HTTP_TOKEN` | Sent as `Authorization: Bearer <token>`. An `Authorization` header in `headers` wins. |
 | `headers` | none | Headers sent with every RPC request, such as `Authorization`. |
 | `fetch` | `globalThis.fetch` | A custom `fetch` implementation. |
 
@@ -59,13 +60,13 @@ World's protocol version and capabilities, so it fails fast when the handler is
 unreachable. `world.getDeploymentId()` asks the Go World for its deployment on
 every call, so it stays correct across redeploys.
 
-If you [protect the RPC path](/worlds/#protecting-the-rpc-path) with a token,
-pass it in `headers`:
+If you [protect the RPC path](/worlds/#protecting-the-rpc-path) with
+`worlds.WithRPCToken`, set `WORKFLOW_HTTP_TOKEN` or pass the token:
 
 ```ts
 const world = await createWorld({
   baseURL: "https://workflows.example.com/v1/workflow",
-  headers: { Authorization: `Bearer ${process.env.WORKFLOW_RPC_TOKEN}` },
+  token: process.env.WORKFLOW_HTTP_TOKEN,
 });
 ```
 
@@ -76,10 +77,12 @@ The Workflow SDK CLI and runtime load a World by module name. Set:
 ```sh
 export WORKFLOW_TARGET_WORLD=go-workflow/world-http
 export WORKFLOW_HTTP_BASE_URL=http://localhost:8080/v1/workflow
+export WORKFLOW_HTTP_TOKEN=... # when the RPC path is protected
 ```
 
 Loaded this way, the adapter is created without options and reads
-`WORKFLOW_HTTP_BASE_URL`, so it cannot send custom headers.
+`WORKFLOW_HTTP_BASE_URL` and `WORKFLOW_HTTP_TOKEN`, so it cannot send other
+custom headers.
 
 ## Limits
 
@@ -88,6 +91,7 @@ cannot create queue handlers. Its deployment ID is the Go World's.
 
 ::: warning
 The RPC endpoint is unauthenticated unless you protect it. Point the adapter
-only at Worlds on a trusted network, or put authentication in front of the
-endpoint.
+only at Worlds on a trusted network, or
+[protect the RPC path](/worlds/#protecting-the-rpc-path) and set
+`WORKFLOW_HTTP_TOKEN`.
 :::

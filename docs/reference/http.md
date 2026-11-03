@@ -71,8 +71,8 @@ created without an ID is given one.
 
 ::: danger Unauthenticated
 The RPC endpoint can start runs, append events, and read every payload. Never
-expose it publicly without your own authentication and authorization in front
-of it.
+expose it publicly unless `worlds.WithRPCToken` or `worlds.WithRPCMiddleware`
+[protects it](/worlds/#protecting-the-rpc-path).
 :::
 
 ## Webhooks

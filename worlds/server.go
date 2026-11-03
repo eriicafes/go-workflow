@@ -2,6 +2,7 @@ package worlds
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,16 +28,67 @@ func HTTPPrefixPath(prefix string) string {
 	return "/" + strings.Trim(prefix, "/")
 }
 
+// HTTPOption configures HTTPHandler.
+type HTTPOption func(*httpOptions)
+
+type httpOptions struct {
+	rpc func(http.Handler) http.Handler
+}
+
+// WithRPCToken makes the RPC endpoint answer 401 unless a request carries
+// token as a bearer token, such as WORKFLOW_HTTP_TOKEN, which world-http
+// sends. An empty token refuses every RPC request, so an unset secret never
+// opens the endpoint. Webhooks are unaffected: the hook token in their URL
+// authorizes them, since their callers can't send your credentials.
+func WithRPCToken(token string) HTTPOption {
+	want := []byte("Bearer " + token)
+	return WithRPCMiddleware(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+}
+
+// WithRPCMiddleware wraps only the RPC endpoint in middleware, such as a
+// session or IP check, and leaves webhooks reachable by their callers.
+// Several wrap in order, the first outermost.
+func WithRPCMiddleware(middleware func(http.Handler) http.Handler) HTTPOption {
+	return func(o *httpOptions) {
+		if o.rpc == nil {
+			o.rpc = middleware
+			return
+		}
+		outer := o.rpc
+		o.rpc = func(next http.Handler) http.Handler { return outer(middleware(next)) }
+	}
+}
+
 // HTTPHandler returns the mux that exposes world to clients and
 // webhook callers. It serves RPCHandler at POST <prefix>/rpc and
 // WebhookHandler at <prefix>/webhooks/{token}. An empty prefix uses
 // /v1/workflow. It does not execute deliveries. Worlds can register their own
 // routes, such as delivery callbacks, on the returned mux.
-func HTTPHandler(world World, prefix string) *http.ServeMux {
+//
+// The RPC endpoint can read and change every run and is unauthenticated
+// unless options protect it, with WithRPCToken or WithRPCMiddleware.
+func HTTPHandler(world World, prefix string, options ...HTTPOption) *http.ServeMux {
+	var o httpOptions
+	for _, option := range options {
+		option(&o)
+	}
+	rpc := RPCHandler(world)
+	if o.rpc != nil {
+		rpc = o.rpc(rpc)
+	}
 	mux := http.NewServeMux()
 	prefix = HTTPPrefixPath(prefix)
 	mux.Handle(prefix+"/webhooks/{token}", WebhookHandler(world))
-	mux.Handle("POST "+prefix+"/rpc", RPCHandler(world))
+	mux.Handle("POST "+prefix+"/rpc", rpc)
 	return mux
 }
 

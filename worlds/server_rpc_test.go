@@ -350,3 +350,64 @@ func TestRPCCapsWaits(t *testing.T) {
 		t.Fatalf("timeout = %s, wait = %s, want 30s each", world.timeout, world.wait)
 	}
 }
+
+func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
+	body, err := cbor.Marshal(rpcRequest{Method: "client.spec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc := func(handler http.Handler, authorization string) int {
+		request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+		request.Header.Set("Content-Type", worlds.RPCContentType)
+		if authorization != "" {
+			request.Header.Set("Authorization", authorization)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("secret"))
+	for authorization, want := range map[string]int{
+		"":              http.StatusUnauthorized,
+		"Bearer wrong":  http.StatusUnauthorized,
+		"secret":        http.StatusUnauthorized,
+		"Bearer secret": http.StatusOK,
+	} {
+		if got := rpc(handler, authorization); got != want {
+			t.Errorf("Authorization %q: status = %d, want %d", authorization, got, want)
+		}
+	}
+	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("")), "Bearer "); got != http.StatusUnauthorized {
+		t.Errorf("empty token: status = %d, want 401", got)
+	}
+
+	// Webhooks stay reachable: an unknown token is a 404, not a 401.
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/missing", nil))
+	if response.Code != http.StatusNotFound {
+		t.Errorf("webhook status = %d, want 404", response.Code)
+	}
+}
+
+func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
+	var order []string
+	mark := func(name string) func(http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				order = append(order, name)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCMiddleware(mark("outer")), worlds.WithRPCMiddleware(mark("inner")))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", nil))
+	if len(order) != 2 || order[0] != "outer" || order[1] != "inner" {
+		t.Fatalf("order = %v", order)
+	}
+	order = nil
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/missing", nil))
+	if len(order) != 0 {
+		t.Fatalf("webhook ran RPC middleware: %v", order)
+	}
+}

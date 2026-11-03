@@ -191,16 +191,19 @@ func OIDCTokenFromEnv(name string) func(context.Context) (string, error) {
 }
 
 // HTTP returns a handler serving the RPC and webhook endpoints under
-// /v1/workflow. It does not authenticate requests. When Config.QStash is set,
+// /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
+// it, such as worlds.WithRPCToken. When Config.QStash is set,
 // it also serves the QStash callback at /v1/workflow/callbacks/qstash, which
 // accepts only requests signed by QStash.
-func HTTP(world *World) http.Handler { return HTTPPrefix(world, "") }
+func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
+	return HTTPPrefix(world, "", options...)
+}
 
 // HTTPPrefix is like HTTP but serves the endpoints, and the QStash callback,
 // under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
 // Config.BaseURL must end with the same prefix.
-func HTTPPrefix(world *World, prefix string) http.Handler {
-	mux := worlds.HTTPHandler(world, prefix)
+func HTTPPrefix(world *World, prefix string, options ...worlds.HTTPOption) http.Handler {
+	mux := worlds.HTTPHandler(world, prefix, options...)
 	if world.config.QStash != nil {
 		mux.Handle("POST "+worlds.HTTPPrefixPath(prefix)+qstashRouteSuffix, QStash(world))
 	}

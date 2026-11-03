@@ -99,41 +99,31 @@ is retried with backoff.
 The RPC and webhook handlers don't authenticate requests.
 
 - **RPC** can start runs and read every run's input, output, and events. Keep it
-  on a private network, or put your own authentication and authorization in
-  front of it.
+  on a private network, or [protect it](#protecting-the-rpc-path) with
+  `worlds.WithRPCToken`.
 - **Webhooks** are authorized only by the token in the URL. Treat webhook URLs
   as bearer capabilities and verify provider signatures in the workflow.
 - **Queue consumers** must only be reachable by the queue infrastructure.
 
 ### Protecting the RPC path
 
-To keep a single handler, wrap `HTTP(world)` itself in middleware that checks
-requests to its RPC path and lets webhook requests through, since webhook
-callers can't send your credentials:
+Pass `worlds.WithRPCToken` to `HTTP(world)` to require a bearer token on the RPC
+path. Webhook requests still pass, since webhook callers can't send your
+credentials:
 
 ```go
-func requireToken(next http.Handler, token string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/workflow/rpc" &&
-			subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
-}
-
-```
-
-Wrap the handler when starting the server:
-
-```go
-handler := requireToken(postgresworld.HTTP(world), os.Getenv("WORKFLOW_RPC_TOKEN"))
+handler := postgresworld.HTTP(world, worlds.WithRPCToken(os.Getenv("WORKFLOW_HTTP_TOKEN")))
 log.Fatal(http.ListenAndServe(":8081", handler))
 ```
 
-Clients then send the token through their `*http.Client`:
+An empty token refuses every RPC request, so an unset secret never leaves the
+endpoint open. For other checks, such as a session or an IP allowlist,
+`worlds.WithRPCMiddleware(middleware)` wraps only the RPC path in your own
+middleware.
+
+The [world-http adapter](/tooling/world-http), and so the
+[web UI](/tooling/web-ui), sends `WORKFLOW_HTTP_TOKEN` as the bearer token.
+Go clients send it through their `*http.Client`:
 
 ```go
 type bearer struct{ token string }
@@ -144,14 +134,9 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-```
-
-Use the transport with the workflow client:
-
-```go
 client := workflow.NewHTTPClient(
 	"http://workflow-worker:8081/v1/workflow",
-	&http.Client{Transport: bearer{os.Getenv("WORKFLOW_RPC_TOKEN")}},
+	&http.Client{Transport: bearer{os.Getenv("WORKFLOW_HTTP_TOKEN")}},
 )
 ```
 
