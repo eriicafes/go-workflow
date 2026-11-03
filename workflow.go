@@ -49,8 +49,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"reflect"
-	"runtime"
 	"slices"
 	"time"
 
@@ -480,12 +478,4 @@ func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, er
 		}
 		return encoded, nil
 	})
-}
-
-func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) string {
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-}
-
-func rollbackFunctionIdentity[In any](fn func(context.Context, In) error) string {
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }
