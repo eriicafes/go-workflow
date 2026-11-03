@@ -82,6 +82,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
+	w.recordDeployment(ctx)
 	var delay time.Duration
 	if input.NotBefore != nil {
 		delay = time.Until(*input.NotBefore)

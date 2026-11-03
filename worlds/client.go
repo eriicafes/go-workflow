@@ -114,6 +114,38 @@ type ClientSpec struct {
 	Capabilities Capabilities `cbor:"capabilities"`
 }
 
+// CreateRun creates a run and queues its first delivery. It fills an empty
+// RunID, and an empty DeploymentID as StartDeploymentID does for
+// input.Latest. When the run already exists and is still pending, as after a
+// create whose queueing failed, it queues the delivery again and returns the
+// run's ID with ErrRunAlreadyExists.
+func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
+	if input.RunID == "" {
+		input.RunID = NewRunID()
+	}
+	if input.DeploymentID == "" {
+		deploymentID, err := StartDeploymentID(ctx, world, input.Latest)
+		if err != nil {
+			return "", err
+		}
+		input.DeploymentID = deploymentID
+	}
+	_, err := world.EventsCreateRun(ctx, input.EventsCreateRunInput)
+	if errors.Is(err, ErrRunAlreadyExists) {
+		run, getErr := world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
+		if getErr != nil || run.Status != StatusPending {
+			return input.RunID, errors.Join(err, getErr)
+		}
+		input.DeploymentID = run.DeploymentID
+	} else if err != nil {
+		return "", err
+	}
+	if _, queueErr := world.Queue(ctx, QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); queueErr != nil {
+		return "", queueErr
+	}
+	return input.RunID, err
+}
+
 // NewClient returns a Client that calls world directly, in the same process.
 func NewClient(world World) Client { return worldClient{world: world} }
 
@@ -171,33 +203,6 @@ func (c worldClient) Analytics() Analytics { return c.world.Analytics() }
 
 func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput) (RunID, error) {
 	return CreateRun(ctx, c.world, input)
-}
-
-// CreateRun creates a run and queues its first delivery. It fills an empty
-// RunID and DeploymentID. When the run already exists and is still pending,
-// as after a create whose queueing failed, it queues the delivery again and
-// returns the run's ID with ErrRunAlreadyExists.
-func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
-	if input.RunID == "" {
-		input.RunID = NewRunID()
-	}
-	if input.DeploymentID == "" {
-		input.DeploymentID = world.DeploymentID()
-	}
-	_, err := world.EventsCreateRun(ctx, input)
-	if errors.Is(err, ErrRunAlreadyExists) {
-		run, getErr := world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
-		if getErr != nil || run.Status != StatusPending {
-			return input.RunID, errors.Join(err, getErr)
-		}
-		input.DeploymentID = run.DeploymentID
-	} else if err != nil {
-		return "", err
-	}
-	if _, queueErr := world.Queue(ctx, QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); queueErr != nil {
-		return "", queueErr
-	}
-	return input.RunID, err
 }
 
 func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
@@ -307,30 +312,6 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 	return nil
 }
 
-// rpcClientError is a server's RPC failure. It wraps the sentinel error the
-// server named, so errors.Is matches it as it would in-process.
-type rpcClientError struct {
-	RPCError
-	sentinel error
-}
-
-func newRPCClientError(failure RPCError) error {
-	err := rpcClientError{RPCError: failure}
-	for _, sentinel := range rpcSentinels {
-		if sentinel.name == failure.Sentinel {
-			err.sentinel = sentinel.err
-			break
-		}
-	}
-	return err
-}
-
-func (e rpcClientError) Error() string {
-	return fmt.Sprintf("workflow: RPC %s: %s", e.Code, e.Message)
-}
-
-func (e rpcClientError) Unwrap() error { return e.sentinel }
-
 func (c *httpClient) RunsGet(ctx context.Context, input RunsGetInput) (Run, error) {
 	var output Run
 	err := c.call(ctx, "runs.get", input, &output)
@@ -391,24 +372,6 @@ func (c *httpClient) StreamsCreateWriteSession(ctx context.Context, input Stream
 		return nil, err
 	}
 	return httpStreamWriteSession{client: c, runID: input.RunID, name: input.Name, id: id}, nil
-}
-
-type httpStreamWriteSession struct {
-	client *httpClient
-	runID  RunID
-	name   string
-	id     StreamID
-}
-
-func (s httpStreamWriteSession) ID() StreamID { return s.id }
-func (s httpStreamWriteSession) Write(ctx context.Context, input StreamWriteSessionWriteInput) error {
-	return s.client.call(ctx, "streams.writeSession", StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
-}
-func (s httpStreamWriteSession) Close(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: true}, nil)
-}
-func (s httpStreamWriteSession) Release(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
 }
 
 func (c *httpClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
@@ -473,6 +436,24 @@ func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
 	return output, nil
 }
 
+type httpStreamWriteSession struct {
+	client *httpClient
+	runID  RunID
+	name   string
+	id     StreamID
+}
+
+func (s httpStreamWriteSession) ID() StreamID { return s.id }
+func (s httpStreamWriteSession) Write(ctx context.Context, input StreamWriteSessionWriteInput) error {
+	return s.client.call(ctx, "streams.writeSession", StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
+}
+func (s httpStreamWriteSession) Close(ctx context.Context) error {
+	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: true}, nil)
+}
+func (s httpStreamWriteSession) Release(ctx context.Context) error {
+	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
+}
+
 type httpAnalytics struct{ client *httpClient }
 
 func (a httpAnalytics) RunsGet(ctx context.Context, input AnalyticsRunsGetInput) (AnalyticsRun, error) {
@@ -504,3 +485,27 @@ func (a httpAnalytics) WaitsList(ctx context.Context, input AnalyticsWaitsListIn
 	err := a.client.call(ctx, "analytics.waits.list", input, &output)
 	return output, err
 }
+
+// rpcClientError is a server's RPC failure. It wraps the sentinel error the
+// server named, so errors.Is matches it as it would in-process.
+type rpcClientError struct {
+	RPCError
+	sentinel error
+}
+
+func newRPCClientError(failure RPCError) error {
+	err := rpcClientError{RPCError: failure}
+	for _, sentinel := range rpcSentinels {
+		if sentinel.name == failure.Sentinel {
+			err.sentinel = sentinel.err
+			break
+		}
+	}
+	return err
+}
+
+func (e rpcClientError) Error() string {
+	return fmt.Sprintf("workflow: RPC %s: %s", e.Code, e.Message)
+}
+
+func (e rpcClientError) Unwrap() error { return e.sentinel }

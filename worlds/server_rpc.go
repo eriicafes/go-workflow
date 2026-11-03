@@ -654,7 +654,12 @@ type (
 	// ClientRunsCreateInput holds the arguments to the client.runs.create RPC
 	// method, which creates a run and queues its first delivery. An empty
 	// RunID is replaced with a new one.
-	ClientRunsCreateInput = EventsCreateRunInput
+	ClientRunsCreateInput struct {
+		EventsCreateRunInput
+		// Latest pins a run with no DeploymentID to the World's latest
+		// deployment, for a workflow marked workflow.StartOnLatest.
+		Latest bool
+	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
 	// method, which cancels the run.
 	ClientRunsCancelInput struct{ RunID RunID }

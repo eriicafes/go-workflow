@@ -109,6 +109,13 @@ deliveries are addressed to the run's deployment through
 `QueueInput.DeploymentID`, and misdelivered ones are re-routed. Of the built-in Worlds, only Vercel reports
 affinity, and only when it has a deployment ID.
 
+A World with affinity can also implement `LatestDeployments`, whose
+`LatestDeploymentID(ctx)` returns its newest deployment, or `""` when it knows
+none. `workflow.Start` pins new runs of workflows marked
+`workflow.StartOnLatest` to it through `StartDeploymentID(ctx, world, latest)`:
+child runs directly, and other runs by setting `ClientRunsCreateInput.Latest`,
+which `CreateRun` resolves on the World's side of a local or HTTP Client.
+
 A World can choose a delivery's queue from `QueueInput.WorkflowName`, which the
 Runtime and Client set on every delivery. `ResumeHook` takes it from the hook's
 `ResumeContext`, and other code that queues for a run it hasn't loaded, such as

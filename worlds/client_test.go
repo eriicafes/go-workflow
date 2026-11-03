@@ -354,7 +354,7 @@ func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	input := worlds.ClientRunsCreateInput{RunID: "wrun_retried", WorkflowName: "flow"}
+	input := worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: "wrun_retried", WorkflowName: "flow"}}
 	if _, err := worlds.CreateRun(ctx, queueOutage{world}, input); !errors.Is(err, errQueueUnavailable) {
 		t.Fatalf("first create error = %v, want the queue error", err)
 	}

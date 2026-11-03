@@ -64,6 +64,17 @@ type Capabilities struct {
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
 }
 
+// LatestDeployments is implemented by a World with deployment affinity that
+// tracks its newest deployment. Runs of workflows marked
+// workflow.StartOnLatest are pinned to LatestDeploymentID instead of the
+// deployment that starts them, so a chain of runs that each start the next
+// moves to new code as it is deployed.
+type LatestDeployments interface {
+	// LatestDeploymentID returns the newest deployment this World's
+	// deployment knows of, or "" when it tracks none.
+	LatestDeploymentID(context.Context) (string, error)
+}
+
 // NormalizeBaseURL validates an HTTP handler's public URL and removes its
 // trailing slash.
 func NormalizeBaseURL(value string) (string, error) {
@@ -370,6 +381,19 @@ func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, err
 	}
 	run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone})
 	return run.DeploymentID, err
+}
+
+// StartDeploymentID returns the deployment a new run is pinned to: the
+// World's latest deployment when latest is true and the World implements
+// LatestDeployments and knows one, otherwise World.DeploymentID.
+func StartDeploymentID(ctx context.Context, world World, latest bool) (string, error) {
+	if tracker, ok := world.(LatestDeployments); ok && latest && world.Capabilities().DeploymentAffinity {
+		id, err := tracker.LatestDeploymentID(ctx)
+		if err != nil || id != "" {
+			return id, err
+		}
+	}
+	return world.DeploymentID(), nil
 }
 
 // RunDelivery returns a delivery for runID addressed as the Runtime addresses

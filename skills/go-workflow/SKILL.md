@@ -55,7 +55,11 @@ Do not swallow SDK suspension panics with a blanket `recover`. Plain deferred
 side effects can repeat on replay; durable cleanup belongs in SDK operations.
 If changing an existing deployed runner, consider its in-flight event logs:
 reordering durable operations can break replay. Use a separate workflow type
-for incompatible changes when old runs still need to execute.
+for incompatible changes when old runs still need to execute. On a World with
+deployment affinity, a workflow that starts its own next run, such as a daily
+chain, stays on its first deployment unless it embeds
+`workflow.StartOnLatest`, which starts each new run on the latest deployment.
+Embed it only in workflows nothing waits on the output of.
 
 ## Deferred cleanup
 

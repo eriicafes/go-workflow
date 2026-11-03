@@ -112,6 +112,36 @@ type Struct[Out any] struct{}
 // Workflow declares Out as the output of the workflow that embeds Struct.
 func (Struct[Out]) Workflow(Out) {}
 
+// StartOnLatest marks a workflow, when embedded in the workflow struct, whose
+// new runs start on the World's latest deployment instead of the deployment
+// that starts them:
+//
+//	type CheckIns struct {
+//		workflow.Struct[CheckInsResult]
+//		workflow.StartOnLatest
+//		UserID string
+//	}
+//
+// A run never moves once started, so its event log is only ever replayed by
+// the code that wrote it. A workflow that starts its next run before it
+// finishes, such as a daily chain, moves to new code at that boundary instead
+// of staying on the deployment its first run started on until the deployment
+// is deleted. Mark only workflows nothing waits on the output of, since a
+// newer deployment may return a different output. On Worlds without
+// deployment affinity, or that do not implement worlds.LatestDeployments, it
+// changes nothing.
+//
+// It has no fields, so it adds nothing to the workflow's JSON input.
+type StartOnLatest struct{}
+
+func (StartOnLatest) startOnLatest() {}
+
+// startsOnLatest reports whether input's workflow embeds StartOnLatest.
+func startsOnLatest(input any) bool {
+	_, ok := input.(interface{ startOnLatest() })
+	return ok
+}
+
 // Run is a handle to a run of a workflow whose output type is Out. Start and
 // Get return one. A Run has an independent lifetime; use Cancel to cancel it.
 //
@@ -395,14 +425,18 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Ru
 	if err != nil {
 		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
 	}
+	latest := startsOnLatest(input)
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := InlineStep(execution.Context(), startChild, childStartInput{WorkflowName: name, Input: raw})
+		id, err := InlineStep(execution.Context(), startChild, childStartInput{WorkflowName: name, Input: raw, Latest: latest})
 		if err != nil {
 			return nil, err
 		}
 		return &Run[Out]{id: id, client: client}, nil
 	}
-	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{WorkflowName: name, Input: raw})
+	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{
+		EventsCreateRunInput: worlds.EventsCreateRunInput{WorkflowName: name, Input: raw},
+		Latest:               latest,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -412,13 +446,18 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Ru
 type childStartInput struct {
 	WorkflowName string
 	Input        json.RawMessage
+	// Latest pins the child to the World's latest deployment, for a
+	// workflow marked StartOnLatest.
+	Latest bool `json:",omitempty"`
 }
 
 // startChild is the inline step Start uses in workflow context. It creates the
-// child run, pinned to the deployment executing the parent, and queues its
-// first delivery. The child run ID comes from worlds.NewChildRunID, so a retried
+// child run, pinned to the deployment executing the parent, or to the latest
+// deployment for a workflow marked StartOnLatest, and queues its first
+// delivery. The child run ID comes from worlds.NewChildRunID, so a retried
 // attempt finds the run an earlier attempt created and queues its first
-// delivery again while it has not started.
+// delivery again, to the deployment it was pinned to, while it has not
+// started.
 func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error) {
 	execution, ok := worlds.ExecutionFromContext(ctx)
 	if !ok {
@@ -430,8 +469,11 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 		root = string(parent.RunID)
 	}
 	id := worlds.NewChildRunID(worlds.StepID(StepID(ctx)))
-	deploymentID := execution.World().DeploymentID()
-	_, err := execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
+	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Latest)
+	if err != nil {
+		return "", err
+	}
+	_, err = execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
 		RunID:        id,
 		DeploymentID: deploymentID,
 		WorkflowName: input.WorkflowName,

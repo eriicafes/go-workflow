@@ -73,6 +73,7 @@ QStash callback, or clients in other processes.
 | `QStash` | Optional long-timer configuration. |
 | `HTTPClient` | Client for Redis REST, Vercel Queues, and QStash. Default `http.DefaultClient`. |
 | `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](/guide/replay#pinning-runs-to-a-deployment). |
+| `DeploymentScope` | The deployments that runs of workflows marked `workflow.StartOnLatest` move between. Default the Vercel environment, plus the branch for previews. See [latest deployment](#latest-deployment). |
 
 `New` does not contact Redis or Vercel. `Close` closes the Redis TCP pool and
 does nothing with the REST transport.
@@ -163,6 +164,29 @@ is gone from `p:runs`, its workflow and status indexes, and its hooks from
 
 Runs that are still pending or running never expire, however old, and runs
 that finished before `Retention` was set are kept.
+
+## Latest deployment
+
+New runs of workflows that embed
+[`workflow.StartOnLatest`](/guide/replay#moving-chains-to-the-latest-deployment)
+start on the latest deployment of this World's `DeploymentScope`, instead of
+the deployment that starts them.
+
+- **Recorded on first use.** Each deployment records itself in Redis the first
+  time a process queues a delivery or starts a marked run. A new deployment
+  counts once it does work, such as handling a webhook, not when it is built.
+- **Latest is the last recorded.** The latest deployment is the one recorded
+  most recently, so an older deployment never takes it back from a newer one.
+  A rollback is not followed until the rolled-back deployment is replaced, and
+  an older deployment that never ran before counts as new the first time it
+  does. Each process reuses the latest it read for a minute, and Redis keeps a
+  scope's 20 newest deployments.
+- **Scoped by environment.** `DeploymentScope` defaults to
+  `VERCEL_TARGET_ENV` or `VERCEL_ENV`, and for previews adds
+  `VERCEL_GIT_COMMIT_REF`, so runs never move between production, previews of
+  different branches, or custom environments. With no scope, as outside
+  Vercel or for a preview without a branch, or no `DeploymentID`, marked runs
+  stay on the deployment that starts them.
 
 ## Storage
 

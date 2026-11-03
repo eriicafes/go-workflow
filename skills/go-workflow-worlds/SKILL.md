@@ -17,8 +17,11 @@ installed contract. `go doc github.com/eriicafes/go-workflow/workflowtest`
 describes the public conformance test entry points.
 
 `World` embeds `Storage`, `Queue`, and `Streamer` and exposes BaseURL,
-Analytics, Capabilities, SpecVersion, and DeploymentID. Report supported
-optional capabilities. Unsupported attribute writes are successful no-ops;
+Analytics, Capabilities, SpecVersion, and DeploymentID. A World with
+deployment affinity can implement `worlds.LatestDeployments` so runs of
+workflows marked `workflow.StartOnLatest` start on its newest deployment.
+Report supported optional capabilities. Unsupported attribute writes are
+successful no-ops;
 unsupported analytics returns nil.
 
 Read [backend contracts](references/contracts.md) for the transaction,

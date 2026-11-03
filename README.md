@@ -77,7 +77,8 @@ If a deployed change makes a runner replay differently from what its run
 recorded, the runtime detects the divergence and fails the run with a
 `worlds.ErrCorruptedEventLog` instead of matching results to the wrong calls.
 Runs can also be pinned to the deployment that started them using DeploymentID,
-so in-flight runs keep replaying the code that recorded them.
+so in-flight runs keep replaying the code that recorded them, while workflows
+that embed `workflow.StartOnLatest` start new runs on the latest deployment.
 
 Steps run at least once and retry on error, three times by default. Set
 `workflow.StepOptions{MaxRetries: n}` to change that, return

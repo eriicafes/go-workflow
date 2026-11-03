@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1878,4 +1879,142 @@ func TestUndatedInlineAttemptKeepsItsLease(t *testing.T) {
 			t.Fatalf("step deliveries = %#v, want none", takeOver)
 		}
 	})
+}
+
+// latestWorld is a deployedWorld whose newest deployment is latest, as the
+// Vercel World reports through worlds.LatestDeployments.
+type latestWorld struct {
+	deployedWorld
+	latest string
+}
+
+func (w latestWorld) LatestDeploymentID(context.Context) (string, error) { return w.latest, nil }
+
+type latestChildInput struct {
+	workflow.Struct[struct{}]
+	workflow.StartOnLatest
+}
+
+type pinnedChildInput struct{ workflow.Struct[struct{}] }
+
+type startsChildrenInput struct {
+	workflow.Struct[startsChildrenOutput]
+}
+
+type startsChildrenOutput struct{ Latest, Pinned string }
+
+func startsChildren(ctx context.Context, _ startsChildrenInput) (startsChildrenOutput, error) {
+	latest, err := workflow.Start(ctx, latestChildInput{})
+	if err != nil {
+		return startsChildrenOutput{}, err
+	}
+	pinned, err := workflow.Start(ctx, pinnedChildInput{})
+	if err != nil {
+		return startsChildrenOutput{}, err
+	}
+	return startsChildrenOutput{Latest: latest.ID(), Pinned: pinned.ID()}, nil
+}
+
+func runDeployment(t *testing.T, ctx context.Context, world worlds.World, id string) string {
+	t.Helper()
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(id), ResolveData: worlds.ResolveDataNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run.DeploymentID
+}
+
+func TestStartOnLatestPinsClientRunsToTheLatestDeployment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
+	client := workflow.NewContext(ctx, workflow.NewClient(d1))
+
+	latest, err := workflow.Start(client, latestChildInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := workflow.Start(client, pinnedChildInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runDeployment(t, ctx, world, latest.ID()); got != "dpl_2" {
+		t.Fatalf("marked run deployment = %q, want dpl_2", got)
+	}
+	if got := runDeployment(t, ctx, world, pinned.ID()); got != "dpl_1" {
+		t.Fatalf("unmarked run deployment = %q, want dpl_1", got)
+	}
+	for _, queued := range world.Queued() {
+		if want := runDeployment(t, ctx, world, string(queued.RunID)); queued.DeploymentID != want {
+			t.Fatalf("delivery of %s addressed to %q, want %q", queued.RunID, queued.DeploymentID, want)
+		}
+	}
+}
+
+func TestStartOnLatestPinsHTTPClientRunsToTheLatestDeployment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
+	server := httptest.NewServer(worlds.HTTPHandler(d1, "/v1/workflow"))
+	defer server.Close()
+	client := workflow.NewContext(ctx, workflow.NewHTTPClient(server.URL+"/v1/workflow"))
+
+	latest, err := workflow.Start(client, latestChildInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := workflow.Start(client, pinnedChildInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runDeployment(t, ctx, world, latest.ID()); got != "dpl_2" {
+		t.Fatalf("marked run deployment = %q, want dpl_2", got)
+	}
+	if got := runDeployment(t, ctx, world, pinned.ID()); got != "dpl_1" {
+		t.Fatalf("unmarked run deployment = %q, want dpl_1", got)
+	}
+}
+
+func TestStartOnLatestPinsChildRunsToTheLatestDeployment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
+	runtime := worlds.NewRuntime(d1, worlds.Runners(workflow.Use(startsChildren)))
+
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1.deployedWorld)), startsChildrenInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, world, runtime)
+	output, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(d1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runDeployment(t, ctx, world, output.Latest); got != "dpl_2" {
+		t.Fatalf("marked child deployment = %q, want dpl_2", got)
+	}
+	if got := runDeployment(t, ctx, world, output.Pinned); got != "dpl_1" {
+		t.Fatalf("unmarked child deployment = %q, want dpl_1", got)
+	}
+}
+
+func TestStartOnLatestNeedsDeploymentAffinity(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), latestChildInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runDeployment(t, ctx, world, run.ID()); got != world.DeploymentID() {
+		t.Fatalf("run deployment = %q, want the World's own %q", got, world.DeploymentID())
+	}
 }

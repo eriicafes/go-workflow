@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -78,6 +79,15 @@ type Config struct {
 	// environment variable, which Vercel sets in every deployment. With
 	// neither, deployment affinity is off.
 	DeploymentID string
+	// DeploymentScope groups the deployments that runs of workflows marked
+	// workflow.StartOnLatest move between: new runs of those workflows are
+	// pinned to the scope's newest deployment that has used this Redis
+	// database. Empty uses the deployment's Vercel environment, from
+	// VERCEL_TARGET_ENV or VERCEL_ENV, and for previews also its branch, from
+	// VERCEL_GIT_COMMIT_REF, so runs never move between environments or
+	// branches. With neither, or for a preview without a branch, those runs
+	// stay on the deployment that starts them.
+	DeploymentScope string
 }
 
 // World is the Vercel World. It is safe for concurrent use, and any number of
@@ -87,6 +97,11 @@ type World struct {
 	http   *http.Client
 	redis  redisStore
 	prefix string
+	// latest guards latestID, the deployment LatestDeploymentID last read,
+	// and latestAt, when it read it.
+	latest   sync.Mutex
+	latestID string
+	latestAt time.Time
 	// scripts is the first argument of every script: the prefix, and the
 	// retention in microseconds when it is set.
 	scripts string
@@ -127,6 +142,9 @@ func New(config Config) (*World, error) {
 	}
 	if config.DeploymentID == "" {
 		config.DeploymentID = os.Getenv("VERCEL_DEPLOYMENT_ID")
+	}
+	if config.DeploymentScope == "" {
+		config.DeploymentScope = deploymentScopeFromEnv()
 	}
 	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix, scripts: config.Prefix}
 	if longest, _ := worlds.MaxRetention(config.Retention, config.Retentions); longest > 0 {
