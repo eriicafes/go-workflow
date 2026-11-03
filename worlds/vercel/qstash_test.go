@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 func TestVerifyQStashSignature(t *testing.T) {
@@ -52,13 +54,13 @@ func TestHTTPMountsQStashHandlerOnlyWhenConfigured(t *testing.T) {
 	server := newRecorder(t, nil)
 	world, _ := newQueueWorld(t, server, true)
 	response := httptest.NewRecorder()
-	HTTP(world).ServeHTTP(response, httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, nil))
+	HTTP(world).ServeHTTP(response, httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, nil))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 	world, _ = newQueueWorld(t, server, false)
 	response = httptest.NewRecorder()
-	HTTP(world).ServeHTTP(response, httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, nil))
+	HTTP(world).ServeHTTP(response, httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unconfigured status = %d, want %d", response.Code, http.StatusNotFound)
 	}
@@ -74,7 +76,7 @@ func TestHTTPPrefixMountsQStashHandlerUnderPrefix(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, nil))
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("default route status = %d, want %d", response.Code, http.StatusNotFound)
 	}

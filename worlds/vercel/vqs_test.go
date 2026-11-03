@@ -310,7 +310,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 	handler := QStash(world)
 
 	body := []byte(`{"id":"01ID"}`)
-	request := httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(body)))
+	request := httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, strings.NewReader(string(body)))
 	request.Header.Set("Upstash-Signature", qstashTestSignature(t, body, world.qstashURL, "next"))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -325,7 +325,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 		t.Fatalf("QStash ID kept after release: %+v", record)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(body)))
+	request = httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, strings.NewReader(string(body)))
 	request.Header.Set("Upstash-Signature", qstashTestSignature(t, body, "https://evil.example.com/v1/workflow/callbacks/qstash", "current"))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -334,7 +334,7 @@ func TestQStashHandlerRepublishesToVercelQueue(t *testing.T) {
 	}
 
 	missing := []byte(`{"id":"02ID"}`)
-	request = httptest.NewRequest(http.MethodPost, defaultHTTPPrefix+qstashRouteSuffix, strings.NewReader(string(missing)))
+	request = httptest.NewRequest(http.MethodPost, worlds.HTTPPrefixPath("")+qstashRouteSuffix, strings.NewReader(string(missing)))
 	request.Header.Set("Upstash-Signature", qstashTestSignature(t, missing, world.qstashURL, "current"))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
