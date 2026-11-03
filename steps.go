@@ -3,6 +3,8 @@ package workflow
 import (
 	"context"
 	"errors"
+	"reflect"
+	"runtime"
 	"slices"
 	"time"
 
@@ -334,4 +336,12 @@ func selectPromise(ctx context.Context, successful bool, results ...promise) (pr
 		}
 		execution.Wait()
 	}
+}
+
+func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) string {
+	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+}
+
+func rollbackFunctionIdentity[In any](fn func(context.Context, In) error) string {
+	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }
