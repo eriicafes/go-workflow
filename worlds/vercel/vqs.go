@@ -25,7 +25,7 @@ const (
 	vqsMaxDelay = 7 * 24 * time.Hour
 	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, so a
 	// message keeps a day of retention after it becomes visible. Longer delays
-	// go through QStash.
+	// are delivered in hops, or go through QStash when it is configured.
 	vqsMaxQueueDelay = 6 * 24 * time.Hour
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
@@ -68,11 +68,12 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 }
 
 // publishVQS sends messageID to topic, or to Config.Topic when it is empty,
-// addressed to deploymentID when it is set. The message ID doubles as the idempotency key so only a retried
-// publish of the same delivery is dropped. Runtime idempotency keys are reused
-// across distinct deliveries and Vercel would silently drop those for up to 24
-// hours.
-func (w *World) publishVQS(ctx context.Context, messageID, topic string, delay time.Duration, deploymentID string) error {
+// addressed to deploymentID when it is set. key is the idempotency key, the
+// message ID itself or, for a hop of a long timer, unique to that hop, so only a
+// retried publish of the same message is dropped. Runtime idempotency keys are
+// reused across distinct deliveries and Vercel would silently drop those for up
+// to 24 hours.
+func (w *World) publishVQS(ctx context.Context, messageID, key, topic string, delay time.Duration, deploymentID string) error {
 	if topic == "" {
 		topic = w.config.Topic
 	}
@@ -81,7 +82,7 @@ func (w *World) publishVQS(ctx context.Context, messageID, topic string, delay t
 		return err
 	}
 	header := http.Header{}
-	header.Set("Vqs-Idempotency-Key", messageID)
+	header.Set("Vqs-Idempotency-Key", key)
 	// Retain every message for the maximum so a delayed or failing delivery
 	// is not dropped before its record is processed.
 	header.Set("Vqs-Retention-Seconds", strconv.Itoa(int(vqsMaxDelay/time.Second)))

@@ -101,8 +101,8 @@ natively, and handles longer timers differently:
 | --- | --- | --- |
 | Local | none | in-process timer heap |
 | Postgres | none | rows with `not_before` |
-| Vercel | 6 days | set `Config.QStash` |
+| Vercel | 6 days | Vercel Queues hops of up to 6 days, or `Config.QStash` |
 | AWS | 15 minutes | set `Config.Scheduler` (EventBridge Scheduler) |
 
 Without the optional component, queueing a delivery beyond the limit returns an
-error. This applies to sleeps, timers, timeouts, and step retry delays.
+error, except on Vercel, which delivers it in hops. This applies to sleeps, timers, timeouts, and step retry delays.

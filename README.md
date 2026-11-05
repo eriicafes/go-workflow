@@ -181,8 +181,8 @@ log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
 log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
 ```
 
-Vercel Queues delays deliveries by at most seven days. Set `Config.QStash` to
-deliver work due later.
+Vercel Queues delays deliveries by at most six days here. Work due later is
+delivered in hops of up to six days, or by QStash when `Config.QStash` is set.
 
 
 ### AWS

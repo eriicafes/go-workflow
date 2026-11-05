@@ -70,15 +70,17 @@ func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bo
 	return record, true, nil
 }
 
-// Queue returns an error for a delivery due more than six days ahead unless
-// Config.QStash is set. It does not deduplicate by IdempotencyKey. It
-// publishes to input.DeploymentID, or to Config.DeploymentID when that is
+// Queue does not deduplicate by input.IdempotencyKey. Vercel Queues
+// deduplicates only retried publishes of the same delivery, by its message ID.
+// It publishes to input.DeploymentID, or to Config.DeploymentID when that is
 // empty, and returns an error wrapping worlds.ErrDeploymentUnavailable when
-// Vercel cannot find that deployment's consumer.
+// Vercel cannot find that deployment's consumer. A delivery due more than six
+// days ahead goes through QStash when Config.QStash is set, and otherwise is
+// delivered in hops of up to six days on Vercel Queues.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	// Store the delivery record, then publish its ID to Vercel Queues (delays
-	// up to six days) or QStash (longer delays). A failed publish removes the
-	// record.
+	// up to six days, in hops for longer ones) or QStash (longer delays, when
+	// configured). A failed publish removes the record.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
@@ -87,9 +89,6 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		delay = time.Until(*input.NotBefore)
 	}
 	long := delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second)
-	if long && w.config.QStash == nil {
-		return worlds.QueueResult{}, errors.New("workflow/vercel: delays over six days require QStash configuration")
-	}
 	id := ulid.Make().String()
 	deploymentID := input.DeploymentID
 	if deploymentID == "" {
@@ -109,8 +108,10 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 }
 
 func (w *World) schedule(ctx context.Context, id string, record queueRecord, delay time.Duration, long bool) error {
-	if !long {
-		return w.publishVQS(ctx, id, record.Topic, delay, record.DeploymentID)
+	if !long || w.config.QStash == nil {
+		// A delay beyond Vercel Queues' limit is delivered early, and the
+		// consumer publishes the next hop.
+		return w.publishVQS(ctx, id, id, record.Topic, min(delay, vqsMaxQueueDelay), record.DeploymentID)
 	}
 	// A delay beyond QStash's limit fires early and is scheduled again by
 	// releaseTimer.
@@ -150,15 +151,23 @@ func (w *World) releaseTimer(ctx context.Context, id string) error {
 	if delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second) {
 		return w.schedule(ctx, id, record, delay, true)
 	}
-	err = w.publishVQS(ctx, id, record.Topic, delay, record.DeploymentID)
-	if errors.Is(err, worlds.ErrDeploymentUnavailable) && record.DeploymentID != w.config.DeploymentID {
-		err = w.publishVQS(ctx, id, record.Topic, delay, w.config.DeploymentID)
-	}
-	if err != nil {
+	if err := w.republish(ctx, id, id, record, delay); err != nil {
 		return err
 	}
 	record.QStashMessageID = ""
 	_, err = w.putQueueRecord(ctx, id, record, "XX")
+	return err
+}
+
+// republish publishes an existing record to Vercel Queues under key, with
+// delay capped at the Vercel Queues limit. When the deployment the delivery is
+// addressed to is gone, it is published to this deployment instead.
+func (w *World) republish(ctx context.Context, id, key string, record queueRecord, delay time.Duration) error {
+	delay = min(delay, vqsMaxQueueDelay)
+	err := w.publishVQS(ctx, id, key, record.Topic, delay, record.DeploymentID)
+	if errors.Is(err, worlds.ErrDeploymentUnavailable) && record.DeploymentID != w.config.DeploymentID {
+		err = w.publishVQS(ctx, id, key, record.Topic, delay, w.config.DeploymentID)
+	}
 	return err
 }
 
@@ -240,7 +249,18 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		return http.StatusOK, c.world.acknowledge(ctx, delivery)
 	}
 	if record.NotBefore != nil {
-		if early := time.Until(*record.NotBefore); early > 0 {
+		early := time.Until(*record.NotBefore)
+		if early > vqsMaxVisibility {
+			// A delay beyond Vercel Queues' limit continues on the next hop,
+			// published before this one is acknowledged so a crash in between
+			// only redelivers this one, whose retried publish Vercel drops by
+			// its idempotency key.
+			if err := c.world.republish(ctx, message.ID, message.ID+":"+delivery.MessageID, record, early); err != nil {
+				return http.StatusInternalServerError, err
+			}
+			return http.StatusOK, c.world.acknowledge(ctx, delivery)
+		}
+		if early > 0 {
 			// Hide the message until it is due instead of failing it.
 			if err := c.world.setVisibility(ctx, delivery, early); err != nil {
 				return http.StatusInternalServerError, err

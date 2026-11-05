@@ -142,10 +142,10 @@ func TestPublishVQS(t *testing.T) {
 	world, _ := newQueueWorld(t, server, false)
 	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
 	world.config.DeploymentID = "dpl_1"
-	if err := world.publishVQS(context.Background(), "01ID", "", 90*time.Second+time.Millisecond, ""); err != nil {
+	if err := world.publishVQS(context.Background(), "01ID", "01ID", "", 90*time.Second+time.Millisecond, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.publishVQS(context.Background(), "02ID", "", 0, "dpl_run"); err != nil {
+	if err := world.publishVQS(context.Background(), "02ID", "02ID", "", 0, "dpl_run"); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.all()
@@ -183,7 +183,7 @@ func TestPublishVQSReportsUnavailableDeployment(t *testing.T) {
 	t.Cleanup(unavailable.Close)
 	world.config.QueueURL = unavailable.URL + "/api/v3"
 
-	err := world.publishVQS(context.Background(), "01ID", "", 0, "dpl_gone")
+	err := world.publishVQS(context.Background(), "01ID", "01ID", "", 0, "dpl_gone")
 	if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 		t.Fatalf("publish error = %v, want ErrDeploymentUnavailable", err)
 	}
@@ -263,21 +263,22 @@ func TestQueueRemovesRecordWhenPublishFails(t *testing.T) {
 func TestQueueLongDelays(t *testing.T) {
 	server := newRecorder(t, nil)
 	world, store := newQueueWorld(t, server, false)
+	// Without QStash, a long delay is published as a six-day hop.
 	due := time.Now().Add(8 * 24 * time.Hour)
-	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due}); err == nil || !strings.Contains(err.Error(), "QStash") {
-		t.Fatalf("long delay without QStash = %v", err)
+	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due})
+	if err != nil {
+		t.Fatalf("long delay without QStash: %v", err)
 	}
-	if len(store.values) != 0 || len(server.all()) != 0 {
-		t.Fatal("long delay without QStash stored or published")
+	if _, ok := store.record(t, result.MessageID); !ok {
+		t.Fatal("long delay without QStash stored no record")
 	}
-	edge := time.Now().Add(vqsMaxQueueDelay - time.Minute)
-	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &edge}); err != nil {
-		t.Fatalf("delay within six days: %v", err)
+	if got := server.all()[0].Header.Get("Vqs-Delay-Seconds"); got != strconv.Itoa(int(vqsMaxQueueDelay/time.Second)) {
+		t.Fatalf("Vqs-Delay-Seconds = %q, want six days", got)
 	}
 
 	world, store = newQueueWorld(t, server, true)
 	due = time.Now().Add(6*24*time.Hour + 12*time.Hour)
-	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due})
+	result, err = world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &due})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,13 +361,13 @@ func TestQueueConsumerPaths(t *testing.T) {
 	}
 
 	// An early delivery is hidden until due.
-	due := time.Now().Add(90 * time.Minute)
+	due := time.Now().Add(30 * time.Minute)
 	data, _ := json.Marshal(queueRecord{RunID: "wrun_1", NotBefore: &due})
 	store.values["p:queue:early"] = string(data)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, deliveryRequest("msg_2", `{"id":"early"}`))
 	patch := server.all()[1]
-	if response.Code != http.StatusAccepted || patch.Method != http.MethodPatch || patch.Path != lease || patch.Body != `{"visibilityTimeoutSeconds":3600}` {
+	if response.Code != http.StatusAccepted || patch.Method != http.MethodPatch || patch.Path != lease || patch.Body != `{"visibilityTimeoutSeconds":1800}` {
 		t.Fatalf("early delivery: status %d request %+v", response.Code, patch)
 	}
 	if _, ok := store.record(t, "early"); !ok {
@@ -586,5 +587,52 @@ func TestReleaseTimerFallsBackFromAnUnavailableDeployment(t *testing.T) {
 	}
 	if strings.Join(deployments, ",") != "dpl_gone,dpl_current" {
 		t.Fatalf("published to %v, want the pinned deployment then the current one", deployments)
+	}
+}
+
+func TestQueueConsumerPublishesNextHop(t *testing.T) {
+	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
+	world, store := newQueueWorld(t, server, false)
+	handler := Queue(world, nil)
+	due := time.Now().Add(8 * 24 * time.Hour)
+	data, _ := json.Marshal(queueRecord{RunID: "wrun_1", NotBefore: &due, DeploymentID: "dpl_run"})
+	store.values["p:queue:long"] = string(data)
+
+	// A delivery due beyond one lease is continued on a new message for the
+	// rest of the delay, then acknowledged.
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, deliveryRequest("msg_1", `{"id":"long"}`))
+	requests := server.all()
+	if response.Code != http.StatusOK || len(requests) != 2 {
+		t.Fatalf("hop delivery: status %d requests %+v", response.Code, requests)
+	}
+	publish, ack := requests[0], requests[1]
+	if publish.Method != http.MethodPost || publish.Path != "/api/v3/topic/workflow" || publish.Body != `{"id":"long"}` {
+		t.Fatalf("next hop publish = %+v", publish)
+	}
+	for header, want := range map[string]string{
+		"Vqs-Idempotency-Key": "long:msg_1",
+		"Vqs-Delay-Seconds":   strconv.Itoa(int(vqsMaxQueueDelay / time.Second)),
+		"Vqs-Deployment-Id":   "dpl_run",
+	} {
+		if got := publish.Header.Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	if ack.Method != http.MethodDelete {
+		t.Fatalf("hop delivery not acknowledged: %+v", ack)
+	}
+	if _, ok := store.record(t, "long"); !ok {
+		t.Fatal("hop delivery removed its record")
+	}
+
+	// The last hop is delayed only by what remains.
+	due = time.Now().Add(2 * 24 * time.Hour)
+	data, _ = json.Marshal(queueRecord{RunID: "wrun_1", NotBefore: &due})
+	store.values["p:queue:long"] = string(data)
+	handler.ServeHTTP(httptest.NewRecorder(), deliveryRequest("msg_2", `{"id":"long"}`))
+	seconds, _ := strconv.ParseInt(server.all()[2].Header.Get("Vqs-Delay-Seconds"), 10, 64)
+	if remaining := time.Duration(seconds) * time.Second; remaining > 2*24*time.Hour+time.Second || remaining < 2*24*time.Hour-time.Minute {
+		t.Fatalf("last hop delay = %s, want about two days", remaining)
 	}
 }

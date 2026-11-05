@@ -5,13 +5,13 @@ import vercelworld "github.com/eriicafes/go-workflow/worlds/vercel"
 ```
 
 The Vercel World stores the event log and its views in Redis and delivers work
-through Vercel Queues. QStash is optional and only carries timers longer than
-six days.
+through Vercel Queues. Timers longer than six days are delivered in hops of up to
+six days on Vercel Queues, or carried by QStash when it is configured.
 
 | Service | Role |
 | --- | --- |
 | Redis (Upstash, TCP or REST) | Event log, run/step/hook views, hook tokens, streams, queue records |
-| Vercel Queues | Delivers queued items with delays up to 6 days |
+| Vercel Queues | Delivers queued items with delays up to 6 days, in hops for longer timers |
 | QStash (optional) | Timers longer than 6 days, handed back to Vercel Queues when due |
 
 ## Usage
@@ -124,12 +124,22 @@ without a topic.
 - **`Deployment(world)`**: the deployment route alone. Mount it at
   `GET <Config.BaseURL>/deployment`.
 
-## Long timers with QStash
+## Long timers
 
 Vercel Queues delays and retains messages for at most seven days. The World
 publishes delays of up to six days to it, so every message keeps a day of
-retention after it becomes visible. Without QStash, queueing a delivery due
-later returns an error. Configure QStash before opening the World:
+retention after it becomes visible. A delivery due later is published with a
+six-day delay, and when it arrives more than an hour early the consumer
+publishes a new message for the rest of the delay, then acknowledges the old
+one. Each hop's idempotency key is the record ID and the incoming Vercel message
+ID, so a hop retried after a crash is dropped. Cancelling a long timer
+deletes its record, and the next hop finds none and is acknowledged.
+
+### QStash
+
+QStash optionally carries long timers instead of hops, with one wake per
+`QStashConfig.MaxDelay` rather than per six days. Configure it before opening
+the World:
 
 ```go
 config.QStash = &vercelworld.QStashConfig{
@@ -242,8 +252,9 @@ The consumer handles each delivery as follows:
 1. Parses the push request: a binary `com.vercel.queue.v2beta` CloudEvent or a
    structured `v1beta` one.
 2. Loads the record. A missing record (cancelled or done) is acknowledged.
-3. If the record is not yet due, extends the lease (at most an hour) instead of
-   failing.
+3. If the record is due within an hour, extends the lease instead of failing.
+   If it is due later, publishes a new message for the rest of the delay and
+   acknowledges this one.
 4. Executes the delivery, renewing the lease every minute.
 5. On success deletes the record and acknowledges the message.
 6. On failure sets the visibility to a backoff of 5 s to 5 min and answers

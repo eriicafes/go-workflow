@@ -1,14 +1,14 @@
 # Vercel world
 
 `vercelworld` stores the workflow event log and its views in Redis and delivers
-work through Vercel Queues. QStash is optional and only carries timers longer
-than seven days.
+work through Vercel Queues. Timers longer than six days are delivered in hops
+of up to six days on Vercel Queues, or carried by QStash when it is configured.
 
 | Service | Role |
 | --- | --- |
 | Redis (Upstash, TCP or REST) | Event log, run/step/hook views, hook tokens, streams, queue records |
-| Vercel Queues | Delivery of every queued item; delays up to 7 days |
-| QStash (optional) | Timers longer than 7 days, handed back to Vercel Queues when due |
+| Vercel Queues | Delivery of every queued item; delays up to 6 days, in hops for longer timers |
+| QStash (optional) | Timers longer than 6 days, handed back to Vercel Queues when due |
 
 ## Entrypoints
 
@@ -163,8 +163,9 @@ returned.
   its delay. `Vqs-Idempotency-Key` is the message ID. Runtime idempotency keys
   are reused across distinct deliveries, and Vercel would silently drop a
   repeat for up to 24 hours.
-- Delays over 7 days go to QStash when `Config.QStash` is set. Otherwise
-  `Queue` returns an error. The QStash message ID is stored on the record.
+- Delays over 6 days go to QStash when `Config.QStash` is set, and the QStash
+  message ID is stored on the record. Otherwise the message is published with
+  a 6-day delay, and the consumer publishes the next hop.
 
 `QueueCancel` deletes the record and any pending QStash message. A Vercel
 Queues message cannot be recalled; its delivery finds no record and is
@@ -176,8 +177,10 @@ The consumer handles each delivery as follows:
    (`ce-vqs*` headers, payload in the body) or a structured `v1beta` one.
    Deliveries without a receipt handle are claimed with `ReceiveMessageById`.
 2. It loads the record. A missing record is acknowledged without running.
-3. If the record's `NotBefore` is in the future, it extends the lease
-   (`PATCH .../lease/{receiptHandle}`, at most an hour) instead of failing.
+3. If the record's `NotBefore` is within an hour, it extends the lease
+   (`PATCH .../lease/{receiptHandle}`) instead of failing. If it is later, it
+   publishes a new message for the rest of the delay (at most 6 days, with
+   idempotency key `{recordID}:{vercelMessageID}`) and acknowledges this one.
 4. It runs `worlds.NewRuntime(world, runners).Execute`, renewing the lease
    every minute.
 5. On success it deletes the record and acknowledges the message

@@ -1,6 +1,7 @@
 // Package vercelworld implements a World on Redis (over TCP or the Upstash REST
-// API) and Vercel Queues, for deployments on Vercel Functions. QStash can
-// optionally deliver work due more than six days ahead.
+// API) and Vercel Queues, for deployments on Vercel Functions. Work due more
+// than six days ahead is delivered in hops of up to six days on Vercel Queues,
+// or by QStash when it is configured.
 package vercelworld
 
 import (
@@ -71,7 +72,8 @@ type Config struct {
 	// forever.
 	Retentions map[string]time.Duration
 	// QStash, when set, delivers work due more than six days ahead. Without
-	// it, queueing such a delivery returns an error.
+	// it, such a delivery is made in hops of up to six days on Vercel
+	// Queues.
 	QStash *QStashConfig
 	// HTTPClient sends Redis REST, Vercel Queues, and QStash requests. Nil uses
 	// http.DefaultClient.

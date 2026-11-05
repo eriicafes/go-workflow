@@ -90,7 +90,7 @@ is retried with backoff.
 | World | Native max delay | Failed delivery backoff |
 | --- | --- | --- |
 | Local | unlimited | 100 ms up to 30 s |
-| Vercel | 6 days (longer with QStash) | 5 s up to 5 min |
+| Vercel | 6 days (longer in hops, or with QStash) | 5 s up to 5 min |
 | AWS | 15 min (longer with Scheduler) | 1 s up to 15 min |
 | Postgres | unlimited | 1 s up to 5 min |
 
