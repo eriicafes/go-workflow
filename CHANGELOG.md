@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.8.0
+
+### Minor Changes
+
+- 3440879: Deliver timers longer than six days in hops of up to six days on Vercel Queues in the Vercel World, so QStash is no longer required for them.
+
 ## 0.7.0
 
 ### Minor Changes
