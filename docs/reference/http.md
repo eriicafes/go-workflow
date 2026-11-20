@@ -79,7 +79,7 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 | Streams | `streams.write`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
 | Keys | `runs.encryptionKey` |
-| Client | `client.spec`, `client.runs.create`, `client.runs.startDeployment`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
+| Client | `client.spec`, `client.runs.newId`, `client.runs.create`, `client.runs.startDeployment`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
 Most methods return the World's Go types. The event writes return the Workflow
 SDK's result shapes instead: `events.create` and `events.createRun` return

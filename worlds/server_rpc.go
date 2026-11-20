@@ -556,6 +556,12 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			}
 		}
 		return encodeRPC(key)
+	case "client.runs.newId":
+		input, err := decodeRPC[ClientRunsNewIDInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(newRunID(world, input))
 	case "client.runs.startDeployment":
 		input, err := decodeRPC[ClientRunsStartDeploymentInput](request.Input)
 		if err != nil {
@@ -671,6 +677,12 @@ type (
 		// Latest asks for LatestDeployment.
 		DeploymentID string
 		Latest       bool
+	}
+	// ClientRunsNewIDInput holds the arguments to Client.RunsNewID and the
+	// client.runs.newId RPC method. Region is a Region's code, or "" to
+	// leave it to the World.
+	ClientRunsNewIDInput struct {
+		Region string
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
 	// method, which cancels the run.
@@ -872,4 +884,10 @@ func (input ClientRunsStartDeploymentInput) deployment() Deployment {
 		return OnDeployment(input.DeploymentID)
 	}
 	return Deployment{latest: input.Latest}
+}
+
+// newRunID returns the ID of a new run of world in input's region.
+func newRunID(world World, input ClientRunsNewIDInput) RunID {
+	region, _ := ParseRegion(input.Region)
+	return RegionRunID(world, NewRunID(), region)
 }

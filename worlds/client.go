@@ -109,6 +109,10 @@ type Client interface {
 	// RunKeys returns the keys of a run's payloads, or nil when they are not
 	// encrypted, as the World's EncryptionKeys resolves them.
 	RunKeys(context.Context, RunKeysInput) (*RunKeys, error)
+	// RunsNewID returns the ID of a new run in input.Region, as the World
+	// mints it: tagged with its region by a World that implements
+	// RegionalRunIDs, and a plain run ID otherwise.
+	RunsNewID(context.Context, ClientRunsNewIDInput) (RunID, error)
 	// RunsStartDeployment returns the deployment a new run starts on, as
 	// StartDeploymentID does, so its payloads can be encrypted for it
 	// before it is created.
@@ -258,6 +262,10 @@ func (c worldClient) Spec(context.Context) (ClientSpec, error) {
 
 func (c worldClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
 	return RunKeysFor(ctx, c.world, input.RunID, input.DeploymentID)
+}
+
+func (c worldClient) RunsNewID(_ context.Context, input ClientRunsNewIDInput) (RunID, error) {
+	return newRunID(c.world, input), nil
 }
 
 func (c worldClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
@@ -498,6 +506,12 @@ func (c *httpClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys,
 	}
 	c.runKeys.Store(input.RunID, keys)
 	return keys, nil
+}
+
+func (c *httpClient) RunsNewID(ctx context.Context, input ClientRunsNewIDInput) (RunID, error) {
+	var id RunID
+	err := c.call(ctx, "client.runs.newId", input, &id)
+	return id, err
 }
 
 func (c *httpClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {

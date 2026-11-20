@@ -529,6 +529,11 @@ type Deployment = worlds.Deployment
 // Workflow SDK's deploymentId: 'latest' does.
 var LatestDeployment = worlds.LatestDeployment
 
+// Region is the region a run's data lives in. Its values are the
+// worlds.Region variables, such as worlds.RegionIAD1, and its zero value
+// leaves it to the World.
+type Region = worlds.Region
+
 // OnDeployment starts a run on the deployment id.
 func OnDeployment(id string) Deployment { return worlds.OnDeployment(id) }
 
@@ -559,6 +564,12 @@ type StartOptions struct {
 	// NoArgumentCompression stores the run's input uncompressed, for input
 	// that does not compress, such as media or encrypted bytes.
 	NoArgumentCompression bool
+	// Region is the region the run's data lives in and its deliveries are
+	// routed to, one of the worlds.Region values such as worlds.RegionFRA1.
+	// Only a World that implements worlds.RegionalRunIDs, such as the Vercel
+	// World, uses it, by tagging the run's ID; others ignore it, as in the
+	// Workflow SDK. The zero value leaves it to the World.
+	Region Region
 	// ReplayedFromRunID is the ID of the run this run replays, wrun_ and a
 	// ULID. It is recorded in the run's ExecutionContext, so tools such as
 	// the Workflow web UI link the replay to its source.
@@ -578,6 +589,7 @@ type startSettings struct {
 	Latest        bool              `json:"latest,omitempty"`
 	Retention     string            `json:"retention,omitempty"`
 	ReplayedFrom  string            `json:"replayedFrom,omitempty"`
+	Region        string            `json:"region,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
 }
@@ -595,9 +607,16 @@ func (options StartOptions) settings() (startSettings, error) {
 		Latest:        options.Deployment.Latest(),
 		Retention:     options.Retention.String(),
 		ReplayedFrom:  options.ReplayedFromRunID,
+		Region:        options.Region.String(),
 		Attributes:    options.Attributes,
 		NoCompression: options.NoArgumentCompression,
 	}, nil
+}
+
+// region returns the Region settings record.
+func (settings startSettings) region() Region {
+	region, _ := worlds.ParseRegion(settings.Region)
+	return region
 }
 
 // executionContext returns the run's ExecutionContext, or nil when it has
@@ -666,7 +685,10 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	}
 	// The input is encrypted with the run's key, so the run's ID and
 	// deployment are settled first.
-	runID := worlds.NewRunID()
+	runID, err := client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: settings.Region})
+	if err != nil {
+		return nil, err
+	}
 	deploymentID, err := client.RunsStartDeployment(ctx, worlds.NewClientRunsStartDeploymentInput(settings.deployment()))
 	if err != nil {
 		return nil, err
@@ -726,7 +748,8 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	if root == "" {
 		root = string(parent.RunID)
 	}
-	id := worlds.NewChildRunID(worlds.StepID(StepID(ctx)))
+	// Tagging is deterministic, so a retried attempt keeps the same ID.
+	id := worlds.RegionRunID(execution.World(), worlds.NewChildRunID(worlds.StepID(StepID(ctx))), input.Settings.region())
 	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Settings.deployment())
 	if err != nil {
 		return "", err

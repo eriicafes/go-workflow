@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"io"
 	"reflect"
 	"strings"
@@ -403,6 +404,84 @@ func TestStartOptions(t *testing.T) {
 		if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: attributes}); !errors.Is(err, worlds.ErrAttributeInvalid) {
 			t.Fatalf("Start with attributes %v error = %v", attributes, err)
 		}
+	}
+}
+
+// regionalWorld is a World whose run IDs carry their region as a suffix.
+type regionalWorld struct{ *testworld.World }
+
+func (regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
+	if region == (worlds.Region{}) {
+		region = worlds.RegionIAD1
+	}
+	return id + worlds.RunID("_"+region.String())
+}
+
+func (regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
+	_, code, _ := strings.Cut(strings.TrimPrefix(string(id), "wrun_"), "_")
+	return worlds.ParseRegion(code)
+}
+
+type regionParentInput struct{}
+
+func (regionParentInput) Workflow(string) {}
+
+func TestStartRegion(t *testing.T) {
+	runners := worlds.Runners(
+		workflow.Use(func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }),
+		workflow.Use(func(ctx context.Context, _ regionParentInput) (string, error) {
+			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.RegionSYD1})
+			if err != nil {
+				return "", err
+			}
+			return run.ID(), nil
+		}),
+	)
+	// The runtime runs on the regional World, so child starts see it.
+	inner := testworld.NewManual()
+	defer inner.Close()
+	world := regionalWorld{inner}
+	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for name, client := range map[string]workflow.Client{"in process": workflow.NewClient(world), "over HTTP": workflow.NewHTTPClient(server.URL + "/v1/workflow")} {
+		clientCtx := workflow.NewContext(ctx, client)
+		run, err := workflow.Start(clientCtx, optionsChildInput{}, workflow.StartOptions{Region: worlds.RegionFRA1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if region, _ := world.RegionForRunID(worlds.RunID(run.ID())); region != worlds.RegionFRA1 {
+			t.Errorf("%s run %s region = %s, want fra1", name, run.ID(), region)
+		}
+		plain, err := workflow.Start(clientCtx, optionsChildInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if region, _ := world.RegionForRunID(worlds.RunID(plain.ID())); region != worlds.RegionIAD1 {
+			t.Errorf("%s run without Region %s region = %s, want the World's iad1", name, plain.ID(), region)
+		}
+	}
+	parent, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), regionParentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := worlds.NewRuntime(world, runners)
+	for _, message := range inner.QueuedMessages() {
+		if message.Input.RunID != worlds.RunID(parent.ID()) {
+			continue
+		}
+		if err := runtime.Execute(ctx, message.Input); err != nil {
+			t.Fatal(err)
+		}
+		_ = inner.Acknowledge(ctx, message.ID)
+	}
+	childID, err := parent.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if region, _ := world.RegionForRunID(worlds.RunID(childID)); region != worlds.RegionSYD1 {
+		t.Errorf("child run %s region = %s, want syd1", childID, region)
 	}
 }
 
