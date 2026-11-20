@@ -485,6 +485,55 @@ func TestStartRegion(t *testing.T) {
 	}
 }
 
+type startHookInput struct{ Token string }
+
+func (startHookInput) Workflow(string) {}
+
+func TestStartHook(t *testing.T) {
+	world := testworld.NewManual()
+	defer world.Close()
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
+		return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
+	}))
+	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for name, client := range map[string]workflow.Client{"in process": workflow.NewClient(world), "over HTTP": workflow.NewHTTPClient(server.URL + "/v1/workflow")} {
+		clientCtx := workflow.NewContext(ctx, client)
+		token := "start-hook-" + strings.ReplaceAll(name, " ", "-")
+		run, err := workflow.Start(clientCtx, startHookInput{Token: token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: token, MinRetention: time.Hour, Metadata: "meta"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The hook takes a payload before the run first executes, and the
+		// workflow's hook of the same token opens it.
+		if err := workflow.ResumeHook(clientCtx, token, "early"); err != nil {
+			t.Fatalf("%s: resume before the run started: %v", name, err)
+		}
+		_, err = workflow.Start(clientCtx, startHookInput{Token: token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: token}})
+		var conflict *worlds.HookConflictError
+		if !errors.As(err, &conflict) || conflict.RunID != worlds.RunID(run.ID()) {
+			t.Fatalf("%s: duplicate start error = %v", name, err)
+		}
+		runtime := worlds.NewRuntime(world, runners)
+		for len(world.QueuedMessages()) != 0 {
+			message := world.QueuedMessages()[0]
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			_ = world.Acknowledge(ctx, message.ID)
+		}
+		if value, err := run.Value(clientCtx); err != nil || value != "early" {
+			t.Fatalf("%s: run value = %q, %v", name, value, err)
+		}
+	}
+	unsupported := workflow.NewContext(ctx, workflow.NewClient(noDeleteWorld{world}))
+	if _, err := workflow.Start(unsupported, startHookInput{}, workflow.StartOptions{Hook: &workflow.StartHook{Token: "t"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("start hook on a World without it error = %v", err)
+	}
+}
+
 func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)

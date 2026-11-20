@@ -69,6 +69,9 @@ type Capabilities struct {
 	// RunsDeleteDataMany and honors the RetentionAttribute value of
 	// RetainNone.
 	DeleteData bool `cbor:"deleteData"`
+	// StartHook reports that EventsCreateRun creates a run's StartHook with
+	// it, as the Workflow SDK's atomicStartHook capability does.
+	StartHook bool `cbor:"startHook"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that

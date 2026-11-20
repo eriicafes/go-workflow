@@ -84,6 +84,17 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
+	if input.StartHook != nil {
+		if input.StartHook.Token == "" {
+			return worlds.EventResult{}, worlds.ErrEventInvalid
+		}
+		// The start hook claims its token with the run, or no run is
+		// created.
+		m.expireTokenLocked(input.StartHook.Token, now)
+		if owner := m.tokens[input.StartHook.Token]; owner != "" {
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: m.hooks[owner].RunID}
+		}
+	}
 	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
@@ -94,6 +105,11 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	}
 	m.runs[input.RunID] = run
 	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}}
+	if hook := input.StartHook; hook != nil {
+		id := worlds.StartHookID(input.RunID)
+		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}
+		m.tokens[hook.Token] = id
+	}
 	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, AllocatedEventCount: 1}, nil
 }
 

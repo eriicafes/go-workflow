@@ -425,6 +425,11 @@ type (
 		// ExecutionContextReplayedFromRunID. The World records it in
 		// run_created and on the Run.
 		ExecutionContext map[string]any
+		// StartHook, on a World with Capabilities().StartHook, creates the
+		// run's start hook in the same write as the run, claiming its token.
+		// When another run holds the token, no run is created and the World
+		// returns a *HookConflictError naming that run.
+		StartHook *StartHook
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {

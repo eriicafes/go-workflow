@@ -417,3 +417,13 @@ func decodeErrorNode(node any) (error, error) {
 	}
 	return &Error{message: chain[0].Message, chain: chain}, nil
 }
+
+// HookConflictError is ErrHookConflict naming the run that holds the token,
+// as the Workflow SDK's HookConflictError carries conflictingRunId.
+type HookConflictError struct{ RunID RunID }
+
+func (e *HookConflictError) Error() string {
+	return fmt.Sprintf("%s by run %s", ErrHookConflict, e.RunID)
+}
+
+func (e *HookConflictError) Is(target error) bool { return target == ErrHookConflict }

@@ -42,6 +42,15 @@ func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveDat
 		return nil
 	}
 	delete(object, field)
+	if raw, ok := object["startHook"]; ok && eventType == EventTypeRunCreated {
+		// A start hook's metadata is user data; its token and retention are
+		// not.
+		var hook map[string]json.RawMessage
+		if json.Unmarshal(raw, &hook) == nil {
+			delete(hook, "metadata")
+			object["startHook"], _ = json.Marshal(hook)
+		}
+	}
 	if len(object) == 0 {
 		return nil
 	}
@@ -127,6 +136,40 @@ type DataRunCreated struct {
 	EncryptionPublicKey string `json:"encryptionPublicKey,omitempty"`
 	// ExecutionContext is the run's executionContext.
 	ExecutionContext map[string]any `json:"executionContext,omitempty"`
+	// StartHook is the hook created with the run. See StartHook.
+	StartHook *StartHook `json:"startHook,omitempty"`
+}
+
+// StartHook is a hook a World creates in the same write as its run, as the
+// Workflow SDK's start({ experimental_hook }) does, so a second start with
+// the same token is refused before it becomes a run. Its ID is StartHookID of
+// the run, and no hook_created is recorded for it: run_created stands for it.
+// From then on it is an ordinary hook of the run, which the workflow opens
+// with a hook of the same token.
+type StartHook struct {
+	Token string `json:"token"`
+	// HookID is the hook's ID, which the World sets on what it records.
+	HookID HookID `json:"hookId,omitempty"`
+	// TokenRetentionUntil keeps the token after the run ends until then.
+	TokenRetentionUntil *time.Time `json:"tokenRetentionUntil,omitempty"`
+	// Metadata is the hook's metadata payload, as a hook_created records
+	// it.
+	Metadata []byte `json:"metadata,omitempty"`
+}
+
+// StartHookID returns the ID of the start hook of runID: hook_ and the run
+// ID's ULID, as the Workflow SDK's startHookId.
+func StartHookID(runID RunID) HookID {
+	return HookID("hook_" + strings.TrimPrefix(string(runID), "wrun_"))
+}
+
+// RunStartHook returns the start hook a run_created event records, or nil.
+func RunStartHook(data []byte) *StartHook {
+	var created DataRunCreated
+	if json.Unmarshal(data, &created) != nil {
+		return nil
+	}
+	return created.StartHook
 }
 
 // ExecutionContextReplayedFromRunID is the executionContext key naming the
@@ -143,7 +186,19 @@ func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
 		DeploymentID:        input.DeploymentID,
 		EncryptionPublicKey: input.EncryptionPublicKey,
 		ExecutionContext:    input.ExecutionContext,
+		StartHook:           startHookOf(input),
 	})
+}
+
+// startHookOf returns the start hook of input as run_created records it,
+// with its ID.
+func startHookOf(input EventsCreateRunInput) *StartHook {
+	if input.StartHook == nil {
+		return nil
+	}
+	hook := *input.StartHook
+	hook.HookID = StartHookID(input.RunID)
+	return &hook
 }
 
 // DataRunCompleted is the Data of a run_completed event.
