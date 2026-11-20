@@ -2,7 +2,12 @@ package vercelworld
 
 import (
 	"context"
-	"sort"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -10,183 +15,327 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-const streamPollMax = 500 * time.Millisecond
+const (
+	// streamChunksPerWrite is the most chunks one write request carries.
+	streamChunksPerWrite = 1000
+	// streamPageSize is the default number of chunks one read returns.
+	streamPageSize = 100
+	streamPollMax  = 500 * time.Millisecond
+	// streamCursorCacheSize bounds the backend cursors a World remembers.
+	streamCursorCacheSize = 1024
+)
 
-type streamWriteSession struct {
-	mu     sync.Mutex
-	world  *World
-	runID  worlds.RunID
-	name   string
-	id     worlds.StreamID
-	closed bool
+// Streams are stored by the backend. Read cursors are chunk indexes, so any
+// instance can continue a read.
+
+// defaultStreamName is the backend name of a run's default stream, whose
+// go-workflow name is empty and cannot be a path segment.
+const defaultStreamName = "_default"
+
+// streamName returns the backend name of a stream.
+func streamName(name string) string {
+	if name == "" {
+		return defaultStreamName
+	}
+	return name
 }
 
-func (s *streamWriteSession) ID() worlds.StreamID { return s.id }
-
-func (s *streamWriteSession) Write(ctx context.Context, input worlds.StreamWriteSessionWriteInput) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return worlds.ErrRunTerminal
-	}
-	return s.world.StreamsWriteSession(ctx, worlds.StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks})
+func (w *World) streamPath(runID worlds.RunID, name string) string {
+	return "/v2/runs/" + pathEscape(string(runID)) + "/stream/" + pathEscape(streamName(name))
 }
 
-func (s *streamWriteSession) Close(ctx context.Context) error   { return s.close(ctx, true) }
-func (s *streamWriteSession) Release(ctx context.Context) error { return s.close(ctx, false) }
-
-func (s *streamWriteSession) close(ctx context.Context, closeStream bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.world.StreamsCloseWriteSession(ctx, worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: closeStream}); err != nil {
-		return err
-	}
-	s.closed = true
-	return nil
+func (w *World) streamsPath(runID worlds.RunID, name, suffix string) string {
+	return "/v2/runs/" + pathEscape(string(runID)) + "/streams/" + pathEscape(streamName(name)) + suffix
 }
 
-func (w *World) streamScript(ctx context.Context, script *redisScript, runID worlds.RunID, name string, args ...string) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header) error {
+	if header == nil {
+		header = http.Header{}
 	}
-	_, err := scriptReply(w.redis.Run(ctx, script, append([]string{w.scripts, string(runID), name}, args...)...))
-	return err
-}
-
-func (w *World) StreamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
-	id := worlds.NewStreamID()
-	if err := w.streamScript(ctx, scriptStreamCreateSession, input.RunID, input.Name, string(id)); err != nil {
-		return nil, err
+	header.Set("Content-Type", "application/octet-stream")
+	if body == nil {
+		body = []byte{}
 	}
-	return &streamWriteSession{world: w, runID: input.RunID, name: input.Name, id: id}, nil
-}
-
-func (w *World) StreamsWriteSession(ctx context.Context, input worlds.StreamsWriteSessionInput) error {
-	args := append([]string{string(input.SessionID), strconv.Itoa(input.Sequence)}, encodeChunks(input.Chunks)...)
-	return w.streamScript(ctx, scriptStreamWriteSession, input.RunID, input.Name, args...)
-}
-
-func (w *World) StreamsCloseWriteSession(ctx context.Context, input worlds.StreamsCloseWriteSessionInput) error {
-	closeStream := "0"
-	if input.Close {
-		closeStream = "1"
+	response, err := w.api.request(ctx, http.MethodPut, w.streamPath(runID, name), nil, body, header)
+	if err != nil {
+		if status := statusOf(err); status == http.StatusConflict || status == http.StatusGone {
+			return errors.Join(worlds.ErrStreamClosed, err)
+		}
+		return notFound(err, worlds.ErrRunNotFound)
 	}
-	return w.streamScript(ctx, scriptStreamCloseSession, input.RunID, input.Name, string(input.SessionID), closeStream)
+	return response.Body.Close()
 }
 
 func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
-	return w.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
+	return w.putStream(ctx, input.RunID, input.Name, input.Chunk, nil)
 }
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
-	return w.streamScript(ctx, scriptStreamWrite, input.RunID, input.Name, encodeChunks(input.Chunks)...)
+	for start := 0; start < len(input.Chunks); start += streamChunksPerWrite {
+		chunks := input.Chunks[start:min(start+streamChunksPerWrite, len(input.Chunks))]
+		var body []byte
+		for _, chunk := range chunks {
+			body = binary.BigEndian.AppendUint32(body, uint32(len(chunk)))
+			body = append(body, chunk...)
+		}
+		header := http.Header{}
+		header.Set("X-Stream-Multi", "true")
+		if err := w.putStream(ctx, input.RunID, input.Name, body, header); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
-	return w.streamScript(ctx, scriptStreamClose, input.RunID, input.Name)
+	header := http.Header{}
+	header.Set("X-Stream-Done", "true")
+	return w.putStream(ctx, input.RunID, input.Name, nil, header)
 }
 
-// readStream returns the done flag, chunk count, and up to count chunks from
-// start in one consistent read.
-func (w *World) readStream(ctx context.Context, runID worlds.RunID, name string, start, count int) (bool, int, [][]byte, error) {
-	result, err := w.redis.Run(ctx, scriptStreamRead, w.scripts, string(runID), name, strconv.Itoa(start), strconv.Itoa(count))
+// streamSocketRetryAfter is how long a World writes through HTTP after the
+// backend declines a stream socket.
+const streamSocketRetryAfter = 5 * time.Minute
+
+// directStreamer hides StreamsOpenWriter, so worlds.OpenStreamWriter returns
+// a writer of the World's HTTP stream writes.
+type directStreamer struct{ worlds.Streamer }
+
+// StreamsOpenWriter returns a writer that sends a stream's writes over the
+// backend's stream socket, as the Workflow SDK does, writing through HTTP
+// while the socket opens and when it is declined or fails. The socket is
+// reachable with a deployment's OIDC token only, so through the API proxy,
+// or with WORKFLOW_STREAMS_TRANSPORT set to http, writes go through HTTP.
+// A writer without a writer ID is given one.
+func (w *World) StreamsOpenWriter(ctx context.Context, input worlds.StreamsOpenWriterInput) (worlds.StreamWriter, error) {
+	if input.WriterID == "" {
+		input.WriterID = worlds.NewWriterID()
+	}
+	direct, err := worlds.OpenStreamWriter(ctx, directStreamer{w}, input)
 	if err != nil {
-		return false, 0, nil, err
+		return nil, err
 	}
-	values, _ := result.([]any)
-	if len(values) < 2 {
-		return false, 0, nil, errCorrupt
+	w.socketMutex.Lock()
+	declined := time.Now().Before(w.socketDeclinedUntil)
+	w.socketMutex.Unlock()
+	if w.api.proxy || declined || w.streamsOverHTTP {
+		return direct, nil
 	}
-	chunks := make([][]byte, 0, len(values)-2)
-	for _, value := range values[2:] {
-		chunk, err := decodeBytes(replyString(value))
-		if err != nil {
-			return false, 0, nil, err
-		}
-		if chunk == nil {
-			chunk = []byte{}
-		}
-		chunks = append(chunks, chunk)
+	target, err := worlds.StreamSocketURL(w.api.baseURL, input.RunID, streamName(input.Name), input.WriterID)
+	if err != nil {
+		return direct, nil
 	}
-	return replyString(values[0]) == "1", int(replyInt(values[1])), chunks, nil
+	header := http.Header{}
+	if err := w.api.authorize(ctx, header); err != nil {
+		return direct, nil
+	}
+	if w.api.userAgent != "" {
+		header.Set("User-Agent", w.api.userAgent)
+	}
+	return worlds.OpenStreamSocketWriter(ctx, worlds.StreamSocketOptions{
+		URL:        target,
+		Header:     header,
+		HTTPClient: w.api.http,
+		Fallback:   direct,
+		OnDecline: func() {
+			w.socketMutex.Lock()
+			w.socketDeclinedUntil = time.Now().Add(streamSocketRetryAfter)
+			w.socketMutex.Unlock()
+		},
+	}), nil
+}
+
+// chunksResponse is a page of a stream's chunks.
+type chunksResponse struct {
+	Data []struct {
+		Index int    `cbor:"index" json:"index"`
+		Data  []byte `cbor:"data" json:"data"`
+	} `cbor:"data" json:"data"`
+	Cursor  *string `cbor:"cursor" json:"cursor"`
+	HasMore bool    `cbor:"hasMore" json:"hasMore"`
+	Done    bool    `cbor:"done" json:"done"`
 }
 
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
-	// Poll with a backoff from 50ms to 500ms while waiting.
 	start, err := worlds.StreamsStartIndex(ctx, w, input)
 	if err != nil {
 		return worlds.StreamChunksResult{}, err
 	}
 	if input.Cursor != "" {
-		value, err := strconv.Atoi(input.Cursor)
-		if err != nil || value < 0 {
-			return worlds.StreamChunksResult{}, worlds.ErrEventInvalid
+		if start, err = strconv.Atoi(input.Cursor); err != nil || start < 0 {
+			return worlds.StreamChunksResult{}, errors.New("workflow/vercel: invalid stream cursor")
 		}
-		start = value
 	}
 	limit := input.Limit
 	if limit <= 0 {
-		limit = 100
+		limit = streamPageSize
 	}
 	deadline := time.Now().Add(input.Wait)
 	delay := 50 * time.Millisecond
 	for {
-		if err := ctx.Err(); err != nil {
-			return worlds.StreamChunksResult{}, err
+		result, err := w.readChunks(ctx, input.RunID, input.Name, start, limit)
+		if err != nil || len(result.Data) > 0 || result.Done || time.Until(deadline) <= 0 {
+			return result, err
 		}
-		done, length, chunks, err := w.readStream(ctx, input.RunID, input.Name, start, limit)
+		timer := time.NewTimer(min(delay, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return worlds.StreamChunksResult{}, ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(2*delay, streamPollMax)
+	}
+}
+
+// readChunks returns up to limit chunks from index start. The backend pages
+// by its own cursor, so a read starts from the cursor the World remembers for
+// the closest index at or before start, and skips the chunks before start.
+func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, error) {
+	result := worlds.StreamChunksResult{Cursor: strconv.Itoa(start), RetryAfter: streamPollMax}
+	index, cursor := w.cursors.near(runID, name, start)
+	for {
+		query := url.Values{"limit": {itoa(max(limit, streamPageSize))}}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+		var page chunksResponse
+		err := w.api.do(ctx, http.MethodGet, w.streamsPath(runID, name, "/chunks"), query, nil, &page)
+		if statusOf(err) == http.StatusNotFound {
+			return result, nil
+		}
 		if err != nil {
 			return worlds.StreamChunksResult{}, err
 		}
-		remaining := time.Until(deadline)
-		if len(chunks) > 0 || done || input.Wait <= 0 || remaining <= 0 {
-			end := start + len(chunks)
-			result := worlds.StreamChunksResult{Done: done, HasMore: end < length, RetryAfter: delay, Cursor: strconv.Itoa(max(end, start))}
-			for index, chunk := range chunks {
-				result.Data = append(result.Data, worlds.StreamChunk{Index: start + index, Data: chunk})
+		for _, chunk := range page.Data {
+			index = chunk.Index + 1
+			if chunk.Index < start {
+				continue
+			}
+			if len(result.Data) == limit {
+				result.HasMore = true
+				break
+			}
+			result.Data = append(result.Data, worlds.StreamChunk{Index: chunk.Index, Data: chunk.Data})
+		}
+		if page.Cursor != nil && *page.Cursor != "" && len(page.Data) > 0 && !result.HasMore {
+			cursor = *page.Cursor
+			w.cursors.put(runID, name, index, cursor)
+		}
+		if result.HasMore || !page.HasMore || page.Cursor == nil || *page.Cursor == "" {
+			result.HasMore = result.HasMore || page.HasMore
+			result.Done = page.Done
+			if len(result.Data) > 0 {
+				result.Cursor = strconv.Itoa(result.Data[len(result.Data)-1].Index + 1)
+			}
+			if result.Done || len(result.Data) > 0 {
+				result.RetryAfter = 0
 			}
 			return result, nil
 		}
-		if err := sleep(ctx, min(delay, remaining)); err != nil {
-			return worlds.StreamChunksResult{}, err
-		}
-		delay = min(delay*2, streamPollMax)
 	}
 }
 
 func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.StreamInfo{}, err
+	var info struct {
+		TailIndex *int `cbor:"tailIndex" json:"tailIndex"`
+		Done      bool `cbor:"done" json:"done"`
 	}
-	done, length, _, err := w.readStream(ctx, input.RunID, input.Name, 0, 0)
+	err := w.api.do(ctx, http.MethodGet, w.streamsPath(input.RunID, input.Name, "/info"), nil, nil, &info)
+	if statusOf(err) == http.StatusNotFound {
+		return worlds.StreamInfo{TailIndex: -1}, nil
+	}
 	if err != nil {
 		return worlds.StreamInfo{}, err
 	}
-	return worlds.StreamInfo{TailIndex: length - 1, Done: done}, nil
+	result := worlds.StreamInfo{TailIndex: -1, Done: info.Done}
+	if info.TailIndex != nil {
+		result.TailIndex = *info.TailIndex
+	}
+	return result, nil
 }
 
 func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	header := http.Header{}
+	header.Set("Accept", "application/json")
+	response, err := w.api.request(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/streams", nil, nil, header)
+	if statusOf(err) == http.StatusNotFound {
+		return []string{}, nil
 	}
-	names, err := w.redis.SMembers(ctx, w.key("streams", string(input.RunID)))
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(names)
+	defer response.Body.Close()
+	data, err := readAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		var wrapped struct {
+			Data []string `json:"data"`
+		}
+		if json.Unmarshal(data, &wrapped) != nil {
+			return nil, errors.New("workflow/vercel: invalid stream list")
+		}
+		names = wrapped.Data
+	}
 	if names == nil {
 		names = []string{}
 	}
+	for index, name := range names {
+		if name == defaultStreamName {
+			names[index] = ""
+		}
+	}
+	slices.Sort(names)
 	return names, nil
 }
 
-func encodeChunks(chunks [][]byte) []string {
-	values := make([]string, len(chunks))
-	for index, chunk := range chunks {
-		values[index] = encodeBytes(chunk)
+// streamCursors remembers, per stream, the backend cursor that continues a
+// read at a chunk index.
+type streamCursors struct {
+	mu      sync.Mutex
+	entries map[streamKey]map[int]string
+	order   []streamKey
+}
+
+type streamKey struct {
+	runID worlds.RunID
+	name  string
+}
+
+// near returns the remembered index closest to start without passing it and
+// its cursor, or 0 and "" to read from the beginning.
+func (c *streamCursors) near(runID worlds.RunID, name string, start int) (int, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	best, cursor := 0, ""
+	for index, value := range c.entries[streamKey{runID, name}] {
+		if index <= start && index > best {
+			best, cursor = index, value
+		}
 	}
-	return values
+	return best, cursor
+}
+
+func (c *streamCursors) put(runID worlds.RunID, name string, index int, cursor string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[streamKey]map[int]string{}
+	}
+	key := streamKey{runID, name}
+	if c.entries[key] == nil {
+		if len(c.order) == streamCursorCacheSize {
+			delete(c.entries, c.order[0])
+			c.order = c.order[1:]
+		}
+		c.order = append(c.order, key)
+		c.entries[key] = map[int]string{}
+	}
+	if len(c.entries[key]) >= 64 {
+		clear(c.entries[key])
+	}
+	c.entries[key][index] = cursor
 }

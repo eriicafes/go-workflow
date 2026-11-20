@@ -30,9 +30,11 @@ mounting it.
 
 Use `workflow.Writer` and `Reader` inside steps. Each write is one chunk;
 `ReaderOption.StartIndex` picks the first chunk, negative from the end, and
-`StreamReader.Next` and `TailIndex` support resuming by chunk index. A writer's
-returned release function relinquishes its exclusive session; `Close` ends
-the stream for all writers. Readers block until data arrives or the closed
+`StreamReader.Next` and `TailIndex` support resuming by chunk index. Writers
+do not wait for each other and buffer their writes: `Flush` waits for them to
+be stored, `Close` gives up the writer leaving the stream open (a step closes
+its writers when it returns), and `CloseStream` ends the stream for all
+writers. Readers block until data arrives or the closed
 stream reaches EOF. External callers can read or write through a Run handle.
 Stream I/O does not belong in the workflow body.
 

@@ -111,16 +111,12 @@ role ARN. SQS standard queues do not deduplicate, so `IdempotencyKey` is not
 used; delivery is at least once and the runtime is idempotent.
 
 The `Queue` handler loads the record for each SQS message. A missing record
-(cancelled or already done) is acknowledged. A message that arrives before its
+(already done) is acknowledged. A message that arrives before its
 due time is sent again with the remaining delay (at most 15 minutes per hop).
 Otherwise it runs the workflow, deletes the record on success, and reports the
 message in `BatchItemFailures` on failure so SQS redelivers only that message.
 Malformed messages are also reported as failures; configure a dead-letter
 queue to collect them.
-
-`QueueCancel` deletes the record and its schedule. A schedule that already
-fired counts as deleted. A world without `Scheduler` cannot delete schedules;
-when such a schedule fires, the consumer finds no record and acknowledges it.
 
 ## Table
 
@@ -227,10 +223,9 @@ schedules its own expiry.
 
 The queue worker additionally needs `sqs:ReceiveMessage`, `DeleteMessage`
 and `GetQueueAttributes` (for the event source mapping), and, with
-`Scheduler`, `scheduler:CreateSchedule` and `scheduler:DeleteSchedule` on
+`Scheduler`, `scheduler:CreateSchedule` on
 `arn:aws:scheduler:<region>:<account>:schedule/<group>/go-workflow-*` plus
-`iam:PassRole` on the Scheduler role. The API role needs
-`scheduler:DeleteSchedule` only if it cancels long timers.
+`iam:PassRole` on the Scheduler role.
 
 ## Limits
 

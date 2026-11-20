@@ -228,17 +228,14 @@ func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
 	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
-	writer, release, err := run.Writer(ctx)
+	writer, err := run.Writer(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := writer.Write([]byte("remote")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := release(); err != nil {
+	if err := writer.CloseStream(); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := run.Reader(ctx)

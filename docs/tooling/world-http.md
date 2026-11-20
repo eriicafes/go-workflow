@@ -3,7 +3,9 @@
 `go-workflow/world-http` exposes a Go World served by
 `HTTP(world)` as a [Workflow SDK](https://workflow-sdk.dev) `World` in
 JavaScript. It sends its operations to the handler's CBOR
-[RPC endpoint](/reference/http#rpc) and uses bounded polling for stream chunks.
+[RPC endpoint](/reference/http#rpc), uses bounded polling for stream chunks,
+and writes streams over the handler's [stream socket](/reference/http#stream-socket),
+falling back to RPC writes.
 
 Most projects never import it: the [web UI](/tooling/web-ui) loads it for you
 through `WORKFLOW_TARGET_WORLD`. Use it directly when JavaScript or TypeScript
@@ -60,8 +62,8 @@ World's protocol version and capabilities, so it fails fast when the handler is
 unreachable. `world.getDeploymentId()` asks the Go World for its deployment on
 every call, so it stays correct across redeploys.
 
-If you [protect the RPC path](/worlds/#protecting-the-rpc-path) with
-`worlds.WithRPCToken`, set `WORKFLOW_HTTP_TOKEN` or pass the token:
+If you [protect the client endpoints](/worlds/#protecting-the-client-endpoints) with
+`worlds.WithClientToken`, set `WORKFLOW_HTTP_TOKEN` or pass the token:
 
 ```ts
 const world = await createWorld({
@@ -92,6 +94,6 @@ cannot create queue handlers. Its deployment ID is the Go World's.
 ::: warning
 The RPC endpoint is unauthenticated unless you protect it. Point the adapter
 only at Worlds on a trusted network, or
-[protect the RPC path](/worlds/#protecting-the-rpc-path) and set
+[protect the client endpoints](/worlds/#protecting-the-client-endpoints) and set
 `WORKFLOW_HTTP_TOKEN`.
 :::

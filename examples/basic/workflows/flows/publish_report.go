@@ -119,11 +119,11 @@ func describeReview(review workflows.Review) string {
 // streamParagraphs writes paragraphs to the progress stream one at a time and
 // returns them joined as a draft.
 func streamParagraphs(ctx context.Context, paragraphs []string) (string, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return "", err
 	}
-	defer release()
+	defer writer.Close()
 	for _, paragraph := range paragraphs {
 		if err := typeOut(ctx, 150*time.Millisecond); err != nil {
 			return "", err
@@ -137,11 +137,11 @@ func streamParagraphs(ctx context.Context, paragraphs []string) (string, error) 
 
 // announce writes a status line to the progress stream.
 func announce(ctx context.Context, line string) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	_, err = fmt.Fprintln(writer, line)
 	return struct{}{}, err
 }
@@ -153,29 +153,29 @@ func publishDraft(ctx context.Context, draft string) (string, error) {
 	}
 	location := "reports/" + workflow.StepID(ctx) + ".md"
 
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return "", err
 	}
-	defer release()
+	defer writer.Close()
 	if _, err := fmt.Fprintln(writer, "published to "+location); err != nil {
 		return "", err
 	}
-	return location, writer.Close()
+	return location, writer.CloseStream()
 }
 
 // abandonDraft is the compensation that ends the progress stream of a run
 // that failed.
 func abandonDraft(ctx context.Context, line string) error {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return err
 	}
-	defer release()
+	defer writer.Close()
 	if _, err := fmt.Fprintln(writer, line); err != nil {
 		return err
 	}
-	return writer.Close()
+	return writer.CloseStream()
 }
 
 // typeOut stands in for the time it takes to write or store a draft.

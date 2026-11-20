@@ -47,7 +47,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"slices"
 	"time"
@@ -384,16 +383,15 @@ func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamR
 }
 
 // Writer returns a writer for the run's stream, for step context and for use
-// outside a run. It waits until no other writer holds the stream name. Close
-// closes the stream for all writers, while the returned release function only
-// gives up this writer's hold so another writer can continue the stream.
-// Writer returns ErrNotInStep in workflow context.
-func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
+// outside a run. Writers of a stream do not wait for each other. Close
+// stores what is buffered and gives up the writer, leaving the stream open,
+// while CloseStream closes the stream for every writer. Writer returns
+// ErrNotInStep in workflow context.
+func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return nil, nil, ErrNotInStep
+		return nil, ErrNotInStep
 	}
-	opts := writerOption(options)
-	return newStreamWriter(ctx, r.client, r.id, opts.Name, string(worlds.NewStreamID()))
+	return newStreamWriter(ctx, r.client, r.id, writerOption(options).Name)
 }
 
 // Get returns a handle to the run with runID, using the Client in ctx. It does

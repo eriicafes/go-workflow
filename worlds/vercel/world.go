@@ -1,18 +1,18 @@
-// Package vercelworld implements a World on Redis (over TCP or the Upstash REST
-// API) and Vercel Queues, for deployments on Vercel Functions. Work due more
-// than six days ahead is delivered in hops of up to six days on Vercel Queues,
-// or by QStash when it is configured.
+// Package vercelworld implements a World on Vercel's managed workflow
+// storage and Vercel Queues, for deployments on Vercel Functions. Runs, steps,
+// hooks, and streams are stored by Vercel's workflow backend, the one the
+// Workflow SDK uses, scoped to the deployment's project and environment.
+// Deliveries go through Vercel Queues, in hops of up to 23 hours for work due
+// later.
 package vercelworld
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,15 +20,9 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-const (
-	defaultPrefix = "go-workflow"
-	// qstashRouteSuffix is the QStash route under the HTTP prefix, among the
-	// callbacks a World mounts for its own use.
-	qstashRouteSuffix = "/callbacks/qstash"
-	// deploymentRouteSuffix is the route under the HTTP prefix that answers
-	// with the deployment serving it.
-	deploymentRouteSuffix = "/deployment"
-)
+// deploymentRouteSuffix is the route under the HTTP prefix that answers with
+// the deployment serving it.
+const deploymentRouteSuffix = "/deployment"
 
 // Config configures the Vercel World.
 type Config struct {
@@ -36,19 +30,10 @@ type Config struct {
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// It is required.
 	BaseURL string
-	// RedisURL selects the TCP transport with redis://, or rediss:// for TLS.
-	// When it is empty, RedisRESTURL and RedisRESTToken select the Upstash
-	// REST transport. One of the two transports is required.
-	RedisURL       string
-	RedisRESTURL   string
-	RedisRESTToken string
-	// QueueURL is the regional Vercel Queues API root including /api/v3, for
-	// example https://iad1.vercel-queue.com/api/v3. It is required.
+	// QueueURL is the regional Vercel Queues API root including /api/v3.
+	// Empty uses https://<region>.vercel-queue.com/api/v3 for the region in
+	// VERCEL_REGION, or iad1.
 	QueueURL string
-	// OIDCToken returns the Vercel OIDC token. It is called for every Vercel
-	// Queues request because Vercel rotates the token. Nil uses
-	// OIDCTokenFromEnv(DefaultOIDCTokenEnv).
-	OIDCToken func(context.Context) (string, error)
 	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
 	// are published to. It is required.
 	Topic string
@@ -59,23 +44,24 @@ type Config struct {
 	// Queue(world, runners) consumes any topic its function is triggered by,
 	// so each topic can have its own trigger and concurrency.
 	Routes map[string]string
-	// Prefix namespaces Redis keys. Empty uses go-workflow.
-	Prefix string
-	// Retention is how long a run's data is kept after the run completes,
-	// fails, or is cancelled. Redis then deletes its event log, steps, hooks,
-	// and streams, and the run drops out of RunsList shortly after. A hook's
-	// token retention extends its hook's data. Zero keeps runs forever.
-	// Runs that finished before Retention was set are kept.
-	Retention time.Duration
-	// Retentions overrides Retention for the workflows it names, by workflow
-	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
-	// forever.
-	Retentions map[string]time.Duration
-	// QStash, when set, delivers work due more than six days ahead. Without
-	// it, such a delivery is made in hops of up to six days on Vercel
-	// Queues.
-	QStash *QStashConfig
-	// HTTPClient sends Redis REST, Vercel Queues, and QStash requests. Nil uses
+	// OIDCToken returns the deployment's Vercel OIDC token. It is called for
+	// every Vercel Queues request, and every workflow backend request without
+	// Token, because Vercel rotates the token. Nil uses
+	// OIDCTokenFromEnv(DefaultOIDCTokenEnv).
+	OIDCToken func(context.Context) (string, error)
+	// Token is a Vercel access token for reaching the workflow backend from
+	// outside a deployment, such as a script or a CLI. With it, requests go
+	// through Vercel's API proxy for ProjectID, TeamID, and Environment
+	// (default production), and the OIDC token is used only for Vercel
+	// Queues. Inside a deployment leave it empty.
+	Token       string
+	ProjectID   string
+	TeamID      string
+	Environment string
+	// BackendURL is the root of the workflow API. Empty uses
+	// DefaultBackendURL, or DefaultProxyURL with Token.
+	BackendURL string
+	// HTTPClient sends workflow backend and Vercel Queues requests. Nil uses
 	// http.DefaultClient.
 	HTTPClient *http.Client
 	// DeploymentID identifies the deployment this World runs in. Runs created
@@ -88,12 +74,11 @@ type Config struct {
 }
 
 // World is the Vercel World. It is safe for concurrent use, and any number of
-// instances may share one Redis database.
+// instances may share one project's storage.
 type World struct {
 	config Config
 	http   *http.Client
-	redis  redisStore
-	prefix string
+	api    *backend
 	// latestURL is the deployment route LatestDeploymentID asks for the
 	// latest deployment, or "" when it reports none. latest guards latestID,
 	// the deployment it last read, and latestAt, when it read it.
@@ -101,20 +86,24 @@ type World struct {
 	latest    sync.Mutex
 	latestID  string
 	latestAt  time.Time
-	// scripts is the first argument of every script: the prefix, and the
-	// retention in microseconds when it is set.
-	scripts string
-	// qstashURL is the public URL QStash delivers long timers to.
-	qstashURL string
+	// cursors remembers where stream reads stopped, so the next read of a
+	// stream continues from the backend's cursor instead of its start.
+	cursors streamCursors
+	// socketDeclinedUntil is when stream writers next try the backend's
+	// stream socket after it declined one.
+	socketMutex         sync.Mutex
+	socketDeclinedUntil time.Time
+	// streamsOverHTTP keeps stream writes on HTTP, as
+	// WORKFLOW_STREAMS_TRANSPORT=http does for the Workflow SDK.
+	streamsOverHTTP bool
 }
 
-// New returns a World for config without contacting Redis or Vercel. It returns
-// an error when BaseURL, QueueURL, Topic, or a Redis transport is missing, when
-// a route names a queue without a topic, or when QStash lacks its token, its
-// signing keys, or an HTTPS callback URL.
+// New returns a World for config without contacting Vercel. It returns an
+// error when BaseURL or Topic is missing, when a route names a queue without
+// a topic, or when Token is set without ProjectID.
 func New(config Config) (*World, error) {
-	if config.BaseURL == "" || config.QueueURL == "" || config.Topic == "" {
-		return nil, errors.New("workflow/vercel: base URL, queue URL, and topic are required")
+	if config.BaseURL == "" || config.Topic == "" {
+		return nil, errors.New("workflow/vercel: base URL and topic are required")
 	}
 	for workflow, queue := range config.Routes {
 		if config.Topics[queue] == "" {
@@ -126,15 +115,19 @@ func New(config Config) (*World, error) {
 		return nil, fmt.Errorf("workflow/vercel: invalid base URL: %w", err)
 	}
 	config.BaseURL = baseURL
+	if config.Token != "" && config.ProjectID == "" {
+		return nil, errors.New("workflow/vercel: a token needs a project ID")
+	}
+	if config.QueueURL == "" {
+		region := os.Getenv("VERCEL_REGION")
+		if region == "" || region == "dev1" {
+			region = "iad1"
+		}
+		config.QueueURL = "https://" + region + ".vercel-queue.com/api/v3"
+	}
 	config.QueueURL = strings.TrimRight(config.QueueURL, "/")
 	if config.HTTPClient == nil {
 		config.HTTPClient = http.DefaultClient
-	}
-	if config.Prefix == "" {
-		config.Prefix = defaultPrefix
-	}
-	if _, negative := worlds.MaxRetention(config.Retention, config.Retentions); negative {
-		return nil, errors.New("workflow/vercel: retention cannot be negative")
 	}
 	if config.OIDCToken == nil {
 		config.OIDCToken = OIDCTokenFromEnv(DefaultOIDCTokenEnv)
@@ -142,53 +135,47 @@ func New(config Config) (*World, error) {
 	if config.DeploymentID == "" {
 		config.DeploymentID = os.Getenv("VERCEL_DEPLOYMENT_ID")
 	}
-	world := &World{config: config, http: config.HTTPClient, prefix: config.Prefix, scripts: config.Prefix}
+	if config.Environment == "" {
+		config.Environment = "production"
+	}
+	if config.BackendURL == "" {
+		config.BackendURL = DefaultBackendURL
+		if config.Token != "" {
+			config.BackendURL = DefaultProxyURL
+		}
+	}
+	userAgent := "go-workflow/vercelworld"
+	if config.DeploymentID != "" {
+		userAgent += " " + config.DeploymentID
+	}
+	world := &World{
+		config: config,
+		http:   config.HTTPClient,
+		api: &backend{
+			baseURL:   strings.TrimRight(config.BackendURL, "/"),
+			proxy:     config.Token != "",
+			token:     config.Token,
+			oidc:      config.OIDCToken,
+			http:      config.HTTPClient,
+			project:   config.ProjectID,
+			team:      config.TeamID,
+			env:       config.Environment,
+			userAgent: userAgent,
+		},
+		streamsOverHTTP: os.Getenv("WORKFLOW_STREAMS_TRANSPORT") == "http",
+	}
 	if config.DeploymentID != "" && os.Getenv("VERCEL_ENV") == "production" {
 		world.latestURL = baseURL + deploymentRouteSuffix
-	}
-	if longest, _ := worlds.MaxRetention(config.Retention, config.Retentions); longest > 0 {
-		byWorkflow := make(map[string]int64, len(config.Retentions))
-		for workflow, retention := range config.Retentions {
-			byWorkflow[workflow] = retention.Microseconds()
-		}
-		encoded, err := json.Marshal(byWorkflow)
-		if err != nil {
-			return nil, err
-		}
-		world.scripts += "\n" + strconv.FormatInt(config.Retention.Microseconds(), 10) + "\n" + string(encoded)
-	}
-	if config.QStash != nil {
-		qstash := *config.QStash
-		if qstash.Token == "" || qstash.CurrentSigningKey == "" || qstash.NextSigningKey == "" {
-			return nil, errors.New("workflow/vercel: QStash token and signing keys are required")
-		}
-		if qstash.BaseURL == "" {
-			qstash.BaseURL = "https://qstash.upstash.io"
-		}
-		qstash.BaseURL = strings.TrimRight(qstash.BaseURL, "/")
-		world.qstashURL, err = qstashDestination(baseURL)
-		if err != nil {
-			return nil, err
-		}
-		world.config.QStash = &qstash
-	}
-	world.redis, err = newRedisStore(config.RedisURL, config.RedisRESTURL, config.RedisRESTToken, config.HTTPClient)
-	if err != nil {
-		return nil, err
 	}
 	return world, nil
 }
 
-// Close closes the Redis TCP connection pool. With the REST transport it does
-// nothing.
-func (w *World) Close() error { return w.redis.Close() }
-
-func (w *World) BaseURL() string             { return w.config.BaseURL }
-func (*World) SpecVersion() int              { return worlds.SpecVersion }
-func (w *World) DeploymentID() string        { return w.config.DeploymentID }
-func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
+func (w *World) BaseURL() string           { return w.config.BaseURL }
+func (*World) SpecVersion() int            { return worlds.SpecVersion }
+func (w *World) DeploymentID() string      { return w.config.DeploymentID }
+func (*World) Analytics() worlds.Analytics { return nil }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != ""}
+	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != ""}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the
@@ -207,26 +194,21 @@ func OIDCTokenFromEnv(name string) func(context.Context) (string, error) {
 	}
 }
 
-// HTTP returns a handler serving the RPC and webhook endpoints under
-// /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
-// it, such as worlds.WithRPCToken. It also serves GET /v1/workflow/deployment,
-// which answers with the deployment serving it, so a World in an older
-// production deployment can find the latest one. When Config.QStash is set,
-// it also serves the QStash callback at /v1/workflow/callbacks/qstash, which
-// accepts only requests signed by QStash.
+// HTTP returns a handler serving the client and webhook endpoints under
+// /v1/workflow. Its client endpoints are unauthenticated unless options
+// protect them, such as worlds.WithClientToken. It also serves
+// GET /v1/workflow/deployment, which answers with the deployment serving it,
+// so a World in an older production deployment can find the latest one.
 func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
 	return HTTPPrefix(world, "", options...)
 }
 
-// HTTPPrefix is like HTTP but serves the endpoints, the deployment route, and
-// the QStash callback, under prefix, such as /internal/workflow. An empty prefix uses /v1/workflow.
-// Config.BaseURL must end with the same prefix.
+// HTTPPrefix is like HTTP but serves the endpoints and the deployment route
+// under prefix, such as /internal/workflow. An empty prefix uses
+// /v1/workflow. Config.BaseURL must end with the same prefix.
 func HTTPPrefix(world *World, prefix string, options ...worlds.HTTPOption) http.Handler {
 	mux := worlds.HTTPHandler(world, prefix, options...)
 	mux.Handle("GET "+worlds.HTTPPrefixPath(prefix)+deploymentRouteSuffix, Deployment(world))
-	if world.config.QStash != nil {
-		mux.Handle("POST "+worlds.HTTPPrefixPath(prefix)+qstashRouteSuffix, QStash(world))
-	}
 	return mux
 }
 

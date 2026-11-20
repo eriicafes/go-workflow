@@ -72,8 +72,12 @@ type StorageEvents interface {
 	// running step is not a repeat. It appends a new attempt, so a delivery can
 	// take over a step whose previous delivery died.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
-	// EventsCreateBatch appends Events to a run in order, atomically. It appends
-	// none of them when any event is invalid or cannot be admitted.
+	// EventsCreateBatch appends Events to a run in order, as one in-band write
+	// when InBandCount is set. It appends none of them when any event is
+	// invalid. When one cannot be admitted it returns that refusal, and the
+	// events of other steps, hooks, and waits in the batch may still be
+	// appended, as in the Workflow SDK, so the runtime replays whatever the
+	// log holds. A refused in-band write appends none of them.
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
 	// EventsGet returns the event identified by RunID and EventID. It returns
 	// ErrEventNotFound when the event does not exist. It applies ResolveData to

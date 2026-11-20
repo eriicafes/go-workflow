@@ -3,8 +3,10 @@
 ## Events and materialized views
 
 Admission checks, event append, and updates to derived run, step, and hook
-views form one atomic operation. `EventsCreateBatch` admits the whole batch or
-none of it.
+views form one atomic operation. `EventsCreateBatch` appends none of its events
+when one is invalid, and none of a refused in-band write. When an event is
+refused, the events of other steps, hooks, and waits may stay appended, as in
+the Workflow SDK; the runtime replays whatever the log holds.
 
 Repeated admitted lifecycle transitions return the existing event with
 `AllocatedEventCount == 0`. A `step_started` event for an already running step
@@ -23,6 +25,11 @@ Keep run, step, and hook payloads only in their events: views store the
 event slots (run result, step created and latest result, hook created; run
 input is slot 1) and reads decode them with `worlds.EventPayload`, skipping
 input, output, and metadata under `ResolveDataNone` but keeping errors.
+
+A backend that cannot store an event's whole Data rebuilds what it dropped:
+step, hook, and wait IDs minted by the runtime carry their declaration
+position (`worlds.OperationPosition`), and the runtime reads a wait's
+cancellation contexts from the replay, so a wait needs only its resume time.
 
 Use SDK payload types such as `DataStepCreated`, `DataStepResult`,
 `DataRunCreated`, `DataRunCompleted`, `DataRunFailed`, `DataHookCreated`,
@@ -80,8 +87,10 @@ failure.
 
 Deliver at least once, respect NotBefore, and redeliver failures. Queue
 IdempotencyKey deduplication is optional; runtime replay still needs to be safe
-without it. QueueBatch can report items published before an error, unlike an
-atomic event batch.
+without it. QueueBatch can report items published before an error. Queued
+deliveries are never cancelled. Set `QueueInput.Attempt` to the backend's
+1-based delivery count when it has one; the Runtime fails a run or step whose
+delivery passes `worlds.MaxDeliveries` attempts.
 
 Persist every QueueInput field, including StepID, QueueName, DeploymentID,
 DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
@@ -93,10 +102,12 @@ the run's deployment and workflow name onto the hooks it creates
 
 ## Streams
 
-Maintain ordered chunks and cursor continuation. A write session owns its
-stream exclusively. Reject stale session IDs and out-of-sequence writes with
-`ErrStreamLocked`. Release relinquishes ownership without closing the stream;
-Close marks it done and relinquishes ownership.
+Maintain ordered chunks and cursor continuation. Streams have no exclusive
+writers: concurrent writes interleave, each writer's chunks staying in order.
+Writes to a closed stream fail with `ErrStreamClosed`, and closing a closed
+stream does nothing. A `StreamWriter` from `StreamsOpenWriter` keeps its
+writes in order; Release ends the writer without closing the stream, and
+CloseStream closes it for every writer.
 
 For a reader draining data, stop only after processing the returned chunks
 and observing `Done && !HasMore`: a closed stream may still have unread

@@ -136,7 +136,7 @@ runID)` returns a delivery addressed that way.
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
-| `EventsCreateBatch` | Appends events atomically. Rejecting one rejects the batch. |
+| `EventsCreateBatch` | Appends events in order. An invalid event appends none of them; a refused event may leave others appended, as in the Workflow SDK. |
 | `EventsGet`, `EventsList`, `EventsListByCorrelationID` | Read the event log. |
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
 
@@ -222,7 +222,6 @@ Run attributes `$parentRunId` (`ParentRunIDAttribute`) and `$rootRunId`
 type Queue interface {
 	Queue(context.Context, QueueInput) (QueueResult, error)
 	QueueBatch(context.Context, QueueBatchInput) ([]QueueResult, error)
-	QueueCancel(context.Context, QueueCancelInput) error
 }
 
 type QueueInput struct {
@@ -237,11 +236,16 @@ type QueueInput struct {
 	DeploymentMismatchRetryCount int    // re-routes so far, set by the Runtime
 	ReplayDivergenceCount        int    // recovery deliveries after divergence, set by the Runtime
 	MessageID                    string // the delivered message's ID, set by the World before Execute; Queue ignores it
+	Attempt                      int    // 1-based delivery attempt, set by the World before Execute; 0 is not counted
 }
 ```
 
-Delivery is at least once. `QueueCancel` returns `ErrQueueMessageNotFound` for
-an unknown message. A World with deployment affinity returns an error wrapping
+Delivery is at least once, and a queued delivery cannot be cancelled: one that
+is no longer needed only replays its run. A World sets `Attempt` from its
+backend's delivery count, and the Runtime gives up on a delivery past
+`MaxDeliveries` (48) attempts, as the Workflow SDK does: a flow delivery fails
+its run, and a step delivery fails its step, both with
+`ErrMaxDeliveriesExceeded`. A World with deployment affinity returns an error wrapping
 `ErrDeploymentUnavailable` when the addressed deployment no longer exists.
 
 ### Routing
@@ -283,14 +287,43 @@ is negative, for validating a configuration.
 
 | Method | Description |
 | --- | --- |
-| `StreamsCreateWriteSession` | Exclusive writer session for a stream. `ErrStreamLocked` if another holds it. |
-| `StreamsWriteSession` | Appends chunks for a session at a sequence number. |
-| `StreamsCloseWriteSession` | Releases a session, optionally closing the stream. |
-| `StreamsWrite`, `StreamsWriteMulti` | Append when no session owns the stream. |
-| `StreamsClose` | Marks a stream done when no session owns it. |
+| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. `ErrStreamClosed` once the stream is closed. |
+| `StreamsClose` | Marks a stream done for every writer. Closing it again does nothing. |
 | `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
 | `StreamsGetInfo` | Tail index and whether the stream is done. |
 | `StreamsList` | Stream names of a run. |
+
+Streams have no exclusive writers, as in the Workflow SDK: any number of
+writers append to a stream at once and their chunks interleave.
+`OpenStreamWriter` returns a `StreamWriter` for one writer, through the
+optional `StreamWriterOpener` interface when the World implements it, and otherwise
+through `StreamsWriteMulti` and `StreamsClose`:
+
+```go
+type StreamWriterOpener interface {
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
+}
+
+type StreamsOpenWriterInput struct {
+	RunID    RunID
+	Name     string
+	WriterID string // from NewWriterID, "wrtr_" and a ULID
+}
+
+type StreamWriter interface {
+	Write(ctx context.Context, chunks [][]byte) error
+	Release(ctx context.Context) error     // ends this writer, leaving the stream open
+	CloseStream(ctx context.Context) error // closes the stream for every writer
+}
+```
+
+A World implements `StreamWriterOpener` to hold a connection for a writer's
+lifetime. `HTTPHandler` serves the Workflow SDK's stream socket protocol at
+`<prefix>/websockets/v1/runs/{runId}/streams/{name}?writerId=`, behind the same
+RPC protection, and `NewHTTPClient` writes over it, falling back to RPC writes
+while it opens and when it is declined or fails. `OpenStreamSocketWriter` and
+`StreamSocketHandler` are the two ends, for a World whose backend speaks the
+protocol, as Vercel's does.
 
 ## Analytics
 
@@ -309,7 +342,7 @@ methods are shared with the World:
 | `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes` | Read runs and change their attributes. |
 | `StepsGet`, `StepsList` | Read steps. |
 | `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
-| `StreamsCreateWriteSession` | Open an exclusive writer session. |
+| `StreamsOpenWriter` | Open a stream writer. |
 | `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID, or by the token of an active or retained hook. |
 | `Analytics` | As on World. |
 
@@ -320,7 +353,7 @@ The rest are the Client's own:
 | `RunsCreate` | Starts a run and queues its first delivery. Returns the run ID. |
 | `RunsCancel` | Cancels a run. Returns `ErrRunTerminal` if finished. |
 | `RunsWake` | Settles pending waits early. |
-| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams without a session. |
+| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams one call at a time. |
 | `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
 | `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
 
@@ -360,6 +393,11 @@ integrations. Operations normally take the runner's next position with
 `Execution.NextPosition`. Lazy hooks reserve a position at creation and pass it
 to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 
+Each declaration's ID carries its position: `NewStepIDAt`, `NewHookIDAt`, and
+`NewWaitIDAt` mint ULIDs whose entropy holds it, and `OperationPosition`
+recovers it. A World whose backend cannot store a declaration's data, as
+Vercel's keeps only a wait's resume time, rebuilds the position from the ID.
+
 | Function | Description |
 | --- | --- |
 | `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
@@ -397,8 +435,8 @@ to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 | `ErrHookConflict` | Another active hook owns the token. |
 | `ErrHookForceClaimed` | Another hook took the token with `Force`. |
 | `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
-| `ErrStreamLocked` | Stream write conflicts with its writer session. |
-| `ErrQueueMessageNotFound` | `QueueCancel` with an unknown message. |
+| `ErrStreamClosed` | Writing to a closed stream. |
+| `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
 | `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |
 | `ErrDeploymentUnavailable` | `Queue` addressed a deployment that no longer exists. |

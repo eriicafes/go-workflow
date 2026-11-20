@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
@@ -26,47 +25,9 @@ const (
 // streamMeta is a STREAM# item. Readers only see chunks below count, which
 // is advanced in the same transaction that writes them.
 type streamMeta struct {
-	found    bool
-	closed   bool
-	session  worlds.StreamID
-	sequence int
-	count    int
-}
-
-type streamWriteSession struct {
-	mu     sync.Mutex
-	world  *World
-	runID  worlds.RunID
-	name   string
-	id     worlds.StreamID
+	found  bool
 	closed bool
-}
-
-func (s *streamWriteSession) ID() worlds.StreamID { return s.id }
-
-func (s *streamWriteSession) Write(ctx context.Context, input worlds.StreamWriteSessionWriteInput) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return worlds.ErrRunTerminal
-	}
-	return s.world.StreamsWriteSession(ctx, worlds.StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks})
-}
-
-func (s *streamWriteSession) Close(ctx context.Context) error   { return s.close(ctx, true) }
-func (s *streamWriteSession) Release(ctx context.Context) error { return s.close(ctx, false) }
-
-func (s *streamWriteSession) close(ctx context.Context, closeStream bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.world.StreamsCloseWriteSession(ctx, worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: closeStream}); err != nil {
-		return err
-	}
-	s.closed = true
-	return nil
+	count  int
 }
 
 func (w *World) streamMeta(ctx context.Context, runID worlds.RunID, name string) (streamMeta, error) {
@@ -75,11 +36,9 @@ func (w *World) streamMeta(ctx context.Context, runID worlds.RunID, name string)
 		return streamMeta{}, err
 	}
 	return streamMeta{
-		found:    true,
-		closed:   readBool(item, "closed"),
-		session:  worlds.StreamID(read(item, "session")),
-		sequence: int(readInt(item, "sequence")),
-		count:    int(readInt(item, "count")),
+		found:  true,
+		closed: readBool(item, "closed"),
+		count:  int(readInt(item, "count")),
 	}, nil
 }
 
@@ -90,78 +49,37 @@ func (w *World) updateStream(ctx context.Context, runID worlds.RunID, name, upda
 	values[":zero"] = avn(0)
 	update += ", #name = :name, #count = if_not_exists(#count, :zero)"
 	names, values := usedOnly(streamNames, values, update, condition)
-	_, err := w.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	input := &dynamodb.UpdateItemInput{
 		TableName:                 awsv2.String(w.config.TableName),
 		Key:                       streamKey(string(runID), name),
 		UpdateExpression:          awsv2.String(update),
-		ConditionExpression:       awsv2.String(condition),
 		ExpressionAttributeNames:  names,
 		ExpressionAttributeValues: values,
-	})
+	}
+	if condition != "" {
+		input.ConditionExpression = awsv2.String(condition)
+	}
+	_, err := w.dynamo.UpdateItem(ctx, input)
 	if conditional(err) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-var streamNames = map[string]string{"#name": "name", "#count": "count", "#closed": "closed", "#session": "session", "#sequence": "sequence"}
-
-func (w *World) StreamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	id := worlds.NewStreamID()
-	ok, err := w.updateStream(ctx, input.RunID, input.Name,
-		"SET #session = :session, #sequence = :zero, #closed = if_not_exists(#closed, :false)",
-		"attribute_not_exists(pk) OR (attribute_not_exists(#session) AND #closed = :false)",
-		map[string]ddb.AttributeValue{":session": avs(string(id)), ":false": avbool(false)})
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		meta, err := w.streamMeta(ctx, input.RunID, input.Name)
-		if err != nil {
-			return nil, err
-		}
-		if meta.closed {
-			return nil, worlds.ErrRunTerminal
-		}
-		return nil, worlds.ErrStreamLocked
-	}
-	return &streamWriteSession{world: w, runID: input.RunID, name: input.Name, id: id}, nil
-}
-
-func (w *World) StreamsWriteSession(ctx context.Context, input worlds.StreamsWriteSessionInput) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	meta, err := w.streamMeta(ctx, input.RunID, input.Name)
-	if err != nil {
-		return err
-	}
-	if !meta.found || meta.closed || meta.session != input.SessionID || meta.sequence != input.Sequence {
-		return worlds.ErrStreamLocked
-	}
-	err = w.appendChunks(ctx, input.RunID, input.Name, meta.count, input.Chunks,
-		"SET #sequence = #sequence + :one",
-		"#session = :session AND #sequence = :sequence AND #count = :seen",
-		map[string]ddb.AttributeValue{":session": avs(string(input.SessionID)), ":sequence": avn(int64(input.Sequence)), ":one": avn(1)})
-	if conditional(err) {
-		return worlds.ErrStreamLocked
-	}
-	return err
-}
+var streamNames = map[string]string{"#name": "name", "#count": "count", "#closed": "closed"}
 
 // appendChunks writes chunks at count and advances count in one transaction.
-func (w *World) appendChunks(ctx context.Context, runID worlds.RunID, name string, count int, chunks [][]byte, update, condition string, values map[string]ddb.AttributeValue) error {
+func (w *World) appendChunks(ctx context.Context, runID worlds.RunID, name string, count int, chunks [][]byte, condition string) error {
 	if len(chunks) > maxChunksPerWrite {
 		return fmt.Errorf("workflow/aws: stream write of %d chunks exceeds the limit of %d per write", len(chunks), maxChunksPerWrite)
 	}
-	values[":seen"] = avn(int64(count))
-	values[":count"] = avn(int64(count + len(chunks)))
-	values[":name"] = avs(name)
-	values[":false"] = avbool(false)
-	update += ", #count = :count, #name = :name, #closed = if_not_exists(#closed, :false)"
+	values := map[string]ddb.AttributeValue{
+		":seen":  avn(int64(count)),
+		":count": avn(int64(count + len(chunks))),
+		":name":  avs(name),
+		":false": avbool(false),
+	}
+	update := "SET #count = :count, #name = :name, #closed = if_not_exists(#closed, :false)"
 	names, values := usedOnly(streamNames, values, update, condition)
 	table := awsv2.String(w.config.TableName)
 	items := []ddb.TransactWriteItem{{Update: &ddb.Update{
@@ -178,37 +96,12 @@ func (w *World) appendChunks(ctx context.Context, runID worlds.RunID, name strin
 	return w.transact(ctx, items)
 }
 
-func (w *World) StreamsCloseWriteSession(ctx context.Context, input worlds.StreamsCloseWriteSessionInput) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	update := "REMOVE #session SET #sequence = :zero, #closed = :closed"
-	values := map[string]ddb.AttributeValue{":session": avs(string(input.SessionID)), ":zero": avn(0), ":closed": avbool(true)}
-	if !input.Close {
-		update = "REMOVE #session SET #sequence = :zero"
-	}
-	names, values := usedOnly(streamNames, values, update, "#session = :session")
-	_, err := w.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 awsv2.String(w.config.TableName),
-		Key:                       streamKey(string(input.RunID), input.Name),
-		UpdateExpression:          awsv2.String(update),
-		ConditionExpression:       awsv2.String("#session = :session"),
-		ExpressionAttributeNames:  names,
-		ExpressionAttributeValues: values,
-	})
-	if conditional(err) {
-		return worlds.ErrStreamLocked
-	}
-	return err
-}
-
 func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
 	return w.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
-	// Append without a session. Concurrent direct writers race on count and
-	// retry.
+	// Concurrent writers race on count and retry.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -217,14 +110,14 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if err != nil {
 			return err
 		}
-		if meta.closed || meta.session != "" {
-			return worlds.ErrStreamLocked
+		if meta.closed {
+			return worlds.ErrStreamClosed
 		}
 		condition := "attribute_not_exists(pk)"
 		if meta.found {
-			condition = "#count = :seen AND attribute_not_exists(#session) AND #closed = :false"
+			condition = "#count = :seen AND #closed = :false"
 		}
-		err = w.appendChunks(ctx, input.RunID, input.Name, meta.count, input.Chunks, "SET #sequence = if_not_exists(#sequence, :zero)", condition, map[string]ddb.AttributeValue{":zero": avn(0)})
+		err = w.appendChunks(ctx, input.RunID, input.Name, meta.count, input.Chunks, condition)
 		if !contended(err) {
 			return err
 		}
@@ -241,10 +134,7 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ok, err := w.updateStream(ctx, input.RunID, input.Name, "SET #closed = :true", "attribute_not_exists(#session)", map[string]ddb.AttributeValue{":true": avbool(true)})
-	if err == nil && !ok {
-		return worlds.ErrStreamLocked
-	}
+	_, err := w.updateStream(ctx, input.RunID, input.Name, "SET #closed = :true", "", map[string]ddb.AttributeValue{":true": avbool(true)})
 	return err
 }
 

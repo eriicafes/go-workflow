@@ -81,7 +81,7 @@ func TestExpireRun(t *testing.T) {
 	if err := world.scheduleExpiry(ctx, finished); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody)); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody), 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range done {
@@ -103,7 +103,7 @@ func TestExpireRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(queueMessage{ID: "expire-wrun_retained", Input: worlds.QueueInput{RunID: "wrun_retained", WorkflowName: "retention"}})
-	if err := world.deliver(ctx, nil, string(body)); err != nil {
+	if err := world.deliver(ctx, nil, string(body), 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range retained {
@@ -154,7 +154,7 @@ func TestRetentionDynamo(t *testing.T) {
 	if schedule == nil {
 		t.Fatal("finishing the run scheduled no expiry")
 	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input)); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input), 1); err != nil {
 		t.Fatal(err)
 	}
 	// The record is due in an hour, so the delivery is sent on, not run.

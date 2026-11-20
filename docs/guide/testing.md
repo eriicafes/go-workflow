@@ -199,7 +199,7 @@ for _, message := range world.QueuedMessages() {
 	}
 
 	// Acknowledge the delivery.
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+	if err := world.Acknowledge(ctx, message.ID); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -126,7 +126,7 @@ handle reads and controls the run with `Value`, `Status`, `Cancel`, and
 | --- | --- | --- |
 | [`worlds/local`](worlds/local) | JSON files, in-process delivery | `World.Prepare` |
 | [`worlds/postgres`](worlds/postgres) | PostgreSQL, LISTEN/NOTIFY workers | `postgresworld.Worker` |
-| [`worlds/vercel`](worlds/vercel) | Redis, Vercel Queues, optional QStash | `vercelworld.Queue` |
+| [`worlds/vercel`](worlds/vercel) | Vercel workflow storage, Vercel Queues | `vercelworld.Queue` |
 | [`worlds/aws`](worlds/aws) | DynamoDB, SQS, optional EventBridge Scheduler | `awsworld.Queue` |
 
 Every World package also exports `HTTP(world)`, which serves the RPC endpoint
@@ -158,17 +158,15 @@ log.Fatal(http.ListenAndServe(":8081", postgresworld.HTTP(world)))
 ### Vercel
 
 Deploy `Queue` as a function with a Vercel Queues trigger for `Config.Topic`,
-and `HTTP` as a separate function for clients. Redis is reached over TCP with
-`RedisURL` or over the Upstash REST API with `RedisRESTURL` and
-`RedisRESTToken`. `OIDCToken` defaults to reading `VERCEL_OIDC_TOKEN` on every
-request.
+and `HTTP` as a separate function for clients. Runs are stored in Vercel's
+managed workflow storage, the one the Workflow SDK uses, so there is no
+database to provision. `OIDCToken` defaults to reading `VERCEL_OIDC_TOKEN` on
+every request.
 
 ```go
 world, err := vercelworld.New(vercelworld.Config{
-	BaseURL:  os.Getenv("WORKFLOW_BASE_URL"),
-	RedisURL: os.Getenv("REDIS_URL"),
-	QueueURL: os.Getenv("VERCEL_QUEUE_URL"),
-	Topic:    os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+	BaseURL: os.Getenv("WORKFLOW_BASE_URL"),
+	Topic:   os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
 })
 if err != nil {
 	log.Fatal(err)
@@ -181,8 +179,8 @@ log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
 log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
 ```
 
-Vercel Queues delays deliveries by at most six days here. Work due later is
-delivered in hops of up to six days, or by QStash when `Config.QStash` is set.
+Vercel Queues delays deliveries by at most 23 hours here, as in the Workflow
+SDK. Work due later is delivered in hops of up to 23 hours.
 
 
 ### AWS
@@ -318,16 +316,16 @@ defer workflow.Rollback(ctx, voidInvoice, invoice.ID)
 
 Steps write run-owned byte streams that readers consume while the run is still
 going. Writers and readers use the run's default stream unless their option
-names another. A stream has one writer at a time, and another writer waits
-until the current one releases or closes it.
+names another. As in the Workflow SDK, writers do not wait for each other:
+their chunks interleave, each writer's in order.
 
 ```go
 func writeProgress(ctx context.Context, count int) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx)
+	writer, err := workflow.Writer(ctx)
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
 	return struct{}{}, err
 }

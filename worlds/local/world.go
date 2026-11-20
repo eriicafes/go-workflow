@@ -278,9 +278,9 @@ func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true}
 }
 
-// HTTP returns a handler serving the RPC and webhook endpoints under
-// /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
-// it, such as worlds.WithRPCToken.
+// HTTP returns a handler serving the client and webhook endpoints under
+// /v1/workflow. Its client endpoints are unauthenticated unless options
+// protect them, such as worlds.WithClientToken.
 func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
 	return HTTPPrefix(world, "", options...)
 }

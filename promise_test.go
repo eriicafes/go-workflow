@@ -239,7 +239,7 @@ func TestThenPreservesRecordedSettlementOrder(t *testing.T) {
 				if err := runtime.Execute(ctx, message.Input); err != nil {
 					t.Fatal(err)
 				}
-				if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+				if err := world.Acknowledge(ctx, message.ID); err != nil {
 					t.Fatal(err)
 				}
 			}

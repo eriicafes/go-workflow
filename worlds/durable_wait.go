@@ -35,24 +35,20 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	position := options.Execution.NextPosition()
 	creationIndex, exists := options.Execution.index[position]
 	if !exists {
-		// On first execution, schedule the timer, then persist the queue message
-		// ID with its durable declaration so a later replay can cancel that schedule.
-		waitID := NewWaitID()
+		// On first execution, schedule the timer, then persist its declaration
+		// with the queue message ID, which analytics report.
+		waitID := NewWaitIDAt(position)
 		data := DataWaitCreated{Position: position, ResumeAt: options.DueAt, Cancellation: CancellationReferences(ctx)}
 		queued := options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		data.QueueMessageID = queued.MessageID
 		encoded, err := json.Marshal(data)
 		if err != nil {
-			_ = options.Execution.World().QueueCancel(ctx, QueueCancelInput{MessageID: queued.MessageID})
 			return DurableWaitResult{WaitID: waitID, Err: err}
 		}
 		// A write that fails or is refused leaves the queued delivery behind.
-		// Cancelling it is best-effort, since an orphan delivery only replays
-		// the run once more.
-		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, func(err error) error {
-			_ = options.Execution.World().QueueCancel(ctx, QueueCancelInput{MessageID: queued.MessageID})
-			return err
-		})
+		// Queues do not recall deliveries, and the orphan only replays the run
+		// once more.
+		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, nil)
 		return DurableWaitResult{WaitID: waitID, QueueMessageID: queued.MessageID}
 	}
 
@@ -84,7 +80,9 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	}
 	// Replay reaches this declaration before later calls that disarmed it.
 	// Inspect the recorded cancellation contexts before admitting a timer firing.
-	for _, ref := range data.Cancellation {
+	// The recorded cancellation contexts are the ones replay reaches the
+	// declaration in, which a World may not store.
+	for _, ref := range CancellationReferences(ctx) {
 		state, err := readCancellation(options.Execution.Context(), options.Execution, ref)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))

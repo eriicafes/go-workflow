@@ -22,7 +22,10 @@ const (
 	latestDeploymentTimeout = 5 * time.Second
 )
 
-var _ worlds.LatestDeployments = (*World)(nil)
+var (
+	_ worlds.LatestDeployments  = (*World)(nil)
+	_ worlds.StreamWriterOpener = (*World)(nil)
+)
 
 // LatestDeploymentID returns the deployment the production domain serves, by
 // requesting the deployment route at Config.BaseURL, which Vercel routes to

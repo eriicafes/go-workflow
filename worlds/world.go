@@ -7,10 +7,12 @@
 package worlds
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
@@ -58,6 +60,7 @@ type World interface {
 // the World's Client are then pinned to World.DeploymentID, and the Runtime
 // replays a run only on the deployment it is pinned to, re-routing other
 // deliveries there.
+
 type Capabilities struct {
 	Analytics          bool `cbor:"analytics"`
 	SetAttributes      bool `cbor:"setAttributes"`
@@ -160,10 +163,6 @@ type HookID string
 // the prefix "wait_".
 type WaitID string
 
-// StreamID identifies a stream writer session. Generated stream IDs have the
-// prefix "strm_".
-type StreamID string
-
 // EventID identifies an event within its run's event log. It encodes the
 // event's position in the log (see EventIDForSlot and EventSlot).
 type EventID string
@@ -186,8 +185,49 @@ func NewHookID() HookID { return HookID("hook_" + ulid.Make().String()) }
 // NewWaitID returns a new unique wait ID.
 func NewWaitID() WaitID { return WaitID("wait_" + ulid.Make().String()) }
 
-// NewStreamID returns a new unique stream writer session ID.
-func NewStreamID() StreamID { return StreamID("strm_" + ulid.Make().String()) }
+// NewStepIDAt returns a new unique ID for the step declared at position,
+// which OperationPosition recovers from it.
+func NewStepIDAt(position int) StepID { return StepID(positionedID("step_", position)) }
+
+// NewHookIDAt returns a new unique ID for the hook declared at position,
+// which OperationPosition recovers from it.
+func NewHookIDAt(position int) HookID { return HookID(positionedID("hook_", position)) }
+
+// NewWaitIDAt returns a new unique ID for the wait declared at position,
+// which OperationPosition recovers from it.
+func NewWaitIDAt(position int) WaitID { return WaitID(positionedID("wait_", position)) }
+
+// positionedID returns prefix and a ULID whose first four bytes of entropy
+// hold position, so the ID of a declaration carries its replay position even
+// where a World cannot store the declaration's data. The other six bytes of
+// entropy are random.
+func positionedID(prefix string, position int) string {
+	var entropy [10]byte
+	binary.BigEndian.PutUint32(entropy[:4], uint32(position))
+	_, _ = rand.Read(entropy[4:])
+	id := ulid.MustNew(ulid.Now(), bytes.NewReader(entropy[:]))
+	return prefix + id.String()
+}
+
+// OperationPosition returns the replay position carried by a step, hook, or
+// wait ID minted by NewStepIDAt, NewHookIDAt, or NewWaitIDAt, which the
+// runtime uses for every declaration. It reports false for an ID that is not
+// a prefixed ULID. For other ULIDs the result is meaningless.
+func OperationPosition(id string) (int, bool) {
+	_, body, ok := strings.Cut(id, "_")
+	if !ok {
+		return 0, false
+	}
+	parsed, err := ulid.ParseStrict(body)
+	if err != nil {
+		return 0, false
+	}
+	return int(binary.BigEndian.Uint32(parsed.Entropy()[:4])), true
+}
+
+// NewWriterID returns a new unique stream writer ID, which has the prefix
+// "wrtr_" the Workflow SDK uses.
+func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
 
 const hookTokenAlphabet = "useandom-26T19834_0v5b7qw9zxcgfkrljAIJPVYKhpGUCXW"
 

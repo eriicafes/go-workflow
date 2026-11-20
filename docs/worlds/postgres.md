@@ -77,7 +77,7 @@ connection string or pool config to use a dedicated schema.
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
 | `go_workflow_hook_tokens` | Token ownership. The primary key makes a token single-owner. |
 | `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
-| `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
+| `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
 Payloads are `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`

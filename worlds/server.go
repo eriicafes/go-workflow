@@ -32,17 +32,17 @@ func HTTPPrefixPath(prefix string) string {
 type HTTPOption func(*httpOptions)
 
 type httpOptions struct {
-	rpc func(http.Handler) http.Handler
+	client func(http.Handler) http.Handler
 }
 
-// WithRPCToken makes the RPC endpoint answer 401 unless a request carries
-// token as a bearer token, such as WORKFLOW_HTTP_TOKEN, which world-http
-// sends. An empty token refuses every RPC request, so an unset secret never
-// opens the endpoint. Webhooks are unaffected: the hook token in their URL
+// WithClientToken makes the client endpoints, RPC and the stream socket,
+// answer 401 unless a request carries token as a bearer token, such as
+// WORKFLOW_HTTP_TOKEN, which world-http sends. An empty token refuses every
+// client request, so an unset secret never opens them. Webhooks are unaffected: the hook token in their URL
 // authorizes them, since their callers can't send your credentials.
-func WithRPCToken(token string) HTTPOption {
+func WithClientToken(token string) HTTPOption {
 	want := []byte("Bearer " + token)
-	return WithRPCMiddleware(func(next http.Handler) http.Handler {
+	return WithClientMiddleware(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
@@ -54,41 +54,45 @@ func WithRPCToken(token string) HTTPOption {
 	})
 }
 
-// WithRPCMiddleware wraps only the RPC endpoint in middleware, such as a
-// session or IP check, and leaves webhooks reachable by their callers.
+// WithClientMiddleware wraps the client endpoints, RPC and the stream socket,
+// in middleware, such as a session or IP check, and leaves webhooks reachable
+// by their callers.
 // Several wrap in order, the first outermost.
-func WithRPCMiddleware(middleware func(http.Handler) http.Handler) HTTPOption {
+func WithClientMiddleware(middleware func(http.Handler) http.Handler) HTTPOption {
 	return func(o *httpOptions) {
-		if o.rpc == nil {
-			o.rpc = middleware
+		if o.client == nil {
+			o.client = middleware
 			return
 		}
-		outer := o.rpc
-		o.rpc = func(next http.Handler) http.Handler { return outer(middleware(next)) }
+		outer := o.client
+		o.client = func(next http.Handler) http.Handler { return outer(middleware(next)) }
 	}
 }
 
 // HTTPHandler returns the mux that exposes world to clients and
-// webhook callers. It serves RPCHandler at POST <prefix>/rpc and
-// WebhookHandler at <prefix>/webhooks/{token}. An empty prefix uses
+// webhook callers. It serves the client endpoints, RPCHandler at
+// POST <prefix>/rpc and StreamSocketHandler at
+// GET <prefix>/websockets/v1/runs/{runId}/streams/{name}, and WebhookHandler
+// at <prefix>/webhooks/{token}. An empty prefix uses
 // /v1/workflow. It does not execute deliveries. Worlds can register their own
 // routes, such as delivery callbacks, on the returned mux.
 //
-// The RPC endpoint can read and change every run and is unauthenticated
-// unless options protect it, with WithRPCToken or WithRPCMiddleware.
+// The client endpoints can read and change every run and are unauthenticated
+// unless options protect them, with WithClientToken or WithClientMiddleware.
 func HTTPHandler(world World, prefix string, options ...HTTPOption) *http.ServeMux {
 	var o httpOptions
 	for _, option := range options {
 		option(&o)
 	}
-	rpc := RPCHandler(world)
-	if o.rpc != nil {
-		rpc = o.rpc(rpc)
+	rpc, socket := RPCHandler(world), StreamSocketHandler(world)
+	if o.client != nil {
+		rpc, socket = o.client(rpc), o.client(socket)
 	}
 	mux := http.NewServeMux()
 	prefix = HTTPPrefixPath(prefix)
 	mux.Handle(prefix+"/webhooks/{token}", WebhookHandler(world))
 	mux.Handle("POST "+prefix+"/rpc", rpc)
+	mux.Handle("GET "+prefix+streamSocketRoute, socket)
 	return mux
 }
 

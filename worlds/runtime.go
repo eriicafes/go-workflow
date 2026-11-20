@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"sync"
 	"time"
@@ -70,6 +71,9 @@ func (r *Runtime) Execute(ctx context.Context, input QueueInput) error {
 	defer stop()
 	ctx = context.WithValue(ctx, clientContextKey{}, nil)
 	ctx = context.WithValue(ctx, cancelContextKey{}, nil)
+	if input.Attempt > MaxDeliveries {
+		return r.exceedDeliveries(ctx, input)
+	}
 	if input.StepID != nil {
 		return r.executeStep(ctx, input)
 	}
@@ -559,5 +563,67 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
 	}
+	return err
+}
+
+// MaxDeliveries is the most attempts of one delivery Runtime.Execute makes,
+// as in the Workflow SDK. With a World's retry backoff it spans hours, short
+// of a queue's retention, so a delivery that keeps failing fails its run or
+// step instead of expiring unseen.
+const MaxDeliveries = 48
+
+// exceedDeliveries fails the run, or the step, of a delivery attempted more
+// than MaxDeliveries times. A failed step is handed to a flow, which decides
+// whether the run fails. It returns nil once the failure is recorded or
+// another delivery has finished the run or step, so the delivery is
+// acknowledged.
+func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error {
+	cause := FatalError{Cause: fmt.Errorf("%w (%d attempts)", ErrMaxDeliveriesExceeded, input.Attempt-1)}
+	log.Printf("workflow: delivery %s for run %s exceeded %d attempts", input.MessageID, input.RunID, MaxDeliveries)
+	run, err := r.world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
+	if errors.Is(err, ErrRunNotFound) {
+		return nil
+	}
+	if err != nil || run.Status.Terminal() {
+		return err
+	}
+	if input.StepID == nil {
+		_, err := r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(cause)}})
+		if errors.Is(err, ErrRunTerminal) {
+			return nil
+		}
+		return err
+	}
+	step, err := r.world.StepsGet(ctx, StepsGetInput{RunID: input.RunID, StepID: *input.StepID, ResolveData: ResolveDataNone})
+	if errors.Is(err, ErrStepNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !step.Status.Terminal() {
+		if step.Status != StatusRunning {
+			// A step result needs a running step.
+			_, err := r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeStepStarted, CorrelationID: string(step.StepID)}})
+			if errors.Is(err, ErrRunTerminal) {
+				return nil
+			}
+			if err != nil && !errors.Is(err, ErrStepNotStartable) {
+				return err
+			}
+		}
+		data, err := json.Marshal(DataStepResult{Error: encodeError(cause)})
+		if err != nil {
+			return err
+		}
+		_, err = r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeStepFailed, CorrelationID: string(step.StepID), Data: data}})
+		if errors.Is(err, ErrRunTerminal) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, ErrStepNotStartable) {
+			return err
+		}
+	}
+	_, err = r.world.Queue(ctx, QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 	return err
 }

@@ -107,7 +107,7 @@ log.Fatal(http.ListenAndServe(":8080", workflow.Middleware(mux, workflow.NewClie
 
 The worker then only runs `postgresworld.Worker` with the runners and doesn't
 need to serve HTTP at all. Protect the mounted RPC path if the application is
-public. See [Protecting the RPC path](/worlds/#protecting-the-rpc-path).
+public. See [Protecting the RPC path](/worlds/#protecting-the-client-endpoints).
 
 ## Serverless
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -54,7 +55,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	creationIndex, exists := options.Execution.index[position]
 	if !exists {
 		// First execution persists the declaration and dispatches its target work.
-		stepID := NewStepID()
+		stepID := NewStepIDAt(position)
 		encoded, err := json.Marshal(input)
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}
@@ -210,6 +211,8 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 // passes on. A cancelled stepCtx makes the error fatal, unless the delivery
 // itself stopped.
 func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay bool, fn func(context.Context, In) (Out, error), input In) (value Out, err error) {
+	returned := &stepReturn{}
+	stepCtx = context.WithValue(stepCtx, stepReturnKey{}, returned)
 	func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -224,10 +227,57 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 		}()
 		value, err = fn(stepCtx, input)
 	}()
+	// What the step left to finish, such as buffered stream writes, is done
+	// before its result is recorded, so a completed step's writes are stored.
+	if returnErr := returned.run(); returnErr != nil && err == nil {
+		err = returnErr
+	}
 	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
 		err = FatalError{Cause: context.Canceled}
 	}
 	return value, err
+}
+
+type stepReturnKey struct{}
+
+// stepReturn holds the functions to run when a step function returns.
+type stepReturn struct {
+	mu    sync.Mutex
+	funcs []func() error
+	done  bool
+}
+
+func (r *stepReturn) run() error {
+	r.mu.Lock()
+	funcs := r.funcs
+	r.funcs, r.done = nil, true
+	r.mu.Unlock()
+	var errs []error
+	for _, fn := range funcs {
+		if err := fn(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// OnStepReturn registers fn to run when the step function ctx belongs to
+// returns, in registration order and before the step's result is recorded.
+// An error from fn fails a step that would otherwise succeed. It reports
+// false, and does not register fn, when ctx is not a running step
+// function's context.
+func OnStepReturn(ctx context.Context, fn func() error) bool {
+	returned, ok := ctx.Value(stepReturnKey{}).(*stepReturn)
+	if !ok {
+		return false
+	}
+	returned.mu.Lock()
+	defer returned.mu.Unlock()
+	if returned.done {
+		return false
+	}
+	returned.funcs = append(returned.funcs, fn)
+	return true
 }
 
 // StepOutcome decodes the result of the step stepID, which must have settled

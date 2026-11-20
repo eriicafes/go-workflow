@@ -26,6 +26,7 @@ import type {
 import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
 import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
+import { HTTPStreamWriteSession } from "./stream-socket.js";
 
 const HTTP_WORLD_SPEC_VERSION = 1;
 
@@ -40,8 +41,8 @@ export interface HTTPWorldOptions {
 	 */
 	baseURL?: string;
 	/**
-	 * Sent as a bearer token with every RPC request, for a server protected
-	 * with `worlds.WithRPCToken`. Defaults to `WORKFLOW_HTTP_TOKEN`. An
+	 * Sent as a bearer token with every RPC and stream socket request, for a server protected
+	 * with `worlds.WithClientToken`. Defaults to `WORKFLOW_HTTP_TOKEN`. An
 	 * `Authorization` header in `headers` takes precedence.
 	 */
 	token?: string;
@@ -340,64 +341,6 @@ export class HTTPWorld implements World {
 				list: (input) => client.call<PaginatedResponse<AnalyticsWait>>("analytics.waits.list", input),
 			},
 		};
-	}
-}
-
-class HTTPStreamWriteSession {
-	readonly client: RPCClient;
-	readonly input: RPC.StreamWriteSessionInput;
-	sessionId?: string;
-	closed = false;
-
-	constructor(client: RPCClient, input: RPC.StreamWriteSessionInput) {
-		this.client = client;
-		this.input = input;
-	}
-
-	async write(sequence: number, chunks: RPC.StreamChunk[]): Promise<void> {
-		if (this.closed) {
-			throw new HTTPWorldError("stream_session_closed", "workflow: stream write session is closed");
-		}
-		await this.client.call<RPC.Empty>("streams.writeSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: await this.getSessionId(),
-			sequence: sequence,
-			chunks: chunks.map(bytes),
-		});
-	}
-
-	async close(): Promise<void> {
-		if (this.closed) {
-			return;
-		}
-		await this.client.call<RPC.Empty>("streams.closeWriteSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: await this.getSessionId(),
-			close: true,
-		});
-		this.closed = true;
-	}
-
-	async release(): Promise<void> {
-		if (!this.sessionId || this.closed) {
-			return;
-		}
-		await this.client.call<RPC.Empty>("streams.closeWriteSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: this.sessionId,
-			close: false,
-		});
-		this.sessionId = undefined;
-	}
-
-	private async getSessionId(): Promise<string> {
-		if (!this.sessionId) {
-			this.sessionId = await this.client.call<string>("streams.createWriteSession", this.input);
-		}
-		return this.sessionId;
 	}
 }
 

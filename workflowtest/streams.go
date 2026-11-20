@@ -12,58 +12,40 @@ import (
 func conformStreams(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "streams")
-	session, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "output", WriterID: "a"})
-	if err != nil {
+	open := func() worlds.StreamWriter {
+		t.Helper()
+		writer, err := worlds.OpenStreamWriter(ctx, world, worlds.StreamsOpenWriterInput{RunID: runID, Name: "output", WriterID: worlds.NewWriterID()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return writer
+	}
+	// Writers of one stream write at once, each in order.
+	first, second := open(), open()
+	if err := first.Write(ctx, [][]byte{[]byte("a"), []byte("b")}); err != nil {
 		t.Fatal(err)
 	}
-	if session.ID() == "" {
-		t.Fatal("session without ID")
-	}
-	_, err = world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "output", WriterID: "b"})
-	conformExpect(t, err, worlds.ErrStreamLocked, "second session")
-	if err := session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 0, Chunks: [][]byte{[]byte("a"), []byte("b")}}); err != nil {
+	if err := second.Write(ctx, [][]byte{[]byte("c")}); err != nil {
 		t.Fatal(err)
 	}
-	err = session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 0, Chunks: [][]byte{[]byte("dup")}})
-	conformExpect(t, err, worlds.ErrStreamLocked, "replayed sequence")
-	err = session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 2, Chunks: [][]byte{[]byte("gap")}})
-	conformExpect(t, err, worlds.ErrStreamLocked, "skipped sequence")
-	err = world.StreamsWriteSession(ctx, worlds.StreamsWriteSessionInput{RunID: runID, Name: "output", SessionID: "strm_other", Sequence: 1, Chunks: [][]byte{[]byte("x")}})
-	conformExpect(t, err, worlds.ErrStreamLocked, "foreign session write")
-	if err := session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 1, Chunks: [][]byte{[]byte("c")}}); err != nil {
+	if err := first.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
-	err = world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "output", Chunk: []byte("direct")})
-	conformExpect(t, err, worlds.ErrStreamLocked, "direct write during session")
-	err = world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: "output"})
-	conformExpect(t, err, worlds.ErrStreamLocked, "direct close during session")
-	err = world.StreamsCloseWriteSession(ctx, worlds.StreamsCloseWriteSessionInput{RunID: runID, Name: "output", SessionID: "strm_other"})
-	conformExpect(t, err, worlds.ErrStreamLocked, "foreign session close")
-	if err := session.Release(ctx); err != nil {
+	if err := first.Write(ctx, [][]byte{[]byte("released")}); err == nil {
+		t.Fatal("released writer accepted a write")
+	}
+	if err := second.Write(ctx, [][]byte{[]byte("d")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.Release(ctx); err != nil {
-		t.Fatalf("second release: %v", err)
-	}
-	conformExpect(t, session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 2, Chunks: [][]byte{[]byte("late")}}), worlds.ErrRunTerminal, "write after release")
-
-	next, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "output", WriterID: "b"})
-	if err != nil {
-		t.Fatalf("session after release: %v", err)
-	}
-	if next.ID() == session.ID() {
-		t.Fatal("session ID reused")
-	}
-	if err := next.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 0, Chunks: [][]byte{[]byte("d")}}); err != nil {
+	if err := second.CloseStream(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := next.Close(ctx); err != nil {
-		t.Fatal(err)
+	conformExpect(t, open().Write(ctx, [][]byte{[]byte("late")}), worlds.ErrStreamClosed, "writer of a closed stream")
+	err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "output", Chunk: []byte("closed")})
+	conformExpect(t, err, worlds.ErrStreamClosed, "direct write on closed stream")
+	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: "output"}); err != nil {
+		t.Fatalf("closing a closed stream: %v", err)
 	}
-	_, err = world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "output"})
-	conformExpect(t, err, worlds.ErrRunTerminal, "session on closed stream")
-	err = world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "output", Chunk: []byte("closed")})
-	conformExpect(t, err, worlds.ErrStreamLocked, "direct write on closed stream")
 
 	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "output", Limit: 3})
 	if err != nil || len(chunks.Data) != 3 || !chunks.HasMore || !chunks.Done || chunks.Cursor == "" {

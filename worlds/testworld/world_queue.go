@@ -2,6 +2,7 @@ package testworld
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -15,7 +16,7 @@ type queuedMessage struct {
 }
 
 // QueueMessage is a delivery that has not been acknowledged. A test that
-// executes it acknowledges it by passing ID to QueueCancel.
+// executes it acknowledges it by passing ID to Acknowledge.
 type QueueMessage struct {
 	ID    string
 	Input worlds.QueueInput
@@ -56,8 +57,9 @@ func (w *World) deliver(id string, input worlds.QueueInput) {
 			case <-timer.C:
 			}
 		}
+		input.Attempt = attempt + 1
 		if w.runtime.Execute(w.ctx, input) == nil {
-			_ = w.QueueCancel(w.ctx, worlds.QueueCancelInput{MessageID: id})
+			_ = w.Acknowledge(w.ctx, id)
 			return
 		}
 	}
@@ -66,7 +68,14 @@ func (w *World) deliver(id string, input worlds.QueueInput) {
 // deliveryAttempts is how often an automatic World executes a delivery.
 const deliveryAttempts = 3
 
-func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
+// ErrMessageNotFound is returned by Acknowledge for a message the World does
+// not hold.
+var ErrMessageNotFound = errors.New("testworld: queue message not found")
+
+// Acknowledge removes the delivery identified by id, which a test using a
+// NewManual World calls once it has executed the delivery. It returns
+// ErrMessageNotFound when no such delivery is queued.
+func (w *World) Acknowledge(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -74,12 +83,12 @@ func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for index, message := range w.queued {
-		if message.id == input.MessageID {
+		if message.id == id {
 			w.queued = append(w.queued[:index], w.queued[index+1:]...)
 			return nil
 		}
 	}
-	return worlds.ErrQueueMessageNotFound
+	return ErrMessageNotFound
 }
 
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {

@@ -365,15 +365,15 @@ func writeOwnStream(ctx context.Context, runID string) (struct{}, error) {
 	if err != nil {
 		return struct{}{}, err
 	}
-	writer, release, err := run.Writer(ctx, workflow.WriterOption{Name: "side"})
+	writer, err := run.Writer(ctx, workflow.WriterOption{Name: "side"})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	if _, err := writer.Write([]byte("from step")); err != nil {
 		return struct{}{}, err
 	}
-	return struct{}{}, writer.Close()
+	return struct{}{}, writer.CloseStream()
 }
 
 func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
@@ -383,7 +383,7 @@ func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
 		if err != nil {
 			return streamAccessOutput{}, err
 		}
-		_, _, workflowErr := run.Writer(ctx)
+		_, workflowErr := run.Writer(ctx)
 		_, err = workflow.Step(ctx, writeOwnStream, runID)
 		return streamAccessOutput{WorkflowErr: fmt.Sprint(workflowErr)}, err
 	}))
@@ -461,7 +461,7 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 			if err := runtime.Execute(ctx, message.Input); err != nil {
 				t.Fatal(err)
 			}
-			_ = world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID})
+			_ = world.Acknowledge(ctx, message.ID)
 			executed = true
 			break
 		}
@@ -495,18 +495,18 @@ type progress struct {
 // writeProgress writes message to the run's default stream and returns when
 // it ran, so the test can measure the time that passed between steps.
 func writeProgress(ctx context.Context, p progress) (time.Time, error) {
-	writer, release, err := workflow.Writer(ctx)
+	writer, err := workflow.Writer(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
-	defer release()
+	defer writer.Close()
 
 	if _, err := io.WriteString(writer, p.Message); err != nil {
 		return time.Time{}, err
 	}
 
 	if p.Close {
-		if err := writer.Close(); err != nil {
+		if err := writer.CloseStream(); err != nil {
 			return time.Time{}, err
 		}
 	}

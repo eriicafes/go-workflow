@@ -116,7 +116,7 @@ config.Routes = worlds.Routes(worlds.Route[workflows.Backfill]("backfill"))
 
 The worker policy grants item reads and writes and `Query` on the table and
 its indexes, `SendMessage`, `ReceiveMessage`, `DeleteMessage`, and
-`GetQueueAttributes` on the task queue and every routed queue, `CreateSchedule` and `DeleteSchedule`
+`GetQueueAttributes` on the task queue and every routed queue, `CreateSchedule`
 on the group's `go-workflow-*` schedules, and `iam:PassRole` on the Scheduler
-role, limited to Scheduler. The API policy grants the same table access,
-`SendMessage`, and `DeleteSchedule` for cancelling long timers.
+role, limited to Scheduler. The API policy grants the same table access and
+`SendMessage`.

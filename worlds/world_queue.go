@@ -17,9 +17,6 @@ type Queue interface {
 	// QueueBatch stores the supplied deliveries and returns their message IDs. It
 	// may return results for items stored before an error.
 	QueueBatch(context.Context, QueueBatchInput) ([]QueueResult, error)
-	// QueueCancel removes the delivery identified by MessageID. It returns
-	// ErrQueueMessageNotFound when the delivery does not exist.
-	QueueCancel(context.Context, QueueCancelInput) error
 }
 
 type (
@@ -60,14 +57,16 @@ type (
 		// redelivered. The World sets it before Runtime.Execute, and Queue
 		// ignores it.
 		MessageID string
+		// Attempt is the 1-based number of this delivery of the message,
+		// which the World sets before Runtime.Execute and Queue ignores.
+		// Zero means the World does not count deliveries. Past
+		// MaxDeliveries, Runtime.Execute fails the delivery's run or step
+		// instead of executing it.
+		Attempt int
 	}
 	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {
 		Items []QueueInput
-	}
-	// QueueCancelInput holds the arguments to QueueCancel.
-	QueueCancelInput struct {
-		MessageID string
 	}
 	// QueueResult is the result of Queue for one delivery.
 	QueueResult struct {

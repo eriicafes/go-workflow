@@ -63,10 +63,9 @@ type Client interface {
 	StreamsGetInfo(context.Context, StreamsGetInfoInput) (StreamInfo, error)
 	// StreamsList returns the names of a run's streams.
 	StreamsList(context.Context, StreamsListInput) ([]string, error)
-	// StreamsCreateWriteSession creates an exclusive writer session for a
-	// stream. It returns ErrStreamLocked while another session holds the
-	// stream.
-	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
+	// StreamsOpenWriter returns a writer for a stream, which other writers
+	// of the stream do not wait for.
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
 
 	// HooksGet returns hook metadata by ID. It returns ErrHookNotFound when
 	// the hook does not exist.
@@ -89,14 +88,13 @@ type Client interface {
 	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
 	// returns the number of waits it settled.
 	RunsWake(context.Context, ClientRunsWakeInput) (int, error)
-	// StreamsWrite appends a chunk to a stream. It returns
-	// ErrStreamLocked while a writer holds the stream.
+	// StreamsWrite appends a chunk to a stream. It returns ErrStreamClosed
+	// when the stream is closed.
 	StreamsWrite(context.Context, StreamsWriteInput) error
 	// StreamsWriteMulti appends several chunks to a stream. It returns
-	// ErrStreamLocked while a writer holds the stream.
+	// ErrStreamClosed when the stream is closed.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
-	// StreamsClose closes a stream. It returns ErrStreamLocked while a
-	// writer holds the stream.
+	// StreamsClose closes a stream for every writer.
 	StreamsClose(context.Context, StreamsCloseInput) error
 	// HooksResume resumes the hook with input.Token with the payload
 	// input.Data, as ResumeHook does. It returns ErrHookNotFound when no
@@ -187,8 +185,8 @@ func (c worldClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return c.world.StreamsList(ctx, input)
 }
 
-func (c worldClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
-	return c.world.StreamsCreateWriteSession(ctx, input)
+func (c worldClient) StreamsOpenWriter(ctx context.Context, input StreamsOpenWriterInput) (StreamWriter, error) {
+	return OpenStreamWriter(ctx, c.world, input)
 }
 
 func (c worldClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
@@ -267,6 +265,9 @@ type httpClient struct {
 	client   *http.Client
 	mutex    sync.Mutex
 	spec     *ClientSpec
+	// socketDeclinedUntil is when the client next tries a stream socket
+	// after the server declined one.
+	socketDeclinedUntil time.Time
 }
 
 func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
@@ -366,12 +367,35 @@ func (c *httpClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return output, err
 }
 
-func (c *httpClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
-	var id StreamID
-	if err := c.call(ctx, "streams.createWriteSession", input, &id); err != nil {
-		return nil, err
+// streamSocketRetryAfter is how long a client that a server declined a
+// stream socket writes through RPC before it tries again.
+const streamSocketRetryAfter = 5 * time.Minute
+
+// StreamsOpenWriter returns a writer that writes through the server's stream
+// socket once it opens, and through RPC calls until then, or when the server
+// declines it.
+func (c *httpClient) StreamsOpenWriter(ctx context.Context, input StreamsOpenWriterInput) (StreamWriter, error) {
+	direct := newDirectStreamWriter(c, input)
+	c.mutex.Lock()
+	declined := time.Now().Before(c.socketDeclinedUntil)
+	c.mutex.Unlock()
+	if declined || input.WriterID == "" {
+		return direct, nil
 	}
-	return httpStreamWriteSession{client: c, runID: input.RunID, name: input.Name, id: id}, nil
+	target, err := StreamSocketURL(c.endpoint, input.RunID, input.Name, input.WriterID)
+	if err != nil {
+		return direct, nil
+	}
+	return OpenStreamSocketWriter(ctx, StreamSocketOptions{
+		URL:        target,
+		HTTPClient: c.client,
+		Fallback:   direct,
+		OnDecline: func() {
+			c.mutex.Lock()
+			c.socketDeclinedUntil = time.Now().Add(streamSocketRetryAfter)
+			c.mutex.Unlock()
+		},
+	}), nil
 }
 
 func (c *httpClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
@@ -434,24 +458,6 @@ func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
 	}
 	c.spec = &output
 	return output, nil
-}
-
-type httpStreamWriteSession struct {
-	client *httpClient
-	runID  RunID
-	name   string
-	id     StreamID
-}
-
-func (s httpStreamWriteSession) ID() StreamID { return s.id }
-func (s httpStreamWriteSession) Write(ctx context.Context, input StreamWriteSessionWriteInput) error {
-	return s.client.call(ctx, "streams.writeSession", StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
-}
-func (s httpStreamWriteSession) Close(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: true}, nil)
-}
-func (s httpStreamWriteSession) Release(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
 }
 
 type httpAnalytics struct{ client *httpClient }

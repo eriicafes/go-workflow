@@ -980,20 +980,20 @@ func (r *run) result(toolCalls []ToolCall, toolResults []ToolResult) Result {
 // the stream when input.Close is set. Streams can only be written in step
 // context, so the agent runs it as a step.
 func writePartsStep(ctx context.Context, input writePartsInput) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, input.Writer)
+	writer, err := workflow.Writer(ctx, input.Writer)
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	for _, part := range input.Parts {
 		if err := writePart(writer, part); err != nil {
 			return struct{}{}, err
 		}
 	}
 	if input.Close {
-		return struct{}{}, writer.Close()
+		return struct{}{}, writer.CloseStream()
 	}
-	return struct{}{}, nil
+	return struct{}{}, writer.Close()
 }
 
 // addApprovalRequests appends approval requests to the last assistant

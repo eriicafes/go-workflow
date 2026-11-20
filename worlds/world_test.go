@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,35 +115,49 @@ func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 	}
 }
 
-func TestStreamNamesHaveExclusiveWriterSessions(t *testing.T) {
+func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream_lock", WorkflowName: "test"})
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream_writer", WorkflowName: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	input := worlds.StreamsOpenWriterInput{RunID: "wrun_stream_writer", Name: "audit", WriterID: worlds.NewWriterID()}
+	first, err := worlds.OpenStreamWriter(ctx, world, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_one"})
+	second, err := worlds.OpenStreamWriter(ctx, world, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_two"}); !errors.Is(err, worlds.ErrStreamLocked) {
-		t.Fatalf("same stream name error = %v", err)
+	if err := first.Write(ctx, [][]byte{[]byte("a"), []byte("b")}); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "logs", WriterID: "step_two"}); err != nil {
-		t.Fatalf("different stream name should acquire: %v", err)
+	if err := second.Write(ctx, [][]byte{[]byte("c")}); err != nil {
+		t.Fatal(err)
 	}
 	if err := first.Release(ctx); err != nil {
 		t.Fatal(err)
 	}
-	second, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_two"})
+	if err := first.Write(ctx, [][]byte{[]byte("x")}); err == nil {
+		t.Fatal("released writer accepted a write")
+	}
+	if err := second.CloseStream(ctx); err != nil {
+		t.Fatal(err)
+	}
+	third, err := worlds.OpenStreamWriter(ctx, world, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Close(ctx); err != nil {
-		t.Fatal(err)
+	if err := third.Write(ctx, [][]byte{[]byte("late")}); !errors.Is(err, worlds.ErrStreamClosed) {
+		t.Fatalf("write to a closed stream = %v", err)
 	}
-	if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_stream_lock", Name: "audit", WriterID: "step_three"}); !errors.Is(err, worlds.ErrRunTerminal) {
-		t.Fatalf("closed stream name error = %v", err)
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: input.RunID, Name: input.Name})
+	if err != nil || len(chunks.Data) != 3 || !chunks.Done || string(chunks.Data[2].Data) != "c" {
+		t.Fatalf("chunks = %#v err=%v", chunks, err)
+	}
+	if !strings.HasPrefix(input.WriterID, "wrtr_") || len(input.WriterID) != len("wrtr_")+26 {
+		t.Fatalf("writer ID = %q", input.WriterID)
 	}
 }
 
@@ -410,3 +425,21 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 }
 
 func ptr(value int) *int { return &value }
+
+func TestOperationPosition(t *testing.T) {
+	for _, position := range []int{0, 1, 7, 1 << 20} {
+		for _, id := range []string{string(worlds.NewStepIDAt(position)), string(worlds.NewHookIDAt(position)), string(worlds.NewWaitIDAt(position))} {
+			if got, ok := worlds.OperationPosition(id); !ok || got != position {
+				t.Fatalf("worlds.OperationPosition(%s) = %d, %v, want %d", id, got, ok, position)
+			}
+		}
+	}
+	if worlds.NewStepIDAt(3) == worlds.NewStepIDAt(3) {
+		t.Fatal("positioned IDs repeat")
+	}
+	for _, id := range []string{"", "step", "step_notaulid", "evnt_00000000000000000000000001x"} {
+		if _, ok := worlds.OperationPosition(id); ok {
+			t.Errorf("worlds.OperationPosition(%q) reported ok", id)
+		}
+	}
+}

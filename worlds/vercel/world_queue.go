@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -14,159 +13,64 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// queueRecord is the durable delivery stored at p:queue:<id>. Vercel Queues
-// and QStash messages carry only the ID.
-type queueRecord struct {
-	QueueName string `json:"queueName,omitempty"`
+// queueMessage is the Vercel Queues payload: the whole delivery, so the
+// World keeps no record of queued work.
+type queueMessage struct {
+	// ID is the delivery's message ID, which stays the same across hops and
+	// redeliveries.
+	ID                           string         `json:"id"`
+	QueueName                    string         `json:"queueName,omitempty"`
+	RunID                        worlds.RunID   `json:"runId"`
+	StepID                       *worlds.StepID `json:"stepId,omitempty"`
+	NotBefore                    *time.Time     `json:"notBefore,omitempty"`
+	IdempotencyKey               string         `json:"idempotencyKey,omitempty"`
+	DeploymentID                 string         `json:"deploymentId,omitempty"`
+	DeploymentMismatchRetryCount int            `json:"deploymentMismatchRetryCount,omitempty"`
+	ReplayDivergenceCount        int            `json:"replayDivergenceCount,omitempty"`
 	// Topic is the Vercel Queues topic the delivery's workflow is routed to;
 	// empty is Config.Topic.
-	Topic           string         `json:"topic,omitempty"`
-	RunID           worlds.RunID   `json:"runId"`
-	StepID          *worlds.StepID `json:"stepId,omitempty"`
-	NotBefore       *time.Time     `json:"notBefore,omitempty"`
-	IdempotencyKey  string         `json:"idempotencyKey,omitempty"`
-	QStashMessageID string         `json:"qstashMessageId,omitempty"`
-	// DeploymentID is the deployment the message is published to, kept so a
-	// QStash timer is handed back to the same deployment.
-	DeploymentID                 string `json:"deploymentId,omitempty"`
-	DeploymentMismatchRetryCount int    `json:"deploymentMismatchRetryCount,omitempty"`
-	ReplayDivergenceCount        int    `json:"replayDivergenceCount,omitempty"`
+	Topic string `json:"topic,omitempty"`
 }
 
-func (record queueRecord) input() worlds.QueueInput {
-	return worlds.QueueInput{QueueName: record.QueueName, RunID: record.RunID, StepID: record.StepID, NotBefore: record.NotBefore, IdempotencyKey: record.IdempotencyKey, DeploymentID: record.DeploymentID, DeploymentMismatchRetryCount: record.DeploymentMismatchRetryCount, ReplayDivergenceCount: record.ReplayDivergenceCount}
+func (message queueMessage) input() worlds.QueueInput {
+	return worlds.QueueInput{QueueName: message.QueueName, RunID: message.RunID, StepID: message.StepID, NotBefore: message.NotBefore, IdempotencyKey: message.IdempotencyKey, DeploymentID: message.DeploymentID, DeploymentMismatchRetryCount: message.DeploymentMismatchRetryCount, ReplayDivergenceCount: message.ReplayDivergenceCount, MessageID: message.ID}
 }
 
-func (w *World) putQueueRecord(ctx context.Context, id string, record queueRecord, mode string) (bool, error) {
-	data, err := json.Marshal(record)
-	if err != nil {
-		return false, err
-	}
-	result, err := w.redis.Run(ctx, scriptQueuePut, w.scripts, id, string(data), mode)
-	return replyInt(result) == 1, err
-}
-
-func (w *World) getQueueRecord(ctx context.Context, id string) (queueRecord, bool, error) {
-	raw, ok, err := w.redis.Get(ctx, w.key("queue", id))
-	if err != nil || !ok {
-		return queueRecord{}, false, err
-	}
-	var record queueRecord
-	if err := json.Unmarshal([]byte(raw), &record); err != nil {
-		return queueRecord{}, false, fmt.Errorf("workflow/vercel: decode queue record %s: %w", id, err)
-	}
-	return record, true, nil
-}
-
-func (w *World) takeQueueRecord(ctx context.Context, id string) (queueRecord, bool, error) {
-	result, err := w.redis.Run(ctx, scriptQueueTake, w.scripts, id)
-	if err != nil || result == nil {
-		return queueRecord{}, false, err
-	}
-	var record queueRecord
-	if err := json.Unmarshal([]byte(replyString(result)), &record); err != nil {
-		return queueRecord{}, false, fmt.Errorf("workflow/vercel: decode queue record %s: %w", id, err)
-	}
-	return record, true, nil
-}
-
-// Queue does not deduplicate by input.IdempotencyKey. Vercel Queues
-// deduplicates only retried publishes of the same delivery, by its message ID.
-// It publishes to input.DeploymentID, or to Config.DeploymentID when that is
-// empty, and returns an error wrapping worlds.ErrDeploymentUnavailable when
-// Vercel cannot find that deployment's consumer. A delivery due more than six
-// days ahead goes through QStash when Config.QStash is set, and otherwise is
-// delivered in hops of up to six days on Vercel Queues.
+// Queue publishes the delivery to Vercel Queues. It does not deduplicate by
+// input.IdempotencyKey: Vercel Queues deduplicates only retried publishes of
+// the same delivery, by its message ID. It publishes to input.DeploymentID,
+// or to Config.DeploymentID when that is empty, and returns an error wrapping
+// worlds.ErrDeploymentUnavailable when Vercel cannot find that deployment's
+// consumer. A delivery due more than 23 hours ahead is delivered in hops of up
+// to 23 hours, as the Workflow SDK does.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
-	// Store the delivery record, then publish its ID to Vercel Queues (delays
-	// up to six days, in hops for longer ones) or QStash (longer delays, when
-	// configured). A failed publish removes the record.
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
-	var delay time.Duration
-	if input.NotBefore != nil {
-		delay = time.Until(*input.NotBefore)
-	}
-	long := delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second)
-	id := ulid.Make().String()
 	deploymentID := input.DeploymentID
 	if deploymentID == "" {
 		deploymentID = w.config.DeploymentID
 	}
-	record := queueRecord{QueueName: input.QueueName, Topic: w.config.Topics[w.config.Routes[input.WorkflowName]], RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
-	if _, err := w.putQueueRecord(ctx, id, record, "NX"); err != nil {
-		return worlds.QueueResult{}, err
-	}
-	if err := w.schedule(ctx, id, record, delay, long); err != nil {
-		if _, _, cleanup := w.takeQueueRecord(context.WithoutCancel(ctx), id); cleanup != nil {
-			err = errors.Join(err, cleanup)
-		}
-		return worlds.QueueResult{}, err
-	}
-	return worlds.QueueResult{MessageID: id}, nil
-}
-
-func (w *World) schedule(ctx context.Context, id string, record queueRecord, delay time.Duration, long bool) error {
-	if !long || w.config.QStash == nil {
-		// A delay beyond Vercel Queues' limit is delivered early, and the
-		// consumer publishes the next hop.
-		return w.publishVQS(ctx, id, id, record.Topic, min(delay, vqsMaxQueueDelay), record.DeploymentID)
-	}
-	// A delay beyond QStash's limit fires early and is scheduled again by
-	// releaseTimer.
-	due := *record.NotBefore
-	if limit := time.Now().Add(w.config.QStash.maxDelay()); due.After(limit) {
-		due = limit
-	}
-	qstashID, err := w.publishQStash(ctx, id, due)
-	if err != nil {
-		return err
-	}
-	record.QStashMessageID = qstashID
-	stored, err := w.putQueueRecord(ctx, id, record, "XX")
-	if err == nil && !stored {
-		// Cancelled while publishing.
-		err = w.cancelQStash(ctx, qstashID)
-	}
-	if err != nil {
-		return errors.Join(err, w.cancelQStash(context.WithoutCancel(ctx), qstashID))
-	}
-	return nil
-}
-
-// releaseTimer moves a QStash-delivered record onto Vercel Queues. When the
-// deployment the delivery is addressed to is gone, it is published to this
-// deployment instead, whose runtime re-routes it and fails the run when its
-// deployment stays unavailable.
-func (w *World) releaseTimer(ctx context.Context, id string) error {
-	record, ok, err := w.getQueueRecord(ctx, id)
-	if err != nil || !ok {
-		return err
-	}
+	message := queueMessage{ID: ulid.Make().String(), QueueName: input.QueueName, Topic: w.config.Topics[w.config.Routes[input.WorkflowName]], RunID: input.RunID, StepID: input.StepID, NotBefore: input.NotBefore, IdempotencyKey: input.IdempotencyKey, DeploymentID: deploymentID, DeploymentMismatchRetryCount: input.DeploymentMismatchRetryCount, ReplayDivergenceCount: input.ReplayDivergenceCount}
 	var delay time.Duration
-	if record.NotBefore != nil {
-		delay = time.Until(*record.NotBefore)
+	if input.NotBefore != nil {
+		delay = time.Until(*input.NotBefore)
 	}
-	if delaySeconds(delay) > int64(vqsMaxQueueDelay/time.Second) {
-		return w.schedule(ctx, id, record, delay, true)
+	if err := w.publishVQS(ctx, message, message.ID, min(delay, vqsMaxQueueDelay), deploymentID); err != nil {
+		return worlds.QueueResult{}, err
 	}
-	if err := w.republish(ctx, id, id, record, delay); err != nil {
-		return err
-	}
-	record.QStashMessageID = ""
-	_, err = w.putQueueRecord(ctx, id, record, "XX")
-	return err
+	return worlds.QueueResult{MessageID: message.ID}, nil
 }
 
-// republish publishes an existing record to Vercel Queues under key, with
-// delay capped at the Vercel Queues limit. When the deployment the delivery is
-// addressed to is gone, it is published to this deployment instead.
-func (w *World) republish(ctx context.Context, id, key string, record queueRecord, delay time.Duration) error {
+// republish publishes message again under key, with delay capped at the
+// Vercel Queues limit. When the deployment the delivery is addressed to is
+// gone, it is published to this deployment instead, whose runtime re-routes
+// it and fails the run when its deployment stays unavailable.
+func (w *World) republish(ctx context.Context, message queueMessage, key string, delay time.Duration) error {
 	delay = min(delay, vqsMaxQueueDelay)
-	err := w.publishVQS(ctx, id, key, record.Topic, delay, record.DeploymentID)
-	if errors.Is(err, worlds.ErrDeploymentUnavailable) && record.DeploymentID != w.config.DeploymentID {
-		err = w.publishVQS(ctx, id, key, record.Topic, delay, w.config.DeploymentID)
+	err := w.publishVQS(ctx, message, key, delay, message.DeploymentID)
+	if errors.Is(err, worlds.ErrDeploymentUnavailable) && message.DeploymentID != w.config.DeploymentID {
+		err = w.publishVQS(ctx, message, key, delay, w.config.DeploymentID)
 	}
 	return err
 }
@@ -181,25 +85,6 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 		results = append(results, result)
 	}
 	return results, nil
-}
-
-func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
-	// Removing the record makes a later delivery acknowledge without running.
-	// A pending QStash timer is deleted too.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	record, ok, err := w.takeQueueRecord(ctx, input.MessageID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return worlds.ErrQueueMessageNotFound
-	}
-	if record.QStashMessageID != "" {
-		return w.cancelQStash(ctx, record.QStashMessageID)
-	}
-	return nil
 }
 
 type consumer struct {
@@ -234,28 +119,20 @@ func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error) {
-	var message vqsMessage
-	if err := json.Unmarshal(delivery.Body, &message); err != nil || message.ID == "" {
+	var message queueMessage
+	if err := json.Unmarshal(delivery.Body, &message); err != nil || message.ID == "" || message.RunID == "" {
 		// This is not a message this World published, so drop it rather than
 		// retry.
 		return http.StatusOK, c.world.acknowledge(ctx, delivery)
 	}
-	record, ok, err := c.world.getQueueRecord(ctx, message.ID)
-	if err != nil {
-		return http.StatusInternalServerError, err
-	}
-	if !ok {
-		// Cancelled or already executed.
-		return http.StatusOK, c.world.acknowledge(ctx, delivery)
-	}
-	if record.NotBefore != nil {
-		early := time.Until(*record.NotBefore)
+	if message.NotBefore != nil {
+		early := time.Until(*message.NotBefore)
 		if early > vqsMaxVisibility {
 			// A delay beyond Vercel Queues' limit continues on the next hop,
 			// published before this one is acknowledged so a crash in between
 			// only redelivers this one, whose retried publish Vercel drops by
 			// its idempotency key.
-			if err := c.world.republish(ctx, message.ID, message.ID+":"+delivery.MessageID, record, early); err != nil {
+			if err := c.world.republish(ctx, message, message.ID+":"+delivery.MessageID, early); err != nil {
 				return http.StatusInternalServerError, err
 			}
 			return http.StatusOK, c.world.acknowledge(ctx, delivery)
@@ -269,9 +146,9 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		}
 	}
 	stop := c.renewLease(ctx, delivery)
-	input := record.input()
-	input.MessageID = message.ID
-	err = c.runtime.Execute(ctx, input)
+	input := message.input()
+	input.Attempt = delivery.DeliveryCount
+	err := c.runtime.Execute(ctx, input)
 	stop()
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		// Retrying cannot create the run, so drop the delivery.
@@ -282,9 +159,6 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		if visibilityErr := c.world.setVisibility(context.WithoutCancel(ctx), delivery, retryDelay(delivery.DeliveryCount)); visibilityErr != nil {
 			err = errors.Join(err, visibilityErr)
 		}
-		return http.StatusInternalServerError, err
-	}
-	if _, _, err := c.world.takeQueueRecord(ctx, message.ID); err != nil {
 		return http.StatusInternalServerError, err
 	}
 	if err := c.world.acknowledge(ctx, delivery); err != nil {

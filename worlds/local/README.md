@@ -32,8 +32,7 @@ under `prefix`, and `RPC` and `Webhook` return each endpoint on its own.
   directory handle. `New(root, config, runners)` borrows a caller-owned
   `*os.Root`, which the caller closes after `Close`. Neither reads any state.
 - `Prepare(ctx)` takes an exclusive `flock` on `locks/world.lock`, validates
-  `version.json`, recovers interrupted writes, releases stream write sessions
-  left by the previous process, and begins delivering every persisted queue
+  `version.json`, recovers interrupted writes, and begins delivering every persisted queue
   item. It returns `ErrInUse` when another World (in this or another process)
   holds the directory. Cancelling `ctx` stops delivery.
 - **Every other method requires a prepared World** and returns `ErrNotPrepared`
@@ -59,7 +58,7 @@ events/<run>/<eventID>.json                one file per event; IDs are slot-padd
 steps/<run>/<step>.json                    step views
 hooks/<hook>.json                          hook views
 tokens/<token>.json                        {hookId, retainUntil}: token ownership
-streams/<run>/<name>/meta.json             {name, closed, session, sequence, count}
+streams/<run>/<name>/meta.json             {name, closed, count}
 streams/<run>/<name>/<%010d>.json          one file per chunk
 queue/<messageID>.json                     durable delivery (ULID IDs)
 queue-keys/<run+key>.json                  idempotency key -> pending message ID
@@ -102,8 +101,7 @@ delivery runs `worlds.NewRuntime(world, runners).Execute` in its own
 goroutine, and its record is deleted on success. A failed delivery is retried
 with exponential backoff from 100ms up to 30s. `IdempotencyKey` deduplicates
 per run while the delivery is pending; the key is released when delivery
-starts, so work queued during a delivery is never dropped. `QueueCancel`
-deletes the record and a scheduled timer for it is skipped.
+starts, so work queued during a delivery is never dropped.
 
 `RunsWaitForTerminalStatus` and `StreamsGetChunks` wait on an in-process
 change notification instead of polling.

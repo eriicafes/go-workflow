@@ -40,14 +40,14 @@ var (
 	ErrHookConflict = errors.New("workflow: hook token is already claimed")
 	// ErrHookForceClaimed reports that another hook took over this hook's token.
 	ErrHookForceClaimed = errors.New("workflow: hook token was force claimed")
-	// ErrStreamLocked reports that a stream write conflicts with its writer session.
-	ErrStreamLocked = errors.New("workflow: stream namespace is already being written")
+	// ErrMaxDeliveriesExceeded is the error of a run or step whose delivery
+	// was attempted more than MaxDeliveries times.
+	ErrMaxDeliveriesExceeded = errors.New("workflow: delivery exceeded the maximum attempts")
+	// ErrStreamClosed reports a write to a closed stream.
+	ErrStreamClosed = errors.New("workflow: stream is closed")
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
 	// malformed or names an unknown event type.
 	ErrEventInvalid = errors.New("workflow: event is invalid")
-	// ErrQueueMessageNotFound is returned by QueueCancel when no pending
-	// delivery has the requested message ID.
-	ErrQueueMessageNotFound = errors.New("workflow: queue message not found")
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
 	ErrWebhookRequestTooLarge = errors.New("workflow: webhook request is too large")

@@ -166,26 +166,26 @@ func compileReport(ctx context.Context, input compileInput) (string, error) {
 
 // writeProgress appends a line to the run's progress stream.
 func writeProgress(ctx context.Context, line string) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	_, err = fmt.Fprintln(writer, line)
 	return struct{}{}, err
 }
 
 // endProgress writes a final line and closes the progress stream.
 func endProgress(ctx context.Context, line string) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: workflows.ProgressStream})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	if _, err := fmt.Fprintln(writer, line); err != nil {
 		return struct{}{}, err
 	}
-	return struct{}{}, writer.Close()
+	return struct{}{}, writer.CloseStream()
 }
 
 // failProgress is the compensation that ends the progress stream of a run

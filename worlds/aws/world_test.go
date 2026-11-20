@@ -126,45 +126,6 @@ func TestQueuePublishFailure(t *testing.T) {
 	}
 }
 
-func TestQueueCancel(t *testing.T) {
-	ctx := context.Background()
-	dynamo, schedules := newFakeDynamo(), newFakeScheduler()
-	world := testWorld(t, dynamo, &fakeSQS{}, schedules)
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: "missing"}); !errors.Is(err, worlds.ErrQueueMessageNotFound) {
-		t.Fatalf("cancel missing = %v", err)
-	}
-	later := time.Now().Add(time.Hour)
-	long, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
-	if err != nil {
-		t.Fatal(err)
-	}
-	short, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: long.MessageID}); err != nil {
-		t.Fatal(err)
-	}
-	if schedules.count() != 0 || dynamo.has(long.MessageID) {
-		t.Fatal("cancel left the schedule or record")
-	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: short.MessageID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: short.MessageID}); !errors.Is(err, worlds.ErrQueueMessageNotFound) {
-		t.Fatalf("second cancel = %v", err)
-	}
-	// A schedule that already fired and deleted itself still cancels cleanly.
-	fired, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
-	if err != nil {
-		t.Fatal(err)
-	}
-	delete(schedules.schedules, scheduleName(fired.MessageID))
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: fired.MessageID}); err != nil {
-		t.Fatalf("cancel after schedule fired: %v", err)
-	}
-}
-
 var tableSequence atomic.Int64
 
 func TestConformance(t *testing.T) {
