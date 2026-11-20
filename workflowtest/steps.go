@@ -167,9 +167,10 @@ func conformStepAdmission(t *testing.T, world worlds.World) {
 func conformLargePayloads(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	// Each payload fits in its own event, while together they exceed what a
-	// World could keep in one record of a step.
+	// World could keep in one record of a step. Event data carries payloads
+	// in base64, so each must stay under 300 KB to fit a 400 KB record.
 	payload := func(fill string) json.RawMessage {
-		return json.RawMessage(`"` + strings.Repeat(fill, 300<<10) + `"`)
+		return json.RawMessage(`"` + strings.Repeat(fill, 250<<10) + `"`)
 	}
 	input, output := payload("i"), payload("o")
 	runID := conformRunID("payloads")
