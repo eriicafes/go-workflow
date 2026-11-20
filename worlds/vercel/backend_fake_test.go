@@ -95,6 +95,8 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		mux := http.NewServeMux()
 		mux.Handle("GET /websockets/v1/runs/{runId}/streams/{name}", worlds.StreamSocketHandler(f.store))
 		mux.ServeHTTP(writer, request)
+	case len(parts) == 3 && parts[0] == "v4" && parts[1] == "runs" && parts[2] == "purge" && request.Method == http.MethodPost:
+		f.purge(ctx, writer, request)
 	case len(parts) == 5 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && parts[4] == "batch" && request.Method == http.MethodPost:
 		f.createBatch(ctx, writer, request, worlds.RunID(parts[2]))
 	case len(parts) == 5 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodPost:
@@ -562,6 +564,9 @@ func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[str
 	if run.CompletedAt != nil {
 		wire["completedAt"] = *run.CompletedAt
 	}
+	if run.ExpiredAt != nil {
+		wire["expiredAt"] = *run.ExpiredAt
+	}
 	if len(run.Error) > 0 {
 		wire["error"] = run.Error
 	}
@@ -690,4 +695,45 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusBadRequest, "validation-error"
 	}
 	return http.StatusInternalServerError, "internal"
+}
+
+// purge deletes run data as the backend's /v4/runs/purge does, naming the
+// deleted and already_deleted outcomes purged and already_purged, and
+// answering in reverse order to exercise reordering.
+func (f *fakeBackend) purge(ctx context.Context, writer http.ResponseWriter, request *http.Request) {
+	var in struct {
+		RunIDs []worlds.RunID `cbor:"runIds"`
+	}
+	body, err := io.ReadAll(request.Body)
+	if err == nil {
+		err = cborDecode.Unmarshal(body, &in)
+	}
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	result, err := f.store.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: in.RunIDs})
+	if err != nil {
+		writeGoError(writer, err)
+		return
+	}
+	results := make([]map[string]any, 0, len(result.Results))
+	for index := len(result.Results) - 1; index >= 0; index-- {
+		value := result.Results[index]
+		wire := map[string]any{"runId": string(value.RunID), "outcome": string(value.Outcome)}
+		switch value.Outcome {
+		case worlds.DeleteDataDeleted:
+			wire["outcome"] = "purged"
+		case worlds.DeleteDataAlreadyDeleted:
+			wire["outcome"] = "already_purged"
+		case worlds.DeleteDataSkipped:
+			wire["reason"], wire["status"] = value.Reason, string(value.Status)
+		}
+		results = append(results, wire)
+	}
+	summary := result.Summary
+	writeCBOR(writer, map[string]any{
+		"summary": map[string]any{"requested": summary.Requested, "purged": summary.Deleted, "alreadyPurged": summary.AlreadyDeleted, "skipped": summary.Skipped, "notCreated": summary.NotCreated, "notFound": summary.NotFound, "failed": summary.Failed},
+		"results": results,
+	})
 }
