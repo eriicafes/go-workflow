@@ -124,8 +124,8 @@ type ClientSpec struct {
 }
 
 // CreateRun creates a run and queues its first delivery. It fills an empty
-// RunID, and an empty DeploymentID as StartDeploymentID does for
-// input.Latest. When the run already exists and is still pending, as after a
+// RunID, and an empty DeploymentID as StartDeploymentID does, for
+// LatestDeployment when input.Latest. When the run already exists and is still pending, as after a
 // create whose queueing failed, it queues the delivery again and returns the
 // run's ID with ErrRunAlreadyExists.
 func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
@@ -133,7 +133,11 @@ func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (R
 		input.RunID = NewRunID()
 	}
 	if input.DeploymentID == "" {
-		deploymentID, err := StartDeploymentID(ctx, world, input.Latest)
+		deployment := Deployment{}
+		if input.Latest {
+			deployment = LatestDeployment
+		}
+		deploymentID, err := StartDeploymentID(ctx, world, deployment)
 		if err != nil {
 			return "", err
 		}
@@ -257,7 +261,7 @@ func (c worldClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys,
 }
 
 func (c worldClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
-	return StartDeploymentID(ctx, c.world, input.Latest)
+	return StartDeploymentID(ctx, c.world, input.deployment())
 }
 
 // maxHTTPWait caps how long one RPC request may block in

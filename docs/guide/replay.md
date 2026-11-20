@@ -239,25 +239,26 @@ which brings their pinned runs back.
 
 A workflow that never ends, such as a daily job that starts tomorrow's run
 before it finishes, would otherwise stay on the deployment its first run
-started on until that deployment is deleted. Embed `workflow.StartOnLatest` in
-it, and new runs of it start on the World's latest deployment instead of the
-one that starts them:
+started on until that deployment is deleted. Start its next run with
+`workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`
+does, and it starts on the World's latest deployment instead of the one that
+starts it:
 
 ```go
-type DailyDigest struct {
-	workflow.Struct[DigestResult]
-	workflow.StartOnLatest
-	UserID string
-}
+next, err := workflow.Start(ctx, DailyDigest{UserID: input.UserID}, workflow.StartOptions{
+	Deployment: workflow.LatestDeployment,
+})
 ```
 
 A run never moves once started, so its event log is still only replayed by
 the code that wrote it: each run of the chain picks up new code when the
 previous one starts it. This applies whether the run is started from a
 workflow, a step or a handler, and through an HTTP client too, since the
-server picks the deployment. Mark only workflows nothing waits on the output
+server picks the deployment. Use it only for runs nothing waits on the output
 of, since a newer deployment may return a different output.
+`workflow.OnDeployment(id)` names a deployment instead.
 
-The marker needs a World that implements `worlds.LatestDeployments`, such as
+The option needs a World with deployment affinity, and `LatestDeployment` one
+that implements `worlds.LatestDeployments`, such as
 the [Vercel World](/worlds/vercel#latest-deployment). On other Worlds it
 changes nothing.

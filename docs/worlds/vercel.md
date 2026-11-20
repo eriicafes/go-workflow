@@ -54,7 +54,7 @@ Give the consumer a `queue/v2beta` trigger for the topic:
 
 When the code that starts workflows has the World in process, pass it to
 `workflow.NewClient`. The HTTP function is then needed only for webhooks,
-clients in other processes, or `workflow.StartOnLatest`, which needs the
+clients in other processes, or `workflow.LatestDeployment`, which needs the
 [deployment route](#latest-deployment).
 
 ## Configuration
@@ -212,8 +212,8 @@ goes to the current deployment instead, whose runtime fails the run with
 
 ## Latest deployment
 
-In a production deployment, new runs of workflows that embed
-[`workflow.StartOnLatest`](/guide/replay#moving-chains-to-the-latest-deployment)
+In a production deployment, runs started with
+[`workflow.LatestDeployment`](/guide/replay#moving-chains-to-the-latest-deployment)
 start on the deployment the production domain serves, instead of the
 deployment that starts them.
 

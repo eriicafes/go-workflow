@@ -111,36 +111,6 @@ type Struct[Out any] struct{}
 // Workflow declares Out as the output of the workflow that embeds Struct.
 func (Struct[Out]) Workflow(Out) {}
 
-// StartOnLatest marks a workflow, when embedded in the workflow struct, whose
-// new runs start on the World's latest deployment instead of the deployment
-// that starts them:
-//
-//	type CheckIns struct {
-//		workflow.Struct[CheckInsResult]
-//		workflow.StartOnLatest
-//		UserID string
-//	}
-//
-// A run never moves once started, so its event log is only ever replayed by
-// the code that wrote it. A workflow that starts its next run before it
-// finishes, such as a daily chain, moves to new code at that boundary instead
-// of staying on the deployment its first run started on until the deployment
-// is deleted. Mark only workflows nothing waits on the output of, since a
-// newer deployment may return a different output. On Worlds without
-// deployment affinity, or that do not implement worlds.LatestDeployments, it
-// changes nothing.
-//
-// It has no fields, so it adds nothing to the workflow's JSON input.
-type StartOnLatest struct{}
-
-func (StartOnLatest) startOnLatest() {}
-
-// startsOnLatest reports whether input's workflow embeds StartOnLatest.
-func startsOnLatest(input any) bool {
-	_, ok := input.(interface{ startOnLatest() })
-	return ok
-}
-
 // Run is a handle to a run of a workflow whose output type is Out. Start and
 // Get return one. A Run has an independent lifetime; use Cancel to cancel it.
 //
@@ -551,9 +521,30 @@ var (
 	RetainNone = worlds.RetainNone
 )
 
+// Deployment is the deployment a new run starts on. Its zero value is the
+// deployment that starts the run.
+type Deployment = worlds.Deployment
+
+// LatestDeployment starts a run on the World's latest deployment, as the
+// Workflow SDK's deploymentId: 'latest' does.
+var LatestDeployment = worlds.LatestDeployment
+
+// OnDeployment starts a run on the deployment id.
+func OnDeployment(id string) Deployment { return worlds.OnDeployment(id) }
+
 // StartOptions holds the options to Start, as the Workflow SDK's start
 // options. The zero value starts a run as Start without options does.
 type StartOptions struct {
+	// Deployment is the deployment the run starts on and stays pinned to.
+	// LatestDeployment starts it on the World's latest deployment, so a
+	// workflow that starts its next run before it finishes, such as a daily
+	// chain, moves to new code at that boundary instead of staying on the
+	// deployment its first run started on. Use it only for runs nothing waits
+	// on the output of, since a newer deployment may return a different
+	// output. OnDeployment names one. On Worlds without deployment affinity
+	// it changes nothing. The zero value is the deployment that starts the
+	// run.
+	Deployment Deployment
 	// Retention is how long the run's data is kept after it finishes.
 	// RetainNone deletes it as soon as the run finishes, recorded as the
 	// $retention attribute, and wins over one in Attributes. The zero value,
@@ -579,6 +570,8 @@ func startOptions(values []StartOptions) StartOptions {
 
 // startSettings are StartOptions as a child run's start step records them.
 type startSettings struct {
+	DeploymentID  string            `json:"deploymentId,omitempty"`
+	Latest        bool              `json:"latest,omitempty"`
 	Retention     string            `json:"retention,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
@@ -589,7 +582,24 @@ func (options StartOptions) settings() (startSettings, error) {
 	if err := worlds.CheckAttributes(options.Attributes, options.AllowReservedAttributes); err != nil {
 		return startSettings{}, err
 	}
-	return startSettings{Retention: options.Retention.String(), Attributes: options.Attributes, NoCompression: options.NoArgumentCompression}, nil
+	return startSettings{
+		DeploymentID:  options.Deployment.ID(),
+		Latest:        options.Deployment.Latest(),
+		Retention:     options.Retention.String(),
+		Attributes:    options.Attributes,
+		NoCompression: options.NoArgumentCompression,
+	}, nil
+}
+
+// deployment returns the Deployment settings record.
+func (settings startSettings) deployment() Deployment {
+	if settings.DeploymentID != "" {
+		return OnDeployment(settings.DeploymentID)
+	}
+	if settings.Latest {
+		return LatestDeployment
+	}
+	return Deployment{}
 }
 
 // attributes returns the run's attributes: lineage, then the caller's, which
@@ -629,9 +639,8 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	if err != nil {
 		return nil, err
 	}
-	latest := startsOnLatest(input)
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Latest: latest, Settings: settings})
+		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Settings: settings})
 		if err != nil {
 			return nil, err
 		}
@@ -640,7 +649,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	// The input is encrypted with the run's key, so the run's ID and
 	// deployment are settled first.
 	runID := worlds.NewRunID()
-	deploymentID, err := client.RunsStartDeployment(ctx, worlds.ClientRunsStartDeploymentInput{Latest: latest})
+	deploymentID, err := client.RunsStartDeployment(ctx, worlds.NewClientRunsStartDeploymentInput(settings.deployment()))
 	if err != nil {
 		return nil, err
 	}
@@ -677,16 +686,13 @@ func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input
 type childStartInput[In any] struct {
 	WorkflowName string `json:"workflowName"`
 	Input        In     `json:"input"`
-	// Latest pins the child to the World's latest deployment, for a
-	// workflow marked StartOnLatest.
-	Latest bool `json:"latest,omitempty"`
 	// Settings are the child's StartOptions.
 	Settings startSettings `json:"settings,omitzero"`
 }
 
 // startChild is the inline step Start uses in workflow context. It creates the
-// child run, pinned to the deployment executing the parent, or to the latest
-// deployment for a workflow marked StartOnLatest, and queues its first
+// child run, pinned to the deployment executing the parent, or to the one its
+// StartOptions.Deployment names, and queues its first
 // delivery. The child run ID comes from worlds.NewChildRunID, so a retried
 // attempt finds the run an earlier attempt created and queues its first
 // delivery again, to the deployment it was pinned to, while it has not
@@ -702,7 +708,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		root = string(parent.RunID)
 	}
 	id := worlds.NewChildRunID(worlds.StepID(StepID(ctx)))
-	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Latest)
+	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Settings.deployment())
 	if err != nil {
 		return "", err
 	}
