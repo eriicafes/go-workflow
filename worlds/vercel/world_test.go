@@ -219,3 +219,25 @@ func TestRunFailedKeepsItsErrorCodeAndRequestID(t *testing.T) {
 		t.Fatalf("vercelIds = %q", backend.vercelIDs)
 	}
 }
+
+func TestRunsCreatedInARegionAreRoutedThere(t *testing.T) {
+	all, queue, _ := newWorlds(t, 1)
+	world := all[0]
+	ctx := context.Background()
+	client := worlds.NewClient(world)
+	runID, err := client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: worlds.RegionSYD1.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if region, ok := world.RegionForRunID(runID); !ok || region != worlds.RegionSYD1 {
+		t.Fatalf("run %s region = %s, %t", runID, region, ok)
+	}
+	if _, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf"}}); err != nil {
+		t.Fatal(err)
+	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if len(queue.requests) != 1 || queue.requests[0].Header.Get("X-Vercel-Queue-Region") != "syd1" {
+		t.Fatalf("first delivery published to %v", queue.requests)
+	}
+}

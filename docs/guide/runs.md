@@ -71,6 +71,7 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, wo
 | `Retention` | `workflow.RetainNone` deletes the run's data as soon as it finishes, recorded as `$retention: "0"`. `Run.Value` then returns `workflow.ErrRunExpired`, so return a result you need through storage you control. The zero value, `workflow.RetainDefault`, leaves it to the World. |
 | `Attributes` | Plain-text attributes set on the run as it is created: at most 64, keys up to 256 characters, values up to 256 bytes. Otherwise `Start` returns `worlds.ErrAttributeInvalid`. |
 | `AllowReservedAttributes` | Permits keys starting with `$`, which are reserved for framework and library code. |
+| `Region` | The region the run's data lives in and its deliveries go to, such as `worlds.RegionFRA1`. Only a World that implements `worlds.RegionalRunIDs`, such as the [Vercel World](/worlds/vercel#regions), uses it; others ignore it, as in the Workflow SDK. |
 | `ReplayedFromRunID` | The run this run replays, `wrun_` and a ULID. It is recorded in the run's `ExecutionContext`, so the Workflow web UI links the replay to its source. Otherwise `Start` returns `workflow.ErrInvalidStartOptions`. |
 | `NoArgumentCompression` | Stores the run's input uncompressed, for input that does not compress, such as media or encrypted bytes. |
 
