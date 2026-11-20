@@ -387,6 +387,7 @@ func (t *txn) commit() error {
 	if len(t.appended) == 0 {
 		return nil
 	}
+	purge := t.applyRetention(time.Now().UTC())
 	err := t.write()
 	if err != nil {
 		if repairErr := t.w.rebuildRun(t.run.RunID); repairErr != nil {
@@ -394,7 +395,35 @@ func (t *txn) commit() error {
 			return t.w.broken
 		}
 	}
+	if err == nil && purge {
+		t.w.purge(t.run)
+	}
 	return err
+}
+
+// applyRetention deletes the payloads of the appended events of a run whose
+// data is gone, as a step still running when its run's data was deleted
+// settles after it. When the appends finish a run with $retention "0", it
+// sets the run's ExpiredAt, committed with them, and reports that the rest of
+// the run's data is to be purged after the commit.
+func (t *txn) applyRetention(now time.Time) bool {
+	finished := false
+	for _, event := range t.appended {
+		switch event.EventType {
+		case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed, worlds.EventTypeRunCancelled:
+			finished = true
+		}
+	}
+	purge := finished && !t.replay && worlds.ReadRunRetention(t.run.Attributes) == worlds.RetainNone && t.run.ExpiredAt == nil
+	if purge {
+		t.run.ExpiredAt, t.run.DataPurged = &now, false
+	}
+	if purge || worlds.RunDataExpired(t.run.Run, now) {
+		for index, event := range t.appended {
+			t.appended[index].Data = worlds.ScrubEventData(event.EventType, event.Data)
+		}
+	}
+	return purge
 }
 
 func (t *txn) write() error {

@@ -109,6 +109,21 @@ until it is restarted.
 Streams commit through `meta.json`: chunk files at or past `count` are ignored
 and overwritten by the next write.
 
+## Deleting run data
+
+A run created with `$retention: "0"` loses its data when it finishes, and
+`RunsDeleteDataMany` deletes a finished run's data on demand, as the Workflow
+SDK's local World does. The run, step, event and hook records stay; the
+payloads in the run's event files go, and its streams are left empty and
+closed.
+
+The append that finishes the run commits its `ExpiredAt` with it, so the data
+is unreadable from that commit on. The event and chunk files are scrubbed next,
+and the run file records `dataPurged`. If that is interrupted, reads keep
+scrubbing what is left, and `Prepare` finishes the purge. A step that settles
+after its run's data was deleted has its result scrubbed as it lands, and a
+deleted run's streams refuse writes.
+
 ## Queue
 
 `Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
