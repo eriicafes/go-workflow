@@ -71,6 +71,9 @@ var (
 	// ErrRunExpired is returned when reading the result of a run whose data
 	// was deleted, as the Workflow SDK's RunExpiredError.
 	ErrRunExpired = errors.New("workflow: run data expired")
+	// ErrAttributeInvalid is returned for run attributes outside the
+	// Workflow SDK's limits. See CheckAttributes.
+	ErrAttributeInvalid = errors.New("workflow: invalid run attribute")
 	// ErrDeleteDataInvalid is returned by RunsDeleteDataMany for a request
 	// without one to MaxDeleteDataRunIDs unique run IDs.
 	ErrDeleteDataInvalid = errors.New("workflow: invalid delete data request")
