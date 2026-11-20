@@ -175,7 +175,7 @@ the replay that declares it.
 | `RunsList` by several statuses | The backend filters by one status, so the World reads a page of each and merges them by creation time. |
 | Hooks | `HooksGet` reads the hook and its events, for when it received a payload or was disposed. |
 | Analytics | Not supported. `Capabilities().Analytics` is false. |
-| Retention | Vercel's plan decides how long runs are kept. |
+| Retention | `Config.Retention` and `Config.Retentions`, built with `vercelworld.Retentions(vercelworld.Retain[W](...))`, take `worlds.RetainDefault`, which leaves runs to Vercel's plan, or `worlds.RetainNone`, which creates runs with the Workflow SDK's `$retention: "0"` attribute so the backend deletes their data when they finish. The backend supports no other retention. A run created with its own `$retention` attribute keeps it. |
 
 ## Encryption
 

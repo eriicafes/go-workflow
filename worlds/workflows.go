@@ -42,6 +42,23 @@ func Routes(routes ...QueueRoute) map[string]string {
 	return byWorkflow
 }
 
+// Retention is how long a finished run's data is kept, as the Workflow SDK's
+// $retention attribute records it. Its zero value is RetainDefault, and
+// RetainNone is the only other value: the SDK supports no other retention.
+type Retention struct{ value string }
+
+var (
+	// RetainDefault leaves a run's data to the World's retention.
+	RetainDefault = Retention{}
+	// RetainNone deletes a run's data as soon as the run finishes. The run's
+	// metadata, such as its ID, status, and attributes, is kept.
+	RetainNone = Retention{value: "0"}
+)
+
+// String returns the RetentionAttribute value of r, or "" for
+// RetainDefault, which is recorded by leaving the attribute out.
+func (r Retention) String() string { return r.value }
+
 // WorkflowRetention sets how long one workflow's finished runs are kept.
 type WorkflowRetention struct {
 	Workflow  string

@@ -157,6 +157,35 @@ func waitFor(t *testing.T, condition func() bool) {
 	}
 }
 
+func TestRetention(t *testing.T) {
+	ctx := context.Background()
+	all, _, _ := newWorlds(t, 1)
+	world := all[0]
+	world.config.Retention = worlds.RetainNone
+	world.config.Retentions = Retentions(WorkflowRetention{Workflow: "kept", Retention: worlds.RetainDefault})
+	for _, test := range []struct {
+		runID, workflow string
+		attributes      map[string]string
+		want            string
+	}{
+		{"wrun_01KDELETED0000000000000000", "deleted", nil, worlds.RetainNone.String()},
+		{"wrun_01KKEPT000000000000000000", "kept", nil, ""},
+		{"wrun_01KOVERRIDDEN0000000000000", "deleted", map[string]string{worlds.RetentionAttribute: "default"}, "default"},
+	} {
+		_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: worlds.RunID(test.runID), WorkflowName: test.workflow, Attributes: test.attributes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(test.runID)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := run.Attributes[worlds.RetentionAttribute]; got != test.want {
+			t.Errorf("%s: %s = %q, want %q", test.workflow, worlds.RetentionAttribute, got, test.want)
+		}
+	}
+}
+
 func TestRunFailedKeepsItsErrorCodeAndRequestID(t *testing.T) {
 	all, _, backend := newWorlds(t, 1)
 	world := all[0]
