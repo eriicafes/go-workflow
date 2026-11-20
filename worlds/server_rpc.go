@@ -42,6 +42,9 @@ type RPCError struct {
 	// Sentinel names the sentinel error the failure matches, such as
 	// run_not_found, so a client can return that error.
 	Sentinel string `cbor:"sentinel,omitempty"`
+	// ConflictingRunID names the run holding a hook token, for a
+	// hook_conflict failure of a *HookConflictError.
+	ConflictingRunID RunID `cbor:"conflictingRunId,omitempty"`
 }
 
 // maxRPCWait caps how long one RPC request may block in a World wait, so a
@@ -838,7 +841,12 @@ func rpcErrorStatus(code string) int {
 func newRPCError(err error) *RPCError {
 	for _, sentinel := range rpcSentinels {
 		if errors.Is(err, sentinel.err) {
-			return &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
+			failure := &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
+			var conflict *HookConflictError
+			if errors.As(err, &conflict) {
+				failure.ConflictingRunID = conflict.RunID
+			}
+			return failure
 		}
 	}
 	var specVersionMismatch specVersionMismatchError

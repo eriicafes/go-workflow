@@ -153,6 +153,14 @@ func (e *Execution) Run() Run {
 	return e.run
 }
 
+// StartHook returns the start hook the run's run_created records, or nil.
+func (e *Execution) StartHook() *StartHook {
+	if len(e.events) == 0 || e.events[0].EventType != EventTypeRunCreated {
+		return nil
+	}
+	return RunStartHook(e.events[0].Data)
+}
+
 // TargetStepID returns the step a step delivery executes. It reports false
 // for a flow, which replays the runner without executing a step.
 func (e *Execution) TargetStepID() (StepID, bool) {

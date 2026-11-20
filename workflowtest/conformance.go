@@ -45,6 +45,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"HooksForce", conformHooksForce},
 		{"HooksRetention", conformHooksRetention},
 		{"HookDisposal", conformHookDisposal},
+		{"StartHook", conformStartHook},
 		{"Webhooks", conformWebhooks},
 		{"Waits", conformWaits},
 		{"Streams", conformStreams},

@@ -574,6 +574,9 @@ type rpcClientError struct {
 }
 
 func newRPCClientError(failure RPCError) error {
+	if failure.Sentinel == "hook_conflict" && failure.ConflictingRunID != "" {
+		return &HookConflictError{RunID: failure.ConflictingRunID}
+	}
 	err := rpcClientError{RPCError: failure}
 	for _, sentinel := range rpcSentinels {
 		if sentinel.name == failure.Sentinel {

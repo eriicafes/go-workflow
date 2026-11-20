@@ -65,6 +65,14 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		position = options.Execution.NextPosition()
 	}
 	creationIndex, exists := options.Execution.index[position]
+	if !exists && !options.IsWebhook && options.Token != "" {
+		// A hook with the token of the run's start hook opens the start
+		// hook, which run_created created, on every replay, as the Workflow
+		// SDK binds createHook({ token }) to it. Nothing is recorded for it.
+		if hook := options.Execution.StartHook(); hook != nil && hook.Token == options.Token {
+			return DurableHookResult[T]{HookID: StartHookID(options.Execution.Run().RunID), Token: hook.Token}
+		}
+	}
 	if !exists {
 		if options.Token == "" {
 			options.Token = NewHookToken()

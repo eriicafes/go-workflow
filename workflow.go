@@ -570,10 +570,28 @@ type StartOptions struct {
 	// World, uses it, by tagging the run's ID; others ignore it, as in the
 	// Workflow SDK. The zero value leaves it to the World.
 	Region Region
+	// Hook creates a hook with the run, claiming its token, as the Workflow
+	// SDK's experimental_hook does. When another run holds the token, Start
+	// creates no run and returns a *worlds.HookConflictError naming it. The
+	// workflow opens the hook with CreateHook and the same token. It needs a
+	// World with Capabilities().StartHook.
+	Hook *StartHook
 	// ReplayedFromRunID is the ID of the run this run replays, wrun_ and a
 	// ULID. It is recorded in the run's ExecutionContext, so tools such as
 	// the Workflow web UI link the replay to its source.
 	ReplayedFromRunID string
+}
+
+// StartHook is a hook Start creates with its run. See StartOptions.Hook.
+type StartHook struct {
+	// Token is the hook's token. It must not be empty.
+	Token string
+	// MinRetention keeps the token unavailable for at least this long from
+	// Start, even after the run ends. Disposing the hook releases it at
+	// once.
+	MinRetention time.Duration
+	// Metadata is stored with the hook, as a payload of the run.
+	Metadata any
 }
 
 func startOptions(values []StartOptions) StartOptions {
@@ -590,6 +608,11 @@ type startSettings struct {
 	Retention     string            `json:"retention,omitempty"`
 	ReplayedFrom  string            `json:"replayedFrom,omitempty"`
 	Region        string            `json:"region,omitempty"`
+	HookToken     string            `json:"hookToken,omitempty"`
+	HookRetention time.Duration     `json:"hookRetention,omitempty"`
+	// HookMetadata is the hook's metadata as devalue text, encrypted with
+	// the run's keys once they are known.
+	HookMetadata []byte `json:"hookMetadata,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
 }
@@ -602,15 +625,54 @@ func (options StartOptions) settings() (startSettings, error) {
 	if id := options.ReplayedFromRunID; id != "" && !worlds.ValidRunID(worlds.RunID(id)) {
 		return startSettings{}, fmt.Errorf("%w: ReplayedFromRunID %.64q is not wrun_ and a ULID", ErrInvalidStartOptions, id)
 	}
+	var hookToken string
+	var hookRetention time.Duration
+	var hookMetadata []byte
+	if hook := options.Hook; hook != nil {
+		if hook.Token == "" {
+			return startSettings{}, fmt.Errorf("%w: Hook needs a token", ErrInvalidStartOptions)
+		}
+		hookToken, hookRetention = hook.Token, hook.MinRetention
+		if hook.Metadata != nil {
+			var err error
+			if hookMetadata, err = worlds.MarshalDevalue(hook.Metadata); err != nil {
+				return startSettings{}, fmt.Errorf("workflow: encode hook metadata: %w", err)
+			}
+		}
+	}
 	return startSettings{
 		DeploymentID:  options.Deployment.ID(),
 		Latest:        options.Deployment.Latest(),
 		Retention:     options.Retention.String(),
 		ReplayedFrom:  options.ReplayedFromRunID,
 		Region:        options.Region.String(),
+		HookToken:     hookToken,
+		HookRetention: hookRetention,
+		HookMetadata:  hookMetadata,
 		Attributes:    options.Attributes,
 		NoCompression: options.NoArgumentCompression,
 	}, nil
+}
+
+// startHook returns the run's start hook, its metadata encrypted with keys,
+// or nil when it has none.
+func (settings startSettings) startHook(keys *worlds.RunKeys) (*worlds.StartHook, error) {
+	if settings.HookToken == "" {
+		return nil, nil
+	}
+	hook := &worlds.StartHook{Token: settings.HookToken}
+	if settings.HookRetention > 0 {
+		until := time.Now().UTC().Add(settings.HookRetention)
+		hook.TokenRetentionUntil = &until
+	}
+	if settings.HookMetadata != nil {
+		metadata, err := worlds.EncodeDevaluePayload(settings.HookMetadata, worlds.PayloadOptions{Keys: keys})
+		if err != nil {
+			return nil, err
+		}
+		hook.Metadata = metadata
+	}
+	return hook, nil
 }
 
 // region returns the Region settings record.
@@ -676,6 +738,21 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	if err != nil {
 		return nil, err
 	}
+	if settings.HookToken != "" {
+		var supported bool
+		if execution, ok := workflowExecutionFromContext(ctx); ok {
+			supported = execution.World().Capabilities().StartHook
+		} else {
+			spec, err := client.Spec(ctx)
+			if err != nil {
+				return nil, err
+			}
+			supported = spec.Capabilities.StartHook
+		}
+		if !supported {
+			return nil, fmt.Errorf("workflow: StartOptions.Hook: the World does not create start hooks: %w", errors.ErrUnsupported)
+		}
+	}
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
 		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Settings: settings})
 		if err != nil {
@@ -703,6 +780,9 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	}
 	create.Attributes = settings.attributes(nil)
 	create.ExecutionContext = settings.executionContext()
+	if create.StartHook, err = settings.startHook(keys); err != nil {
+		return nil, err
+	}
 	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: create})
 	if err != nil {
 		return nil, err
@@ -767,6 +847,9 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		worlds.RootRunIDAttribute:   root,
 	})
 	create.ExecutionContext = input.Settings.executionContext()
+	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
+		return "", err
+	}
 	_, err = execution.World().EventsCreateRun(ctx, create)
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
 		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})

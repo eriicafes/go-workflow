@@ -66,6 +66,11 @@ func (m *World) hookPayloadLocked(hook worlds.Hook, resolve worlds.ResolveData) 
 		if event.EventType == worlds.EventTypeHookCreated && event.CorrelationID == string(hook.HookID) {
 			hook.Metadata = worlds.EventPayload(event)
 		}
+		if event.EventType == worlds.EventTypeRunCreated && hook.HookID == worlds.StartHookID(hook.RunID) {
+			if start := worlds.RunStartHook(event.Data); start != nil {
+				hook.Metadata = start.Metadata
+			}
+		}
 	}
 	return hook
 }

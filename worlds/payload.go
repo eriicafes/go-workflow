@@ -107,6 +107,12 @@ func EncodePayload(value any, options PayloadOptions) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return EncodeDevaluePayload(data, options)
+}
+
+// EncodeDevaluePayload encodes devalue text, as MarshalDevalue returns it, as
+// a payload, for a value encoded before its run's keys are known.
+func EncodeDevaluePayload(data []byte, options PayloadOptions) ([]byte, error) {
 	data = labelPayload(PayloadDevalue, data)
 	if !options.NoCompression {
 		data = compressPayload(data)

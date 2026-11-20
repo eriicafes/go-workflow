@@ -101,6 +101,9 @@ type Capabilities struct {
 	// DeleteData: RunsDeleteDataMany, and $retention "0" deletes a run's
 	// data as it finishes.
 	DeleteData bool
+	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
+	// with the run, or returns a *HookConflictError and creates nothing.
+	StartHook bool
 }
 ```
 

@@ -3,6 +3,7 @@ package workflowtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -247,4 +248,49 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	if err != nil || hook.DisposedAt == nil || hook.ForceClaimedBy == nil || hook.ForceClaimedBy.HookID != "hook_g" {
 		t.Fatalf("force-claimed hook = %#v err=%v", hook, err)
 	}
+}
+
+func conformStartHook(t *testing.T, world worlds.World) {
+	if !world.Capabilities().StartHook {
+		return
+	}
+	ctx := context.Background()
+	token := fmt.Sprintf("conformance-start-%d", time.Now().UnixNano())
+	owner := conformRunID("start_hook")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: owner, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token, Metadata: []byte(`"metadata"`)}}); err != nil {
+		t.Fatal(err)
+	}
+	// The start hook exists with the run, under its run's ID.
+	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
+	if err != nil || hook.HookID != worlds.StartHookID(owner) || hook.RunID != owner || string(hook.Metadata) != `"metadata"` {
+		t.Fatalf("start hook = %+v, %v", hook, err)
+	}
+	events := conformAllEvents(t, world, owner)
+	if start := worlds.RunStartHook(events[0].Data); len(events) != 1 || start == nil || start.Token != token || start.HookID != worlds.StartHookID(owner) {
+		t.Fatalf("run_created = %s", events[0].Data)
+	}
+	// It takes payloads while its run is still pending.
+	conformAppend(t, world, owner, worlds.EventTypeHookReceived, string(worlds.StartHookID(owner)), conformReceived(t, "early"))
+
+	// A second start with the token is refused before it becomes a run.
+	duplicate := conformRunID("start_hook_duplicate")
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: duplicate, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
+	var conflict *worlds.HookConflictError
+	if !errors.Is(err, worlds.ErrHookConflict) || !errors.As(err, &conflict) || conflict.RunID != owner {
+		t.Fatalf("duplicate start error = %v", err)
+	}
+	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: duplicate}); !errors.Is(err, worlds.ErrRunNotFound) {
+		t.Fatalf("refused start created a run: %v", err)
+	}
+
+	// The run's end frees the token, unless its retention has not passed.
+	conformAppend(t, world, owner, worlds.EventTypeRunCancelled, "", nil)
+	retained := conformRunID("start_hook_retained")
+	until := time.Now().Add(time.Hour)
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: retained, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token, TokenRetentionUntil: &until}}); err != nil {
+		t.Fatalf("start after the owner ended: %v", err)
+	}
+	conformAppend(t, world, retained, worlds.EventTypeRunCancelled, "", nil)
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: conformRunID("start_hook_after_retention"), WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
+	conformExpect(t, err, worlds.ErrHookConflict, "start during the token's retention")
 }
