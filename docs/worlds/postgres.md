@@ -126,6 +126,13 @@ increments `attempts`, and executes each:
   backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
 
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` creates the hook `hook_<run ULID>` and
+claims its token in the transaction that creates the run. When another run
+holds the token, the transaction rolls back and returns a
+`*worlds.HookConflictError` naming it.
+
 ## Retention
 
 A run's data is deleted as the Workflow SDK deletes it: the run, step, event

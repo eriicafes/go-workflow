@@ -38,6 +38,27 @@ func (w *World) recoverLocked() error {
 			}
 		}
 	}
+	// A start hook written for a run whose run file was never written
+	// claims nothing.
+	hooks, err := w.readHooks()
+	if err != nil {
+		return err
+	}
+	for _, hook := range hooks {
+		if committed[fileKey(string(hook.RunID))] || hook.HookID != worlds.StartHookID(hook.RunID) {
+			continue
+		}
+		if owner, err := w.readToken(hook.Token); err != nil {
+			return err
+		} else if owner != nil && owner.HookID == hook.HookID {
+			if err := remove(w.root, tokenPath(hook.Token)); err != nil {
+				return err
+			}
+		}
+		if err := remove(w.root, hookPath(hook.HookID)); err != nil {
+			return err
+		}
+	}
 	for _, parent := range []string{"events", "steps"} {
 		dirs, err := listDirs(w.root, parent)
 		if err != nil {
