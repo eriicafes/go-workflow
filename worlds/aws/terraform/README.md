@@ -103,7 +103,7 @@ config.Routes = worlds.Routes(worlds.Route[workflows.Backfill]("backfill"))
 | `deletion_protection` | `true` | Table deletion protection. |
 | `visibility_timeout_seconds` | `360` | Keep above the worker Lambda timeout. |
 | `message_retention_seconds` | `1209600` | Queue and dead-letter retention (14 days, the SQS maximum). |
-| `max_receive_count` | `10` | Deliveries before a message moves to the dead-letter queue. |
+| `max_receive_count` | `50` | Deliveries before a message moves to the dead-letter queue. Must exceed the runtime's 48, so it fails the run first. |
 | `enable_scheduler` | `true` | Create the schedule group and Scheduler role. Without them, deliveries due more than 15 minutes ahead fail. |
 | `worker_function_name` | `null` | Worker Lambda; creates the event source mapping when set. |
 | `batch_size` | `10` | Messages per worker invocation. |
