@@ -74,6 +74,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	setRequestID(ctx, meta)
 	meta["occurredAt"] = time.Now().UTC()
 	meta["remoteRefBehavior"] = "resolve"
 	if input.Event.EventType == worlds.EventTypeRunStarted {
@@ -256,6 +257,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err != nil {
 			return worlds.EventBatchResult{}, err
 		}
+		setRequestID(ctx, meta)
 		meta["occurredAt"] = time.Now().UTC()
 		meta["remoteRefBehavior"] = "resolve"
 		if input.InBandCount != nil {

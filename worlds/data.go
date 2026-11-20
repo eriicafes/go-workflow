@@ -2,6 +2,7 @@ package worlds
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -127,6 +128,10 @@ func DecodeRunCompleted(data []byte) []byte {
 type DataRunFailed struct {
 	// Error is the run's error as a payload.
 	Error []byte `json:"error,omitempty"`
+	// ErrorCode is the Workflow SDK's category of the error, such as
+	// USER_ERROR or MAX_DELIVERIES_EXCEEDED, kept in plain text so tools can
+	// sort failures without opening the payload.
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 // DecodeRunFailed returns the Error of run_failed event Data, or nil when data
@@ -146,7 +151,29 @@ func EncodeRunFailed(err error, options PayloadOptions) ([]byte, error) {
 	if encodeErr != nil {
 		return nil, encodeErr
 	}
-	return json.Marshal(DataRunFailed{Error: payload})
+	return json.Marshal(DataRunFailed{Error: payload, ErrorCode: runErrorCode(err)})
+}
+
+// runErrorCode returns the Workflow SDK's RUN_ERROR_CODES value for the error
+// a run failed with.
+func runErrorCode(err error) string {
+	var divergence replayDivergenceError
+	var delivery deliveryError
+	switch {
+	case errors.As(err, &divergence):
+		return "REPLAY_DIVERGENCE"
+	case errors.Is(err, ErrCorruptedEventLog):
+		return "CORRUPTED_EVENT_LOG"
+	case errors.Is(err, ErrMaxDeliveriesExceeded):
+		return "MAX_DELIVERIES_EXCEEDED"
+	case errors.Is(err, ErrDeploymentMismatch):
+		return "DEPLOYMENT_MISMATCH"
+	case errors.Is(err, ErrWorkflowNotFound):
+		return "WORKFLOW_NOT_REGISTERED"
+	case errors.As(err, &delivery):
+		return "WORLD_CONTRACT_ERROR"
+	}
+	return "USER_ERROR"
 }
 
 // DataStepCreated is the Data of a step_created event. The step's position

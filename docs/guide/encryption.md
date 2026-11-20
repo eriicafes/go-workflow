@@ -37,8 +37,8 @@ encoding, a type implements `worlds.PayloadMarshaler` and
 
 A run's input is its argument list, `[input]`, and a step's input is
 `{args: [input]}`, as the SDK records them. Payloads of 1 KiB or more are
-compressed when that saves at least 5%: with gzip, or with zstd when
-`WORKFLOW_COMPRESSION_CODEC=zstd`. `WORKFLOW_DISABLE_COMPRESSION=1` turns
+compressed when that saves at least 5%: with zstd at level 3, as the SDK does,
+or with gzip when `WORKFLOW_COMPRESSION_CODEC=gzip`. `WORKFLOW_DISABLE_COMPRESSION=1` turns
 compression off.
 
 A stream is a stream of values, as the SDK's `getWritable()` writes one: each

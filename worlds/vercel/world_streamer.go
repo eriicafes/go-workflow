@@ -28,24 +28,12 @@ const (
 // Streams are stored by the backend. Read cursors are chunk indexes, so any
 // instance can continue a read.
 
-// defaultStreamName is the backend name of a run's default stream, whose
-// go-workflow name is empty and cannot be a path segment.
-const defaultStreamName = "_default"
-
-// streamName returns the backend name of a stream.
-func streamName(name string) string {
-	if name == "" {
-		return defaultStreamName
-	}
-	return name
-}
-
 func (w *World) streamPath(runID worlds.RunID, name string) string {
-	return "/v2/runs/" + pathEscape(string(runID)) + "/stream/" + pathEscape(streamName(name))
+	return "/v2/runs/" + pathEscape(string(runID)) + "/stream/" + pathEscape(name)
 }
 
 func (w *World) streamsPath(runID worlds.RunID, name, suffix string) string {
-	return "/v2/runs/" + pathEscape(string(runID)) + "/streams/" + pathEscape(streamName(name)) + suffix
+	return "/v2/runs/" + pathEscape(string(runID)) + "/streams/" + pathEscape(name) + suffix
 }
 
 func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header) error {
@@ -121,7 +109,7 @@ func (w *World) StreamsOpenWriter(ctx context.Context, input worlds.StreamsOpenW
 	if w.api.proxy || declined || w.streamsOverHTTP {
 		return direct, nil
 	}
-	target, err := worlds.StreamSocketURL(w.api.baseURL, input.RunID, streamName(input.Name), input.WriterID)
+	target, err := worlds.StreamSocketURL(w.api.baseURL, input.RunID, input.Name, input.WriterID)
 	if err != nil {
 		return direct, nil
 	}
@@ -282,11 +270,6 @@ func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) 
 	}
 	if names == nil {
 		names = []string{}
-	}
-	for index, name := range names {
-		if name == defaultStreamName {
-			names[index] = ""
-		}
 	}
 	slices.Sort(names)
 	return names, nil

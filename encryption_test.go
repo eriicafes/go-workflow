@@ -131,7 +131,7 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 
 	// The stream holds the step's frame, encrypted, and the outside writer's,
 	// sealed, and reads back as written.
-	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID())})
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID()), Name: worlds.UserStreamName(worlds.RunID(run.ID()), "")})
 	if err != nil || len(chunks.Data) != 2 {
 		t.Fatalf("stream = %#v err=%v", chunks, err)
 	}

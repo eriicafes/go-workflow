@@ -233,15 +233,21 @@ func TestPayloadRoundTrips(t *testing.T) {
 	}
 	for name, options := range map[string]PayloadOptions{
 		"plain":  {},
+		"gzip":   {},
 		"encr":   {Keys: keys},
 		"encp":   {SealTo: keys.PublicKey},
 		"stored": {NoCompression: true},
 	} {
+		codec := ""
+		if name == "gzip" {
+			codec = "gzip"
+		}
+		t.Setenv("WORKFLOW_COMPRESSION_CODEC", codec)
 		payload, err := EncodePayload(value, options)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		wantLabel := map[string]string{"plain": PayloadGzip, "encr": PayloadEncrypted, "encp": PayloadSealed, "stored": PayloadDevalue}[name]
+		wantLabel := map[string]string{"plain": PayloadZstd, "gzip": PayloadGzip, "encr": PayloadEncrypted, "encp": PayloadSealed, "stored": PayloadDevalue}[name]
 		if PayloadLabel(payload) != wantLabel {
 			t.Fatalf("%s label = %q", name, PayloadLabel(payload))
 		}

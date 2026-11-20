@@ -2,10 +2,24 @@ package worlds
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
+
+// UserStreamName returns the stored name of the user stream name of run
+// runID, as the Workflow SDK names it: strm_ and the run ID's ULID, then
+// _user, and for a named stream _ and the name in unpadded base64url. The
+// empty name is the run's default stream.
+func UserStreamName(runID RunID, name string) string {
+	stored := strings.Replace(string(runID), "wrun_", "strm_", 1) + "_user"
+	if name == "" {
+		return stored
+	}
+	return stored + "_" + base64.RawURLEncoding.EncodeToString([]byte(name))
+}
 
 // Streamer stores streams, which are named, ordered sequences of chunks that a
 // run writes and readers consume. A stream is identified by its run ID and

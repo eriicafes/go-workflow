@@ -202,19 +202,15 @@ func protectPayload(data []byte, keys *RunKeys, sealTo []byte) ([]byte, error) {
 
 // compressPayload compresses a labelled payload as the Workflow SDK does:
 // payloads of at least 1 KiB, kept only when that saves at least 5%. It
-// writes gzip, which the SDK writes when zstd is unavailable and every SDK
-// reader opens, or zstd with WORKFLOW_COMPRESSION_CODEC=zstd.
+// writes zstd at the SDK's level, or gzip with WORKFLOW_COMPRESSION_CODEC=gzip.
 // WORKFLOW_DISABLE_COMPRESSION=1 turns it off.
 func compressPayload(data []byte) []byte {
 	if len(data) < payloadCompressMin || os.Getenv("WORKFLOW_DISABLE_COMPRESSION") == "1" {
 		return data
 	}
-	label, compressed := PayloadGzip, []byte(nil)
-	if os.Getenv("WORKFLOW_COMPRESSION_CODEC") == "zstd" {
-		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
-		if err != nil {
-			return data
-		}
+	var label string
+	var compressed []byte
+	if encoder := newZstdEncoder(); encoder != nil && os.Getenv("WORKFLOW_COMPRESSION_CODEC") != "gzip" {
 		label, compressed = PayloadZstd, encoder.EncodeAll(data, nil)
 		_ = encoder.Close()
 	} else {
@@ -222,12 +218,24 @@ func compressPayload(data []byte) []byte {
 		writer, _ := gzip.NewWriterLevel(&buffer, gzip.DefaultCompression)
 		_, _ = writer.Write(data)
 		_ = writer.Close()
-		compressed = buffer.Bytes()
+		label, compressed = PayloadGzip, buffer.Bytes()
 	}
 	if float64(payloadLabelSize+len(compressed)) >= float64(len(data))*(1-payloadCompressSavings) {
 		return data
 	}
 	return labelPayload(label, compressed)
+}
+
+// newZstdEncoder returns an encoder at zstd level 3, the SDK's, or nil if
+// one cannot be made, and payloads are then written with gzip. It is made for
+// the call, as unzstd's decoder is, since an encoder's channels cannot be
+// shared across synctest bubbles.
+func newZstdEncoder() *zstd.Encoder {
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return nil
+	}
+	return encoder
 }
 
 // unzstd decompresses a zstd payload. Its decoder is made for the call, so
