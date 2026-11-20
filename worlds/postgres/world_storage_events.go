@@ -16,7 +16,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey})
+	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -28,11 +28,17 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	var executionContext []byte
+	if len(input.ExecutionContext) > 0 {
+		if executionContext, err = json.Marshal(input.ExecutionContext); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, at)
 		if err != nil {
 			return err
 		}

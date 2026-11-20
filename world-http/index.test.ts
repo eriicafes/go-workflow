@@ -476,3 +476,29 @@ test("deletes run data only when the Go world supports it, and reports deleted r
 	const run = await world.runs.get("wrun_01");
 	expect(run.expiredAt).toEqual(new Date("2026-01-02T03:04:05Z"));
 });
+
+test("passes a run's executionContext through with its keys as written", async () => {
+	const inputs: Record<string, unknown>[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 3, Capabilities: {} });
+			}
+			if (envelope.method === "runs.get") {
+				return rpcResponse({ RunID: "wrun_01", ExecutionContext: { replayedFromRunId: "wrun_00" }, StartedAt: null, CompletedAt: null });
+			}
+			inputs.push(envelope.input as Record<string, unknown>);
+			return rpcResponse({ Event: { RunID: "wrun_01", EventID: "evnt_01", EventType: "run_created", Data: null }, Allocated: 1 });
+		},
+	});
+	await world.events.create("wrun_01", {
+		eventType: "run_created",
+		specVersion: SPEC_VERSION_CURRENT,
+		eventData: { workflowName: "wf", input: new Uint8Array(), executionContext: { replayedFromRunId: "wrun_00" } },
+	} as never);
+	expect(inputs[0]?.ExecutionContext).toEqual({ replayedFromRunId: "wrun_00" });
+	const run = await world.runs.get("wrun_01");
+	expect(run.executionContext).toEqual({ replayedFromRunId: "wrun_00" });
+});

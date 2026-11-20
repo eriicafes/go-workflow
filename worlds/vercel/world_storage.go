@@ -92,6 +92,7 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		CompletedAt:         timeField(values, "completedAt"),
 		ExpiredAt:           timeField(values, "expiredAt"),
 	}
+	run.ExecutionContext, _ = values["executionContext"].(map[string]any)
 	if resolve != worlds.ResolveDataNone {
 		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
 	}

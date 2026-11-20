@@ -162,6 +162,11 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	setTime(item, "startedAt", run.StartedAt)
 	setTime(item, "completedAt", run.CompletedAt)
 	setTime(item, "expiredAt", run.ExpiredAt)
+	if len(run.ExecutionContext) > 0 {
+		// It is valid JSON, decoded from or built for run_created.
+		encoded, _ := json.Marshal(run.ExecutionContext)
+		item["executionContext"] = avs(string(encoded))
+	}
 	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "encryptionPublicKey", run.EncryptionPublicKey)
 	setString(item, "startedEventId", string(view.startedEventID))
@@ -177,8 +182,13 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			attributes[name] = readAttr(value)
 		}
 	}
+	var executionContext map[string]any
+	if encoded := read(item, "executionContext"); encoded != "" {
+		_ = json.Unmarshal([]byte(encoded), &executionContext)
+	}
 	return runView{
 		Run: worlds.Run{
+			ExecutionContext:    executionContext,
 			RunID:               worlds.RunID(read(item, "runId")),
 			WorkflowName:        read(item, "workflowName"),
 			Status:              worlds.Status(read(item, "status")),
@@ -204,7 +214,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "encryptionPublicKey", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "encryptionPublicKey", "executionContext", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
 	for _, name := range []string{"resultEventId", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {

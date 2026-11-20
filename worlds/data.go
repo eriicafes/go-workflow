@@ -125,6 +125,25 @@ type DataRunCreated struct {
 	// writers outside the run seal payloads to. It is set when the run's
 	// payloads are encrypted.
 	EncryptionPublicKey string `json:"encryptionPublicKey,omitempty"`
+	// ExecutionContext is the run's executionContext.
+	ExecutionContext map[string]any `json:"executionContext,omitempty"`
+}
+
+// ExecutionContextReplayedFromRunID is the executionContext key naming the
+// run a run was replayed from, as the Workflow SDK records it, so tools link
+// the replay to its source.
+const ExecutionContextReplayedFromRunID = "replayedFromRunId"
+
+// RunCreatedData returns the Data of the run_created event of input.
+func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
+	return json.Marshal(DataRunCreated{
+		WorkflowName:        input.WorkflowName,
+		Input:               input.Input,
+		Attributes:          input.Attributes,
+		DeploymentID:        input.DeploymentID,
+		EncryptionPublicKey: input.EncryptionPublicKey,
+		ExecutionContext:    input.ExecutionContext,
+	})
 }
 
 // DataRunCompleted is the Data of a run_completed event.

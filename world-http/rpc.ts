@@ -50,6 +50,7 @@ export namespace RPC {
 		startedAt: Date | null;
 		completedAt: Date | null;
 		expiredAt?: Date | null;
+		executionContext?: Record<string, unknown> | null;
 	};
 	export type Step = {
 		runId: string;
@@ -297,7 +298,7 @@ export class RPCClient {
 	}
 }
 
-const opaqueMapKeys = new Set(["attributes", "header"]);
+const opaqueMapKeys = new Set(["attributes", "header", "executionContext"]);
 
 // Go names workflows and steps by package path and identifier, such as
 // "example.com/app/flows.Publish", while the Workflow SDK parses names shaped

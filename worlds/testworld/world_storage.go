@@ -73,6 +73,7 @@ func (m *World) hookPayloadLocked(hook worlds.Hook, resolve worlds.ResolveData) 
 func cloneRun(value worlds.Run) worlds.Run {
 	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
 	value.Attributes = maps.Clone(value.Attributes)
+	value.ExecutionContext = maps.Clone(value.ExecutionContext)
 	return value
 }
 

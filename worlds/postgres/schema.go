@@ -145,6 +145,8 @@ ALTER TABLE go_workflow_hooks DROP COLUMN webhook, DROP COLUMN webhook_event_id,
 -- its payloads are gone.
 ALTER TABLE go_workflow_runs ADD COLUMN expired_at timestamptz,
 	ADD COLUMN data_purged boolean NOT NULL DEFAULT false;
+-- A run's executionContext, as the Workflow SDK records it.
+ALTER TABLE go_workflow_runs ADD COLUMN execution_context jsonb;
 CREATE INDEX go_workflow_runs_expired_idx ON go_workflow_runs (expired_at) WHERE expired_at IS NOT NULL AND NOT data_purged;
 `}
 

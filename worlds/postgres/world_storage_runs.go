@@ -85,16 +85,16 @@ func runSelect(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""
 	}
-	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at" +
+	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context" +
 		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot" + live
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
 	var run worlds.Run
-	var attributes, input, result []byte
+	var attributes, input, result, executionContext []byte
 	var resultType *worlds.EventType
 	var inBandCount int64
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt, &executionContext); err != nil {
 		return worlds.Run{}, err
 	}
 	if input != nil {
@@ -112,6 +112,11 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 	run.Attributes = map[string]string{}
 	if err := json.Unmarshal(attributes, &run.Attributes); err != nil {
 		return worlds.Run{}, err
+	}
+	if len(executionContext) > 0 {
+		if err := json.Unmarshal(executionContext, &run.ExecutionContext); err != nil {
+			return worlds.Run{}, err
+		}
 	}
 	run.CreatedAt, run.UpdatedAt = run.CreatedAt.UTC(), run.UpdatedAt.UTC()
 	run.StartedAt, run.CompletedAt, run.ExpiredAt = utc(run.StartedAt), utc(run.CompletedAt), utc(run.ExpiredAt)
