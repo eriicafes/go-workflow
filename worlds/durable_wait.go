@@ -15,12 +15,11 @@ type (
 		DueAt     time.Time
 	}
 
-	// DurableWaitResult is a declared timer: its ID, the queue message that
-	// fires it, and any error from declaring it.
+	// DurableWaitResult is a declared timer: its ID and any error from
+	// declaring it.
 	DurableWaitResult struct {
-		WaitID         WaitID
-		QueueMessageID string
-		Err            error
+		WaitID WaitID
+		Err    error
 	}
 )
 
@@ -35,12 +34,11 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	position := options.Execution.NextPosition()
 	creationIndex, exists := options.Execution.index[position]
 	if !exists {
-		// On first execution, schedule the timer, then persist its declaration
-		// with the queue message ID, which analytics report.
+		// On first execution, schedule the timer, then persist its
+		// declaration.
 		waitID := NewWaitIDAt(position)
-		data := DataWaitCreated{Position: position, ResumeAt: options.DueAt, Cancellation: CancellationReferences(ctx)}
-		queued := options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
-		data.QueueMessageID = queued.MessageID
+		data := DataWaitCreated{ResumeAt: options.DueAt}
+		options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		encoded, err := json.Marshal(data)
 		if err != nil {
 			return DurableWaitResult{WaitID: waitID, Err: err}
@@ -49,7 +47,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		// Queues do not recall deliveries, and the orphan only replays the run
 		// once more.
 		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, nil)
-		return DurableWaitResult{WaitID: waitID, QueueMessageID: queued.MessageID}
+		return DurableWaitResult{WaitID: waitID}
 	}
 
 	// Replay the declaration at this logical workflow position.
@@ -68,7 +66,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// completes it.
 	_, completed := options.Execution.settles[string(waitID)]
 	if completed || ctx.Err() != nil || options.Execution.target != nil {
-		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
+		return DurableWaitResult{WaitID: waitID}
 	}
 	if time.Now().Before(data.ResumeAt) {
 		// The timer's own delivery can arrive early when clocks disagree. It
@@ -76,7 +74,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		if options.Execution.delivery.IdempotencyKey == string(waitID) {
 			options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		}
-		return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
+		return DurableWaitResult{WaitID: waitID}
 	}
 	// Replay reaches this declaration before later calls that disarmed it.
 	// Inspect the recorded cancellation contexts before admitting a timer firing.
@@ -87,10 +85,10 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
-		if len(state.Cause) != 0 {
-			return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
+		if state.Cause != nil {
+			return DurableWaitResult{WaitID: waitID}
 		}
 	}
 	options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
-	return DurableWaitResult{WaitID: waitID, QueueMessageID: data.QueueMessageID}
+	return DurableWaitResult{WaitID: waitID}
 }

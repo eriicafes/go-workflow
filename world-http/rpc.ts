@@ -42,6 +42,7 @@ export namespace RPC {
 		error: Uint8Array;
 		attributes: Record<string, string>;
 		deploymentId: string;
+		encryptionPublicKey?: string;
 		inBandCount: number;
 		createdAt: Date;
 		updatedAt: Date;

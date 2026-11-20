@@ -165,8 +165,8 @@ func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []wo
 	}
 }
 
-func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) worlds.DataHookCreated {
-	data := worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), IsWebhook: webhook != nil, Webhook: webhook}
+func conformHookData(token string, webhook bool, retention time.Duration) worlds.DataHookCreated {
+	data := worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), IsWebhook: webhook}
 	if retention > 0 {
 		until := time.Now().UTC().Add(retention)
 		data.TokenRetentionUntil = &until

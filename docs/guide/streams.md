@@ -131,3 +131,9 @@ stores its buffered chunks through the World's
 [`StreamWriter`](/reference/worlds#streamer): over a socket held for the
 writer's lifetime where the World offers one, as the HTTP client and the Vercel
 World do, and otherwise one request per batch of chunks.
+
+Each chunk is stored as the Workflow SDK stores a value of a stream: a frame
+holding the chunk as a `Uint8Array` payload, encrypted with the run's key when
+its payloads are, or sealed to the run's public key when written from outside
+it with `Run.Writer`. SDK tools such as the Workflow web UI read Go streams as
+they read JS ones. See [Data Format and Encryption](/guide/encryption).

@@ -30,6 +30,7 @@ pool and leaves it open on `Close`.
 | Config | Default | Meaning |
 |---|---|---|
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. Webhook URLs are built from it. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](https://go-workflow.vercel.app/guide/encryption). |
 | `URL` | required by `Open` | Connection string. |
 | `PollInterval` | 250ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |

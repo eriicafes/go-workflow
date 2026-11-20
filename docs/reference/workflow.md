@@ -301,9 +301,8 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 
 ```go
 type WebhookOption struct {
-	Method   string         // empty accepts any method
-	Response *http.Response // static response, body up to 128 KiB
-	Manual   bool           // hold the request until RespondWith
+	Response *http.Response // static response to every request, body up to 128 KiB
+	Manual   bool           // hold each request until a step calls RespondWith
 }
 ```
 
@@ -321,22 +320,32 @@ func (w *Webhook[T]) Dispose(ctx context.Context)
 | --- | --- | --- |
 | `URL` | W | Absolute endpoint URL. |
 | `Token`, `ID` | W | Hook identity. |
-| `Request` | W | Waits for the request. |
+| `Request` | W | Waits for the next request. A webhook takes any number. |
 | `Dispose` | W | Durable disposal, deactivating the endpoint. Panics on failure, including when deferred. |
 
 ### WebhookRequest
 
 ```go
-func (r *WebhookRequest[T]) JSON() (T, error)
+type WebhookRequest[T any] struct {
+	Method string
+	URL    string
+	Header http.Header
+	// the body's stream and response stream are unexported
+}
+
+func (r *WebhookRequest[T]) Body(ctx context.Context) ([]byte, error)
+func (r *WebhookRequest[T]) JSON(ctx context.Context) (T, error)
 func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Response) error
 ```
 
-Embeds the incoming HTTP request and implements JSON serialization for step input, preserving raw body and response origin.
+The Workflow SDK's `Request`. Its body is a stream of the run, so it is read
+in a step; pass the request to the step as its input.
 
 | Method | Context | Description |
 | --- | --- | --- |
-| `JSON` | W, S | Parses the recorded body without consuming it. |
-| `RespondWith` | S | Records a manual response, idempotently for the same content. |
+| `Body` | S | Reads the request body. |
+| `JSON` | S | Decodes the request body as `T`. |
+| `RespondWith` | S | Sends a manual webhook's response. The request answers with the first one sent. |
 
 ## Streams
 

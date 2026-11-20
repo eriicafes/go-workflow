@@ -299,7 +299,11 @@ func TestHTTPClientWritesStreamsOverTheSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID()), Name: "remote"})
-	if err != nil || !chunks.Done || len(chunks.Data) != 3 || string(chunks.Data[2].Data) != "three" {
+	var last [][]byte
+	if err == nil && len(chunks.Data) == 3 {
+		last, err = worlds.DecodeStreamFrames(chunks.Data[2].Data, nil)
+	}
+	if err != nil || !chunks.Done || len(last) != 1 || string(last[0]) != "three" {
 		t.Fatalf("remote stream = %#v err=%v", chunks, err)
 	}
 }

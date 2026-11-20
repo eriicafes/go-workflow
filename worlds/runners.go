@@ -2,23 +2,23 @@ package worlds
 
 import (
 	"context"
-	"encoding/json"
 )
 
 // Runner is the function that executes a workflow, paired with the workflow
 // name so the Runtime can replay it. The workflow name is derived from the
 // workflow type, its package path and type name, and runs record it to select
-// their Runner. The function receives and returns JSON, and the Runtime passes
-// it the run's Execution through its context.
+// their Runner. The function receives and returns payloads, and the Runtime
+// passes it the run's Execution through its context, whose EncodePayload and
+// DecodePayload read and write them.
 type Runner struct {
 	name string
-	run  func(context.Context, json.RawMessage) (json.RawMessage, error)
+	run  func(context.Context, []byte) ([]byte, error)
 }
 
 // NewRunner returns a Runner that executes the workflow named name with run.
-// run receives the JSON-encoded workflow input and returns the JSON-encoded
-// output.
-func NewRunner(name string, run func(context.Context, json.RawMessage) (json.RawMessage, error)) Runner {
+// run receives the run's input payload, the workflow's argument list, and
+// returns its output payload.
+func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner {
 	return Runner{name: name, run: run}
 }
 
@@ -26,7 +26,7 @@ func NewRunner(name string, run func(context.Context, json.RawMessage) (json.Raw
 func (r Runner) Name() string { return r.name }
 
 // Run calls the runner's function with input.
-func (r Runner) Run(ctx context.Context, input json.RawMessage) (json.RawMessage, error) {
+func (r Runner) Run(ctx context.Context, input []byte) ([]byte, error) {
 	return r.run(ctx, input)
 }
 

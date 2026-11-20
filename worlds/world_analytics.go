@@ -107,9 +107,7 @@ type AnalyticsWait struct {
 	RunID  RunID
 	WaitID WaitID
 	// DueAt is when the timer fires.
-	DueAt time.Time
-	// QueueMessageID is the delivery scheduled for the timer.
-	QueueMessageID string
-	CreatedAt      time.Time
-	CompletedAt    *time.Time
+	DueAt       time.Time
+	CreatedAt   time.Time
+	CompletedAt *time.Time
 }

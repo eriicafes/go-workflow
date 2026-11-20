@@ -25,7 +25,7 @@ import (
 
 // SpecVersion is the RPC protocol version implemented by this package. A
 // World returns it from its SpecVersion method.
-const SpecVersion = 1
+const SpecVersion = 2
 
 // World is the backend a run is recorded in. It provides event storage, a
 // delivery queue, and streams. The runtime, the client, and HTTPHandler all
@@ -450,4 +450,19 @@ func RunDelivery(ctx context.Context, world World, runID RunID) (QueueInput, err
 	}
 	input.WorkflowName = run.WorkflowName
 	return input, nil
+}
+
+// HookPayloadOptions returns how a payload sent to hook is written, as the
+// Workflow SDK writes one from outside its run: sealed to the run's public
+// key, or, for a run that published none, encrypted with the run's key from
+// client, or unencrypted when the run has no key.
+func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadOptions, error) {
+	if publicKey := DecodePublicKey(hook.ResumeContext.EncryptionPublicKey); publicKey != nil {
+		return PayloadOptions{SealTo: publicKey}, nil
+	}
+	keys, err := client.RunKeys(ctx, RunKeysInput{RunID: hook.RunID, DeploymentID: hook.ResumeContext.DeploymentID})
+	if err != nil {
+		return PayloadOptions{}, err
+	}
+	return PayloadOptions{Keys: keys}, nil
 }

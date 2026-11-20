@@ -144,27 +144,27 @@ retention reserved. The backend derives the run, step, and hook views and
 enforces token ownership across the whole project and environment, every
 region and deployment included.
 
-The backend keeps an event as the metadata it knows for its type, such as a
-step's name or a wait's resume time, plus one opaque payload. The World
-writes each go-workflow event onto that shape:
+go-workflow's events have the Workflow SDK's shape, so the backend keeps each
+as it keeps a JS run's event: its metadata, such as a step's name or a wait's
+resume time, and its payload, already in the SDK's format. The runs, steps,
+hooks, and streams of Go runs show in Vercel's dashboard as JS ones do.
 
 | Event | Payload | Metadata |
 | --- | --- | --- |
-| `run_created` | the run's input | workflow name, deployment, attributes |
+| `run_created` | the run's input | workflow name, deployment, attributes, public key |
 | `run_completed`, `run_failed` | the output or error | |
-| `step_created` | the whole step declaration: input, retries, rollback, cancellation contexts | step name |
+| `step_created` | the step's input | step name |
 | `step_completed`, `step_failed`, `step_retrying` | the result or error | retry time |
 | `step_started` | | owner message |
-| `hook_created` | the whole hook declaration: metadata and webhook settings | token, retention, webhook, system, forced |
+| `hook_created` | the hook's metadata | token, retention, webhook, system, forced |
 | `hook_received` | the payload | |
 | `wait_created` | | resume time |
 | `attr_set` | | changes and writer |
 
-A wait keeps only its resume time. The runtime mints every step, hook, and
-wait ID with its replay position in the ID's entropy (`worlds.NewWaitIDAt`
-and the like), so the World reads a wait's position back from its ID, and the
-runtime reads a wait's cancellation contexts from the replay. A wait's queue
-message ID is not kept.
+The runtime mints every step, hook, and wait ID with its replay position in the
+ID's entropy (`worlds.NewWaitIDAt` and the like), so a declaration's position
+comes back from its ID, and a step's retries and cancellation contexts come from
+the replay that declares it.
 
 | Contract | On Vercel |
 | --- | --- |
@@ -176,6 +176,23 @@ message ID is not kept.
 | Hooks | `HooksGet` reads the hook and its events, for when it received a payload or was disposed. |
 | Analytics | Not supported. `Capabilities().Analytics` is false. |
 | Retention | Vercel's plan decides how long runs are kept. |
+
+## Encryption
+
+The World encrypts payloads as the Workflow SDK does on Vercel, with no
+configuration. With a project ID, from `Config.ProjectID` or
+`VERCEL_PROJECT_ID`, a run's key is:
+
+- in a Vercel Function, for a run of this deployment, derived from the
+  deployment's key, `VERCEL_DEPLOYMENT_KEY`, with HKDF-SHA256 and
+  `{projectId}|{runId}`;
+- otherwise, such as for a run of another deployment, read from Vercel's API,
+  `GET https://api.vercel.com/v1/workflow/run-key/{deploymentId}`, with
+  `Config.Token`, `VERCEL_TOKEN`, or the deployment's OIDC token, and
+  `Config.TeamID`.
+
+Without a deployment key, or a project ID, payloads are not encrypted. See
+[Data Format and Encryption](/guide/encryption).
 
 ## Long timers
 

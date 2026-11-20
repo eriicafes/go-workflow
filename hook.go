@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -73,12 +72,14 @@ func CreateHook[T any](ctx context.Context, options ...HookOption) *Hook[T] {
 
 // Hook receives repeated typed payloads addressed by its token.
 type Hook[T any] struct {
-	token          string
-	id             worlds.HookID
-	registered     bool
-	position       int
-	disposed       bool
-	webhook        *worlds.Webhook
+	token      string
+	id         worlds.HookID
+	registered bool
+	position   int
+	disposed   bool
+	// isWebhook and metadata make the hook a webhook with its settings.
+	isWebhook      bool
+	metadata       []byte
 	minRetention   time.Duration
 	force          bool
 	received       worlds.EventID
@@ -95,7 +96,8 @@ func (h *Hook[T]) create(execution *worlds.Execution, position int, token string
 		Execution:    execution,
 		Position:     &position,
 		Token:        token,
-		Webhook:      h.webhook,
+		IsWebhook:    h.isWebhook,
+		Metadata:     h.metadata,
 		MinRetention: h.minRetention,
 		Force:        h.force,
 	})
@@ -277,8 +279,10 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 	return &Hook[T]{token: token, id: hook.HookID, ClaimedFrom: hook.ClaimedFrom}, true, nil
 }
 
-// ResumeHook resumes the active hook with token, sending value as its payload
-// encoded as JSON, and queues a delivery so its run resumes. It uses the
+// ResumeHook resumes the active hook with token, sending value as its
+// payload, and queues a delivery so its run resumes. The payload is sealed
+// to the run's public key when its payloads are encrypted, as in the
+// Workflow SDK, so the caller cannot read the run back. It uses the
 // Client in ctx and returns ErrHookNotFound when no active hook has the token.
 // It is for steps and external callers; workflow context returns ErrNotInStep.
 func ResumeHook[T any](ctx context.Context, token string, value T) error {
@@ -289,7 +293,15 @@ func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(value)
+	hook, err := client.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
+	if err != nil {
+		return err
+	}
+	options, err := worlds.HookPayloadOptions(ctx, client, hook)
+	if err != nil {
+		return err
+	}
+	payload, err := worlds.EncodePayload(value, options)
 	if err != nil {
 		return fmt.Errorf("workflow: encode hook payload: %w", err)
 	}

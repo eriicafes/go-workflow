@@ -16,15 +16,17 @@ tool builders, and people [implementing a World](/worlds/custom).
 
 ```go
 func Runners(values ...Runner) RunnerSet
-func NewRunner(name string, run func(context.Context, json.RawMessage) (json.RawMessage, error)) Runner
+func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner
 
 func NewRuntime(world World, runners RunnerSet) *Runtime
 func (*Runtime) Execute(ctx context.Context, input QueueInput) error
 ```
 
 `workflow.Use` builds a `Runner` from a typed runner function. `NewRunner`
-builds one from a JSON function, for runners written without the `workflow`
-package.
+builds one from a function of payloads, for runners written without the
+`workflow` package: it receives the run's input payload and returns its output
+payload, read and written with the `DecodePayload` and `EncodePayload` methods
+of the run's `Execution`, which encrypt as the run does.
 
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
 flow. With `StepID` set it executes that step. A delivery for a terminal run
@@ -162,11 +164,12 @@ type Run struct {
 	RunID        RunID
 	WorkflowName string
 	Status       Status
-	Input        []byte // JSON workflow input
-	Output       []byte // JSON workflow output
-	Error        []byte // JSON Error; DecodeError decodes it
+	Input        []byte // payload: the argument list, [input]
+	Output       []byte // payload
+	Error        []byte // payload; DecodeErrorPayload decodes it
 	Attributes   map[string]string
 	DeploymentID string // the deployment the run is pinned to
+	EncryptionPublicKey string // base64, set when the run's payloads are encrypted
 	InBandCount  int    // events appended by the run's orchestrator, which fence its writes
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -195,9 +198,8 @@ type Hook struct {
 	ResumeContext       HookResumeContext // copied from the run when the hook is created
 	HookID              HookID
 	Token               string
-	Metadata            []byte
-	Webhook             *Webhook // set for webhooks
-	WebhookEventID      EventID
+	Metadata            []byte // payload; a webhook's is its WebhookMetadata
+	IsWebhook           bool
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	ReceivedAt          *time.Time
@@ -208,10 +210,14 @@ type Hook struct {
 }
 
 type HookResumeContext struct {
-	DeploymentID string
-	WorkflowName string
+	DeploymentID        string
+	WorkflowName        string
+	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
 }
 ```
+
+A view's payloads are in the Workflow SDK's format and may be encrypted; a
+World stores them as opaque bytes. See [Payloads](#payloads).
 
 Run attributes `$parentRunId` (`ParentRunIDAttribute`) and `$rootRunId`
 (`RootRunIDAttribute`) are set on child runs.
@@ -356,6 +362,8 @@ The rest are the Client's own:
 | `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams one call at a time. |
 | `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
 | `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
+| `RunKeys` | The keys of a run's payloads, or nil when they are not encrypted. |
+| `RunsStartDeployment` | The deployment a new run starts on, so its input is encrypted for it. |
 
 ```go
 type ClientSpec struct {
@@ -384,6 +392,41 @@ func NormalizeBaseURL(value string) (string, error)
 ```
 
 See [HTTP Endpoints](/reference/http).
+
+## Payloads
+
+```go
+func EncodePayload(value any, options PayloadOptions) ([]byte, error)
+func DecodePayload(data []byte, keys *RunKeys, value any) error
+func EncodeErrorPayload(err error, options PayloadOptions) ([]byte, error)
+func DecodeErrorPayload(data []byte, keys *RunKeys) *Error
+
+type PayloadOptions struct {
+	Keys          *RunKeys // encrypt with the run's key (encr)
+	SealTo        []byte   // seal to a run's public key (encp)
+	NoCompression bool
+}
+
+type EncryptionKeys interface {
+	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
+}
+
+func RunKeysFor(ctx context.Context, world any, runID RunID, deploymentID string) (*RunKeys, error)
+func NewRunKeys(runKey []byte) (*RunKeys, error)
+func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error)
+func ConfiguredRunKey(key []byte, runID RunID) ([]byte, error)
+```
+
+Payloads use the Workflow SDK's format: devalue text labelled `devl`,
+optionally compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
+[Data Format and Encryption](/guide/encryption). `EncryptionKeys` is the
+optional World interface the SDK calls `getEncryptionKeyForRun`. A World that
+takes a `Config.EncryptionKey` returns `ConfiguredRunKey(key, runID)`.
+`RunKeysFor` resolves and caches a run's keys. `EncodeStreamFrame` and
+`SplitStreamFrames` write and read stream frames, and `PayloadMarshaler`,
+`PayloadUnmarshaler`, and `PayloadReduced` let a type choose its encoding,
+such as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata`, the SDK's
+`Request`, `Response`, and `{respondWith}`.
 
 ## Durable primitives
 

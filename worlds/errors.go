@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -191,23 +192,6 @@ func NewError(err error) *Error {
 	return &Error{message: err.Error(), chain: appendErrorChain(nil, err)}
 }
 
-// DecodeError decodes an Error encoded with json.Marshal. Data that is
-// not an encoded Error becomes an Error whose message is data.
-func DecodeError(data []byte) *Error {
-	var value Error
-	if err := json.Unmarshal(data, &value); err != nil || (value.message == "" && value.chain == nil) {
-		return &Error{message: string(data)}
-	}
-	return &value
-}
-
-func encodeError(err error) []byte {
-	// Encoding cannot fail, because NewError keeps only the JSON that an
-	// error in the chain encoded successfully.
-	data, _ := json.Marshal(NewError(err))
-	return data
-}
-
 // Error returns the original error's message.
 func (e *Error) Error() string { return e.message }
 
@@ -322,4 +306,105 @@ func errorTypeName(t reflect.Type) string {
 		return prefix + t.String()
 	}
 	return prefix + t.PkgPath() + "." + t.Name()
+}
+
+var (
+	fatalErrorTypeName     = errorTypeName(reflect.TypeFor[FatalError]())
+	retryableErrorTypeName = errorTypeName(reflect.TypeFor[RetryableError]())
+)
+
+// encodeErrorNode returns err as the Workflow SDK's Error value: each error
+// of its chain is an Error whose name is its Go type, with its JSON encoding
+// as data and the next error as its cause. FatalError and RetryableError are
+// the SDK's errors of those names.
+func encodeErrorNode(err error) (any, error) {
+	chain := NewError(err).chain
+	var next any
+	for i := len(chain) - 1; i >= 0; i-- {
+		cause := chain[i]
+		object := &dvObject{}
+		typ := "Error"
+		switch cause.Type {
+		case fatalErrorTypeName:
+			typ = "FatalError"
+		case retryableErrorTypeName:
+			typ = "RetryableError"
+		default:
+			object.set("name", cause.Type)
+		}
+		object.set("message", cause.Message)
+		object.set("stack", dvUndefined{})
+		if next != nil {
+			object.set("cause", next)
+		}
+		switch {
+		case typ == "RetryableError":
+			var data struct{ After time.Duration }
+			_ = json.Unmarshal(cause.Data, &data)
+			object.set("retryAfter", dvNumber(strconv.FormatInt(time.Now().Add(data.After).UnixMilli(), 10)))
+		case typ == "Error" && len(cause.Data) > 0:
+			data, err := jsonNode(cause.Data)
+			if err != nil {
+				return nil, err
+			}
+			object.set("data", data)
+		}
+		next = dvTyped{typ, object}
+	}
+	return next, nil
+}
+
+// decodeErrorNode returns the Error an SDK Error value records, reading its
+// causes as its chain.
+func decodeErrorNode(node any) (error, error) {
+	if message, ok := node.(string); ok {
+		return &Error{message: message, chain: []errorCause{{Type: "Error", Message: message}}}, nil
+	}
+	var chain []errorCause
+	for node != nil {
+		typed, ok := node.(dvTyped)
+		if !ok || !isErrorType(typed.typ) {
+			break
+		}
+		object, ok := typed.value.(*dvObject)
+		if !ok {
+			return nil, fmt.Errorf("%w: %s is not an object", ErrPayloadInvalid, typed.typ)
+		}
+		cause := errorCause{Type: typed.typ}
+		if name, ok := object.get("name"); ok {
+			if text, ok := name.(string); ok && text != "" {
+				cause.Type = text
+			}
+		}
+		switch typed.typ {
+		case "FatalError":
+			cause.Type = fatalErrorTypeName
+		case "RetryableError":
+			cause.Type = retryableErrorTypeName
+			if at, ok := object.get("retryAfter"); ok {
+				if text, ok := numberText(at); ok {
+					if ms, err := strconv.ParseFloat(text, 64); err == nil {
+						after := max(time.Until(time.UnixMilli(int64(ms))), 0)
+						cause.Data, _ = json.Marshal(struct{ After time.Duration }{after})
+					}
+				}
+			}
+		}
+		if message, ok := object.get("message"); ok {
+			cause.Message, _ = message.(string)
+		}
+		if data, ok := object.get("data"); ok {
+			encoded, err := nodeJSON(data)
+			if err != nil {
+				return nil, err
+			}
+			cause.Data = encoded
+		}
+		chain = append(chain, cause)
+		node, _ = object.get("cause")
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("%w: cannot decode %s as an error", ErrPayloadInvalid, nodeKind(node))
+	}
+	return &Error{message: chain[0].Message, chain: chain}, nil
 }

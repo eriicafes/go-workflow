@@ -23,6 +23,7 @@ const guideSidebar: DefaultTheme.SidebarItem[] = [
       { text: 'Hooks', link: '/guide/hooks' },
       { text: 'Webhooks', link: '/guide/webhooks' },
       { text: 'Streams', link: '/guide/streams' },
+      { text: 'Data and Encryption', link: '/guide/encryption' },
       { text: 'Composing Workflows', link: '/guide/composition' },
     ],
   },

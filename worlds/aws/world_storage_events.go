@@ -27,7 +27,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	data, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	data, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -36,7 +36,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
 	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
 	if conditional(err) {
@@ -748,13 +748,6 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(requested.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return nil, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return nil, worlds.ErrHookNotActive
-		}
 
 	case worlds.EventTypeHookDisposed:
 		entry, err := tx.hook(ctx, worlds.HookID(requested.CorrelationID))
@@ -857,7 +850,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName}, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -873,18 +866,6 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		hook := entry.hook
 		entry.dirty = true
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		data, ok := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && ok {
-			if data.Request != nil {
-				hook.WebhookEventID = event.EventID
-			}
-			if data.Response != nil && data.ResponseTo == hook.WebhookEventID {
-				return tx.completeHook(ctx, hook, now)
-			}
-		}
-		if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-			return tx.completeHook(ctx, hook, now)
-		}
 	case worlds.EventTypeHookDisposed:
 		entry, err := tx.hook(ctx, worlds.HookID(event.CorrelationID))
 		if err != nil || entry.hook == nil {

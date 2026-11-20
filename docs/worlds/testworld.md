@@ -33,6 +33,12 @@ a [`testing/synctest`](https://pkg.go.dev/testing/synctest) bubble and those
 timers run on the bubble's fake clock, so a run that sleeps for weeks finishes
 instantly. See [Testing](/guide/testing#sleeps-and-timers).
 
+## Encryption
+
+`SetEncryptionKey(key)` makes the World encrypt every run's payloads with a key
+derived from a 32-byte key, as a World configured with an `EncryptionKey` does,
+so tests cover encrypted runs. Set it before starting runs.
+
 ## Manual delivery
 
 `testworld.NewManual` records deliveries without executing them. The test

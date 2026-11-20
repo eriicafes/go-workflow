@@ -37,7 +37,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 
 	expect(world.specVersion).toBe(SPEC_VERSION_CURRENT);
 	expect(world._spec).toEqual({ specVersion: 1, capabilities: { analytics: false, setAttributes: true } });
-	expect(requests[0]?.envelope.specVersion).toBe(1);
+	expect(requests[0]?.envelope.specVersion).toBe(2);
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
 		hookForceClaim: true,
@@ -47,7 +47,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 	expect(run.runId).toBe("wrun_01");
 	expect(run.workflowName).toBe("report");
 	expect(run.attributes).toEqual({ "external-id": "42" });
-	expect(requests[1]?.envelope.specVersion).toBe(1);
+	expect(requests[1]?.envelope.specVersion).toBe(2);
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
 });
@@ -228,7 +228,7 @@ test("maps Go workflow and step names to Workflow SDK names and back", async () 
 });
 
 test("exposes stored event data as eventData with Workflow SDK names", async () => {
-	const goData = new TextEncoder().encode(JSON.stringify({ stepName: "example.com/app/flows.writeDraft", position: 2 }));
+	const goData = new TextEncoder().encode(JSON.stringify({ stepName: "example.com/app/flows.writeDraft", input: "ZGV2bA==" }));
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
@@ -240,7 +240,7 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 			return rpcResponse({
 				Data: [
 					{ EventID: "evnt_01", EventType: "step_created", CorrelationID: "step_01", Data: goData },
-					{ EventID: "evnt_02", EventType: "hook_received", CorrelationID: "hook_01", Data: encode({ payload: 7 }) },
+					{ EventID: "evnt_02", EventType: "hook_received", CorrelationID: "hook_01", Data: new TextEncoder().encode('{"payload":"AQI="}') },
 					{ EventID: "evnt_03", EventType: "run_started", CorrelationID: "", Data: null },
 				],
 				HasMore: false,
@@ -250,8 +250,8 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 
 	const events = await world.events.list({ runId: "wrun_01" } as never);
 	expect(events.data.map((event) => (event as { eventData?: unknown }).eventData)).toEqual([
-		{ stepName: "step//example.com/app/flows//writeDraft", position: 2 },
-		{ payload: 7 },
+		{ stepName: "step//example.com/app/flows//writeDraft", input: new TextEncoder().encode("devl") },
+		{ payload: new Uint8Array([1, 2]) },
 		undefined,
 	]);
 	expect(events.data[0]).not.toHaveProperty("data");
@@ -297,7 +297,7 @@ test("writes event data as JSON and shapes event results like the Workflow SDK",
 	expect(new TextDecoder().decode((sent?.Event as Record<string, unknown>).Data as Uint8Array)).toBe('{"stepName":"write","input":"AQI="}');
 	expect(sent?.Options).toEqual({ InBandCount: 4 });
 	expect(result).toMatchObject({
-		event: { eventId: "evnt_02", eventData: { stepName: "write", input: "AQI=" } },
+		event: { eventId: "evnt_02", eventData: { stepName: "write", input: new Uint8Array([1, 2]) } },
 		step: { stepId: "step_01", stepName: "step//example.com/app/flows//write" },
 		stepCreated: true,
 		allocated: 1,
@@ -341,8 +341,8 @@ test("reads a stream from a chunk index, then follows the cursor", async () => {
 	expect(inputs[1]).toMatchObject({ Cursor: "4" });
 });
 
-test("decodes run and step data stored by the Go runtime", async () => {
-	const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+test("passes run and step payloads through in the Workflow SDK's format", async () => {
+	const json = (value: unknown) => new TextEncoder().encode("devl" + JSON.stringify([value]));
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
@@ -358,11 +358,12 @@ test("decodes run and step data stored by the Go runtime", async () => {
 		},
 	});
 	const run = await world.runs.get("wrun_01");
-	expect(run.input).toEqual({ topic: "go" });
-	expect(run.error).toEqual({ message: "boom" });
+	expect(run.input).toEqual(json({ topic: "go" }));
+	expect(run.error).toEqual(json({ message: "boom", chain: [] }));
+	expect(run.specVersion).toBe(SPEC_VERSION_CURRENT);
 	const step = await world.steps.get("wrun_01", "step_01");
-	expect(step.input).toBe(1);
-	expect(step.output).toBe("done");
+	expect(step.input).toEqual(json(1));
+	expect(step.output).toEqual(json("done"));
 });
 
 test("waits for a terminal run across bounded requests", async () => {
@@ -411,4 +412,27 @@ test("sends a bearer token from the option or WORKFLOW_HTTP_TOKEN", async () => 
 		if (previous === undefined) delete process.env.WORKFLOW_HTTP_TOKEN;
 		else process.env.WORKFLOW_HTTP_TOKEN = previous;
 	}
+});
+
+test("reads a run's encryption key from the Go world", async () => {
+	const inputs: Record<string, unknown>[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 2, Capabilities: { Analytics: false, SetAttributes: false } });
+			}
+			expect(envelope.method).toBe("runs.encryptionKey");
+			const input = envelope.input as Record<string, unknown>;
+			inputs.push(input);
+			return rpcResponse(input.RunID === "wrun_plain" ? null : new Uint8Array(32).fill(7));
+		},
+	});
+	expect(await world.getEncryptionKeyForRun("wrun_01", { deploymentId: "dpl_1" })).toEqual(new Uint8Array(32).fill(7));
+	expect(await world.getEncryptionKeyForRun("wrun_plain")).toBeUndefined();
+	expect(inputs).toEqual([
+		{ RunID: "wrun_01", DeploymentID: "dpl_1" },
+		{ RunID: "wrun_plain", DeploymentID: "" },
+	]);
 });

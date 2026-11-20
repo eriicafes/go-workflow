@@ -62,7 +62,7 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   30 seconds per request. Clients repeat the request to wait longer.
 
 - **Spec version:** when `specVersion` is set and differs from the World's
-  (`worlds.SpecVersion`, currently `1`), the request fails with
+  (`worlds.SpecVersion`, currently `2`), the request fails with
   `invalid_argument`. Clients call `client.spec` first, which returns
   `{ specVersion, capabilities }`.
 
@@ -78,7 +78,8 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 | Queue | `queue.queue`, `queue.queueBatch` |
 | Streams | `streams.write`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
-| Client | `client.spec`, `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
+| Keys | `runs.encryptionKey` |
+| Client | `client.spec`, `client.runs.create`, `client.runs.startDeployment`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
 Most methods return the World's Go types. The event writes return the Workflow
 SDK's result shapes instead: `events.create` and `events.createRun` return
@@ -98,23 +99,21 @@ Never expose them publicly unless `worlds.WithClientToken` or
 ## Webhooks
 
 `<prefix>/webhooks/{token}` resumes the webhook that owns `token` with the
-request.
+request, as the Workflow SDK's webhook handler does: it writes the body to a
+byte stream of the run, resumes the hook with the SDK's `Request`, sealed to
+the run's public key when its payloads are encrypted, and queues a delivery so
+the run resumes. A webhook takes any number of requests.
 
 | Situation | Response |
 | --- | --- |
 | No active webhook owns the token, or its run finished | `404 Not Found` |
-| Method differs from `WebhookOption.Method` | `405 Method Not Allowed` with `Allow` |
 | Body over 128 KiB | `413 Request Entity Too Large` |
 | Default webhook | `202 Accepted` |
-| `WebhookOption.Response` set | that response |
-| `WebhookOption.Manual` | Waits for a step to call `WebhookRequest.RespondWith`. |
+| `WebhookOption.Response` set | that response, to every request |
+| `WebhookOption.Manual` | The first response a step writes with `WebhookRequest.RespondWith` to the request's response stream. |
 | Manual response times out | `504 Gateway Timeout` |
-| Webhook disposed or run terminated while waiting for a response | `410 Gone` |
 | Storage failure while waiting for a response | `500 Internal Server Error` |
 | Ownership changes during the request | Retryable `503 Service Unavailable`. The request is not forwarded to the new owner. |
-
-The request's method, URL, headers, and body are recorded in a `hook_received`
-event and a delivery is queued so the run resumes.
 
 The token is the only authorization. Serve `WebhookHandler` (or a World's
 `Webhook(world)`) publicly on its own if you need webhooks but want to keep RPC

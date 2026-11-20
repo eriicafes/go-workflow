@@ -44,8 +44,8 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 		t.Fatalf("events = %#v", events)
 	}
 	var data struct {
-		WorkflowName string          `json:"workflowName"`
-		Input        json.RawMessage `json:"input"`
+		WorkflowName string `json:"workflowName"`
+		Input        []byte `json:"input"`
 	}
 	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` {
 		t.Fatalf("run_created data = %s err=%v", events[0].Data, err)
@@ -121,7 +121,7 @@ func conformRunsWaitForTerminalStatus(t *testing.T, world worlds.World) {
 	}
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"done"}`)}})
+		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"ImRvbmUi"}`)}})
 	}()
 	run, err = world.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 10 * time.Second})
 	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `"done"` {

@@ -161,17 +161,21 @@ type Run struct {
 	RunID        RunID
 	WorkflowName string
 	Status       Status
-	// Input is the JSON-encoded workflow input.
+	// Input is the run's argument list, [input], as a payload.
 	Input []byte
-	// Output is the JSON-encoded workflow output of a completed run.
+	// Output is the output payload of a completed run.
 	Output []byte
-	// Error is the JSON-encoded Error of a failed run. DecodeError
+	// Error is the error payload of a failed run. DecodeErrorPayload
 	// decodes it.
 	Error      []byte
 	Attributes map[string]string
 	// DeploymentID is the deployment the run is pinned to, recorded when the
 	// run is created. Empty means the run is not pinned.
 	DeploymentID string
+	// EncryptionPublicKey is the run's public key in base64, which writers
+	// outside the run seal payloads to. It is empty when the run's payloads
+	// are not encrypted.
+	EncryptionPublicKey string
 	// InBandCount counts the events appended by in-band writes, those the
 	// run's orchestrator fences with EventsCreateOptions.InBandCount. A flow
 	// starts from it and passes it with each in-band write.
@@ -206,12 +210,12 @@ type Step struct {
 	// Status is pending before the first attempt starts and again while a
 	// retry is scheduled.
 	Status Status
-	// Input is the JSON-encoded step input.
+	// Input is the step's arguments, {args: [input]}, as a payload.
 	Input []byte
-	// Output is the JSON-encoded output of a completed step.
+	// Output is the output payload of a completed step.
 	Output []byte
 	// Error is the JSON-encoded Error of the last failed attempt.
-	// DecodeError decodes it.
+	// DecodeErrorPayload decodes it.
 	Error []byte
 	// Attempt is the number of attempts started so far.
 	Attempt     int
@@ -242,20 +246,6 @@ type (
 		RunID       RunID
 		ResolveData ResolveData
 	}
-	// WebhookRequest is an HTTP request received by a webhook.
-	WebhookRequest struct {
-		Method string              `json:"method"`
-		URL    string              `json:"url"`
-		Header map[string][]string `json:"header"`
-		Body   []byte              `json:"body"`
-	}
-	// WebhookResponse is an HTTP response returned to a webhook caller. A zero
-	// Status is sent as 200.
-	WebhookResponse struct {
-		Status int                 `json:"status"`
-		Header map[string][]string `json:"header,omitempty"`
-		Body   []byte              `json:"body,omitempty"`
-	}
 	// HookForceClaim names the hook that took a token with a forced claim.
 	HookForceClaim struct {
 		RunID  RunID  `json:"runId"`
@@ -263,26 +253,16 @@ type (
 	}
 )
 
-// Webhook configures how a webhook answers HTTP requests to its URL.
-type Webhook struct {
-	// Method is the HTTP method the webhook accepts. Empty accepts any
-	// method.
-	Method string `json:"method,omitempty"`
-	// Manual makes the webhook wait for the workflow to record a response
-	// and send that to the caller.
-	Manual bool `json:"manual,omitempty"`
-	// Response is sent to every caller when set, and the hook is disposed
-	// after the first request. When neither Manual nor Response is set, callers
-	// receive 202 Accepted.
-	Response *WebhookResponse `json:"response,omitempty"`
-}
-
 // Hook is the view of one hook derived from its run's event log.
 // HookResumeContext is the part of a hook's run that addresses the
 // deliveries its payloads queue: the run's deployment and workflow.
 type HookResumeContext struct {
 	DeploymentID string
 	WorkflowName string
+	// EncryptionPublicKey is the run's public key in base64, which a
+	// payload sent to the hook is sealed to. It is empty when the run's
+	// payloads are not encrypted.
+	EncryptionPublicKey string
 }
 
 type Hook struct {
@@ -292,14 +272,12 @@ type Hook struct {
 	ResumeContext HookResumeContext
 	HookID        HookID
 	Token         string
-	// Metadata is the JSON-encoded metadata recorded when the hook was
-	// created.
+	// Metadata is the hook's metadata payload, recorded when it was created.
+	// A webhook's holds how it responds, as WebhookMetadata.
 	Metadata []byte
-	// Webhook is set when the hook is a webhook.
-	Webhook *Webhook
-	// WebhookEventID is the hook_received event that recorded the webhook
-	// request.
-	WebhookEventID EventID
+	// IsWebhook reports that the hook is a webhook, which HTTP requests to
+	// its URL resume.
+	IsWebhook bool
 	// TokenRetentionUntil is the earliest time terminal-run cleanup may release
 	// the token, or nil when there is no retention reservation. Active runs
 	// keep their tokens beyond it; explicit disposal always releases them
@@ -380,12 +358,16 @@ type (
 	EventsCreateRunInput struct {
 		RunID        RunID
 		WorkflowName string
-		// Input is the JSON-encoded workflow input.
+		// Input is the run's argument list, [input], as a payload.
 		Input      []byte
 		Attributes map[string]string
 		// DeploymentID pins the run to a deployment. Empty leaves the run
 		// unpinned. The World records it in run_created and on the Run.
 		DeploymentID string
+		// EncryptionPublicKey is the run's public key in base64, set when its
+		// payloads are encrypted. The World records it in run_created, on the
+		// Run, and in the ResumeContext of the run's hooks.
+		EncryptionPublicKey string
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {

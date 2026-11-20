@@ -532,6 +532,28 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		default:
 			return nil, fmt.Errorf("%w: unknown analytics method %q", errRPCInvalidInput, request.Method)
 		}
+	case "runs.encryptionKey":
+		input, err := decodeRPC[RunKeysInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		var key []byte
+		if provider, ok := world.(EncryptionKeys); ok {
+			if key, err = provider.EncryptionKeyForRun(ctx, input.RunID, input.DeploymentID); err != nil {
+				return nil, err
+			}
+		}
+		return encodeRPC(key)
+	case "client.runs.startDeployment":
+		input, err := decodeRPC[ClientRunsStartDeploymentInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		deploymentID, err := StartDeploymentID(ctx, world, input.Latest)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(deploymentID)
 	case "client.spec":
 		return encodeRPC(ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()})
 	case "client.runs.create":
@@ -620,6 +642,19 @@ type (
 		EventsCreateRunInput
 		// Latest pins a run with no DeploymentID to the World's latest
 		// deployment, for a workflow marked workflow.StartOnLatest.
+		Latest bool
+	}
+	// RunKeysInput holds the arguments to Client.RunKeys and the
+	// runs.encryptionKey RPC method, which answers with the World's key for
+	// the run.
+	RunKeysInput struct {
+		RunID        RunID
+		DeploymentID string
+	}
+	// ClientRunsStartDeploymentInput holds the arguments to
+	// Client.RunsStartDeployment and the client.runs.startDeployment RPC
+	// method.
+	ClientRunsStartDeploymentInput struct {
 		Latest bool
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC

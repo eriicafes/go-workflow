@@ -1,7 +1,8 @@
 # Webhooks
 
-A webhook lets a workflow wait for an HTTP request. Create it, share its URL
-with the producer, and wait for the recorded request:
+A webhook lets a workflow wait for HTTP requests, as the Workflow SDK's
+`createWebhook` does. Create it, share its URL with the producer, and wait for
+a request:
 
 ```go
 webhook, err := workflow.CreateWebhook[Payment](ctx)
@@ -19,7 +20,7 @@ if err != nil {
 	return Output{}, err
 }
 
-payment, err := request.JSON()
+payment, err := workflow.Step(ctx, readPayment, request)
 if err != nil {
 	return Output{}, err
 }
@@ -27,44 +28,48 @@ if err != nil {
 return Output{PaymentID: payment.ID}, nil
 ```
 
-`Request` returns a `WebhookRequest` that embeds the incoming HTTP request. The
-request survives step serialization, including its raw body and response
-origin. Call `JSON` to decode the recorded body without consuming
-`Request.Body`.
+`Request` returns the next request as a `WebhookRequest`, the SDK's
+`Request`: its `Method`, `URL`, and `Header` are recorded with it, and its
+body is a stream of the run. Reading the body is I/O, so `Body` and `JSON` are
+step-only. Pass the request to a step, which can also verify a signature:
 
-Reads of the recorded request are deterministic. Put signature verification
-and other external work in a step.
+```go
+func readPayment(ctx context.Context, request *workflow.WebhookRequest[Payment]) (Payment, error) {
+	payment, err := request.JSON(ctx)
+	if err != nil {
+		return Payment{}, workflow.FatalError(err)
+	}
+	return payment, nil
+}
+```
 
-The reconstructed HTTP request uses `context.Background()`. Use the step handler's `ctx` for cancellation and step operations. If you need the HTTP request itself to carry that context, bind it explicitly inside the step with `request.Request = request.Request.WithContext(ctx)`.
+A webhook takes any number of requests: call `Request` again for the next
+one, or dispose of the webhook when it is no longer needed.
 
 ## URLs and responses
 
-The URL is `<BaseURL>/webhooks/<random-token>`. Set the World's `Config.BaseURL` to the public location of its HTTP handler. A webhook always gets a random token.
-
-Set `WebhookOption.Method` to restrict the HTTP method. An empty method
-accepts any request method.
+The URL is `<BaseURL>/webhooks/<random-token>`. Set the World's
+`Config.BaseURL` to the public location of its HTTP handler. A webhook always
+gets a random token. It accepts any HTTP method; check `request.Method` in a
+step when only some should be accepted.
 
 | Configuration | Response |
 | --- | --- |
 | default | `202 Accepted` |
-| `Response` | Static response. |
-| `Manual: true` | Waits for the receiving step's recorded response. |
+| `Response` | The static response, sent to every request. |
+| `Manual: true` | Held until a step responds with `RespondWith`. |
 
-Each webhook accepts one request. The endpoint deactivates once the request
-is recorded, or with `Manual`, once its response is recorded.
-
-Request and static response bodies are limited to 128 KiB. See
-[HTTP Endpoints](/reference/http#webhooks) for response codes and failure cases.
+The settings are the webhook's metadata, `{respondWith}`, as the SDK records
+them. Request and static response bodies are limited to 128 KiB. See
+[HTTP Endpoints](/reference/http#webhooks) for response codes and failure
+cases.
 
 ## Responding inside a step
 
-Pass the serialized request as the step input. `RespondWith` is callable only inside a step:
+With `Manual`, each request waits for a response. `RespondWith` is step-only:
 
 ```go
-webhook, err := workflow.CreateWebhook[Command](ctx, workflow.WebhookOption{
-	Method: http.MethodPost,
-	Manual: true,
-})
+webhook, err := workflow.CreateWebhook[Command](ctx, workflow.WebhookOption{Manual: true})
 if err != nil {
 	return Output{}, err
 }
@@ -79,11 +84,11 @@ command, err := workflow.Step(ctx, respondToCommand, request)
 return Output{Command: command}, err
 ```
 
-The step decodes the command and records the response:
+The step decodes the command and sends the response:
 
 ```go
 func respondToCommand(ctx context.Context, request *workflow.WebhookRequest[Command]) (Command, error) {
-	command, err := request.JSON()
+	command, err := request.JSON(ctx)
 	if err != nil {
 		return Command{}, workflow.FatalError(err)
 	}
@@ -98,15 +103,12 @@ func respondToCommand(ctx context.Context, request *workflow.WebhookRequest[Comm
 }
 ```
 
-A retry that records the same response succeeds without another response
-event. Recording a different response fails with a fatal error.
-
-The responding step must belong to the receiving run, and the webhook must
-use manual responses. Invalid or oversized responses fail without retrying.
-Transient storage failures remain retryable.
+The response is written to the request's response stream, and the request
+answers with the first one written, so a retried attempt's response is
+ignored. `RespondWith` fails without retrying for a webhook without manual
+responses or an oversized body.
 
 A webhook can participate in [selection](/guide/concurrency#racing-operations).
-Dispose it when the endpoint is no longer needed.
 
 ## Security
 

@@ -56,6 +56,8 @@ var storedKeys = map[string]string{
 	"hookIsWebhook":           "isWebhook",
 	"hookIsSystem":            "isSystem",
 	"hookTokenRetentionUntil": "tokenRetentionUntil",
+	"hookForce":               "force",
+	"encryptionPublicKey":     "encryptionPublicKey",
 	"ownerMessageId":          "ownerMessageId",
 	"changes":                 "changes",
 	"writer":                  "writer",
@@ -374,7 +376,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	if eventType == worlds.EventTypeRunCreated {
 		var created worlds.DataRunCreated
 		_ = json.Unmarshal(data, &created)
-		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID}); err != nil {
+		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey}); err != nil {
 			return refuse(err)
 		}
 		run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
@@ -544,6 +546,9 @@ func lazy(query map[string][]string) bool {
 
 func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[string]any {
 	wire := map[string]any{"runId": string(run.RunID), "workflowName": run.WorkflowName, "status": string(run.Status), "deploymentId": run.DeploymentID, "attributes": run.Attributes, "createdAt": run.CreatedAt, "updatedAt": run.UpdatedAt, "specVersion": specVersion}
+	if run.EncryptionPublicKey != "" {
+		wire["encryptionPublicKey"] = run.EncryptionPublicKey
+	}
 	if run.StartedAt != nil {
 		wire["startedAt"] = *run.StartedAt
 	}
@@ -575,11 +580,8 @@ func (f *fakeBackend) wireStep(ctx context.Context, step worlds.Step, query map[
 		wire["error"] = step.Error
 	}
 	if !lazy(query) {
-		events, _ := f.store.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: step.RunID, CorrelationID: string(step.StepID)})
-		for _, event := range events.Data {
-			if event.EventType == worlds.EventTypeStepCreated {
-				wire["input"] = []byte(event.Data)
-			}
+		if len(step.Input) > 0 {
+			wire["input"] = step.Input
 		}
 		if len(step.Output) > 0 {
 			wire["output"] = step.Output
@@ -598,18 +600,15 @@ func (f *fakeBackend) writeHook(ctx context.Context, writer http.ResponseWriter,
 }
 
 func (f *fakeBackend) wireHook(ctx context.Context, hook worlds.Hook) map[string]any {
-	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName}}
+	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName, "encryptionPublicKey": hook.ResumeContext.EncryptionPublicKey}}
 	if hook.TokenRetentionUntil != nil {
 		wire["tokenRetentionUntil"] = *hook.TokenRetentionUntil
 	}
 	if hook.ClaimedFrom != nil {
 		wire["claimedFrom"] = map[string]any{"runId": string(hook.ClaimedFrom.RunID), "hookId": string(hook.ClaimedFrom.HookID)}
 	}
-	events, _ := f.store.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: hook.RunID, CorrelationID: string(hook.HookID)})
-	for _, event := range events.Data {
-		if event.EventType == worlds.EventTypeHookCreated {
-			wire["metadata"] = []byte(event.Data)
-		}
+	if len(hook.Metadata) > 0 {
+		wire["metadata"] = hook.Metadata
 	}
 	return wire
 }

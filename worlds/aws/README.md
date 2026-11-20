@@ -60,7 +60,7 @@ with its own worker concurrency for heavy work:
 
 ```go
 world, err := awsworld.New(awsworld.Config{
-	// BaseURL, TableName, QueueURL, Scheduler...
+	// BaseURL, TableName, QueueURL, Scheduler, EncryptionKey...
 	Queues: map[string]awsworld.QueueConfig{
 		"backfill": {URL: backfillURL, ARN: backfillARN},
 		"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},

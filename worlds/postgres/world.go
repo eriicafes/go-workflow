@@ -5,6 +5,7 @@
 package postgresworld
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -49,6 +50,11 @@ type Config struct {
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
 	// forever.
 	Retentions map[string]time.Duration
+	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
+	// key derived from it for the run, as the Workflow SDK does. Empty leaves
+	// payloads unencrypted. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionKey []byte
 }
 
 // DefaultQueue is the queue of workflows Config.Routes doesn't route.
@@ -57,16 +63,18 @@ const DefaultQueue = ""
 // World is the Postgres World. It is safe for concurrent use, and any number
 // of Worlds in any number of processes may share one database.
 type World struct {
-	pool        *pgxpool.Pool
-	ownsPool    bool
-	baseURL     string
-	interval    time.Duration
-	concurrency int
-	lease       time.Duration
-	notifier    *notifier
-	routes      map[string]string
-	retention   time.Duration
-	retentions  map[string]time.Duration
+	pool     *pgxpool.Pool
+	ownsPool bool
+	baseURL  string
+	// encryptionKey is Config.EncryptionKey.
+	encryptionKey []byte
+	interval      time.Duration
+	concurrency   int
+	lease         time.Duration
+	notifier      *notifier
+	routes        map[string]string
+	retention     time.Duration
+	retentions    map[string]time.Duration
 }
 
 // Open connects to config.URL, migrates the schema, and returns a World that
@@ -97,6 +105,9 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 	if config.BaseURL == "" {
 		return nil, errors.New("workflow/postgres: base URL is required")
 	}
+	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
+		return nil, err
+	}
 	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("workflow/postgres: invalid base URL: %w", err)
@@ -117,15 +128,16 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		return nil, err
 	}
 	return &World{
-		pool:        pool,
-		baseURL:     baseURL,
-		interval:    config.PollInterval,
-		concurrency: config.Concurrency,
-		lease:       config.LeaseDuration,
-		notifier:    newNotifier(pool),
-		routes:      config.Routes,
-		retention:   config.Retention,
-		retentions:  config.Retentions,
+		pool:          pool,
+		baseURL:       baseURL,
+		encryptionKey: bytes.Clone(config.EncryptionKey),
+		interval:      config.PollInterval,
+		concurrency:   config.Concurrency,
+		lease:         config.LeaseDuration,
+		notifier:      newNotifier(pool),
+		routes:        config.Routes,
+		retention:     config.Retention,
+		retentions:    config.Retentions,
 	}, nil
 }
 
@@ -202,4 +214,10 @@ func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options
 		}()
 	}
 	return world.work(ctx, worlds.NewRuntime(world, runners), option)
+}
+
+// EncryptionKeyForRun returns the key of a run's payloads, derived from
+// Config.EncryptionKey, or nil when the World has none.
+func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
+	return worlds.ConfiguredRunKey(w.encryptionKey, runID)
 }

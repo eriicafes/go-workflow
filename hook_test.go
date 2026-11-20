@@ -358,9 +358,11 @@ func TestHookRegistersOnlyWhenUsedAndKeepsTokenAfterInterruptedCommit(t *testing
 			if err := json.Unmarshal(event.Data, &created); err != nil {
 				t.Fatal(err)
 			}
-			if err := json.Unmarshal(created.Input, &capturedToken); err != nil {
+			var args struct{ Args [1]string }
+			if err := worlds.DecodePayload(created.Input, nil, &args); err != nil {
 				t.Fatal(err)
 			}
+			capturedToken = args.Args[0]
 			stepID = worlds.StepID(event.CorrelationID)
 		}
 	}

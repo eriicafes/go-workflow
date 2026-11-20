@@ -127,6 +127,9 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// follow-up storage read.
 	execution := newExecution(ctx, r.world, run, events, nil)
 	execution.delivery, execution.running = input, &r.running
+	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
+		return err
+	}
 	execution.merge(started, startedLatest)
 
 	// A run whose workflow is not registered fails without replaying, so it
@@ -135,7 +138,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	if !ok {
 		_, err := r.world.EventsCreate(ctx, EventsCreateInput{
 			RunID: run.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))},
+			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: execution.runFailedData(fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))},
 		})
 		if errors.Is(err, ErrRunTerminal) {
 			return nil
@@ -151,7 +154,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 // event log is handed to recoverDivergence.
 func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution *Execution) (err error) {
 	ctx := execution.Context()
-	output, err := r.run(runner, ctx, json.RawMessage(run.Input))
+	output, err := r.run(runner, ctx, run.Input)
 	// Steps the runner declared and no longer waits for are not started.
 	execution.pending = nil
 	defer func() {
@@ -279,7 +282,7 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 	}
 	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(failure)},
+		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: execution.runFailedData(failure)},
 		Options: EventsCreateOptions{InBandCount: execution.InBandCount()},
 	})
 	if errors.Is(err, ErrRunTerminal) {
@@ -359,6 +362,9 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	// only when replay reaches the matching step declaration.
 	execution := newExecution(ctx, r.world, run, events, input.StepID)
 	execution.delivery = input
+	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
+		return err
+	}
 	execution.merge(started, startedLatest)
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
@@ -372,7 +378,7 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 // recoverDivergence.
 func (r *Runtime) replayStep(input QueueInput, runner Runner, run Run, execution *Execution, stepID StepID) error {
 	ctx := execution.Context()
-	_, err := r.run(runner, ctx, json.RawMessage(run.Input))
+	_, err := r.run(runner, ctx, run.Input)
 
 	// Persist the reported target result. A failed target is reported to the
 	// root replay, which decides whether the workflow itself should fail and
@@ -454,7 +460,7 @@ func (r *Runtime) failStep(ctx context.Context, input QueueInput, execution *Exe
 				if execution.IsSuspended() {
 					err = recoveredError
 				} else {
-					err = r.completeStep(ctx, execution, stepID, DataStepResult{Error: encodeError(recoveredError)})
+					err = r.completeStep(ctx, execution, stepID, DataStepResult{Error: execution.encodeError(recoveredError)})
 				}
 			}
 		}
@@ -464,12 +470,12 @@ func (r *Runtime) failStep(ctx context.Context, input QueueInput, execution *Exe
 			return err
 		}
 	}
-	return r.completeStep(ctx, execution, stepID, DataStepResult{Error: encodeError(failure)})
+	return r.completeStep(ctx, execution, stepID, DataStepResult{Error: execution.encodeError(failure)})
 }
 
 // run preserves error panics, including replay control, and converts other
 // application panic values into workflow errors.
-func (r *Runtime) run(runner Runner, ctx context.Context, input json.RawMessage) (output json.RawMessage, err error) {
+func (r *Runtime) run(runner Runner, ctx context.Context, input []byte) (output []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if recoveredError, ok := recovered.(error); ok {
@@ -517,9 +523,13 @@ func (r *Runtime) supersede(ctx context.Context, input QueueInput) error {
 func (r *Runtime) recoverDivergence(ctx context.Context, input QueueInput, divergenceErr replayDivergenceError) error {
 	if input.ReplayDivergenceCount >= maxReplayDivergenceRetries {
 		corrupted := corruptedEventLogError{Position: divergenceErr.Position, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
-		_, err := r.world.EventsCreate(ctx, EventsCreateInput{
+		data, err := r.runFailedData(ctx, input.RunID, input.DeploymentID, corrupted)
+		if err != nil {
+			return err
+		}
+		_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 			RunID: input.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(corrupted)},
+			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data},
 		})
 		if errors.Is(err, ErrRunTerminal) {
 			return nil
@@ -556,9 +566,13 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 		}
 	}
 	mismatch := deploymentMismatchError{RunDeploymentID: run.DeploymentID, DeploymentID: r.world.DeploymentID(), RecoveryAttempts: attempts}
-	_, err := r.world.EventsCreate(ctx, EventsCreateInput{
+	data, err := r.runFailedData(ctx, run.RunID, run.DeploymentID, mismatch)
+	if err != nil {
+		return err
+	}
+	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID: run.RunID,
-		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(mismatch)},
+		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data},
 	})
 	if errors.Is(err, ErrRunTerminal) {
 		return nil
@@ -588,7 +602,11 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error 
 		return err
 	}
 	if input.StepID == nil {
-		_, err := r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: EncodeRunFailed(cause)}})
+		data, err := r.runFailedData(ctx, run.RunID, run.DeploymentID, cause)
+		if err != nil {
+			return err
+		}
+		_, err = r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data}})
 		if errors.Is(err, ErrRunTerminal) {
 			return nil
 		}
@@ -612,7 +630,15 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error 
 				return err
 			}
 		}
-		data, err := json.Marshal(DataStepResult{Error: encodeError(cause)})
+		keys, err := RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID)
+		if err != nil {
+			return err
+		}
+		payload, err := EncodeErrorPayload(cause, PayloadOptions{Keys: keys})
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(DataStepResult{Error: payload})
 		if err != nil {
 			return err
 		}
@@ -626,4 +652,14 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error 
 	}
 	_, err = r.world.Queue(ctx, QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 	return err
+}
+
+// runFailedData returns the Data of a run_failed event for err, encrypted
+// with the run's keys.
+func (r *Runtime) runFailedData(ctx context.Context, runID RunID, deploymentID string, err error) ([]byte, error) {
+	keys, keysErr := RunKeysFor(ctx, r.world, runID, deploymentID)
+	if keysErr != nil {
+		return nil, keysErr
+	}
+	return EncodeRunFailed(err, PayloadOptions{Keys: keys})
 }

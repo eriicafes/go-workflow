@@ -14,9 +14,14 @@ type (
 		Execution *Execution
 		// Position is a declaration position reserved by NextPosition. When nil,
 		// DurableHook declares and registers at the next position immediately.
-		Position     *int
-		Token        string
-		Webhook      *Webhook
+		Position *int
+		Token    string
+		// Metadata is the hook's metadata payload. A webhook's is its
+		// WebhookMetadata.
+		Metadata []byte
+		// IsWebhook makes the hook a webhook, resumed by HTTP requests to its
+		// URL. A webhook's token is always generated.
+		IsWebhook    bool
 		MinRetention time.Duration
 		Force        bool
 		// System marks a hook the runtime creates for itself, such as a
@@ -65,7 +70,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 			options.Token = NewHookToken()
 		}
 		hookID := NewHookIDAt(position)
-		created := DataHookCreated{Position: position, Token: options.Token, IsWebhook: options.Webhook != nil, IsSystem: options.System, Webhook: options.Webhook, Force: options.Force}
+		created := DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
 		if options.MinRetention > 0 {
 			until := time.Now().UTC().Add(options.MinRetention)
 			created.TokenRetentionUntil = &until
@@ -85,7 +90,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableHookResult[T]{Err: fmt.Errorf("workflow: decode hook: %w", err)}
 	}
-	if options.Webhook == nil && options.Token != "" && created.Token != options.Token {
+	if !options.IsWebhook && options.Token != "" && created.Token != options.Token {
 		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
 	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
@@ -107,31 +112,12 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 }
 
 // HookEvent reports the next delivered payload or disposal after cursor.
-// For webhooks, it returns incoming requests and skips hook_received events
-// that record manual responses sent by the workflow.
 func HookEvent(execution *Execution, id HookID, cursor EventID) (Event, bool) {
-	webhook := false
 	for _, event := range execution.events[:execution.horizon] {
-		if event.CorrelationID != string(id) {
+		if event.CorrelationID != string(id) || event.EventID <= cursor {
 			continue
 		}
-		if event.EventType == EventTypeHookCreated {
-			var created DataHookCreated
-			_ = json.Unmarshal(event.Data, &created)
-			webhook = created.Webhook != nil
-		}
-		if event.EventID <= cursor {
-			continue
-		}
-		if event.EventType == EventTypeHookDisposed {
-			return event, true
-		}
-		if event.EventType == EventTypeHookReceived {
-			// Manual responses also use hook_received; skip them so they are
-			// not delivered as another incoming webhook request.
-			if received, ok := DecodeWebhookReceived(event.Data); webhook && ok && received.Response != nil {
-				continue
-			}
+		if event.EventType == EventTypeHookDisposed || event.EventType == EventTypeHookReceived {
 			return event, true
 		}
 	}
@@ -159,7 +145,7 @@ func HookOutcome[T any](execution *Execution, hookID HookID, after EventID) Dura
 		return result
 	}
 	result.Received = true
-	if err := json.Unmarshal(DecodeHookReceived(event.Data), &result.Data); err != nil {
+	if err := execution.DecodePayload(DecodeHookReceived(event.Data), &result.Data); err != nil {
 		result.Err = fmt.Errorf("workflow: decode hook value: %w", err)
 		return result
 	}

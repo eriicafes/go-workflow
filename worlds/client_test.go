@@ -53,7 +53,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 			}
 			data := []byte(`{"token":"racing-token"}`)
 			if mode == "webhook" {
-				data = []byte(`{"token":"racing-token","webhook":{"method":"POST"}}`)
+				data = []byte(`{"token":"racing-token","isWebhook":true}`)
 			}
 			if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_old", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_old", Data: data}}); err != nil {
 				t.Fatal(err)
@@ -284,7 +284,7 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_resume", WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resume", Data: []byte(`{"token":"resume-token","webhook":{}}`)}}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resume", Data: []byte(`{"token":"resume-token"}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "resume-token"})
@@ -296,8 +296,11 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A webhook takes one request, so a second resume is refused, as when an
-	// earlier resume recorded its request but stopped before queueing.
+	// A resume of a disposed hook is refused, as when an earlier resume
+	// recorded its payload but stopped before queueing, and queues anyway.
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_resume"}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := worlds.ResumeHook(ctx, world, hook, payload); !errors.Is(err, worlds.ErrHookNotActive) {
 		t.Fatalf("error = %v, want ErrHookNotActive", err)
 	}

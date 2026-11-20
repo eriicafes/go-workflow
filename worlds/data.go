@@ -2,7 +2,6 @@ package worlds
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -97,21 +96,26 @@ func ResolveEvents(events []Event, resolve EventsResolveData) []Event {
 
 // DataRunCreated is the Data of a run_created event.
 type DataRunCreated struct {
-	WorkflowName string            `json:"workflowName"`
-	Input        json.RawMessage   `json:"input"`
+	WorkflowName string `json:"workflowName"`
+	// Input is the run's argument list, [input], as a payload.
+	Input        []byte            `json:"input"`
 	Attributes   map[string]string `json:"attributes"`
 	DeploymentID string            `json:"deploymentId,omitempty"`
+	// EncryptionPublicKey is the run's X25519 public key in base64, which
+	// writers outside the run seal payloads to. It is set when the run's
+	// payloads are encrypted.
+	EncryptionPublicKey string `json:"encryptionPublicKey,omitempty"`
 }
 
 // DataRunCompleted is the Data of a run_completed event.
 type DataRunCompleted struct {
-	// Output is the JSON output of the run.
-	Output json.RawMessage `json:"output,omitempty"`
+	// Output is the run's output as a payload.
+	Output []byte `json:"output,omitempty"`
 }
 
 // DecodeRunCompleted returns the Output of run_completed event Data, or nil
 // when data is not a DataRunCompleted.
-func DecodeRunCompleted(data []byte) json.RawMessage {
+func DecodeRunCompleted(data []byte) []byte {
 	var completed DataRunCompleted
 	if json.Unmarshal(data, &completed) != nil {
 		return nil
@@ -121,13 +125,13 @@ func DecodeRunCompleted(data []byte) json.RawMessage {
 
 // DataRunFailed is the Data of a run_failed event.
 type DataRunFailed struct {
-	// Error is the run's error, encoded as an Error.
-	Error json.RawMessage `json:"error,omitempty"`
+	// Error is the run's error as a payload.
+	Error []byte `json:"error,omitempty"`
 }
 
 // DecodeRunFailed returns the Error of run_failed event Data, or nil when data
 // is not a DataRunFailed.
-func DecodeRunFailed(data []byte) json.RawMessage {
+func DecodeRunFailed(data []byte) []byte {
 	var failed DataRunFailed
 	if json.Unmarshal(data, &failed) != nil {
 		return nil
@@ -135,21 +139,23 @@ func DecodeRunFailed(data []byte) json.RawMessage {
 	return failed.Error
 }
 
-// EncodeRunFailed returns the Data of a run_failed event for err.
-func EncodeRunFailed(err error) []byte {
-	// Encoding cannot fail, because encodeError returns valid JSON.
-	data, _ := json.Marshal(DataRunFailed{Error: encodeError(err)})
-	return data
+// EncodeRunFailed returns the Data of a run_failed event for err, its
+// payload written with options.
+func EncodeRunFailed(err error, options PayloadOptions) ([]byte, error) {
+	payload, encodeErr := EncodeErrorPayload(err, options)
+	if encodeErr != nil {
+		return nil, encodeErr
+	}
+	return json.Marshal(DataRunFailed{Error: payload})
 }
 
-// DataStepCreated is the JSON payload of a step_created event.
+// DataStepCreated is the Data of a step_created event. The step's position
+// is in its ID, and its options and cancellation contexts come from the
+// replay that declares it.
 type DataStepCreated struct {
-	Position     int                     `json:"position"`
-	StepName     string                  `json:"stepName"`
-	Input        json.RawMessage         `json:"input"`
-	MaxRetries   int                     `json:"maxRetries"`
-	Rollback     bool                    `json:"rollback,omitempty"`
-	Cancellation []cancellationReference `json:"cancellation,omitempty"`
+	StepName string `json:"stepName"`
+	// Input is the step's arguments, {args: [input]}, as a payload.
+	Input []byte `json:"input"`
 }
 
 // DataStepStarted is the JSON payload of a step_started event.
@@ -163,28 +169,23 @@ type DataStepStarted struct {
 // DataStepResult is the JSON payload of a step_completed, step_retrying, or
 // step_failed event.
 type DataStepResult struct {
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      json.RawMessage `json:"error,omitempty"`
-	RetryAfter *time.Time      `json:"retryAfter,omitempty"`
+	Result     []byte     `json:"result,omitempty"`
+	Error      []byte     `json:"error,omitempty"`
+	RetryAfter *time.Time `json:"retryAfter,omitempty"`
 }
 
-// DataWaitCreated is the JSON payload of a wait_created event.
+// DataWaitCreated is the Data of a wait_created event. The wait's position
+// is in its ID, and its cancellation contexts come from the replay.
 type DataWaitCreated struct {
-	Position       int                     `json:"position"`
-	ResumeAt       time.Time               `json:"resumeAt"`
-	QueueMessageID string                  `json:"queueMessageId"`
-	Cancellation   []cancellationReference `json:"cancellation,omitempty"`
+	ResumeAt time.Time `json:"resumeAt"`
 }
 
-// DataHookCreated is the JSON payload of a hook_created or hook_conflict
-// event. Webhook carries the settings that IsWebhook summarizes.
+// DataHookCreated is the Data of a hook_created or hook_conflict event.
 type DataHookCreated struct {
-	Position  int      `json:"position"`
-	Token     string   `json:"token"`
-	Metadata  []byte   `json:"metadata,omitempty"`
-	IsWebhook bool     `json:"isWebhook,omitempty"`
-	IsSystem  bool     `json:"isSystem,omitempty"`
-	Webhook   *Webhook `json:"webhook,omitempty"`
+	Token     string `json:"token"`
+	Metadata  []byte `json:"metadata,omitempty"`
+	IsWebhook bool   `json:"isWebhook,omitempty"`
+	IsSystem  bool   `json:"isSystem,omitempty"`
 	// TokenRetentionUntil reserves the token until this time, including
 	// after the run ends.
 	TokenRetentionUntil *time.Time      `json:"tokenRetentionUntil,omitempty"`
@@ -195,51 +196,25 @@ type DataHookCreated struct {
 
 // DataHookReceived is the Data of a hook_received event.
 type DataHookReceived struct {
-	// Payload is the JSON value sent to the hook. A webhook receives a
-	// WebhookReceivedEventData.
-	Payload json.RawMessage `json:"payload,omitempty"`
+	// Payload is the value sent to the hook as a payload. A webhook
+	// receives a WebhookRequest.
+	Payload []byte `json:"payload,omitempty"`
 }
 
-// EncodeHookReceived returns the Data of a hook_received event carrying the
-// JSON payload.
+// EncodeHookReceived returns the Data of a hook_received event carrying
+// payload.
 func EncodeHookReceived(payload []byte) ([]byte, error) {
-	data, err := json.Marshal(DataHookReceived{Payload: payload})
-	if err != nil {
-		return nil, fmt.Errorf("%w: hook payload is not JSON: %v", ErrEventInvalid, err)
-	}
-	return data, nil
+	return json.Marshal(DataHookReceived{Payload: payload})
 }
 
 // DecodeHookReceived returns the Payload of hook_received event Data, or nil
 // when data is not a DataHookReceived.
-func DecodeHookReceived(data []byte) json.RawMessage {
+func DecodeHookReceived(data []byte) []byte {
 	var received DataHookReceived
 	if json.Unmarshal(data, &received) != nil {
 		return nil
 	}
 	return received.Payload
-}
-
-// WebhookReceivedEventData is the Data of a hook_received event for a
-// webhook. It holds either the received Request or, for a manual
-// webhook, the workflow's Response to the request event named by
-// ResponseTo.
-type WebhookReceivedEventData struct {
-	Request    *WebhookRequest  `json:"request,omitempty"`
-	Response   *WebhookResponse `json:"response,omitempty"`
-	ResponseTo EventID          `json:"responseTo,omitempty"`
-}
-
-// DecodeWebhookReceived decodes the WebhookReceivedEventData that
-// hook_received event Data carries for a webhook. It reports false for other
-// Data.
-func DecodeWebhookReceived(data []byte) (WebhookReceivedEventData, bool) {
-	var received WebhookReceivedEventData
-	payload := DecodeHookReceived(data)
-	if payload == nil || json.Unmarshal(payload, &received) != nil {
-		return WebhookReceivedEventData{}, false
-	}
-	return received, true
 }
 
 // HookDisposedEventData is the Data of a hook_disposed event. It is empty
