@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -185,19 +184,16 @@ func conformBatch(t *testing.T, world worlds.World) {
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_missing"},
 	}})
 	conformExpect(t, err, worlds.ErrStepNotStartable, "batch with rejected event")
-	if _, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_b"}); !errors.Is(err, worlds.ErrStepNotFound) {
-		t.Fatalf("rejected batch leaked step_b: %v", err)
-	}
-	if events := conformAllEvents(t, world, runID); len(events) != 4 {
-		t.Fatalf("events after rejected batch = %d, want 4", len(events))
-	}
+	// A refused event may leave the others appended, but an invalid batch
+	// appends nothing.
+	before := len(conformAllEvents(t, world, runID))
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunCreated}}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "batch with run_created")
+	if events := conformAllEvents(t, world, runID); len(events) != before {
+		t.Fatalf("events after invalid batch = %d, want %d", len(events), before)
+	}
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunStarted}}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "batch with replayed event")
-	if events := conformAllEvents(t, world, runID); len(events) != 4 {
-		t.Fatalf("events after invalid batches = %d, want 4", len(events))
-	}
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: "wrun_missing", Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeRunStarted}}})
 	conformExpect(t, err, worlds.ErrRunNotFound, "batch for missing run")
 	completed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
@@ -208,10 +204,6 @@ func conformBatch(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunTerminal, "batch appending after its own terminal event")
 	if completed.Events != nil {
 		t.Fatalf("failed batch returned results: %#v", completed)
-	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-	if err != nil || run.Status != worlds.StatusRunning {
-		t.Fatalf("run after rejected terminal batch = %#v err=%v", run, err)
 	}
 }
 

@@ -36,7 +36,7 @@ instantly. See [Testing](/guide/testing#sleeps-and-timers).
 ## Manual delivery
 
 `testworld.NewManual` records deliveries without executing them. The test
-executes them with a `worlds.Runtime` and acknowledges each with `QueueCancel`.
+executes them with a `worlds.Runtime` and acknowledges each with `Acknowledge`.
 
 ```go
 runners := []worlds.Runner{workflow.Use(flows.GenerateReport)}
@@ -49,7 +49,7 @@ for len(world.QueuedMessages()) > 0 {
 		t.Fatal(err)
 	}
 
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+	if err := world.Acknowledge(ctx, message.ID); err != nil {
 		t.Fatal(err)
 	}
 }

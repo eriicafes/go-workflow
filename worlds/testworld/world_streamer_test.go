@@ -16,11 +16,7 @@ func TestStreamCursorsOutOfRangeDoNotPanic(t *testing.T) {
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
-	session, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "s", WriterID: "w"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := session.Write(ctx, worlds.StreamWriteSessionWriteInput{Chunks: [][]byte{[]byte("a")}}); err != nil {
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "s", Chunk: []byte("a")}); err != nil {
 		t.Fatal(err)
 	}
 	for _, cursor := range []string{"-3", "5", "x"} {

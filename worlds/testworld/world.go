@@ -50,7 +50,7 @@ func New(runners ...worlds.Runner) *World {
 
 // NewManual returns a World that records deliveries without executing them.
 // Tests execute them through QueuedMessages and acknowledge each with
-// QueueCancel.
+// Acknowledge.
 func NewManual(runners ...worlds.Runner) *World {
 	return newWorld(false, runners...)
 }

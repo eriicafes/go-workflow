@@ -104,7 +104,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"held", ""} {
-		if _, err := world.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: name}); err != nil {
+		if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: "wrun_persist", Name: name}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,11 +138,9 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if err != nil || len(names) != 3 || names[0] != "" || names[1] != "held" || names[2] != "out/1" {
 		t.Fatalf("stream names = %q err=%v", names, err)
 	}
-	// Sessions belong to the process that opened them and are released at
-	// Prepare, including the default stream's.
 	for _, name := range []string{"held", ""} {
-		if _, err := reopened.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: "wrun_persist", Name: name}); err != nil {
-			t.Fatalf("session on %q after restart: %v", name, err)
+		if info, err := reopened.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: "wrun_persist", Name: name}); err != nil || !info.Done {
+			t.Fatalf("closed stream %q after restart = %#v err=%v", name, info, err)
 		}
 	}
 	next, err := reopened.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_persist", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}})
@@ -525,16 +523,6 @@ func TestQueueIdempotencyKey(t *testing.T) {
 	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", NotBefore: &later, IdempotencyKey: "k"})
 	if err != nil || other.MessageID == first.MessageID {
 		t.Fatalf("same key on another run = %#v err=%v", other, err)
-	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: first.MessageID}); err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || fresh.MessageID == first.MessageID {
-		t.Fatalf("key after cancel = %#v err=%v", fresh, err)
-	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: "../version"}); !errors.Is(err, worlds.ErrQueueMessageNotFound) {
-		t.Fatalf("cancel path-like ID = %v", err)
 	}
 }
 

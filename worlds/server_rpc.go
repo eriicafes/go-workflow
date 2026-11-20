@@ -62,12 +62,11 @@ var rpcSentinels = []struct {
 	{"step_not_found", "not_found", ErrStepNotFound},
 	{"event_not_found", "not_found", ErrEventNotFound},
 	{"hook_not_found", "not_found", ErrHookNotFound},
-	{"queue_message_not_found", "not_found", ErrQueueMessageNotFound},
 	{"event_invalid", "invalid_argument", ErrEventInvalid},
 	{"run_already_exists", "conflict", ErrRunAlreadyExists},
 	{"run_terminal", "conflict", ErrRunTerminal},
 	{"step_not_startable", "conflict", ErrStepNotStartable},
-	{"stream_locked", "conflict", ErrStreamLocked},
+	{"stream_closed", "conflict", ErrStreamClosed},
 	{"hook_conflict", "conflict", ErrHookConflict},
 	{"hook_not_active", "conflict", ErrHookNotActive},
 	{"hook_force_claimed", "conflict", ErrHookForceClaimed},
@@ -322,15 +321,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(value)
-	case "queue.cancel":
-		input, err := decodeRPC[QueueCancelInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.QueueCancel(ctx, input); err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
 	case "streams.write":
 		input, err := decodeRPC[StreamsWriteInput](request.Input)
 		if err != nil {
@@ -338,34 +328,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		}
 		err = world.StreamsWrite(ctx, input)
 		if err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
-	case "streams.createWriteSession":
-		input, err := decodeRPC[StreamsCreateWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		session, err := world.StreamsCreateWriteSession(ctx, input)
-		if err != nil {
-			return nil, err
-		}
-		return encodeRPC(session.ID())
-	case "streams.writeSession":
-		input, err := decodeRPC[StreamsWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.StreamsWriteSession(ctx, input); err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
-	case "streams.closeWriteSession":
-		input, err := decodeRPC[StreamsCloseWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.StreamsCloseWriteSession(ctx, input); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})

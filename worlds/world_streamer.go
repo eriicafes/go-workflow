@@ -2,32 +2,25 @@ package worlds
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 )
 
 // Streamer stores streams, which are named, ordered sequences of chunks that a
 // run writes and readers consume. A stream is identified by its run ID and
-// name. Writes go either through one exclusive writer session or directly when
-// no session owns the stream.
+// name. Any number of writers may append to a stream at once, as in the
+// Workflow SDK: each write's chunks stay in order, and the writes of
+// different writers interleave in the order the World stores them.
 type Streamer interface {
-	// StreamsCreateWriteSession creates an exclusive writer session for the
-	// stream named Name in run RunID. It returns ErrStreamLocked when another
-	// session owns the stream.
-	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
-	// StreamsWriteSession appends Chunks for SessionID at Sequence. It returns
-	// ErrStreamLocked when the session is not current or Sequence is not next.
-	StreamsWriteSession(context.Context, StreamsWriteSessionInput) error
-	// StreamsCloseWriteSession releases SessionID. It closes the stream when
-	// Close is true. It returns ErrStreamLocked when SessionID is not current.
-	StreamsCloseWriteSession(context.Context, StreamsCloseWriteSessionInput) error
-	// StreamsWrite appends Chunk when no writer session owns the stream. It
-	// returns ErrStreamLocked when a session owns the stream.
+	// StreamsWrite appends Chunk. It returns ErrStreamClosed when the stream
+	// is closed.
 	StreamsWrite(context.Context, StreamsWriteInput) error
-	// StreamsWriteMulti appends Chunks when no writer session owns the stream. It
-	// returns ErrStreamLocked when a session owns the stream.
+	// StreamsWriteMulti appends Chunks in order. It returns ErrStreamClosed
+	// when the stream is closed.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
-	// StreamsClose marks a stream done when no writer session owns it. It returns
-	// ErrStreamLocked when a session owns the stream.
+	// StreamsClose marks a stream done for every writer. Closing a closed
+	// stream succeeds.
 	StreamsClose(context.Context, StreamsCloseInput) error
 	// StreamsGetChunks returns chunks after Cursor, or from StartIndex when
 	// Cursor is empty (see StreamsStartIndex). When no chunk is available
@@ -41,57 +34,100 @@ type Streamer interface {
 	StreamsList(context.Context, StreamsListInput) ([]string, error)
 }
 
-// StreamWriteSession is an exclusive writer session for one stream, created
-// by StreamsCreateWriteSession. Only one session owns a stream at a time.
-type StreamWriteSession interface {
-	// ID returns the session ID.
-	ID() StreamID
-	// Write appends Chunks at Sequence. It returns ErrStreamLocked when the
-	// session is no longer current or Sequence is not the next one.
-	Write(context.Context, StreamWriteSessionWriteInput) error
-	// Close marks the stream done and releases the session.
-	Close(context.Context) error
-	// Release releases the session without marking the stream done, so
-	// another writer can continue it.
-	Release(context.Context) error
+// StreamWriterOpener is implemented by a World with a faster transport for a
+// writer that writes a stream many times, such as a WebSocket held for the
+// writer's lifetime. OpenStreamWriter uses it when the World implements it.
+// It gives the writer no exclusive hold on the stream.
+type StreamWriterOpener interface {
+	// StreamsOpenWriter returns a writer for the stream Name of run RunID.
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
 }
 
+// StreamWriter appends to one stream on behalf of one writer, which other
+// writers of the stream do not wait for. After Release or CloseStream it
+// accepts no more writes.
+type StreamWriter interface {
+	// Write appends chunks in order. It returns ErrStreamClosed when the
+	// stream is closed.
+	Write(ctx context.Context, chunks [][]byte) error
+	// Release gives up the writer and its transport, leaving the stream open
+	// for other writers.
+	Release(ctx context.Context) error
+	// CloseStream closes the stream for every writer and gives up the
+	// writer.
+	CloseStream(ctx context.Context) error
+}
+
+// OpenStreamWriter returns a writer for a stream: streamer's own when it
+// implements StreamWriterOpener, and otherwise one that writes through
+// StreamsWriteMulti and StreamsClose.
+func OpenStreamWriter(ctx context.Context, streamer Streamer, input StreamsOpenWriterInput) (StreamWriter, error) {
+	if writers, ok := streamer.(StreamWriterOpener); ok {
+		return writers.StreamsOpenWriter(ctx, input)
+	}
+	return newDirectStreamWriter(streamer, input), nil
+}
+
+// streamAppender is the part of a Streamer a direct writer uses.
+type streamAppender interface {
+	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
+	StreamsClose(context.Context, StreamsCloseInput) error
+}
+
+func newDirectStreamWriter(streamer streamAppender, input StreamsOpenWriterInput) *directStreamWriter {
+	return &directStreamWriter{streamer: streamer, runID: input.RunID, name: input.Name}
+}
+
+// directStreamWriter writes through a Streamer's stateless methods.
+type directStreamWriter struct {
+	streamer streamAppender
+	runID    RunID
+	name     string
+	mu       sync.Mutex
+	done     bool
+}
+
+func (w *directStreamWriter) Write(ctx context.Context, chunks [][]byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done {
+		return errStreamWriterDone
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	return w.streamer.StreamsWriteMulti(ctx, StreamsWriteMultiInput{RunID: w.runID, Name: w.name, Chunks: chunks})
+}
+
+func (w *directStreamWriter) Release(context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.done = true
+	return nil
+}
+
+func (w *directStreamWriter) CloseStream(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.streamer.StreamsClose(ctx, StreamsCloseInput{RunID: w.runID, Name: w.name}); err != nil {
+		return err
+	}
+	w.done = true
+	return nil
+}
+
+// errStreamWriterDone is returned by a StreamWriter used after Release or
+// CloseStream.
+var errStreamWriterDone = errors.New("workflow: stream writer is released")
+
 type (
-	// StreamsCreateWriteSessionInput holds the arguments to
-	// StreamsCreateWriteSession.
-	StreamsCreateWriteSessionInput struct {
+	// StreamsOpenWriterInput holds the arguments to StreamsOpenWriter.
+	StreamsOpenWriterInput struct {
 		RunID RunID
 		Name  string
-		// WriterID identifies the writer requesting the session. A World may
-		// ignore it.
+		// WriterID identifies the writer, for observability only. NewWriterID
+		// makes one.
 		WriterID string
-	}
-	// StreamsWriteSessionInput holds the arguments to StreamsWriteSession.
-	StreamsWriteSessionInput struct {
-		RunID     RunID
-		Name      string
-		SessionID StreamID
-		// Sequence is the number of writes this session has made before this
-		// one, starting at zero.
-		Sequence int
-		Chunks   [][]byte
-	}
-	// StreamsCloseWriteSessionInput holds the arguments to
-	// StreamsCloseWriteSession.
-	StreamsCloseWriteSessionInput struct {
-		RunID     RunID
-		Name      string
-		SessionID StreamID
-		// Close marks the stream done as the session is released.
-		Close bool
-	}
-	// StreamWriteSessionWriteInput holds the arguments to
-	// StreamWriteSession.Write.
-	StreamWriteSessionWriteInput struct {
-		// Sequence is the number of writes this session has made before this
-		// one, starting at zero.
-		Sequence int
-		Chunks   [][]byte
 	}
 	// StreamsWriteInput holds the arguments to StreamsWrite.
 	StreamsWriteInput struct {

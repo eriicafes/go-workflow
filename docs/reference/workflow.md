@@ -205,7 +205,7 @@ func (r *Run[Out]) Exists(ctx context.Context) (bool, error)
 func (r *Run[Out]) WorkflowName(ctx context.Context) (string, error)
 func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, error)
 func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamReader, error)
-func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error)
+func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error)
 ```
 
 | Method | Description |
@@ -341,17 +341,23 @@ Embeds the incoming HTTP request and implements JSON serialization for step inpu
 ## Streams
 
 ```go
-func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error)
+func Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error)
 func Reader(ctx context.Context, options ...ReaderOption) (StreamReader, error)
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Writer` | S | Writer for a stream of the current run, plus a release function. |
+| `Writer` | S | Writer for a stream of the current run, closed when the step returns. |
 | `Reader` | S | Reader from `StartIndex`. Negative indexes count from the end. |
 
 ```go
 type WriterOption struct{ Name string } // empty is the default stream
+type StreamWriter interface {
+	io.Writer           // buffers one chunk per Write
+	io.Closer           // stores what is buffered and gives up the writer
+	Flush() error       // waits until buffered chunks are stored
+	CloseStream() error // stores what is buffered and closes the stream for every writer
+}
 type ReaderOption struct {
 	Name       string // empty is the default stream
 	StartIndex int    // first chunk; negative counts back from the end

@@ -128,6 +128,9 @@ CREATE TABLE go_workflow_stream_chunks (
 	data bytea NOT NULL,
 	PRIMARY KEY (run_id, name, idx)
 );
+`, `
+-- Stream writers are no longer exclusive.
+ALTER TABLE go_workflow_streams DROP COLUMN session, DROP COLUMN sequence;
 `}
 
 // migrate applies pending migrations in one transaction under a

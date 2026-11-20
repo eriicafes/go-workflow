@@ -19,7 +19,7 @@ hero:
 features:
   - icon: 🌍
     title: Run anywhere, no lock-in
-    details: Pick a World for local files, PostgreSQL, Redis with Vercel Queues, or DynamoDB with SQS. Runs sleep without holding a process, and your workflows stay the same on every World.
+    details: Pick a World for local files, PostgreSQL, Vercel, or DynamoDB with SQS. Runs sleep without holding a process, and your workflows stay the same on every World.
   - icon: 🖥️
     title: Inspect every run
     details: Runs follow the Workflow SDK's event model, so its web UI shows every Go run, step, hook, and stream.

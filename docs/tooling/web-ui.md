@@ -30,7 +30,7 @@ talks to your handler's RPC endpoint. You don't import it yourself.
 
 ::: warning
 The RPC endpoint is unauthenticated unless you protect it. To point the web UI
-at a deployed World, [protect the RPC path](/worlds/#protecting-the-rpc-path)
-with `worlds.WithRPCToken` and export the same `WORKFLOW_HTTP_TOKEN` before
+at a deployed World, [protect the client endpoints](/worlds/#protecting-the-client-endpoints)
+with `worlds.WithClientToken` and export the same `WORKFLOW_HTTP_TOKEN` before
 running `npx workflow web`.
 :::

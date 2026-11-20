@@ -140,7 +140,8 @@ func (w *World) consume(ctx context.Context, runtime *worlds.Runtime, event even
 			continue
 		}
 		stop := w.holdVisibility(ctx, queueURL, record.ReceiptHandle)
-		err := w.deliver(ctx, runtime, record.Body)
+		attempt, _ := strconv.Atoi(record.Attributes["ApproximateReceiveCount"])
+		err := w.deliver(ctx, runtime, record.Body, attempt)
 		stop()
 		if err != nil {
 			log.Printf("workflow/aws: delivery %s failed: %v", record.MessageId, err)
@@ -199,7 +200,7 @@ func retryBackoff(receiveCount string) time.Duration {
 	return min(backoff, maxRetryBackoff)
 }
 
-func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body string) error {
+func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body string, attempt int) error {
 	var message queueMessage
 	if err := json.Unmarshal([]byte(body), &message); err != nil || message.ID == "" {
 		// Redelivering a body that is not a queue message cannot succeed.
@@ -231,7 +232,7 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body strin
 		return w.deleteQueueRecord(ctx, message.ID)
 	}
 	input := record.input
-	input.MessageID = message.ID
+	input.MessageID, input.Attempt = message.ID, attempt
 	if err := runtime.Execute(ctx, input); err != nil {
 		return err
 	}

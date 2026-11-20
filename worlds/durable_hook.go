@@ -64,7 +64,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		if options.Token == "" {
 			options.Token = NewHookToken()
 		}
-		hookID := NewHookID()
+		hookID := NewHookIDAt(position)
 		created := DataHookCreated{Position: position, Token: options.Token, IsWebhook: options.Webhook != nil, IsSystem: options.System, Webhook: options.Webhook, Force: options.Force}
 		if options.MinRetention > 0 {
 			until := time.Now().UTC().Add(options.MinRetention)

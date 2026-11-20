@@ -14,7 +14,6 @@ import (
 // schedulerAPI is the subset of the EventBridge Scheduler client used by World.
 type schedulerAPI interface {
 	CreateSchedule(context.Context, *scheduler.CreateScheduleInput, ...func(*scheduler.Options)) (*scheduler.CreateScheduleOutput, error)
-	DeleteSchedule(context.Context, *scheduler.DeleteScheduleInput, ...func(*scheduler.Options)) (*scheduler.DeleteScheduleOutput, error)
 }
 
 func (w *World) scheduleGroup() string {
@@ -47,20 +46,6 @@ func (w *World) createSchedule(ctx context.Context, name string, due time.Time, 
 		Target:                     target,
 		ActionAfterCompletion:      sch.ActionAfterCompletionDelete,
 	})
-	return err
-}
-
-// deleteSchedule removes a schedule. A schedule that already fired and was
-// deleted, or never existed, counts as removed.
-func (w *World) deleteSchedule(ctx context.Context, name string) error {
-	_, err := w.scheduler.DeleteSchedule(ctx, &scheduler.DeleteScheduleInput{
-		Name:      awsv2.String(name),
-		GroupName: awsv2.String(w.scheduleGroup()),
-	})
-	var notFound *sch.ResourceNotFoundException
-	if errors.As(err, &notFound) {
-		return nil
-	}
 	return err
 }
 

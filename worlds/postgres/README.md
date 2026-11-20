@@ -70,7 +70,7 @@ the connection string or pool config to use a dedicated schema.
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
 | `go_workflow_hook_tokens` | Token ownership; the primary key makes a token single-owner. |
 | `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
-| `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
+| `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
 The event log is the only copy of payloads. The run, step, and hook views
@@ -113,8 +113,7 @@ increments `attempts`, then executes each with the runtime:
 - shutdown releases the lease so another worker picks the row up immediately.
 
 Delivery is at least once. The runtime's event admission makes duplicate
-deliveries inert. `QueueCancel` deletes the row; a row cancelled while being
-executed is simply not found when the worker settles it.
+deliveries inert.
 
 ## Retention
 

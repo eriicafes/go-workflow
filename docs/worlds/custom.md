@@ -31,7 +31,7 @@ type World interface {
 | --- | --- |
 | [`Storage`](/reference/worlds#storage) | Append-only event logs and the run, step, and hook views derived from them. |
 | [`Queue`](/reference/worlds#queue) | Durable deliveries with a not-before time. |
-| [`Streamer`](/reference/worlds#streamer) | Named, ordered byte streams with exclusive writer sessions. |
+| [`Streamer`](/reference/worlds#streamer) | Named, ordered byte streams that any number of writers append to. |
 | [`Analytics`](/reference/worlds#analytics) | Optional reporting queries across runs. |
 
 ## Key requirements

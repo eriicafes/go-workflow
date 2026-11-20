@@ -74,9 +74,9 @@ func ConformanceShared(t *testing.T, newPair func(t *testing.T) (worlds.World, w
 		a, b := newPair(t)
 		conformConcurrentHookClaims(t, a, b)
 	})
-	t.Run("SharedStreamSessions", func(t *testing.T) {
+	t.Run("SharedStreams", func(t *testing.T) {
 		a, b := newPair(t)
-		conformSharedStreamSessions(t, a, b)
+		conformSharedStreams(t, a, b)
 	})
 }
 

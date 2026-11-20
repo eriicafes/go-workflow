@@ -1,32 +1,17 @@
 package vercelworld
 
 import (
-	"cmp"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/oklog/ulid/v2"
-
 	"github.com/eriicafes/go-workflow/workflowtest"
 	"github.com/eriicafes/go-workflow/worlds"
 )
-
-// scriptDeletePrefix removes every key under ARGV[1] after a test.
-var scriptDeletePrefix = newRedisScript(`
-local cursor = '0'
-repeat
-  local reply = redis.call('SCAN', cursor, 'MATCH', ARGV[1] .. ':*', 'COUNT', 1000)
-  cursor = reply[1]
-  for _, key in ipairs(reply[2]) do redis.call('DEL', key) end
-until cursor == '0'
-return 0
-`)
 
 // fakeVQS accepts publishes like the Vercel Queues API.
 type fakeVQS struct {
@@ -56,85 +41,117 @@ func (f *fakeVQS) published() [][]byte {
 	return append([][]byte(nil), f.bodies...)
 }
 
-func TestConformanceRedisTCP(t *testing.T) {
-	runConformance(t, redisTCPConfig())
-}
-
-func TestConformanceRedisREST(t *testing.T) {
-	runConformance(t, redisRESTConfig())
-}
-
-// TestConformanceRetention checks that expiring finished runs changes
-// nothing a World does while runs are kept.
-func TestConformanceRetention(t *testing.T) {
-	config := redisTCPConfig()
-	config.Retention = time.Hour
-	runConformance(t, config)
-}
-
-// newWorldPair returns count Worlds sharing a unique prefix on the backend
-// described by config, and removes the prefix's keys after the test.
-func newWorlds(t *testing.T, config Config, count int) ([]*World, *fakeVQS) {
+// newWorlds returns count Worlds sharing one fake backend, as instances of
+// one deployment would, with a fake Vercel Queues API.
+func newWorlds(t *testing.T, count int) ([]*World, *fakeVQS, *fakeBackend) {
 	t.Helper()
+	backend := newFakeBackend(t)
 	queue := &fakeVQS{}
 	server := httptest.NewServer(queue)
 	t.Cleanup(server.Close)
-	config.BaseURL = "http://localhost/v1/workflow"
-	config.QueueURL = server.URL + "/api/v3"
-	config.Topic = "workflow"
-	config.OIDCToken = staticOIDCToken("test-oidc")
-	config.Prefix = "gwtest:" + ulid.Make().String()
 	result := make([]*World, count)
 	for index := range result {
-		world, err := New(config)
+		world, err := New(Config{
+			BaseURL:    "http://localhost/v1/workflow",
+			QueueURL:   server.URL + "/api/v3",
+			Topic:      "workflow",
+			OIDCToken:  staticOIDCToken("test-oidc"),
+			BackendURL: backend.server.URL,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		result[index] = world
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := result[0].redis.Exists(ctx, config.Prefix); err != nil {
-		t.Fatalf("Redis is not reachable (%s%s): %v", config.RedisURL, config.RedisRESTURL, err)
+	return result, queue, backend
+}
+
+func TestConformance(t *testing.T) {
+	workflowtest.Conformance(t, func(t *testing.T) worlds.World {
+		all, _, _ := newWorlds(t, 1)
+		return all[0]
+	})
+}
+
+func TestConformanceShared(t *testing.T) {
+	workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {
+		all, _, _ := newWorlds(t, 2)
+		return all[0], all[1]
+	})
+}
+
+func TestNewValidatesConfig(t *testing.T) {
+	valid := Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow"}
+	for name, mutate := range map[string]func(*Config){
+		"missing base URL":      func(c *Config) { c.BaseURL = "" },
+		"relative base URL":     func(c *Config) { c.BaseURL = "/v1/workflow" },
+		"missing topic":         func(c *Config) { c.Topic = "" },
+		"token without project": func(c *Config) { c.Token = "token" },
+		"route without topic": func(c *Config) {
+			c.Routes = map[string]string{"example.com/a.Workflow": "backfill"}
+		},
+	} {
+		config := valid
+		mutate(&config)
+		if _, err := New(config); err == nil {
+			t.Errorf("%s: New succeeded", name)
+		}
 	}
-	t.Cleanup(func() {
-		if _, err := result[0].redis.Run(context.Background(), scriptDeletePrefix, config.Prefix); err != nil {
-			t.Errorf("clean up Redis keys: %v", err)
+	if _, err := New(valid); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewDefaults(t *testing.T) {
+	t.Setenv("VERCEL_REGION", "sfo1")
+	world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if world.config.QueueURL != "https://sfo1.vercel-queue.com/api/v3" || world.api.baseURL != DefaultBackendURL || world.api.proxy {
+		t.Fatalf("defaults = queue %q backend %q proxy %v", world.config.QueueURL, world.api.baseURL, world.api.proxy)
+	}
+	proxied, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", Token: "token", ProjectID: "prj_1", TeamID: "team_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxied.api.baseURL != DefaultProxyURL || !proxied.api.proxy || proxied.api.env != "production" {
+		t.Fatalf("proxy defaults = backend %q proxy %v env %q", proxied.api.baseURL, proxied.api.proxy, proxied.api.env)
+	}
+}
+
+// TestProxyCredentials checks the headers a World sends through Vercel's API
+// proxy with an access token.
+func TestProxyCredentials(t *testing.T) {
+	var header http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		header = request.Header.Clone()
+		writer.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+	world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", Token: "vercel-token", ProjectID: "prj_1", TeamID: "team_1", Environment: "preview", BackendURL: server.URL, OIDCToken: func(context.Context) (string, error) {
+		t.Fatal("OIDC token requested through the proxy")
+		return "", nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = world.StepsGet(context.Background(), worlds.StepsGetInput{RunID: "wrun_1", StepID: "step_1"})
+	if header.Get("Authorization") != "Bearer vercel-token" || header.Get("X-Vercel-Project-Id") != "prj_1" || header.Get("X-Vercel-Team-Id") != "team_1" || header.Get("X-Vercel-Environment") != "preview" || header.Get("X-Vercel-Trusted-Oidc-Idp-Token") != "" {
+		t.Fatalf("proxy headers = %v", header)
+	}
+}
+
+func staticOIDCToken(token string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) { return token, nil }
+}
+
+// waitFor polls condition until it holds or a second passes.
+func waitFor(t *testing.T, condition func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(time.Second); !condition(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met")
 		}
-		for _, world := range result {
-			_ = world.Close()
-		}
-	})
-	return result, queue
-}
-
-func runConformance(t *testing.T, config Config) {
-	t.Run("Conformance", func(t *testing.T) {
-		workflowtest.Conformance(t, func(t *testing.T) worlds.World {
-			pair, _ := newWorlds(t, config, 1)
-			return pair[0]
-		})
-	})
-	t.Run("ConformanceShared", func(t *testing.T) {
-		workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {
-			pair, _ := newWorlds(t, config, 2)
-			return pair[0], pair[1]
-		})
-	})
-}
-
-// redisTCPConfig targets the Redis at REDIS_URL, defaulting to
-// redis://localhost:6379.
-func redisTCPConfig() Config {
-	return Config{RedisURL: cmp.Or(os.Getenv("REDIS_URL"), "redis://localhost:6379")}
-}
-
-// redisRESTConfig targets the Upstash-compatible REST endpoint at
-// UPSTASH_REDIS_REST_URL, defaulting to a local serverless-redis-http at
-// http://localhost:8079 with token "local".
-func redisRESTConfig() Config {
-	return Config{
-		RedisRESTURL:   cmp.Or(os.Getenv("UPSTASH_REDIS_REST_URL"), "http://localhost:8079"),
-		RedisRESTToken: cmp.Or(os.Getenv("UPSTASH_REDIS_REST_TOKEN"), "local"),
 	}
 }

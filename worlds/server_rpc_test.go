@@ -351,7 +351,7 @@ func TestRPCCapsWaits(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
+func TestHTTPHandlerWithClientTokenProtectsClientEndpoints(t *testing.T) {
 	body, err := cbor.Marshal(rpcRequest{Method: "client.spec"})
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +367,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 		return response.Code
 	}
 
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("secret"))
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("secret"))
 	for authorization, want := range map[string]int{
 		"":              http.StatusUnauthorized,
 		"Bearer wrong":  http.StatusUnauthorized,
@@ -378,7 +378,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 			t.Errorf("Authorization %q: status = %d, want %d", authorization, got, want)
 		}
 	}
-	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("")), "Bearer "); got != http.StatusUnauthorized {
+	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("")), "Bearer "); got != http.StatusUnauthorized {
 		t.Errorf("empty token: status = %d, want 401", got)
 	}
 
@@ -390,7 +390,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
+func TestHTTPHandlerWithClientMiddlewareWrapsInOrder(t *testing.T) {
 	var order []string
 	mark := func(name string) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler {
@@ -400,7 +400,7 @@ func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
 			})
 		}
 	}
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCMiddleware(mark("outer")), worlds.WithRPCMiddleware(mark("inner")))
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientMiddleware(mark("outer")), worlds.WithClientMiddleware(mark("inner")))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", nil))
 	if len(order) != 2 || order[0] != "outer" || order[1] != "inner" {
 		t.Fatalf("order = %v", order)

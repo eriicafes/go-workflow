@@ -1,18 +1,38 @@
 # HTTP Endpoints
 
 `worlds.HTTPHandler(world, prefix)`, which every World package wraps as
-`HTTP(world)`, serves two endpoints under a prefix (default `/v1/workflow`).
+`HTTP(world)`, serves three endpoints under a prefix (default `/v1/workflow`).
 It does not execute deliveries.
 
 | Route | Handler | Purpose |
 | --- | --- | --- |
 | `POST <prefix>/rpc` | `worlds.RPCHandler` | CBOR RPC for clients and tools |
+| `GET <prefix>/websockets/v1/runs/{runId}/streams/{name}` | `worlds.StreamSocketHandler` | stream writes over a WebSocket |
 | `<prefix>/webhooks/{token}` | `worlds.WebhookHandler` | webhook requests |
 
-The Vercel World adds `POST <prefix>/callbacks/qstash` when QStash is
-configured. `vercelworld.QStash(world)` exposes that callback separately.
-Callback routes under `<prefix>/callbacks/` are where a World mounts endpoints
-specific to it.
+The Vercel World adds `GET <prefix>/deployment`, which answers with the
+deployment serving it. `vercelworld.Deployment(world)` exposes that route
+separately. Callback routes under `<prefix>/callbacks/` are where a World
+mounts endpoints specific to it.
+
+## Stream socket
+
+The stream socket carries one writer's writes to a stream, in the Workflow
+SDK's v1 stream socket protocol, behind the same protection as RPC. The
+`writerId` query parameter (`wrtr_` and a ULID) is required. Every message is a
+frame: a big-endian u32 meta length, CBOR meta, a u32 body length, and the
+body.
+
+| Client message | Meta | Body |
+| --- | --- | --- |
+| write | `{ type: "write", reqId, chunkSeq, numChunks }` | each chunk as a u32 length and its bytes |
+| close | `{ type: "close", reqId }` | empty; closes the stream for every writer |
+
+The server answers each with `{ type: "write_ack" | "close_ack", reqId }` or
+`{ type: "error", reqId, status, message }`, where `409` means the stream is
+closed. `workflow.NewHTTPClient` and the `world-http` adapter open the socket
+for each writer and write through RPC while it opens and when it is declined or
+fails, so a server that does not serve it still works.
 
 ## RPC
 
@@ -55,8 +75,8 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 | Steps | `steps.get`, `steps.list` |
 | Events | `events.create`, `events.createRun`, `events.createBatch`, `events.get`, `events.list`, `events.listByCorrelationID` |
 | Hooks | `hooks.get`, `hooks.getByToken`, `hooks.list` |
-| Queue | `queue.queue`, `queue.queueBatch`, `queue.cancel` |
-| Streams | `streams.write`, `streams.createWriteSession`, `streams.writeSession`, `streams.closeWriteSession`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
+| Queue | `queue.queue`, `queue.queueBatch` |
+| Streams | `streams.write`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
 | Client | `client.spec`, `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
@@ -70,9 +90,9 @@ Other batch failures are returned as the request's error. A run
 created without an ID is given one.
 
 ::: danger Unauthenticated
-The RPC endpoint can start runs, append events, and read every payload. Never
-expose it publicly unless `worlds.WithRPCToken` or `worlds.WithRPCMiddleware`
-[protects it](/worlds/#protecting-the-rpc-path).
+The client endpoints can start runs, append events, and read every payload.
+Never expose them publicly unless `worlds.WithClientToken` or
+`worlds.WithClientMiddleware` [protects them](/worlds/#protecting-the-client-endpoints).
 :::
 
 ## Webhooks

@@ -218,7 +218,7 @@ func deliverNext(t *testing.T, ctx context.Context, world *testworld.World, runt
 		t.Fatal(err)
 	}
 
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+	if err := world.Acknowledge(ctx, message.ID); err != nil {
 		t.Fatal(err)
 	}
 	return message.Input
@@ -560,7 +560,7 @@ func deliverStep(t *testing.T, ctx context.Context, world *testworld.World, runt
 				t.Fatal(err)
 			}
 
-			if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+			if err := world.Acknowledge(ctx, message.ID); err != nil {
 				t.Fatal(err)
 			}
 			return
@@ -819,7 +819,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	if err := runtime.Execute(ctx, delivery.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	if queued := world.QueuedMessages(); len(queued) != 1 || queued[0].Input.StepID == nil {
@@ -889,41 +889,6 @@ func (w *refusingWorld) EventsCreate(ctx context.Context, input worlds.EventsCre
 		return worlds.EventResult{}, worlds.ErrInBandSuperseded
 	}
 	return w.World.EventsCreate(ctx, input)
-}
-
-func TestRefusedWaitCancelsItsQueuedTimer(t *testing.T) {
-	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
-	defer cancel()
-
-	world := testworld.NewManual()
-	defer world.Close()
-
-	refusing := &refusingWorld{World: world}
-	runtime := worlds.NewRuntime(refusing, worlds.Runners(workflow.Use(sleepAnHour)))
-	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), sleeperInput{}); err != nil {
-		t.Fatal(err)
-	}
-	deliverNext(t, ctx, world, runtime)
-	if !refusing.refused {
-		t.Fatal("wait_created was not refused")
-	}
-	for _, message := range world.QueuedMessages() {
-		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
-			t.Fatalf("the refused wait left its timer queued: %#v", message.Input)
-		}
-	}
-
-	// The follow-up replays and declares the wait once.
-	deliverNext(t, ctx, world, runtime)
-	timers := 0
-	for _, message := range world.QueuedMessages() {
-		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
-			timers++
-		}
-	}
-	if timers != 1 {
-		t.Fatalf("timers = %d, want 1", timers)
-	}
 }
 
 type backoffInput struct{}
@@ -1001,7 +966,7 @@ func TestSuspendingFlowLeavesARetryThatIsNotDueQueuedOnce(t *testing.T) {
 	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: worlds.RunID(run.ID())}); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: flow.MessageID}); err != nil {
+	if err := world.Acknowledge(ctx, flow.MessageID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1037,7 +1002,7 @@ func TestEarlyTimerDeliveryQueuesItsReplacement(t *testing.T) {
 	if err := runtime.Execute(ctx, timer.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: timer.ID}); err != nil {
+	if err := world.Acknowledge(ctx, timer.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1085,7 +1050,7 @@ func TestRedeliveredStepQueuesTheFlowItFailedToQueue(t *testing.T) {
 	if err := runtime.Execute(ctx, step.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: step.ID}); err != nil {
+	if err := world.Acknowledge(ctx, step.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1369,7 +1334,7 @@ func TestFlowRunsTheFirstStepsInlineAndQueuesTheRest(t *testing.T) {
 	if promoted, queued := inlineSteps(t, ctx, world, runID), len(stepDeliveries(world)); promoted != 3 || queued != 7 {
 		t.Fatalf("inline=%d queued=%d, want 3 and 7", promoted, queued)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	drain(t, ctx, world, runtime)
@@ -1426,7 +1391,7 @@ func TestPromotedStepQueuesItsRetryAsAStepDelivery(t *testing.T) {
 	if len(retries) != 1 || retries[0].IdempotencyKey != "retry:"+string(*retries[0].StepID)+":1" {
 		t.Fatalf("step deliveries = %#v, want the retry", retries)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	drain(t, ctx, world, runtime)
@@ -1496,7 +1461,7 @@ func TestStepDeliveryTakesOverAPromotedStepAfterItsLease(t *testing.T) {
 		runner, started := crashingStepRunner(&attempts)
 		world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
 		crash(t, ctx, runtime, delivery.Input, started)
-		if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+		if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2016,5 +1981,59 @@ func TestStartOnLatestNeedsDeploymentAffinity(t *testing.T) {
 	}
 	if got := runDeployment(t, ctx, world, run.ID()); got != world.DeploymentID() {
 		t.Fatalf("run deployment = %q, want the World's own %q", got, world.DeploymentID())
+	}
+}
+
+func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := worlds.NewRuntime(world, worlds.Runners())
+
+	// A flow past the cap fails its run without replaying it.
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_flow_cap", WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_flow_cap", Attempt: worlds.MaxDeliveries + 1}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_flow_cap"})
+	if err != nil || run.Status != worlds.StatusFailed || !strings.Contains(string(run.Error), "maximum attempts") {
+		t.Fatalf("run past the cap = %#v err=%v", run, err)
+	}
+	// The cap itself still executes.
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_flow_at_cap", WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_flow_at_cap", Attempt: worlds.MaxDeliveries}); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_flow_at_cap"}); strings.Contains(string(run.Error), "maximum attempts") {
+		t.Fatalf("run at the cap failed for its attempts: %#v", run)
+	}
+
+	// A step past the cap fails, and a flow is queued to observe it.
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cap", WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeRunStarted},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
+	} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_step_cap", Event: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stepID := worlds.StepID("step_a")
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_step_cap", StepID: &stepID, Attempt: worlds.MaxDeliveries + 1}); err != nil {
+		t.Fatal(err)
+	}
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_step_cap", StepID: stepID})
+	if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
+		t.Fatalf("step past the cap = %#v err=%v", step, err)
+	}
+	queued := world.Queued()
+	if len(queued) == 0 || queued[len(queued)-1].RunID != "wrun_step_cap" || queued[len(queued)-1].StepID != nil {
+		t.Fatalf("queued after the failed step = %#v", queued)
 	}
 }

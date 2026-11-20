@@ -6,8 +6,9 @@ Go.
 
 `createWorld` exposes a Go `worlds.HTTPHandler` as a JavaScript World-shaped
 object, so the [Workflow SDK](https://workflow-sdk.dev) CLI and web UI can
-inspect Go runs. It sends its operations to the handler's CBOR RPC endpoint and
-uses bounded polling for stream chunks.
+inspect Go runs. It sends its operations to the handler's CBOR RPC endpoint,
+uses bounded polling for stream chunks, and writes streams over the handler's
+stream socket, falling back to RPC writes.
 
 ```sh
 npm install go-workflow
@@ -23,7 +24,7 @@ const world = await createWorld({
 
 `baseURL` is the prefix passed to Go's `worlds.HTTPHandler`. When omitted,
 `createWorld()` reads `WORKFLOW_HTTP_BASE_URL`. When the Go handler protects
-its RPC path with `worlds.WithRPCToken`, set `WORKFLOW_HTTP_TOKEN` or pass
+its client endpoints with `worlds.WithClientToken`, set `WORKFLOW_HTTP_TOKEN` or pass
 `token`, and the adapter sends it as a bearer token.
 
 To load this package through the Workflow SDK runtime, set

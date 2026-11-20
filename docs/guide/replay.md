@@ -207,7 +207,7 @@ How it works:
   [world-http adapter](/tooling/world-http) get the Go World's deployment ID.
 - **Addressed to the run's deployment.** Every delivery for a run is sent to
   its deployment, including the ones queued from outside the run: hook and
-  webhook resumes, `WakeUp`, and QStash timers. A newer deployment handling a
+  webhook resumes, `WakeUp`, and the hops of long timers. A newer deployment handling a
   webhook for an older run sends the delivery back to the older one.
 - **Re-routed if misdelivered.** A delivery that still reaches another
   deployment is not replayed. It is sent to the run's deployment again, after

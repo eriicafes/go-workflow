@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,12 +22,15 @@ import (
 var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
 
 const (
-	// vqsMaxDelay is the longest Vqs-Delay-Seconds and Vqs-Retention-Seconds.
-	vqsMaxDelay = 7 * 24 * time.Hour
-	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, so a
-	// message keeps a day of retention after it becomes visible. Longer delays
-	// are delivered in hops, or go through QStash when it is configured.
-	vqsMaxQueueDelay = 6 * 24 * time.Hour
+	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, as
+	// the Workflow SDK does: a message keeps Vercel's default retention of 24
+	// hours, so it is still retained for an hour after it becomes visible.
+	// Longer delays are delivered in hops.
+	vqsMaxQueueDelay = 23 * time.Hour
+	// vqsMinRetry is the shortest visibility timeout Vercel Queues accepts.
+	vqsMinRetry = 5 * time.Second
+	// vqsMaxRetry is the longest backoff of a failed delivery.
+	vqsMaxRetry = 15 * time.Minute
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
 	vqsLease          = 5 * time.Minute
@@ -34,12 +38,6 @@ const (
 	vqsMaxVisibility  = time.Hour
 	vqsPayloadMaxSize = 1 << 20
 )
-
-// vqsMessage is the Vercel Queue payload. The delivery itself is the Redis
-// queue record it names.
-type vqsMessage struct {
-	ID string `json:"id"`
-}
 
 func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte, header http.Header) (*http.Response, error) {
 	token, err := w.config.OIDCToken(ctx)
@@ -67,25 +65,23 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	return w.http.Do(request)
 }
 
-// publishVQS sends messageID to topic, or to Config.Topic when it is empty,
+// publishVQS sends message to its topic, or to Config.Topic when it has none,
 // addressed to deploymentID when it is set. key is the idempotency key, the
-// message ID itself or, for a hop of a long timer, unique to that hop, so only a
-// retried publish of the same message is dropped. Runtime idempotency keys are
-// reused across distinct deliveries and Vercel would silently drop those for up
-// to 24 hours.
-func (w *World) publishVQS(ctx context.Context, messageID, key, topic string, delay time.Duration, deploymentID string) error {
+// message ID itself or, for a hop of a long timer, unique to that hop, so only
+// a retried publish of the same message is dropped. Runtime idempotency keys
+// are reused across distinct deliveries and Vercel would silently drop those
+// for up to 24 hours.
+func (w *World) publishVQS(ctx context.Context, message queueMessage, key string, delay time.Duration, deploymentID string) error {
+	topic := message.Topic
 	if topic == "" {
 		topic = w.config.Topic
 	}
-	body, err := json.Marshal(vqsMessage{ID: messageID})
+	body, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 	header := http.Header{}
 	header.Set("Vqs-Idempotency-Key", key)
-	// Retain every message for the maximum so a delayed or failing delivery
-	// is not dropped before its record is processed.
-	header.Set("Vqs-Retention-Seconds", strconv.Itoa(int(vqsMaxDelay/time.Second)))
 	if seconds := delaySeconds(delay); seconds > 0 {
 		header.Set("Vqs-Delay-Seconds", strconv.FormatInt(seconds, 10))
 	}
@@ -251,11 +247,15 @@ func delaySeconds(delay time.Duration) int64 {
 	return int64((delay + time.Second - 1) / time.Second)
 }
 
-// retryDelay backs off failed deliveries from 5 seconds to 5 minutes.
+// retryDelay backs off failed deliveries as the Workflow SDK does: a second
+// doubling with each delivery up to 15 minutes, with up to 25% jitter either
+// way, and never less than the 5 seconds Vercel Queues accepts.
 func retryDelay(deliveryCount int) time.Duration {
-	delay := 5 * time.Second
-	for range min(max(deliveryCount-1, 0), 6) {
+	delay := time.Second
+	for range min(max(deliveryCount-1, 0), 10) {
 		delay *= 2
 	}
-	return min(delay, 5*time.Minute)
+	delay = min(delay, vqsMaxRetry)
+	jitter := time.Duration((rand.Float64()*2 - 1) * 0.25 * float64(delay))
+	return max(delay+jitter, vqsMinRetry)
 }

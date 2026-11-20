@@ -1,9 +1,11 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -22,102 +24,180 @@ func writerOption(values []WriterOption) WriterOption {
 	return values[len(values)-1]
 }
 
+// StreamWriter writes a run's stream. Writers of a stream do not wait for
+// each other: each writer's chunks stay in order, and different writers'
+// chunks interleave, as in the Workflow SDK.
+//
+// Each Write is one chunk. Write returns once the chunk is buffered, and the
+// writer stores buffered chunks together in the background, so a failed
+// store is reported by a later Write, Flush, Close, or CloseStream.
+type StreamWriter interface {
+	// Write buffers p as one chunk. It blocks while the buffer is full.
+	io.Writer
+	// Close stores what is buffered and gives up the writer, leaving the
+	// stream open for other writers. It is the Workflow SDK's releaseLock.
+	io.Closer
+	// Flush waits until every buffered chunk is stored.
+	Flush() error
+	// CloseStream stores what is buffered, then closes the stream for every
+	// writer and gives up this one.
+	CloseStream() error
+}
+
 // Writer returns a writer for a stream of the run ctx belongs to. It must be
 // called in step context. It returns ErrNotInStep in workflow context and
 // ErrNoWorkflow outside a run.
 //
-// The writer holds the stream name, so Writer waits while another writer holds
-// it. Close closes the stream for all writers, while the returned release
-// function only gives up this writer's hold so a retry or another step can
-// continue the stream.
-func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
+// When the step function returns, the writer is closed if it is still open,
+// before the step's result is recorded, so a completed step's chunks are
+// stored. A failed store fails the step.
+func Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) {
 	execution, ok := stepExecutionFromContext(ctx)
 	if !ok {
 		if _, ok := workflowExecutionFromContext(ctx); ok {
-			return nil, nil, ErrNotInStep
+			return nil, ErrNotInStep
 		}
-		return nil, nil, ErrNoWorkflow
+		return nil, ErrNoWorkflow
 	}
 	opts := writerOption(options)
-	return newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, StepID(ctx))
+	writer, err := newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name)
+	if err != nil {
+		return nil, err
+	}
+	worlds.OnStepReturn(ctx, writer.Close)
+	return writer, nil
 }
+
+const (
+	// streamBufferBytes is how many bytes a writer buffers before Write
+	// blocks.
+	streamBufferBytes = 1 << 20
+	// streamChunksPerStore is the most chunks a writer stores at once.
+	streamChunksPerStore = 1000
+	// streamStoreTimeout bounds one store of buffered chunks.
+	streamStoreTimeout = time.Minute
+)
+
+var errStreamWriterClosed = errors.New("workflow: stream writer is closed")
 
 type streamWriter struct {
-	ctx      context.Context
-	client   Client
-	runID    worlds.RunID
-	name     string
-	session  worlds.StreamWriteSession
-	closed   bool
-	sequence int
+	ctx    context.Context
+	writer worlds.StreamWriter
+	mu     sync.Mutex
+	cond   *sync.Cond
+	// pending holds the buffered chunks, pendingBytes their size, and
+	// storing reports a store in flight.
+	pending      [][]byte
+	pendingBytes int
+	storing      bool
+	err          error
+	closed       bool
 }
 
-func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string, writerID string) (io.WriteCloser, func() error, error) {
-	writer := &streamWriter{ctx: ctx, client: client, runID: runID, name: name}
-	backoff := 10 * time.Millisecond
-	for {
-		session, err := client.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: name, WriterID: writerID})
-		if !errors.Is(err, worlds.ErrStreamLocked) {
-			if err != nil {
-				return nil, nil, err
-			}
-			writer.session = session
-			break
-		}
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, nil, ctx.Err()
-		case <-timer.C:
-		}
-		backoff = min(2*backoff, 500*time.Millisecond)
+func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string) (*streamWriter, error) {
+	writer, err := client.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID, Name: name, WriterID: worlds.NewWriterID()})
+	if err != nil {
+		return nil, err
 	}
-	return writer, writer.release, nil
-}
-
-// releaseContext returns the context a writer gives up its hold with. It
-// outlives the writer's own context, so a cancelled step still frees the
-// stream for the next writer.
-func (w *streamWriter) releaseContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(w.ctx), 5*time.Second)
+	// Stores outlive the step's context, so a step that returns, or is
+	// cancelled, still stores what it wrote.
+	w := &streamWriter{ctx: context.WithoutCancel(ctx), writer: writer}
+	w.cond = sync.NewCond(&w.mu)
+	return w, nil
 }
 
 func (w *streamWriter) Write(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.closed {
-		return 0, errors.New("workflow: stream writer is closed")
+		return 0, errStreamWriterClosed
 	}
-	if err := w.session.Write(w.ctx, worlds.StreamWriteSessionWriteInput{Sequence: w.sequence, Chunks: [][]byte{data}}); err != nil {
-		return 0, err
+	if w.err != nil {
+		return 0, w.err
 	}
-	w.sequence++
+	w.pending = append(w.pending, bytes.Clone(data))
+	w.pendingBytes += len(data)
+	if !w.storing {
+		w.storing = true
+		go w.store()
+	}
+	for w.pendingBytes > streamBufferBytes && w.err == nil {
+		w.cond.Wait()
+	}
+	if w.err != nil {
+		return 0, w.err
+	}
 	return len(data), nil
 }
 
-func (w *streamWriter) Close() error {
-	if w.closed {
-		return nil
+// store stores buffered chunks until none remain or a store fails.
+func (w *streamWriter) store() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for len(w.pending) > 0 && w.err == nil {
+		count := min(len(w.pending), streamChunksPerStore)
+		chunks := w.pending[:count]
+		w.pending = w.pending[count:]
+		w.mu.Unlock()
+		ctx, cancel := context.WithTimeout(w.ctx, streamStoreTimeout)
+		err := w.writer.Write(ctx, chunks)
+		cancel()
+		w.mu.Lock()
+		for _, chunk := range chunks {
+			w.pendingBytes -= len(chunk)
+		}
+		if err != nil {
+			w.err = err
+			w.pending, w.pendingBytes = nil, 0
+		}
+		w.cond.Broadcast()
 	}
-	ctx, cancel := w.releaseContext()
-	defer cancel()
-	if err := w.session.Close(ctx); err != nil {
-		return err
-	}
-	w.closed = true
-	return nil
+	w.storing = false
+	w.cond.Broadcast()
 }
 
-func (w *streamWriter) release() error {
+// flushLocked waits until nothing is buffered or in flight.
+func (w *streamWriter) flushLocked() error {
+	for (w.storing || len(w.pending) > 0) && w.err == nil {
+		w.cond.Wait()
+	}
+	return w.err
+}
+
+func (w *streamWriter) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.flushLocked()
+}
+
+func (w *streamWriter) Close() error {
+	return w.finish(func(ctx context.Context) error { return w.writer.Release(ctx) })
+}
+
+func (w *streamWriter) CloseStream() error {
+	return w.finish(func(ctx context.Context) error { return w.writer.CloseStream(ctx) })
+}
+
+// finish stores what is buffered, then gives up the writer with end. Later
+// calls return nil.
+func (w *streamWriter) finish(end func(context.Context) error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.closed {
 		return nil
 	}
-	ctx, cancel := w.releaseContext()
+	err := w.flushLocked()
+	w.closed = true
+	ctx, cancel := context.WithTimeout(w.ctx, streamStoreTimeout)
 	defer cancel()
-	if err := w.session.Release(ctx); err != nil {
+	if err != nil {
+		_ = w.writer.Release(ctx)
 		return err
 	}
-	w.closed = true
-	return nil
+	return end(ctx)
 }
 
 // ReaderOption holds the options to Reader and Run.Reader.

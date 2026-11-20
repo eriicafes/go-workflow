@@ -3,395 +3,485 @@ package vercelworld
 import (
 	"context"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strconv"
+	"net/http"
+	"net/url"
+	"slices"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-var errCorrupt = errors.New("workflow/vercel: corrupt Redis data")
-
-// Redis keys (p is Config.Prefix). Kinds are distinct namespaces, and keys
-// with two user-supplied parts hex-encode the last one so they cannot collide.
-//
-//	p:run:<run>                 hash: run view, count (event count), score
-//	p:attrs:<run>               hash: attributes
-//	p:events:<run>              list: event records, index = slot-1, the only
-//	                            copy of payloads
-//	p:last:<run>                hash: "<type>[\n<correlation>]" -> last slot
-//	p:corr:<run>:<hex(cid)>     zset: slots of a correlation ID
-//	p:steps:<run>               hash: step ID -> step JSON
-//	p:steporder:<run>           zset: step ID scored by creation slot
-//	p:runhooks:<run>            zset: hook IDs of a run
-//	p:hook:<hook>               string: hook JSON
-//	p:token:<token>             string: owning hook ID
-//	p:hooks                     zset: all hook IDs
-//	p:runs, p:runs:wf:<name>, p:runs:status:<s>, p:runs:wfstatus:<s>:<name>
-//	                            zsets: run IDs by creation score
-//	p:order                     string: last creation score
-//	p:streams:<run>             set: stream names
-//	p:stream:<run>:<hex(name)>  hash: closed, session, seq
-//	p:chunks:<run>:<hex(name)>  list: base64 chunks
-//	p:queue:<id>                string: queue record JSON
-//
-// Creation scores are microsecond timestamps made strictly increasing by
-// p:order, so they are unique and give stable cursors.
-//
-// Views hold the slots of the events that carry their payloads instead of
-// copies: a run's input is slot 1 and its resultSlot is its run_completed or
-// run_failed, a step's slot is its step_created and its resultSlot its latest
-// step_completed, step_failed, or step_retrying, and a hook's slot is its
-// hook_created in the hook's run. Reads fetch those records, at most one
-// script call per page.
-func (w *World) key(kind, id string) string { return w.prefix + ":" + kind + ":" + id }
-
-func (w *World) corrKey(runID worlds.RunID, correlationID string) string {
-	return w.key("corr", string(runID)+":"+hex.EncodeToString([]byte(correlationID)))
+// listResponse is a page of a run, step, or hook listing.
+type listResponse struct {
+	Data    []map[string]any `cbor:"data" json:"data"`
+	Cursor  *string          `cbor:"cursor" json:"cursor"`
+	HasMore bool             `cbor:"hasMore" json:"hasMore"`
 }
 
-// eventRecord is the JSON stored per event, and its slot is its list position.
-type eventRecord struct {
-	Type          worlds.EventType `json:"t"`
-	CorrelationID string           `json:"c,omitempty"`
-	JSONData      json.RawMessage  `json:"j,omitempty"`
-	Data          []byte           `json:"d,omitempty"`
-	At            string           `json:"at"`
+func (page listResponse) cursor() string {
+	if page.Cursor == nil || !page.HasMore {
+		return ""
+	}
+	return *page.Cursor
 }
 
-// stepView is the step JSON written by scriptAppend.
-type stepView struct {
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Attempt     int    `json:"attempt"`
-	Slot        uint64 `json:"slot"`
-	ResultSlot  uint64 `json:"resultSlot,omitempty"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
-	StartedAt   string `json:"startedAt,omitempty"`
-	CompletedAt string `json:"completedAt,omitempty"`
-	RetryAfter  string `json:"retryAfter,omitempty"`
+// entityQuery maps a Pagination and ResolveData to entity list parameters.
+// The backend's default order is not ascending, so the order is always sent.
+func entityQuery(pagination worlds.Pagination, resolve worlds.ResolveData) url.Values {
+	query := url.Values{}
+	if pagination.Limit > 0 {
+		query.Set("limit", itoa(pagination.Limit))
+	}
+	if pagination.Cursor != "" {
+		query.Set("cursor", pagination.Cursor)
+	}
+	order := pagination.SortOrder
+	if order == "" {
+		order = worlds.SortOrderAscending
+	}
+	query.Set("sortOrder", string(order))
+	query.Set("remoteRefBehavior", entityRefs(resolve))
+	return query
 }
 
-// hookView is the hook JSON written by scriptAppend.
-type hookView struct {
-	RunID               worlds.RunID           `json:"runId"`
-	WorkflowName        string                 `json:"wf,omitempty"`
-	DeploymentID        string                 `json:"dep,omitempty"`
-	Token               string                 `json:"token"`
-	Slot                uint64                 `json:"slot"`
-	Webhook             string                 `json:"webhook,omitempty"`
-	ReceivedSlot        uint64                 `json:"rid,omitempty"`
-	CreatedAt           string                 `json:"createdAt"`
-	UpdatedAt           string                 `json:"updatedAt"`
-	ReceivedAt          string                 `json:"receivedAt,omitempty"`
-	TokenRetentionUntil string                 `json:"tokenRetentionUntil,omitempty"`
-	ClaimedFrom         *worlds.HookForceClaim `json:"claimedFrom,omitempty"`
-	ForceClaimedBy      *worlds.HookForceClaim `json:"forceClaimedBy,omitempty"`
-	DisposedAt          string                 `json:"disposedAt,omitempty"`
+// entityRefs is how the backend returns entity payloads.
+func entityRefs(resolve worlds.ResolveData) string {
+	if resolve == worlds.ResolveDataNone {
+		return "lazy"
+	}
+	return "resolve"
 }
 
-func micros(t time.Time) string { return strconv.FormatInt(t.UnixMicro(), 10) }
-
-// parseCount parses a counter stored in a run hash, where a missing field is 0.
-func parseCount(value string) int {
-	count, _ := strconv.Atoi(value)
-	return count
-}
-
-func parseMicros(value string) time.Time {
-	n, _ := strconv.ParseInt(value, 10, 64)
-	return time.UnixMicro(n).UTC()
-}
-
-func optionalMicros(value string) *time.Time {
-	if value == "" {
+func payloadBytes(value any) []byte {
+	data, _ := value.([]byte)
+	if len(data) == 0 {
 		return nil
 	}
-	t := parseMicros(value)
-	return &t
+	return data
 }
 
-func encodeBytes(data []byte) string { return base64.StdEncoding.EncodeToString(data) }
-
-func decodeBytes(value string) ([]byte, error) {
-	if value == "" {
-		return nil, nil
+func timeField(values map[string]any, key string) *time.Time {
+	value, ok := asTime(values[key])
+	if !ok || value.IsZero() {
+		return nil
 	}
-	data, err := base64.StdEncoding.DecodeString(value)
+	return &value
+}
+
+func requiredTime(values map[string]any, key string) time.Time {
+	value, _ := asTime(values[key])
+	return value
+}
+
+// toRun returns the go-workflow view of a backend run.
+func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
+	run := worlds.Run{
+		RunID:        worlds.RunID(str(values, "runId")),
+		WorkflowName: str(values, "workflowName"),
+		Status:       worlds.Status(str(values, "status")),
+		Error:        payloadBytes(values["error"]),
+		Attributes:   stringMap(values["attributes"]),
+		DeploymentID: str(values, "deploymentId"),
+		CreatedAt:    requiredTime(values, "createdAt"),
+		UpdatedAt:    requiredTime(values, "updatedAt"),
+		StartedAt:    timeField(values, "startedAt"),
+		CompletedAt:  timeField(values, "completedAt"),
+	}
+	if resolve != worlds.ResolveDataNone {
+		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
+	}
+	return run
+}
+
+// toStep returns the go-workflow view of a backend step. Its input is the
+// step_created Data the World stores as the step's payload.
+func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, error) {
+	attempt, _ := asInt(values["attempt"])
+	step := worlds.Step{
+		RunID:       worlds.RunID(str(values, "runId")),
+		StepID:      worlds.StepID(str(values, "stepId")),
+		StepName:    str(values, "stepName"),
+		Status:      worlds.Status(str(values, "status")),
+		Error:       payloadBytes(values["error"]),
+		Attempt:     attempt,
+		CreatedAt:   requiredTime(values, "createdAt"),
+		UpdatedAt:   requiredTime(values, "updatedAt"),
+		StartedAt:   timeField(values, "startedAt"),
+		CompletedAt: timeField(values, "completedAt"),
+		RetryAfter:  timeField(values, "retryAfter"),
+	}
+	if resolve != worlds.ResolveDataNone {
+		if blob := payloadBytes(values["input"]); blob != nil {
+			var created worlds.DataStepCreated
+			if err := json.Unmarshal(blob, &created); err != nil {
+				return worlds.Step{}, err
+			}
+			step.Input = created.Input
+		}
+		step.Output = payloadBytes(values["output"])
+	}
+	return step, nil
+}
+
+// toHook returns the go-workflow view of a backend hook. Its metadata and
+// webhook settings come from the hook_created Data the World stores as the
+// hook's payload.
+func toHook(values map[string]any) (worlds.Hook, error) {
+	hook := worlds.Hook{
+		RunID:               worlds.RunID(str(values, "runId")),
+		HookID:              worlds.HookID(str(values, "hookId")),
+		Token:               str(values, "token"),
+		TokenRetentionUntil: timeField(values, "tokenRetentionUntil"),
+		ClaimedFrom:         hookClaim(values["claimedFrom"]),
+		CreatedAt:           requiredTime(values, "createdAt"),
+	}
+	hook.UpdatedAt = hook.CreatedAt
+	if resume, ok := values["resumeContext"].(map[string]any); ok {
+		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName")}
+	}
+	if blob := payloadBytes(values["metadata"]); blob != nil {
+		var created worlds.DataHookCreated
+		if err := json.Unmarshal(blob, &created); err != nil {
+			return worlds.Hook{}, err
+		}
+		hook.Metadata, hook.Webhook = created.Metadata, created.Webhook
+	}
+	return hook, nil
+}
+
+func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	run, err := w.getRun(ctx, input.RunID, input.ResolveData, "", 0)
 	if err != nil {
-		return nil, fmt.Errorf("workflow/vercel: decode stored bytes: %w", err)
+		return worlds.Run{}, err
 	}
-	return data, nil
+	// The run view has no in-band count, so read it from the snapshot of a
+	// one-event listing.
+	loaded, err := w.listEvents(ctx, input.RunID, 0, 1, worlds.EventsResolveDataNone)
+	if err != nil {
+		return worlds.Run{}, err
+	}
+	if loaded.SeqInBand != nil {
+		run.InBandCount = *loaded.SeqInBand
+	}
+	return run, nil
 }
 
-func newEventRecord(event worlds.EventsCreateEvent, now time.Time) string {
-	data, _ := json.Marshal(eventRecord{Type: event.EventType, CorrelationID: event.CorrelationID, Data: event.Data, At: micros(now)})
-	return string(data)
+// getRun reads a run, from the long-poll status route when wait is set.
+func (w *World) getRun(ctx context.Context, runID worlds.RunID, resolve worlds.ResolveData, suffix string, wait time.Duration) (worlds.Run, error) {
+	query := url.Values{"remoteRefBehavior": {entityRefs(resolve)}}
+	if wait > 0 {
+		query.Set("waitMs", itoa(int(wait/time.Millisecond)))
+	}
+	var values map[string]any
+	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(runID))+suffix, query, nil, &values); err != nil {
+		return worlds.Run{}, notFound(err, worlds.ErrRunNotFound)
+	}
+	return toRun(values, resolve), nil
 }
 
-func decodeEvent(runID worlds.RunID, slot uint64, raw string, resolve worlds.EventsResolveData) (worlds.Event, error) {
-	var record eventRecord
-	if err := json.Unmarshal([]byte(raw), &record); err != nil {
-		return worlds.Event{}, fmt.Errorf("workflow/vercel: decode event %d of %s: %w", slot, runID, err)
+func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	if len(input.Status) > 1 {
+		return w.runsByStatuses(ctx, input)
 	}
-	event := worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(slot), EventType: record.Type, CorrelationID: record.CorrelationID, Data: record.Data, CreatedAt: parseMicros(record.At)}
-	if len(record.JSONData) > 0 {
-		event.Data = record.JSONData
+	var status worlds.Status
+	if len(input.Status) == 1 {
+		status = input.Status[0]
 	}
-	event.Data = worlds.ResolveEventData(event.EventType, event.Data, resolve)
-	return event, nil
+	page, err := w.runsPage(ctx, input, status, input.Pagination)
+	if err != nil {
+		return worlds.Page[worlds.Run]{}, err
+	}
+	result := worlds.Page[worlds.Run]{Cursor: page.cursor(), HasMore: page.HasMore}
+	for _, values := range page.Data {
+		result.Data = append(result.Data, toRun(values, input.ResolveData))
+	}
+	return result, nil
 }
 
-// decodeRecord decodes the record at a slot a view references, with its data.
-func decodeRecord(runID worlds.RunID, slot uint64, raw string) (worlds.Event, error) {
-	if raw == "" {
-		return worlds.Event{}, fmt.Errorf("%w: missing event %d of %s", errCorrupt, slot, runID)
+func (w *World) runsPage(ctx context.Context, input worlds.RunsListInput, status worlds.Status, pagination worlds.Pagination) (listResponse, error) {
+	query := entityQuery(pagination, input.ResolveData)
+	if input.WorkflowName != "" {
+		query.Set("workflowName", input.WorkflowName)
 	}
-	return decodeEvent(runID, slot, raw, worlds.EventsResolveDataAll)
+	if status != "" {
+		query.Set("status", string(status))
+	}
+	var page listResponse
+	err := w.api.do(ctx, http.MethodGet, "/v2/runs", query, nil, &page)
+	return page, err
 }
 
-// payloadRef names an event record a view references and receives its
-// payload.
-type payloadRef struct {
-	runID worlds.RunID
-	slot  uint64
-	set   func(eventType worlds.EventType, payload []byte)
+// runsByStatuses lists runs in any of several statuses. The backend filters
+// by one status, so it reads a page of each and merges them by creation. The
+// cursor holds each status's own cursor, "" to start and "-" once it is read
+// to the end.
+func (w *World) runsByStatuses(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	statuses := slices.Clone(input.Status)
+	slices.Sort(statuses)
+	statuses = slices.Compact(statuses)
+	cursors := map[worlds.Status]string{}
+	if input.Pagination.Cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(input.Pagination.Cursor)
+		if err != nil || json.Unmarshal(raw, &cursors) != nil {
+			return worlds.Page[worlds.Run]{}, errors.New("workflow/vercel: invalid runs cursor")
+		}
+	}
+	type item struct {
+		run    worlds.Run
+		status worlds.Status
+	}
+	var items []item
+	pages := map[worlds.Status]listResponse{}
+	for _, status := range statuses {
+		if cursors[status] == "-" {
+			continue
+		}
+		pagination := input.Pagination
+		pagination.Cursor = cursors[status]
+		page, err := w.runsPage(ctx, input, status, pagination)
+		if err != nil {
+			return worlds.Page[worlds.Run]{}, err
+		}
+		pages[status] = page
+		for _, values := range page.Data {
+			items = append(items, item{run: toRun(values, input.ResolveData), status: status})
+		}
+	}
+	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
+	slices.SortStableFunc(items, func(a, b item) int {
+		order := a.run.CreatedAt.Compare(b.run.CreatedAt)
+		if order == 0 {
+			order = compareStrings(string(a.run.RunID), string(b.run.RunID))
+		}
+		if descending {
+			return -order
+		}
+		return order
+	})
+	taken := items
+	if limit := input.Pagination.Limit; limit > 0 && len(items) > limit {
+		taken = items[:limit]
+	}
+	counts := map[worlds.Status]int{}
+	result := worlds.Page[worlds.Run]{}
+	for _, item := range taken {
+		counts[item.status]++
+		result.Data = append(result.Data, item.run)
+	}
+	next := map[worlds.Status]string{}
+	for _, status := range statuses {
+		page, read := pages[status]
+		switch {
+		case !read:
+			next[status] = "-"
+		case counts[status] == len(page.Data):
+			next[status] = page.cursor()
+			if !page.HasMore {
+				next[status] = "-"
+			}
+		case counts[status] == 0:
+			next[status] = cursors[status]
+		default:
+			// Continue after the runs taken from this status, which the
+			// backend's cursor of a page of that size names.
+			pagination := input.Pagination
+			pagination.Cursor, pagination.Limit = cursors[status], counts[status]
+			shorter, err := w.runsPage(ctx, input, status, pagination)
+			if err != nil {
+				return worlds.Page[worlds.Run]{}, err
+			}
+			next[status] = shorter.cursor()
+		}
+		if next[status] != "-" {
+			result.HasMore = true
+		}
+	}
+	if result.HasMore {
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			return worlds.Page[worlds.Run]{}, err
+		}
+		result.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	return result, nil
 }
 
-// resolvePayloads reads the records refs name in one script call and passes
-// each payload to its ref.
-func (w *World) resolvePayloads(ctx context.Context, refs []payloadRef) error {
-	if len(refs) == 0 {
-		return nil
+func compareStrings(a, b string) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
 	}
-	args := make([]string, 0, 1+2*len(refs))
-	args = append(args, w.scripts)
-	for _, ref := range refs {
-		args = append(args, string(ref.runID), strconv.FormatUint(ref.slot, 10))
+	return 0
+}
+
+// runWaitSlice is the longest the backend holds one status request.
+const runWaitSlice = 25 * time.Second
+
+func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
+	deadline := time.Now().Add(input.Timeout)
+	delay := 50 * time.Millisecond
+	longPoll := true
+	for {
+		remaining := time.Until(deadline)
+		var run worlds.Run
+		var err error
+		if longPoll && remaining > 0 {
+			run, err = w.getRun(ctx, input.RunID, input.ResolveData, "/status", min(remaining, runWaitSlice))
+			if errors.Is(err, worlds.ErrRunNotFound) || statusOf(err) == http.StatusMethodNotAllowed || statusOf(err) == http.StatusNotImplemented || statusOf(err) == http.StatusGatewayTimeout {
+				// The route is missing or did not hold the request: poll
+				// plain reads instead, which also tell a missing run apart.
+				longPoll = false
+				run, err = w.getRun(ctx, input.RunID, input.ResolveData, "", 0)
+			}
+		} else {
+			run, err = w.getRun(ctx, input.RunID, input.ResolveData, "", 0)
+		}
+		if err != nil || run.Status.Terminal() || time.Until(deadline) <= 0 {
+			return run, err
+		}
+		if longPoll {
+			continue
+		}
+		timer := time.NewTimer(min(delay, time.Until(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return worlds.Run{}, ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(2*delay, time.Second)
 	}
-	result, err := w.redis.Run(ctx, scriptEventsAt, args...)
+}
+
+func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttributesInput) error {
+	if len(input.Changes) == 0 {
+		_, err := w.getRun(ctx, input.RunID, worlds.ResolveDataNone, "", 0)
+		return err
+	}
+	data, err := worlds.EncodeAttrSet(input)
 	if err != nil {
 		return err
 	}
-	raws := replyStrings(result)
-	if len(raws) != len(refs) {
-		return errCorrupt
+	_, err = w.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, Data: data}})
+	return err
+}
+
+func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (worlds.Step, error) {
+	query := url.Values{"remoteRefBehavior": {entityRefs(input.ResolveData)}}
+	var values map[string]any
+	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/steps/"+pathEscape(string(input.StepID)), query, nil, &values); err != nil {
+		return worlds.Step{}, notFound(err, worlds.ErrStepNotFound)
 	}
-	for index, raw := range raws {
-		event, err := decodeRecord(refs[index].runID, refs[index].slot, raw)
+	return toStep(values, input.ResolveData)
+}
+
+func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	var page listResponse
+	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/steps", entityQuery(input.Pagination, input.ResolveData), nil, &page); err != nil {
+		if statusOf(err) == http.StatusNotFound {
+			return worlds.Page[worlds.Step]{}, nil
+		}
+		return worlds.Page[worlds.Step]{}, err
+	}
+	result := worlds.Page[worlds.Step]{Cursor: page.cursor(), HasMore: page.HasMore}
+	for _, values := range page.Data {
+		step, err := toStep(values, input.ResolveData)
 		if err != nil {
-			return err
+			return worlds.Page[worlds.Step]{}, err
 		}
-		refs[index].set(event.EventType, worlds.EventPayload(event))
+		result.Data = append(result.Data, step)
 	}
-	return nil
+	return result, nil
 }
 
-// decodeStep decodes a step view. Its payloads are in the event log, and
-// stepPayloads resolves them.
-func decodeStep(runID worlds.RunID, stepID worlds.StepID, raw string) (worlds.Step, stepView, error) {
-	var view stepView
-	if err := json.Unmarshal([]byte(raw), &view); err != nil {
-		return worlds.Step{}, stepView{}, fmt.Errorf("workflow/vercel: decode step %s: %w", stepID, err)
+func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
+	var values map[string]any
+	if err := w.api.do(ctx, http.MethodGet, "/v2/hooks/"+pathEscape(string(input.HookID)), nil, nil, &values); err != nil {
+		return worlds.Hook{}, notFound(err, worlds.ErrHookNotFound)
 	}
-	step := worlds.Step{RunID: runID, StepID: stepID, StepName: view.Name, Status: worlds.Status(view.Status), Attempt: view.Attempt, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), StartedAt: optionalMicros(view.StartedAt), CompletedAt: optionalMicros(view.CompletedAt)}
-	if view.RetryAfter != "" {
-		retryAfter, err := time.Parse(time.RFC3339Nano, view.RetryAfter)
+	return w.hookView(ctx, values, input.ResolveData)
+}
+
+func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
+	var values map[string]any
+	if err := w.api.do(ctx, http.MethodGet, "/v2/hooks/by-token", url.Values{"token": {input.Token}}, nil, &values); err != nil {
+		return worlds.Hook{}, notFound(err, worlds.ErrHookNotFound)
+	}
+	return w.hookView(ctx, values, input.ResolveData)
+}
+
+func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	query := entityQuery(input.Pagination, input.ResolveData)
+	if input.RunID != "" {
+		query.Set("runId", string(input.RunID))
+	}
+	var page listResponse
+	if err := w.api.do(ctx, http.MethodGet, "/v2/hooks", query, nil, &page); err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	result := worlds.Page[worlds.Hook]{Cursor: page.cursor(), HasMore: page.HasMore}
+	for _, values := range page.Data {
+		hook, err := w.hookView(ctx, values, input.ResolveData)
 		if err != nil {
-			return worlds.Step{}, stepView{}, fmt.Errorf("workflow/vercel: decode step retry time: %w", err)
+			return worlds.Page[worlds.Hook]{}, err
 		}
-		step.RetryAfter = &retryAfter
+		result.Data = append(result.Data, hook)
 	}
-	return step, view, nil
+	return result, nil
 }
 
-// stepPayloads returns the refs that fill step's input from its step_created
-// and its output or error from its latest result. ResolveDataNone skips the
-// input and output, so a completed step reads nothing.
-func stepPayloads(step *worlds.Step, view stepView, resolve worlds.ResolveData) []payloadRef {
-	var refs []payloadRef
-	if resolve != worlds.ResolveDataNone && view.Slot != 0 {
-		refs = append(refs, payloadRef{runID: step.RunID, slot: view.Slot, set: func(_ worlds.EventType, payload []byte) { step.Input = payload }})
-	}
-	if view.ResultSlot != 0 && (resolve != worlds.ResolveDataNone || step.Status != worlds.StatusCompleted) {
-		refs = append(refs, payloadRef{runID: step.RunID, slot: view.ResultSlot, set: func(eventType worlds.EventType, payload []byte) {
-			if eventType != worlds.EventTypeStepCompleted {
-				step.Error = payload
-			} else if resolve != worlds.ResolveDataNone {
-				step.Output = payload
-			}
-		}})
-	}
-	return refs
-}
-
-// resolveSteps fills the payloads of steps, whose views are views, in one
-// script call.
-func (w *World) resolveSteps(ctx context.Context, steps []worlds.Step, views []stepView, resolve worlds.ResolveData) error {
-	var refs []payloadRef
-	for index := range steps {
-		refs = append(refs, stepPayloads(&steps[index], views[index], resolve)...)
-	}
-	return w.resolvePayloads(ctx, refs)
-}
-
-// decodeHook decodes a hook view. Its metadata is in its hook_created record,
-// and resolveHooks reads it.
-func decodeHook(hookID worlds.HookID, raw string) (worlds.Hook, hookView, error) {
-	var view hookView
-	if err := json.Unmarshal([]byte(raw), &view); err != nil {
-		return worlds.Hook{}, hookView{}, fmt.Errorf("workflow/vercel: decode hook %s: %w", hookID, err)
-	}
-	hook := worlds.Hook{RunID: view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: view.DeploymentID, WorkflowName: view.WorkflowName}, HookID: hookID, Token: view.Token, CreatedAt: parseMicros(view.CreatedAt), UpdatedAt: parseMicros(view.UpdatedAt), ReceivedAt: optionalMicros(view.ReceivedAt), TokenRetentionUntil: optionalMicros(view.TokenRetentionUntil), ClaimedFrom: view.ClaimedFrom, ForceClaimedBy: view.ForceClaimedBy, DisposedAt: optionalMicros(view.DisposedAt)}
-	if view.ReceivedSlot != 0 {
-		hook.WebhookEventID = worlds.EventIDForSlot(view.ReceivedSlot)
-	}
-	if view.Webhook != "" {
-		hook.Webhook = new(worlds.Webhook)
-		if err := json.Unmarshal([]byte(view.Webhook), hook.Webhook); err != nil {
-			return worlds.Hook{}, hookView{}, fmt.Errorf("workflow/vercel: decode hook webhook: %w", err)
-		}
-	}
-	return hook, view, nil
-}
-
-// resolveHooks fills the metadata of hooks, whose views are views, in one
-// script call. ResolveDataNone reads nothing.
-func (w *World) resolveHooks(ctx context.Context, hooks []worlds.Hook, views []hookView, resolve worlds.ResolveData) error {
-	if resolve == worlds.ResolveDataNone {
-		return nil
-	}
-	var refs []payloadRef
-	for index := range hooks {
-		if views[index].Slot == 0 {
-			continue
-		}
-		hook := &hooks[index]
-		refs = append(refs, payloadRef{runID: hook.RunID, slot: views[index].Slot, set: func(_ worlds.EventType, payload []byte) { hook.Metadata = payload }})
-	}
-	return w.resolvePayloads(ctx, refs)
-}
-
-// scriptReply splits a script result into its values, mapping an {"err", code}
-// reply to the World error for code.
-func scriptReply(result any, err error) ([]any, error) {
+// hookView completes a backend hook with what its events record: when it
+// received a payload, the webhook request event, and its disposal.
+func (w *World) hookView(ctx context.Context, values map[string]any, resolve worlds.ResolveData) (worlds.Hook, error) {
+	hook, err := toHook(values)
 	if err != nil {
-		return nil, err
+		return worlds.Hook{}, err
 	}
-	values, ok := result.([]any)
-	if !ok || len(values) == 0 {
-		return nil, fmt.Errorf("workflow/vercel: unexpected script reply %#v", result)
+	events, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: hook.RunID, CorrelationID: string(hook.HookID)})
+	if err != nil {
+		return worlds.Hook{}, err
 	}
-	if values[0] == "ok" {
-		return values[1:], nil
-	}
-	if values[0] != "err" || len(values) < 2 {
-		return nil, fmt.Errorf("workflow/vercel: unexpected script reply %#v", result)
-	}
-	code, _ := values[1].(string)
-	switch code {
-	case "run_not_found":
-		return nil, worlds.ErrRunNotFound
-	case "run_exists":
-		return nil, worlds.ErrRunAlreadyExists
-	case "run_terminal":
-		return nil, worlds.ErrRunTerminal
-	case "step_not_startable":
-		return nil, worlds.ErrStepNotStartable
-	case "hook_force_claimed":
-		return nil, worlds.ErrHookForceClaimed
-	case "hook_not_active":
-		return nil, worlds.ErrHookNotActive
-	case "hook_conflict":
-		return nil, worlds.ErrHookConflict
-	case "in_band_superseded":
-		return nil, worlds.ErrInBandSuperseded
-	case "invalid":
-		return nil, worlds.ErrEventInvalid
-	case "stream_locked":
-		return nil, worlds.ErrStreamLocked
-	default:
-		return nil, fmt.Errorf("workflow/vercel: script error %q", code)
-	}
-}
-
-func replyString(value any) string {
-	switch value := value.(type) {
-	case string:
-		return value
-	case int64:
-		return strconv.FormatInt(value, 10)
-	default:
-		return ""
-	}
-}
-
-func replyInt(value any) int64 {
-	switch value := value.(type) {
-	case int64:
-		return value
-	case string:
-		n, _ := strconv.ParseInt(value, 10, 64)
-		return n
-	default:
-		return 0
-	}
-}
-
-func replyStrings(value any) []string {
-	values, _ := value.([]any)
-	result := make([]string, len(values))
-	for index, item := range values {
-		result[index] = replyString(item)
-	}
-	return result
-}
-
-func flatHash(value any) map[string]string {
-	values := replyStrings(value)
-	result := make(map[string]string, len(values)/2)
-	for index := 0; index+1 < len(values); index += 2 {
-		result[values[index]] = values[index+1]
-	}
-	return result
-}
-
-func formatScore(score float64) string { return strconv.FormatFloat(score, 'f', -1, 64) }
-
-// scoreRange returns the ZRANGEBYSCORE bounds after cursor in the requested
-// order. Cursors are the score of the last returned member.
-func scoreRange(cursor string, desc bool) (min, max string, err error) {
-	if cursor != "" {
-		if _, err := strconv.ParseFloat(cursor, 64); err != nil {
-			return "", "", fmt.Errorf("%w: invalid cursor %q", worlds.ErrEventInvalid, cursor)
+	for _, event := range events.Data {
+		switch event.EventType {
+		case worlds.EventTypeHookCreated:
+			var created worlds.DataHookCreated
+			if json.Unmarshal(event.Data, &created) == nil {
+				if hook.Webhook == nil {
+					hook.Webhook = created.Webhook
+				}
+				if hook.Metadata == nil {
+					hook.Metadata = created.Metadata
+				}
+				if hook.ClaimedFrom == nil {
+					hook.ClaimedFrom = created.ForceClaimedFrom
+				}
+			}
+		case worlds.EventTypeHookReceived:
+			if hook.ReceivedAt == nil {
+				at := event.CreatedAt
+				hook.ReceivedAt = &at
+			}
+			if received, ok := worlds.DecodeWebhookReceived(event.Data); ok && hook.Webhook != nil && received.Request != nil && hook.WebhookEventID == "" {
+				hook.WebhookEventID = event.EventID
+			}
+		case worlds.EventTypeHookDisposed:
+			at := event.CreatedAt
+			hook.DisposedAt = &at
+			var disposed worlds.HookDisposedEventData
+			if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil {
+				hook.ForceClaimedBy = disposed.ForceClaimedBy
+			}
+		}
+		if event.CreatedAt.After(hook.UpdatedAt) {
+			hook.UpdatedAt = event.CreatedAt
 		}
 	}
-	switch {
-	case cursor == "":
-		return "-inf", "+inf", nil
-	case desc:
-		return "-inf", "(" + cursor, nil
-	default:
-		return "(" + cursor, "+inf", nil
+	if resolve == worlds.ResolveDataNone {
+		hook.Metadata = nil
 	}
-}
-
-func fetchCount(limit int) int64 {
-	if limit <= 0 {
-		return -1
-	}
-	return int64(limit) + 1
-}
-
-// trimPage cuts members fetched with fetchCount to a page and its cursor.
-func trimPage(members []redisZ, limit int) ([]redisZ, string, bool) {
-	if limit <= 0 || len(members) <= limit {
-		return members, "", false
-	}
-	members = members[:limit]
-	return members, formatScore(members[limit-1].Score), true
+	return hook, nil
 }

@@ -929,7 +929,7 @@ func TestInlineStepQueuesItsRetryBeforeRecordingIt(t *testing.T) {
 	if err := runtime.Execute(ctx, first.Input); !errors.Is(err, storageErr) {
 		t.Fatalf("delivery error = %v, want the storage error", err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: first.ID}); err != nil {
+	if err := world.Acknowledge(ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
 	if queued := world.QueuedMessages(); len(queued) != 1 || queued[0].Input.NotBefore == nil {
@@ -942,7 +942,7 @@ func TestInlineStepQueuesItsRetryBeforeRecordingIt(t *testing.T) {
 		if err := runtime.Execute(ctx, message.Input); err != nil {
 			t.Fatal(err)
 		}
-		if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+		if err := world.Acknowledge(ctx, message.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1125,7 +1125,7 @@ func TestInlineBackgroundRunsInlineWithoutStepDeliveries(t *testing.T) {
 			if err := runtime.Execute(ctx, message.Input); err != nil {
 				t.Fatal(err)
 			}
-			if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+			if err := world.Acknowledge(ctx, message.ID); err != nil {
 				t.Fatal(err)
 			}
 		}
