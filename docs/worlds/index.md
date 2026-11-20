@@ -57,10 +57,22 @@ followed by the prefix, such as `http://workflow-worker:8081/v1/workflow`.
 
 ## Retention
 
-Runs are kept forever by default. A World that supports retention deletes a
-run's data `Config.Retention` after the run completes, fails, or is cancelled,
-so storage stays bounded. `Config.Retentions` sets it per workflow, by workflow
-name, and zero keeps that workflow's runs forever:
+A run's data is deleted as the Workflow SDK deletes it: its inputs, outputs
+and errors, the payloads in its events and hooks, and its streams' chunks. The
+run, step, event and hook records stay with their IDs, statuses, timestamps
+and attributes, the run's `ExpiredAt` is set, and the Workflow web UI shows its
+data as expired. Reading its result returns `workflow.ErrRunExpired`.
+
+Every World with `Capabilities().DeleteData` deletes a run's data:
+
+- when the run finishes, if it was created with `$retention: "0"`
+  (`worlds.RetainNone`);
+- on demand, with `workflow.DeleteRuns` or `RunsDeleteDataMany`;
+- after `Config.Retention`, in a World that supports it.
+
+`Config.Retention` keeps a finished run's data for that long, and
+`Config.Retentions` sets it per workflow, by workflow name. Zero keeps the
+data:
 
 ```go
 config.Retention = 24 * time.Hour
@@ -70,15 +82,12 @@ config.Retentions = worlds.Retentions(
 )
 ```
 
-Every World that supports retention follows the same rules:
-
-- Runs that are still pending or running are never deleted, however old.
-- A hook whose token retention has not ended keeps its run until it ends.
-- Runs that finished before retention was set are kept.
-
-Callers read a run's result and streams right after it finishes, so a few
-minutes is the shortest practical retention. Each World's page describes how
-and when it deletes.
+When a run finishes, its `ExpiredAt` is set from its workflow's retention, and
+its data reads as gone once that passes. Runs that are still pending or running
+are never deleted, and changing the retention applies to runs that finish
+afterwards. Callers read a run's result and streams right after it finishes, so
+a few minutes is the shortest practical retention. Each World's page describes
+how and when it deletes.
 
 ## Delivery guarantees
 
