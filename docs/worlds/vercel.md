@@ -176,6 +176,7 @@ the replay that declares it.
 | Hooks | `HooksGet` reads the hook and its events, for when it received a payload or was disposed. |
 | Analytics | Not supported. `Capabilities().Analytics` is false. |
 | Retention | `Config.Retention` and `Config.Retentions`, built with `vercelworld.Retentions(vercelworld.Retain[W](...))`, take `worlds.RetainDefault`, which leaves runs to Vercel's plan, or `worlds.RetainNone`, which creates runs with the Workflow SDK's `$retention: "0"` attribute so the backend deletes their data when they finish. The backend supports no other retention. A run created with its own `$retention` attribute keeps it. |
+| Deleting run data | `RunsDeleteDataMany` calls the backend's `/v4/runs/purge`, as world-vercel does, and maps its `purged` and `already_purged` outcomes to `deleted` and `already_deleted`. The backend deletes a `$retention: "0"` run's data when it finishes and reports `expiredAt` on runs. |
 
 ## Encryption
 

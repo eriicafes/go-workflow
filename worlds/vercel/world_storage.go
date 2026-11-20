@@ -90,6 +90,7 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		UpdatedAt:           requiredTime(values, "updatedAt"),
 		StartedAt:           timeField(values, "startedAt"),
 		CompletedAt:         timeField(values, "completedAt"),
+		ExpiredAt:           timeField(values, "expiredAt"),
 	}
 	if resolve != worlds.ResolveDataNone {
 		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
@@ -469,7 +470,61 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 	return hook, nil
 }
 
-// RunsDeleteDataMany is not supported yet.
-func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
-	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/vercel: delete run data: %w", errors.ErrUnsupported)
+// purgeResult is the backend's run data deletion result, which names the
+// deleted and already_deleted outcomes purged and already_purged.
+type purgeResult struct {
+	Summary struct {
+		Requested     int `cbor:"requested" json:"requested"`
+		Purged        int `cbor:"purged" json:"purged"`
+		AlreadyPurged int `cbor:"alreadyPurged" json:"alreadyPurged"`
+		Skipped       int `cbor:"skipped" json:"skipped"`
+		NotCreated    int `cbor:"notCreated" json:"notCreated"`
+		NotFound      int `cbor:"notFound" json:"notFound"`
+		Failed        int `cbor:"failed" json:"failed"`
+	} `cbor:"summary" json:"summary"`
+	Results []struct {
+		RunID     string `cbor:"runId" json:"runId"`
+		Outcome   string `cbor:"outcome" json:"outcome"`
+		Reason    string `cbor:"reason,omitempty" json:"reason,omitempty"`
+		Status    string `cbor:"status,omitempty" json:"status,omitempty"`
+		Code      string `cbor:"code,omitempty" json:"code,omitempty"`
+		Retryable bool   `cbor:"retryable,omitempty" json:"retryable,omitempty"`
+	} `cbor:"results" json:"results"`
+}
+
+// RunsDeleteDataMany deletes the data of finished runs through the backend,
+// as world-vercel does. The backend keeps their metadata.
+func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	if err := worlds.CheckDeleteDataInput(input); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	ids := make([]string, len(input.RunIDs))
+	for index, id := range input.RunIDs {
+		ids[index] = string(id)
+	}
+	var response purgeResult
+	if err := w.api.do(ctx, http.MethodPost, "/v4/runs/purge", nil, map[string]any{"runIds": ids}, &response); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	byID := make(map[string]worlds.DeleteDataResult, len(response.Results))
+	for _, wire := range response.Results {
+		outcome := worlds.DeleteDataOutcome(wire.Outcome)
+		switch wire.Outcome {
+		case "purged":
+			outcome = worlds.DeleteDataDeleted
+		case "already_purged":
+			outcome = worlds.DeleteDataAlreadyDeleted
+		}
+		byID[wire.RunID] = worlds.DeleteDataResult{RunID: worlds.RunID(wire.RunID), Outcome: outcome, Reason: wire.Reason, Status: worlds.Status(wire.Status), Code: wire.Code, Retryable: wire.Retryable}
+	}
+	// Exactly one result per requested run, reordered to the request.
+	results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+	for index, id := range input.RunIDs {
+		result, ok := byID[string(id)]
+		if !ok || len(byID) != len(input.RunIDs) {
+			return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/vercel: delete data returned %d results for %d runs", len(response.Results), len(input.RunIDs))
+		}
+		results[index] = result
+	}
+	return worlds.NewDeleteDataResult(results), nil
 }
