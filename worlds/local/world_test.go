@@ -218,6 +218,57 @@ func TestViewsHoldNoPayloads(t *testing.T) {
 	}
 }
 
+func TestPrepareFinishesAnInterruptedPurge(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	world := startWorld(t, dir, nil)
+	runID := worlds.RunID("wrun_interrupted")
+	input := base64.StdEncoding.EncodeToString([]byte(`"run-input-bytes"`))
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "purge", Input: []byte(`"run-input-bytes"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []worlds.EventType{worlds.EventTypeRunStarted, worlds.EventTypeRunCancelled} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "out", Chunk: []byte("chunk")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A crash after the run's ExpiredAt committed left its files unpurged.
+	runFile := filepath.Join(dir, "runs", key(string(runID))+".json")
+	raw, err := os.ReadFile(runFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	record["ExpiredAt"] = time.Now().UTC().Add(-time.Second)
+	writeRecord(t, dir, "runs/"+key(string(runID))+".json", record)
+
+	reopened := startWorld(t, dir, nil)
+	event, err := os.ReadFile(filepath.Join(dir, "events", key(string(runID)), string(worlds.EventIDForSlot(1))+".json"))
+	if err != nil || strings.Contains(string(event), input) {
+		t.Fatalf("run_created file after recovery = %s, err=%v", event, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "streams", key(string(runID)), key("out"), "0000000000.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("chunk file after recovery: %v", err)
+	}
+	if raw, err := os.ReadFile(runFile); err != nil || !strings.Contains(string(raw), `"dataPurged":true`) {
+		t.Fatalf("run file after recovery = %s, err=%v", raw, err)
+	}
+	chunks, err := reopened.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out"})
+	if err != nil || len(chunks.Data) != 0 || !chunks.Done {
+		t.Fatalf("chunks after recovery = %+v, err=%v", chunks, err)
+	}
+}
+
 func TestSecondPrepareIsInUse(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

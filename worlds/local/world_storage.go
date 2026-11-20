@@ -30,6 +30,10 @@ type runRecord struct {
 	// OutputSlot is the run_completed event and ErrorSlot the run_failed event.
 	OutputSlot int `json:"outputSlot,omitempty"`
 	ErrorSlot  int `json:"errorSlot,omitempty"`
+	// DataPurged reports that the run's data was deleted from its event and
+	// chunk files. A run whose ExpiredAt is set commits that first, so until
+	// DataPurged its reads scrub what is left, and recovery deletes it.
+	DataPurged bool `json:"dataPurged,omitempty"`
 }
 
 // stepRecord is the materialized step. InputSlot is its step_created event.
@@ -116,7 +120,7 @@ func (w *World) readEvents(runID worlds.RunID, from, to int) ([]worlds.Event, er
 		if err := readJSON(w.root, eventPath(runID, slot), &event); err != nil {
 			return nil, err
 		}
-		events = append(events, event)
+		events = append(events, w.scrubUnpurged(event))
 	}
 	return events, nil
 }
@@ -128,7 +132,16 @@ func (w *World) readEvent(runID worlds.RunID, slot int) (worlds.Event, bool, err
 	}
 	var event worlds.Event
 	err := readJSON(w.root, eventPath(runID, slot), &event)
-	return event, err == nil, err
+	return w.scrubUnpurged(event), err == nil, err
+}
+
+// scrubUnpurged removes the payload of an event whose run's data was deleted
+// but whose files still hold it, after a purge that failed partway.
+func (w *World) scrubUnpurged(event worlds.Event) worlds.Event {
+	if w.unpurged[event.RunID] {
+		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
+	return event
 }
 
 func (w *World) readHooks() ([]hookRecord, error) {

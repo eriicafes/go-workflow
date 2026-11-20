@@ -32,6 +32,11 @@ func (w *World) recoverLocked() error {
 				return err
 			}
 		}
+		if run.ExpiredAt != nil && !run.DataPurged && worlds.RunDataExpired(run.Run, time.Now()) {
+			if err := w.purgeData(run); err != nil {
+				return err
+			}
+		}
 	}
 	for _, parent := range []string{"events", "steps"} {
 		dirs, err := listDirs(w.root, parent)

@@ -75,6 +75,13 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if meta.Closed {
 			return worlds.ErrStreamClosed
 		}
+		// A deleted run's streams take no more data.
+		var run runRecord
+		if ok, err := w.readOptional(runPath(input.RunID), &run); err != nil {
+			return err
+		} else if ok && worlds.RunDataExpired(run.Run, time.Now()) {
+			return worlds.ErrStreamClosed
+		}
 		return w.appendChunks(input.RunID, meta, input.Chunks)
 	})
 }
@@ -130,6 +137,9 @@ func (w *World) readChunks(runID worlds.RunID, name string, start, limit int) (w
 	if err != nil {
 		return worlds.StreamChunksResult{}, false, err
 	}
+	if w.unpurged[runID] {
+		meta.Count, meta.Closed = 0, true
+	}
 	end := max(start, min(start+limit, meta.Count))
 	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: strconv.Itoa(end), HasMore: end < meta.Count, Done: meta.Closed, RetryAfter: streamRetryAfter}
 	for index := start; index < end; index++ {
@@ -167,7 +177,12 @@ func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) 
 		return nil, err
 	}
 	defer unlock()
-	dir := path.Join("streams", fileKey(string(input.RunID)))
+	return w.streamNames(input.RunID)
+}
+
+// streamNames returns the names of a run's streams, sorted.
+func (w *World) streamNames(runID worlds.RunID) ([]string, error) {
+	dir := path.Join("streams", fileKey(string(runID)))
 	keys, err := listDirs(w.root, dir)
 	if err != nil {
 		return nil, err

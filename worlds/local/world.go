@@ -57,10 +57,13 @@ type World struct {
 	prepared      bool
 	closed        bool
 	broken        error
-	ctx           context.Context
-	cancel        context.CancelFunc
-	runtime       *worlds.Runtime
-	workers       sync.WaitGroup
+	// unpurged names runs whose data was deleted but whose files a failed
+	// purge left holding it. Reads scrub them until the purge is retried.
+	unpurged map[worlds.RunID]bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	runtime  *worlds.Runtime
+	workers  sync.WaitGroup
 
 	changesMu sync.Mutex
 	changes   chan struct{}
@@ -286,7 +289,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true}
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under
