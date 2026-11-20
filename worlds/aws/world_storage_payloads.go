@@ -156,8 +156,16 @@ func (w *World) resolveHooks(ctx context.Context, items []map[string]ddb.Attribu
 	if err != nil {
 		return nil, err
 	}
-	for index := range hooks {
-		hooks[index].Metadata = worlds.EventPayload(events[created[index]])
+	for index, hook := range hooks {
+		event := events[created[index]]
+		if hook.HookID == worlds.StartHookID(hook.RunID) {
+			// A start hook's created event is its run's run_created.
+			if start := worlds.RunStartHook(event.Data); start != nil {
+				hooks[index].Metadata = start.Metadata
+			}
+			continue
+		}
+		hooks[index].Metadata = worlds.EventPayload(event)
 	}
 	return hooks, nil
 }

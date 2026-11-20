@@ -309,6 +309,15 @@ func classify(err error, eventType worlds.EventType) error {
 			return fmt.Errorf("%w: %v", worlds.ErrHookNotActive, err)
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunNotFound, err)
+	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":
+		// Another run owns a start hook's token, which the backend names, as
+		// world-vercel reads it.
+		conflict := &worlds.HookConflictError{}
+		if details, ok := api.Fields["details"].(map[string]any); ok {
+			id, _ := details["conflictingRunId"].(string)
+			conflict.RunID = worlds.RunID(id)
+		}
+		return conflict
 	case api.Status == http.StatusConflict && api.Code == "hook-force-claimed":
 		return fmt.Errorf("%w: %v", worlds.ErrHookForceClaimed, err)
 	case api.Status == http.StatusConflict, api.Status == http.StatusGone:
