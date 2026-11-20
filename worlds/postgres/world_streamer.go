@@ -26,9 +26,19 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		return err
 	}
 	return w.inTx(ctx, func(tx pgx.Tx) error {
+		// The run's row lock orders the write against a purge of its data,
+		// and a deleted run's streams take no more data.
+		var expired bool
+		err := tx.QueryRow(ctx, `SELECT coalesce(expired_at <= now(), false) FROM go_workflow_runs WHERE run_id = $1 FOR SHARE`, input.RunID).Scan(&expired)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if expired {
+			return worlds.ErrStreamClosed
+		}
 		var closed bool
 		var count int64
-		err := tx.QueryRow(ctx, `INSERT INTO go_workflow_streams (run_id, name) VALUES ($1, $2)
+		err = tx.QueryRow(ctx, `INSERT INTO go_workflow_streams (run_id, name) VALUES ($1, $2)
 			ON CONFLICT (run_id, name) DO UPDATE SET run_id = excluded.run_id
 			RETURNING closed, chunk_count`, input.RunID, input.Name).Scan(&closed, &count)
 		if err != nil {
@@ -103,7 +113,11 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
 	var closed bool
 	var count int64
-	err := w.pool.QueryRow(ctx, `SELECT closed, chunk_count FROM go_workflow_streams WHERE run_id = $1 AND name = $2`, runID, name).Scan(&closed, &count)
+	// A run whose expired_at has passed reads as empty and closed, before
+	// Worker deletes its chunks.
+	err := w.pool.QueryRow(ctx, `SELECT s.closed OR coalesce(r.expired_at <= now(), false), CASE WHEN r.expired_at <= now() THEN 0 ELSE s.chunk_count END
+		FROM go_workflow_streams s LEFT JOIN go_workflow_runs r ON r.run_id = s.run_id
+		WHERE s.run_id = $1 AND s.name = $2`, runID, name).Scan(&closed, &count)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return worlds.StreamChunksResult{}, false, err
 	}

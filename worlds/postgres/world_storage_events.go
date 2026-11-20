@@ -61,7 +61,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	var result worlds.EventResult
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		a, err := lockRun(ctx, tx, input.RunID)
+		a, err := w.lockRun(ctx, tx, input.RunID)
 		if err != nil {
 			return err
 		}
@@ -110,7 +110,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	var inBandCount int
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
 		results = make([]worlds.EventResult, 0, len(input.Events))
-		a, err := lockRun(ctx, tx, input.RunID)
+		a, err := w.lockRun(ctx, tx, input.RunID)
 		if err != nil {
 			return err
 		}
@@ -154,7 +154,13 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 		var event worlds.Event
 		event, err = scanEvent(w.pool.QueryRow(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot = $2`, input.RunID, int64(slot)))
 		if err == nil {
-			event.Data = worlds.ResolveEventData(event.EventType, event.Data, input.ResolveData)
+			resolve := input.ResolveData
+			if expired, err := w.runDataExpired(ctx, input.RunID); err != nil {
+				return worlds.Event{}, err
+			} else if expired {
+				resolve = worlds.EventsResolveDataNone
+			}
+			event.Data = worlds.ResolveEventData(event.EventType, event.Data, resolve)
 			return event, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -218,6 +224,11 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
+	if expired, err := w.runDataExpired(ctx, runID); err != nil {
+		return worlds.Page[worlds.Event]{}, err
+	} else if expired {
+		resolve = worlds.EventsResolveDataNone
+	}
 	events = worlds.ResolveEvents(events, resolve)
 	if len(events) == 0 {
 		if err := w.runExists(ctx, runID); err != nil {
@@ -235,6 +246,7 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 // row lock. Admission reads see the transaction's own earlier appends, so a
 // batch is admitted against its in-progress state.
 type appender struct {
+	w           *World
 	tx          pgx.Tx
 	run         worlds.Run
 	count       uint64
@@ -398,6 +410,11 @@ func (a *appender) delta(ctx context.Context, options worlds.EventsCreateOptions
 func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (worlds.Event, error) {
 	a.count++
 	event := worlds.Event{RunID: a.run.RunID, EventID: worlds.EventIDForSlot(a.count), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: value.Data, CreatedAt: now()}
+	if worlds.RunDataExpired(a.run, event.CreatedAt) {
+		// A step still running when its run's data was deleted settles after
+		// it. What it brought is deleted as it lands.
+		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
 	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_events (run_id, slot, type, correlation_id, data, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		event.RunID, int64(a.count), event.EventType, event.CorrelationID, event.Data, event.CreatedAt); err != nil {
 		return worlds.Event{}, err
@@ -579,11 +596,30 @@ func (a *appender) flush(ctx context.Context) error {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
+		if err := a.expire(ctx); err != nil {
+			return err
+		}
 		if _, err := a.tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelRuns, string(a.run.RunID)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// expire applies the retention of a run that has just finished. A run with
+// $retention "0" loses its data in this transaction, before waiters are
+// notified. Otherwise a Config.Retention for its workflow sets the run's
+// expired_at, and Worker deletes its data once it has passed.
+func (a *appender) expire(ctx context.Context) error {
+	if worlds.ReadRunRetention(a.run.Attributes) == worlds.RetainNone {
+		return purgeRunData(ctx, a.tx, a.run.RunID)
+	}
+	retention := a.w.retentionFor(a.run.WorkflowName)
+	if retention <= 0 || a.run.CompletedAt == nil {
+		return nil
+	}
+	_, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET expired_at = $2 WHERE run_id = $1 AND expired_at IS NULL`, a.run.RunID, a.run.CompletedAt.Add(retention))
+	return err
 }
 
 // eventColumns are the columns scanEvent reads. Data is always read, since
@@ -605,13 +641,13 @@ func validEvent(event worlds.EventsCreateEvent) bool {
 	return event.EventType != worlds.EventTypeRunCreated && event.EventType.Valid()
 }
 
-func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, error) {
-	a := &appender{tx: tx}
+func (w *World) lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, error) {
+	a := &appender{w: w, tx: tx}
 	var attributes []byte
 	var count, inBandCount int64
-	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, encryption_public_key, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
+	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, encryption_public_key, status, result_slot, attributes, updated_at, started_at, completed_at, expired_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.EncryptionPublicKey, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
+		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.EncryptionPublicKey, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &a.run.ExpiredAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}

@@ -41,10 +41,12 @@ type Config struct {
 	// DefaultQueue.
 	Routes map[string]string
 	// Retention is how long a run's data is kept after the run completes,
-	// fails, or is cancelled. Worker then deletes its run, events, steps,
-	// hooks, queued deliveries, and streams in the background. A run with a
-	// hook whose token retention has not ended is kept until it ends. Zero
-	// keeps runs forever.
+	// fails, or is cancelled. The run's ExpiredAt is set when it finishes,
+	// its payloads read as gone once that passes, and Worker deletes them in
+	// the background, as the Workflow SDK deletes a run's data: the run,
+	// step, event, and hook rows stay, and streams are left empty and closed.
+	// Zero keeps the data. A run created with $retention "0" loses its data
+	// as it finishes, whatever Retention is.
 	Retention time.Duration
 	// Retentions overrides Retention for the workflows it names, by workflow
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
@@ -156,7 +158,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true}
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under

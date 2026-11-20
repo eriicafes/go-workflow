@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -80,12 +79,14 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 // the input from run_created in slot 1 and the output or error from the
 // result slot. ResolveDataNone joins only a run_failed result, for the error.
 func runSelect(resolve worlds.ResolveData) string {
-	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = r.run_id AND ie.slot = 1"
+	// Payloads read as NULL once the run's expired_at has passed.
+	live := " AND (r.expired_at IS NULL OR r.expired_at > now())"
+	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = r.run_id AND ie.slot = 1"+live
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""
 	}
-	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.created_at, r.updated_at, r.started_at, r.completed_at" +
-		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot"
+	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at" +
+		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot" + live
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
@@ -93,7 +94,7 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 	var attributes, input, result []byte
 	var resultType *worlds.EventType
 	var inBandCount int64
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt); err != nil {
 		return worlds.Run{}, err
 	}
 	if input != nil {
@@ -113,7 +114,7 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 		return worlds.Run{}, err
 	}
 	run.CreatedAt, run.UpdatedAt = run.CreatedAt.UTC(), run.UpdatedAt.UTC()
-	run.StartedAt, run.CompletedAt = utc(run.StartedAt), utc(run.CompletedAt)
+	run.StartedAt, run.CompletedAt, run.ExpiredAt = utc(run.StartedAt), utc(run.CompletedAt), utc(run.ExpiredAt)
 	return run, nil
 }
 
@@ -125,7 +126,43 @@ func statusStrings(values []worlds.Status) []string {
 	return result
 }
 
-// RunsDeleteDataMany is not supported yet.
-func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
-	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/postgres: delete run data: %w", errors.ErrUnsupported)
+func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	if err := worlds.CheckDeleteDataInput(input); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+	for index, id := range input.RunIDs {
+		results[index] = w.deleteRunData(ctx, id)
+	}
+	return worlds.NewDeleteDataResult(results), nil
+}
+
+// deleteRunData deletes one run's data in its own transaction, so a failure
+// leaves the other runs of the request deleted.
+func (w *World) deleteRunData(ctx context.Context, id worlds.RunID) worlds.DeleteDataResult {
+	result := worlds.DeleteDataResult{RunID: id}
+	err := w.inTx(ctx, func(tx pgx.Tx) error {
+		var status worlds.Status
+		var expired, purged bool
+		err := tx.QueryRow(ctx, `SELECT status, coalesce(expired_at <= now(), false), data_purged FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, id).Scan(&status, &expired, &purged)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			result.Outcome = worlds.DeleteDataNotFound
+			return nil
+		case err != nil:
+			return err
+		case !status.Terminal():
+			result.Outcome, result.Reason, result.Status = worlds.DeleteDataSkipped, worlds.DeleteDataRunNotTerminal, status
+			return nil
+		}
+		result.Outcome = worlds.DeleteDataDeleted
+		if expired {
+			result.Outcome = worlds.DeleteDataAlreadyDeleted
+		}
+		return purgeRunData(ctx, tx, id)
+	})
+	if err != nil {
+		return worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "storage_error", Retryable: ctx.Err() == nil}
+	}
+	return result
 }
