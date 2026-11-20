@@ -3,6 +3,7 @@ package worlds
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"time"
 )
 
@@ -84,6 +85,14 @@ func EventPayload(event Event) []byte {
 		return data.Metadata
 	}
 	return nil
+}
+
+// EventPayloadFields returns, by event type, the Data field holding user
+// data, as the Workflow SDK's getEventDataRefFields does. ScrubEventData
+// removes it. A World that deletes data in its own storage, such as in SQL,
+// uses it to find the payloads.
+func EventPayloadFields() map[EventType]string {
+	return maps.Clone(eventPayloadFields)
 }
 
 // ScrubEventData returns event Data without its user data, as the Workflow

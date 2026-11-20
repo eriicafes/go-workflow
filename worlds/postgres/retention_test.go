@@ -18,55 +18,56 @@ func TestExpireRuns(t *testing.T) {
 	ctx := context.Background()
 
 	done := retentionRun(t, world, "done")
-	writeEvent(t, world, done, worlds.EventTypeHookCreated, "hook_done", worlds.DataHookCreated{Token: "token_done"})
+	writeEvent(t, world, done, worlds.EventTypeHookCreated, "hook_done", worlds.DataHookCreated{Token: "token_done", Metadata: []byte(`"metadata"`)})
 	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: done, Name: "out", Chunk: []byte("chunk")}); err != nil {
 		t.Fatal(err)
 	}
-	later := time.Now().Add(time.Hour)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: done, WorkflowName: "retention", NotBefore: &later}); err != nil {
-		t.Fatal(err)
-	}
 	complete(t, world, done)
-
 	alive := retentionRun(t, world, "alive")
 
-	// A hook whose token retention has not ended keeps its run.
-	retained := retentionRun(t, world, "retained")
-	writeEvent(t, world, retained, worlds.EventTypeHookCreated, "hook_retained", worlds.DataHookCreated{Token: "token_retained", TokenRetentionUntil: &later})
-	complete(t, world, retained)
-
-	before := rowCounts(t, world, done)
-	for _, table := range []string{"go_workflow_runs", "go_workflow_events", "go_workflow_steps", "go_workflow_hooks", "go_workflow_queue", "go_workflow_streams", "go_workflow_stream_chunks"} {
-		if before[table] == 0 {
-			t.Fatalf("the finished run has no rows in %s to expire", table)
-		}
+	// A finished run's data is kept for the hour.
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: done})
+	if err != nil || run.ExpiredAt == nil || run.ExpiredAt.Sub(*run.CompletedAt) != time.Hour || string(run.Output) != `"ok"` {
+		t.Fatalf("finished run = %+v, %v", run, err)
 	}
-
-	// Nothing has been kept for the hour yet.
-	if n, err := world.expireRuns(ctx, time.Now()); err != nil || n != 0 {
+	if n, err := world.expireRuns(ctx); err != nil || n != 0 {
 		t.Fatalf("expireRuns before retention = %d, %v", n, err)
 	}
-	n, err := world.expireRuns(ctx, time.Now().Add(2*time.Hour))
-	if err != nil || n != 1 {
-		t.Fatalf("expireRuns = %d, %v; want the finished run only", n, err)
+
+	// Once the hour has passed, reads hide the run's data before Worker
+	// deletes it.
+	if _, err := world.pool.Exec(ctx, `UPDATE go_workflow_runs SET expired_at = now() - interval '1 second' WHERE run_id = $1`, done); err != nil {
+		t.Fatal(err)
 	}
-	for table, count := range rowCounts(t, world, done) {
-		if count != 0 {
-			t.Errorf("%s still has %d rows of the expired run", table, count)
+	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: done})
+	if err != nil || run.Input != nil || run.Output != nil {
+		t.Fatalf("expired run before purge = %+v, %v", run, err)
+	}
+	if purgedData(t, world, done) {
+		t.Fatal("the run was purged before Worker ran")
+	}
+	if n, err := world.expireRuns(ctx); err != nil || n != 1 {
+		t.Fatalf("expireRuns = %d, %v; want the expired run only", n, err)
+	}
+	if !purgedData(t, world, done) {
+		t.Fatal("expireRuns left the run's data")
+	}
+	// Its rows stay, as in the Workflow SDK, and the chunks go.
+	counts := rowCounts(t, world, done)
+	for _, table := range []string{"go_workflow_runs", "go_workflow_events", "go_workflow_steps", "go_workflow_hooks", "go_workflow_streams"} {
+		if counts[table] == 0 {
+			t.Errorf("%s lost the expired run's rows", table)
 		}
 	}
-	var tokens int
-	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_hook_tokens WHERE hook_id = 'hook_done'`).Scan(&tokens); err != nil || tokens != 0 {
-		t.Errorf("hook tokens of the expired run = %d, %v", tokens, err)
+	if counts["go_workflow_stream_chunks"] != 0 {
+		t.Errorf("stream chunks of the expired run = %d", counts["go_workflow_stream_chunks"])
 	}
-	for _, runID := range []worlds.RunID{alive, retained} {
-		if rowCounts(t, world, runID)["go_workflow_runs"] != 1 {
-			t.Errorf("%s was expired", runID)
-		}
+	var payloads int
+	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE run_id = $1 AND (convert_from(data, 'UTF8')::jsonb ?| array['input', 'output', 'result', 'error', 'metadata', 'payload'])`, done).Scan(&payloads); err != nil || payloads != 0 {
+		t.Fatalf("events of the expired run with payloads = %d, %v", payloads, err)
 	}
-	page, err := world.RunsList(ctx, worlds.RunsListInput{})
-	if err != nil || len(page.Data) != 2 {
-		t.Fatalf("RunsList = %d runs, %v; want the two kept", len(page.Data), err)
+	if run := rowCounts(t, world, alive); run["go_workflow_runs"] != 1 || purgedData(t, world, alive) {
+		t.Error("a running run was expired")
 	}
 }
 
@@ -76,25 +77,20 @@ func TestExpireRunsByWorkflow(t *testing.T) {
 		Retention:  time.Hour,
 		Retentions: map[string]time.Duration{"short": time.Minute, "kept": 0},
 	})
-	short := retentionRunOf(t, world, "short_run", "short")
-	complete(t, world, short)
-	kept := retentionRunOf(t, world, "kept_run", "kept")
-	complete(t, world, kept)
-	other := retentionRunOf(t, world, "other_run", "other")
-	complete(t, world, other)
-
-	// Past the short workflow's retention, before the default's.
-	n, err := world.expireRuns(context.Background(), time.Now().Add(10*time.Minute))
-	if err != nil || n != 1 || rowCounts(t, world, short)["go_workflow_runs"] != 0 {
-		t.Fatalf("expireRuns after a minute = %d, %v; want only the short run", n, err)
-	}
-	// Past the default; the kept workflow's runs stay forever.
-	n, err = world.expireRuns(context.Background(), time.Now().Add(1000*time.Hour))
-	if err != nil || n != 1 || rowCounts(t, world, other)["go_workflow_runs"] != 0 {
-		t.Fatalf("expireRuns after the default = %d, %v; want only the other run", n, err)
-	}
-	if rowCounts(t, world, kept)["go_workflow_runs"] != 1 {
-		t.Fatal("a run of a workflow kept forever was expired")
+	ctx := context.Background()
+	for workflow, want := range map[string]time.Duration{"short": time.Minute, "kept": 0, "other": time.Hour} {
+		runID := retentionRunOf(t, world, workflow+"_run", workflow)
+		complete(t, world, runID)
+		run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case want == 0 && run.ExpiredAt != nil:
+			t.Errorf("%s run expires at %v; want kept", workflow, run.ExpiredAt)
+		case want > 0 && (run.ExpiredAt == nil || run.ExpiredAt.Sub(*run.CompletedAt) != want):
+			t.Errorf("%s run expires at %v; want %v after it completed", workflow, run.ExpiredAt, want)
+		}
 	}
 }
 
@@ -111,9 +107,9 @@ func TestWorkerExpiresRuns(t *testing.T) {
 	stopped := make(chan error, 1)
 	go func() { stopped <- Worker(ctx, world, worlds.Runners()) }()
 	deadline := time.Now().Add(10 * time.Second)
-	for rowCounts(t, world, done)["go_workflow_runs"] != 0 {
+	for !purgedData(t, world, done) {
 		if time.Now().After(deadline) {
-			t.Fatal("Worker did not expire the finished run")
+			t.Fatal("Worker did not delete the finished run's data")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -121,6 +117,16 @@ func TestWorkerExpiresRuns(t *testing.T) {
 	if err := <-stopped; err != context.Canceled {
 		t.Fatalf("Worker returned %v", err)
 	}
+}
+
+// purgedData reports whether a run's rows no longer hold its data.
+func purgedData(t *testing.T, world *World, runID worlds.RunID) bool {
+	t.Helper()
+	var purged bool
+	if err := world.pool.QueryRow(context.Background(), `SELECT data_purged FROM go_workflow_runs WHERE run_id = $1`, runID).Scan(&purged); err != nil {
+		t.Fatal(err)
+	}
+	return purged
 }
 
 // retentionRun creates a started run of the retention workflow with a

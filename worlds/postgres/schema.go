@@ -139,6 +139,13 @@ ALTER TABLE go_workflow_hooks ADD COLUMN encryption_public_key text NOT NULL DEF
 -- takes any number of requests.
 ALTER TABLE go_workflow_hooks DROP COLUMN webhook, DROP COLUMN webhook_event_id,
 	ADD COLUMN is_webhook boolean NOT NULL DEFAULT false;
+`, `
+-- A run's data is deleted, rather than the run, as the Workflow SDK does.
+-- expired_at is when it was or will be deleted, and data_purged records that
+-- its payloads are gone.
+ALTER TABLE go_workflow_runs ADD COLUMN expired_at timestamptz,
+	ADD COLUMN data_purged boolean NOT NULL DEFAULT false;
+CREATE INDEX go_workflow_runs_expired_idx ON go_workflow_runs (expired_at) WHERE expired_at IS NOT NULL AND NOT data_purged;
 `}
 
 // migrate applies pending migrations in one transaction under a

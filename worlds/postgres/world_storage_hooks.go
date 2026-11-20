@@ -105,7 +105,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		}
 		runs := map[worlds.RunID]*appender{}
 		for _, id := range ids {
-			run, err := lockRun(ctx, tx, id)
+			run, err := w.lockRun(ctx, tx, id)
 			if errors.Is(err, worlds.ErrRunNotFound) && id != input.RunID {
 				continue
 			}
@@ -204,7 +204,7 @@ func hookJoin(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		return ""
 	}
-	return " LEFT JOIN go_workflow_events me ON me.run_id = h.run_id AND me.slot = h.created_slot"
+	return " LEFT JOIN go_workflow_events me ON me.run_id = h.run_id AND me.slot = h.created_slot" + runLive("h.run_id")
 }
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
