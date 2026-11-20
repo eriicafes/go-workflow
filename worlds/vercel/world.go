@@ -30,9 +30,12 @@ type Config struct {
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// It is required.
 	BaseURL string
-	// QueueURL is the regional Vercel Queues API root including /api/v3.
-	// Empty uses https://<region>.vercel-queue.com/api/v3 for the region in
-	// VERCEL_REGION, or iad1.
+	// QueueURL is a Vercel Queues API root including /api/v3 that every
+	// queue request goes to, naming the message's region in the
+	// x-vercel-queue-region header, as a proxy forwards it. Empty sends each
+	// message to https://<region>.vercel-queue.com/api/v3 for the region its
+	// run ID carries, as world-vercel does, else that of VERCEL_REGION, else
+	// iad1, and releases each delivery in the region that delivered it.
 	QueueURL string
 	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
 	// are published to. It is required.
@@ -157,13 +160,6 @@ func New(config Config) (*World, error) {
 	config.BaseURL = baseURL
 	if config.Token != "" && config.ProjectID == "" {
 		return nil, errors.New("workflow/vercel: a token needs a project ID")
-	}
-	if config.QueueURL == "" {
-		region := os.Getenv("VERCEL_REGION")
-		if region == "" || region == "dev1" {
-			region = "iad1"
-		}
-		config.QueueURL = "https://" + region + ".vercel-queue.com/api/v3"
 	}
 	config.QueueURL = strings.TrimRight(config.QueueURL, "/")
 	if config.HTTPClient == nil {

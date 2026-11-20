@@ -64,7 +64,7 @@ clients in other processes, or `workflow.LatestDeployment`, which needs the
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
 | `Topic` | Required. Topic deliveries of unrouted workflows are published to. |
 | `Topics`, `Routes` | Further topics by queue name, and the queue of each routed workflow. See [routing](#routing-workflows-to-topics). |
-| `QueueURL` | Regional Vercel Queues API root including `/api/v3`. Default `https://<VERCEL_REGION>.vercel-queue.com/api/v3`, or `iad1` outside a deployment. |
+| `QueueURL` | A Vercel Queues API root including `/api/v3` that every queue request goes to, with the message's region in `x-vercel-queue-region`, as a proxy takes it. Empty routes each message to its region's `https://<region>.vercel-queue.com/api/v3`. See [regions](#regions). |
 | `OIDCToken` | Returns the deployment's OIDC token for each request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
 | `Token`, `ProjectID`, `TeamID`, `Environment` | A Vercel access token and the project it acts in, for using the storage from outside a deployment. See [outside a deployment](#outside-a-deployment). |
 | `BackendURL` | Root of the workflow API. Default `https://vercel-workflow.com/api`, or `https://api.vercel.com/v1/workflow` with `Token`. |
@@ -231,6 +231,20 @@ deployment that starts them.
 - **Production only.** Previews and custom environments keep marked runs on
   the deployment that starts them, since their `BaseURL` names another
   deployment or is protected. So does a failed request, which is logged.
+
+## Regions
+
+Run IDs carry the region a run's data lives in, as world-vercel's tagged run
+IDs do, and each run's queue messages go to that region:
+
+- **Run IDs.** The World implements `worlds.RegionalRunIDs`: a new run's ID is
+  a ULID with its region in the top bits of its randomness, from
+  `StartOptions.Region`, else `VERCEL_REGION`, else `iad1`. Child run IDs,
+  derived from their start step, are tagged the same way. An untagged ID lives
+  in `iad1`, as on the backend.
+- **Routing.** A message is sent to the region its run ID carries, else to
+  `VERCEL_REGION`'s, else `iad1`. A delivery's lease is renewed and released in
+  the region Vercel names in its `ce-vqsregion` header.
 
 ## Queue delivery
 

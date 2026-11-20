@@ -109,8 +109,8 @@ func TestNewDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if world.config.QueueURL != "https://sfo1.vercel-queue.com/api/v3" || world.api.baseURL != DefaultBackendURL || world.api.proxy {
-		t.Fatalf("defaults = queue %q backend %q proxy %v", world.config.QueueURL, world.api.baseURL, world.api.proxy)
+	if queue, header := world.queueURL(envRegion()); queue != "https://sfo1.vercel-queue.com/api/v3" || header != nil || world.api.baseURL != DefaultBackendURL || world.api.proxy {
+		t.Fatalf("defaults = queue %q backend %q proxy %v", queue, world.api.baseURL, world.api.proxy)
 	}
 	proxied, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", Token: "token", ProjectID: "prj_1", TeamID: "team_1"})
 	if err != nil {
