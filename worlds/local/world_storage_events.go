@@ -565,7 +565,27 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
-	if err := w.createRun(run, event); err != nil {
+	var hook *hookRecord
+	if start := input.StartHook; start != nil {
+		if start.Token == "" {
+			return worlds.EventResult{}, worlds.ErrEventInvalid
+		}
+		// The start hook claims its token with the run, or no run is
+		// created.
+		owner, err := w.readToken(start.Token)
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		if owner.held(now) {
+			previous, err := w.readHook(owner.HookID)
+			if err != nil {
+				return worlds.EventResult{}, err
+			}
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: previous.RunID}
+		}
+		hook = &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}}
+	}
+	if err := w.createRun(run, event, hook); err != nil {
 		return worlds.EventResult{}, err
 	}
 	w.signal()
@@ -574,7 +594,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 
 // createRun clears leftovers of an uncommitted create, then writes slot one and
 // commits the run record.
-func (w *World) createRun(run runRecord, event worlds.Event) error {
+func (w *World) createRun(run runRecord, event worlds.Event, hook *hookRecord) error {
 	for _, dir := range []string{eventsDir(run.RunID), stepsDir(run.RunID)} {
 		if err := w.root.RemoveAll(dir); err != nil {
 			return err
@@ -582,6 +602,16 @@ func (w *World) createRun(run runRecord, event worlds.Event) error {
 	}
 	if err := writeJSON(w.root, eventPath(run.RunID, 1), event); err != nil {
 		return err
+	}
+	// A start hook and its token are written before the run file commits
+	// them. Recovery removes them when the run file was never written.
+	if hook != nil {
+		if err := writeJSON(w.root, hookPath(hook.HookID), hook); err != nil {
+			return err
+		}
+		if err := writeJSON(w.root, tokenPath(hook.Token), tokenRecord{HookID: hook.HookID}); err != nil {
+			return err
+		}
 	}
 	return writeJSON(w.root, runPath(run.RunID), run)
 }

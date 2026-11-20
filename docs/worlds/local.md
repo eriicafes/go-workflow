@@ -109,6 +109,13 @@ until it is restarted.
 Streams commit through `meta.json`: chunk files at or past `count` are ignored
 and overwritten by the next write.
 
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` writes the hook `hook_<run ULID>` and its
+token file before the run file, which commits them with the run, and refuses
+with a `*worlds.HookConflictError` when another run holds the token. `Prepare`
+removes a start hook and token whose run file was never written.
+
 ## Deleting run data
 
 A run created with `$retention: "0"` loses its data when it finishes, and

@@ -265,6 +265,16 @@ func hookView(record hookRecord, load eventLoader, resolve worlds.ResolveData) (
 	if resolve == worlds.ResolveDataNone {
 		return value, nil
 	}
+	if value.HookID == worlds.StartHookID(value.RunID) {
+		// A start hook's metadata is in its run's run_created.
+		event, ok, err := load(1)
+		if ok && err == nil {
+			if start := worlds.RunStartHook(event.Data); start != nil {
+				value.Metadata = start.Metadata
+			}
+		}
+		return value, err
+	}
 	var err error
 	value.Metadata, err = load.payload(record.MetadataSlot)
 	return value, err

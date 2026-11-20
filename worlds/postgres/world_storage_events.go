@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/jackc/pgx/v5"
@@ -47,7 +48,10 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO go_workflow_events (run_id, slot, type, correlation_id, data, created_at) VALUES ($1, 1, $2, '', $3, $4)`,
 			input.RunID, worlds.EventTypeRunCreated, payload, at)
-		return err
+		if err != nil || input.StartHook == nil {
+			return err
+		}
+		return createStartHook(ctx, tx, input, at)
 	})
 	if err != nil {
 		return worlds.EventResult{}, err
@@ -668,4 +672,40 @@ func (w *World) lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*ap
 	a.run.InBandCount = int(inBandCount)
 	a.wasTerminal = a.run.Status.Terminal()
 	return a, nil
+}
+
+// createStartHook creates a run's start hook in the transaction creating the
+// run, claiming its token, or returns a *HookConflictError naming the run
+// holding it, which rolls the run back.
+func createStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput, at time.Time) error {
+	start := input.StartHook
+	if start.Token == "" {
+		return worlds.ErrEventInvalid
+	}
+	holder, err := lockToken(ctx, tx, start.Token, at)
+	if err != nil {
+		return err
+	}
+	if holder.hookID != "" {
+		return &worlds.HookConflictError{RunID: holder.runID}
+	}
+	id := worlds.StartHookID(input.RunID)
+	// created_slot 1 joins run_created, which holds the hook's metadata.
+	if _, err := tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, created_slot, is_webhook, created_at, updated_at, token_retention_until)
+		VALUES ($1, $2, $3, $4, $5, $6, 1, false, $7, $7, $8)`, id, input.RunID, input.WorkflowName, input.DeploymentID, input.EncryptionPublicKey, start.Token, at, start.TokenRetentionUntil); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_hook_tokens (token, hook_id) VALUES ($1, $2) ON CONFLICT (token) DO NOTHING`, start.Token, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// A concurrent claimant inserted the token since it was checked.
+		var owner worlds.RunID
+		if err := tx.QueryRow(ctx, `SELECT h.run_id FROM go_workflow_hook_tokens t JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1`, start.Token).Scan(&owner); err != nil {
+			return err
+		}
+		return &worlds.HookConflictError{RunID: owner}
+	}
+	return nil
 }

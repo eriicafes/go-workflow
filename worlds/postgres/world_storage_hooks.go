@@ -214,7 +214,14 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 		return worlds.Hook{}, err
 	}
 	if metadata != nil {
-		hook.Metadata = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeHookCreated, Data: metadata})
+		if hook.HookID == worlds.StartHookID(hook.RunID) {
+			// A start hook's created slot is its run's run_created.
+			if start := worlds.RunStartHook(metadata); start != nil {
+				hook.Metadata = start.Metadata
+			}
+		} else {
+			hook.Metadata = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeHookCreated, Data: metadata})
+		}
 	}
 	if len(claimed) > 0 {
 		if err := json.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
