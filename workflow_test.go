@@ -257,6 +257,29 @@ func TestStartAndGetCoverRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunValueReportsDeletedData(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+		return pointerWorkflowOutput{Value: input.Value}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, &pointerWorkflowInput{Value: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{worlds.RunID(run.ID())}})
+	if err != nil || result.Summary.Deleted != 1 {
+		t.Fatalf("delete = %+v, %v", result, err)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("deleted run error = %v", err)
+	}
+}
+
 func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)

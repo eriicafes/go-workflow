@@ -2,6 +2,8 @@ package awsworld
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -86,4 +88,9 @@ func runsIndex(workflowName string, status []worlds.Status) indexQuery {
 		return indexQuery{index: listGroupIndex, partition: "RUNS#" + workflowName, status: status}
 	}
 	return indexQuery{index: listIndex, partition: "RUNS", status: status}
+}
+
+// RunsDeleteDataMany is not supported yet.
+func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/aws: delete run data: %w", errors.ErrUnsupported)
 }

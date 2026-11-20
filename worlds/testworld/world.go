@@ -42,7 +42,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true}
 }
 
 // New returns a World that executes deliveries for the workflows of runners

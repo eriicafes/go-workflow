@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -466,4 +467,9 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 		hook.Metadata = nil
 	}
 	return hook, nil
+}
+
+// RunsDeleteDataMany is not supported yet.
+func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/vercel: delete run data: %w", errors.ErrUnsupported)
 }

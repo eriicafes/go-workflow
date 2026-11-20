@@ -289,8 +289,8 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 }
 
 // Value returns the output of the run once it has finished. It returns the
-// run's error as an *Error when the run failed and ErrRunCancelled when it was
-// cancelled.
+// run's error as an *Error when the run failed, ErrRunCancelled when it was
+// cancelled, and ErrRunExpired when its data was deleted.
 //
 // In workflow context, Value reads the run once and returns ErrRunNotFinished
 // when the run had not finished, so replay stays deterministic. In step context
@@ -322,6 +322,8 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 		return zero, worlds.ErrRunNotFound
 	case !run.Status.Terminal():
 		return zero, ErrRunNotFinished
+	case run.Status != worlds.StatusCancelled && worlds.RunDataExpired(run, time.Now()):
+		return zero, ErrRunExpired
 	}
 	keys, err := r.client.RunKeys(ctx, worlds.RunKeysInput{RunID: run.RunID, DeploymentID: run.DeploymentID})
 	if err != nil {
@@ -350,6 +352,11 @@ func runValue(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 		return worlds.Run{}, nil
 	}
 	run.Input = nil
+	// The recorded run keeps ExpiredAt only once it has passed, so a replay
+	// reaches the same answer later.
+	if !worlds.RunDataExpired(run, time.Now()) {
+		run.ExpiredAt = nil
+	}
 	return run, err
 }
 

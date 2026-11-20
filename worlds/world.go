@@ -65,6 +65,10 @@ type Capabilities struct {
 	Analytics          bool `cbor:"analytics"`
 	SetAttributes      bool `cbor:"setAttributes"`
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
+	// DeleteData reports that the World deletes run data: it implements
+	// RunsDeleteDataMany and honors the RetentionAttribute value of
+	// RetainNone.
+	DeleteData bool `cbor:"deleteData"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that

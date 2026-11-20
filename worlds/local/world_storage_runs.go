@@ -2,6 +2,8 @@ package localworld
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -81,4 +83,9 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 
 func matchesRun(run worlds.Run, workflowName string, statuses []worlds.Status) bool {
 	return (workflowName == "" || run.WorkflowName == workflowName) && (len(statuses) == 0 || slices.Contains(statuses, run.Status))
+}
+
+// RunsDeleteDataMany is not supported yet.
+func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/local: delete run data: %w", errors.ErrUnsupported)
 }

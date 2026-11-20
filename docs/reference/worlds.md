@@ -98,6 +98,9 @@ type Capabilities struct {
 	Analytics          bool
 	SetAttributes      bool
 	DeploymentAffinity bool
+	// DeleteData: RunsDeleteDataMany, and $retention "0" deletes a run's
+	// data as it finishes.
+	DeleteData bool
 }
 ```
 
@@ -135,6 +138,7 @@ runID)` returns a delivery addressed that way.
 | `RunsList` | Runs filtered by `WorkflowName` and `Status`, paginated. |
 | `RunsWaitForTerminalStatus` | Blocks until the run is terminal, `Timeout` elapses, or `ctx` is done. |
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
+| `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
@@ -345,7 +349,7 @@ methods are shared with the World:
 
 | Method | Description |
 | --- | --- |
-| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes` | Read runs and change their attributes. |
+| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes`, `RunsDeleteDataMany` | Read runs, change their attributes, and delete their data. |
 | `StepsGet`, `StepsList` | Read steps. |
 | `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
 | `StreamsOpenWriter` | Open a stream writer. |
