@@ -105,17 +105,17 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 			panic(options.Execution.exit(errReplaySuspended))
 		}
 		stepID := NewStepIDAt(position)
-		encoded, err := json.Marshal(input)
+		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step input: %w", err)}
 		}
-		created := DataStepCreated{Position: position, StepName: options.Name, Input: encoded, MaxRetries: options.MaxRetries, Cancellation: CancellationReferences(ctx)}
+		created := DataStepCreated{StepName: options.Name, Input: encoded}
 		options.Execution.hold(pendingStep{
 			stepID:   stepID,
 			created:  &created,
 			explicit: true,
 			attempt:  1,
-			run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, created.Cancellation, fn, input),
+			run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
 		})
 		return DurableStepResult[Out]{StepID: stepID}
 	}
@@ -177,9 +177,11 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 	}
 
 	// Later attempts always use the input captured by step_created.
-	if err := json.Unmarshal(createdData.Input, &input); err != nil {
+	var args stepArgs[In]
+	if err := options.Execution.DecodePayload(createdData.Input, &args); err != nil {
 		return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode inline step input: %w", err)}
 	}
+	input = args.Args[0]
 	options.Execution.hold(pendingStep{
 		stepID:   stepID,
 		explicit: true,
@@ -255,11 +257,11 @@ func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID S
 		if callErr != nil {
 			span.RecordError(callErr)
 			span.SetStatus(codes.Error, callErr.Error())
-			return DataStepResult{Error: encodeError(callErr), RetryAfter: stepRetryAfter(callErr, maxRetries, attempt)}, nil
+			return DataStepResult{Error: execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, maxRetries, attempt)}, nil
 		}
-		output, err := json.Marshal(value)
+		output, err := execution.EncodePayload(value)
 		if err != nil {
-			return DataStepResult{Error: encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
+			return DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
 		}
 		return DataStepResult{Result: output}, nil
 	}

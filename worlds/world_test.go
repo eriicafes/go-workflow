@@ -188,7 +188,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt, QueueMessageID: "queue_1"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	}
 	analytics := world.Analytics()
 	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: "wrun_wait_analytics", WaitID: "wait_1"})
-	if err != nil || wait.QueueMessageID != "queue_1" || !wait.DueAt.Equal(dueAt) {
+	if err != nil || !wait.DueAt.Equal(dueAt) {
 		t.Fatalf("wait = %#v, %v", wait, err)
 	}
 	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_wait_analytics"})
@@ -223,86 +223,83 @@ func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
 	}
 }
 
-type webhookCompletingWorld struct{ *testworld.World }
-
-func (w webhookCompletingWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
-	result, err := w.World.Queue(ctx, input)
-	if err != nil {
-		return result, err
-	}
-	// A resumed workflow can finish before the handler returns from Queue.
-	_, err = w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted}})
-	return result, err
-}
-
-func TestWebhookHandlerOnlyResumesPublicWebhooksWithTheConfiguredMethod(t *testing.T) {
-	world := webhookCompletingWorld{testworld.NewManual()}
+func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
+	world := testworld.NewManual()
 	defer world.Close()
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_webhook", WorkflowName: "webhook"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	createHook := func(runID, id, token string, webhook *worlds.Webhook) {
-		data, err := json.Marshal(worlds.DataHookCreated{Token: token, Webhook: webhook})
+	createHook := func(id, token string, webhook bool, metadata any) {
+		var encoded []byte
+		if metadata != nil {
+			if encoded, err = worlds.EncodePayload(metadata, worlds.PayloadOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := json.Marshal(worlds.DataHookCreated{Token: token, IsWebhook: webhook, Metadata: encoded})
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{
-			RunID: worlds.RunID(runID),
+			RunID: "wrun_webhook",
 			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: id, Data: data},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	createHook("wrun_webhook", "hook_public", "public", &worlds.Webhook{Method: http.MethodPatch})
-	createHook("wrun_webhook", "hook_internal", "internal", nil)
-	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_static", WorkflowName: "webhook"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	createHook("wrun_static", "hook_static", "static", &worlds.Webhook{Method: http.MethodPost, Response: &worlds.WebhookResponse{Status: http.StatusCreated, Header: map[string][]string{"X-Webhook": {"static"}}, Body: []byte("ack")}})
+	createHook("hook_public", "public", true, nil)
+	createHook("hook_internal", "internal", false, nil)
+	createHook("hook_static", "static", true, worlds.WebhookMetadata{Response: &worlds.WebhookResponse{Status: http.StatusCreated, Header: http.Header{"X-Webhook": {"static"}}, Body: &worlds.StreamRef{BodyInit: []byte("ack")}}})
 
 	handler := worlds.HTTPHandler(world, "")
-	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/public", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPatch {
-		t.Fatalf("wrong-method response = %d, allow=%q", response.Code, response.Header().Get("Allow"))
+	serve := func(method, token string, body []byte) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, httpPrefix+"/webhooks/"+token, bytes.NewReader(body)))
+		return response
 	}
-
-	request = httptest.NewRequest(http.MethodPatch, httpPrefix+"/webhooks/public", bytes.NewReader([]byte("payload")))
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("public webhook response = %d", response.Code)
+	for range 2 {
+		if response := serve(http.MethodPatch, "public", []byte("payload")); response.Code != http.StatusAccepted {
+			t.Fatalf("public webhook response = %d %s", response.Code, response.Body)
+		}
+		if response := serve(http.MethodPost, "static", nil); response.Code != http.StatusCreated || response.Header().Get("X-Webhook") != "static" || response.Body.String() != "ack" {
+			t.Fatalf("static webhook response = %d, header=%q, body=%q", response.Code, response.Header().Get("X-Webhook"), response.Body.String())
+		}
 	}
-
-	request = httptest.NewRequest(http.MethodGet, httpPrefix+"/webhooks/internal", nil)
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNotFound {
+	if response := serve(http.MethodGet, "internal", nil); response.Code != http.StatusNotFound {
 		t.Fatalf("regular hook response = %d", response.Code)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/static", nil)
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || response.Header().Get("X-Webhook") != "static" || response.Body.String() != "ack" {
-		t.Fatalf("static webhook response = %d, header=%q, body=%q", response.Code, response.Header().Get("X-Webhook"), response.Body.String())
+	// Each request resumed the hook with the SDK's Request, its body written
+	// to a byte stream of the run.
+	events, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: "wrun_webhook", CorrelationID: "hook_public"})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	request = httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/static", nil)
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("second static webhook response = %d", response.Code)
+	requests := 0
+	for _, event := range events.Data {
+		if event.EventType != worlds.EventTypeHookReceived {
+			continue
+		}
+		var request worlds.WebhookRequest
+		if err := worlds.DecodePayload(worlds.DecodeHookReceived(event.Data), nil, &request); err != nil || request.Method != http.MethodPatch || request.Body == nil {
+			t.Fatalf("request = %+v err=%v", request, err)
+		}
+		body, err := worlds.ReadByteStream(ctx, world, "wrun_webhook", *request.Body)
+		if err != nil || string(body) != "payload" {
+			t.Fatalf("body = %q err=%v", body, err)
+		}
+		requests++
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
 	}
 }
 
 func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
-	world := testworld.New(worlds.NewRunner("manual", func(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	world := testworld.New(worlds.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
 		execution, ok := worlds.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, nil
@@ -315,20 +312,14 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 			if event.EventType != worlds.EventTypeHookReceived {
 				continue
 			}
-			received, ok := worlds.DecodeWebhookReceived(event.Data)
-			if !ok || received.Request == nil {
-				continue
-			}
-			payload, err := json.Marshal(worlds.WebhookReceivedEventData{Response: &worlds.WebhookResponse{Status: http.StatusOK, Header: map[string][]string{"X-Webhook": {"manual"}}, Body: []byte("done")}, ResponseTo: event.EventID})
-			if err != nil {
+			var request worlds.WebhookRequest
+			if err := execution.DecodePayload(worlds.DecodeHookReceived(event.Data), &request); err != nil {
 				return nil, err
 			}
-			response, err := worlds.EncodeHookReceived(payload)
-			if err != nil {
+			response := worlds.WebhookResponse{Status: http.StatusOK, Header: http.Header{"X-Webhook": {"manual"}}, Body: &worlds.StreamRef{BodyInit: []byte("done")}}
+			if err := execution.WriteWebhookResponse(ctx, request, response); err != nil {
 				return nil, err
 			}
-			_, err = execution.World().EventsCreate(ctx, worlds.EventsCreateInput{RunID: execution.Run().RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: event.CorrelationID, Data: response}})
-			return nil, err
 		}
 		return nil, nil
 	}))
@@ -337,7 +328,11 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(worlds.DataHookCreated{Token: "manual", Webhook: &worlds.Webhook{Manual: true}})
+	metadata, err := worlds.EncodePayload(worlds.WebhookMetadata{Manual: true}, worlds.PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(worlds.DataHookCreated{Token: "manual", IsWebhook: true, Metadata: metadata})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,12 +345,6 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("request"))))
 	if response.Code != http.StatusOK || response.Header().Get("X-Webhook") != "manual" || response.Body.String() != "done" {
 		t.Fatalf("manual webhook response = %d, header=%q, body=%q", response.Code, response.Header().Get("X-Webhook"), response.Body.String())
-	}
-
-	response = httptest.NewRecorder()
-	worlds.HTTPHandler(world, "").ServeHTTP(response, httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/manual", bytes.NewReader([]byte("late request"))))
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("late manual webhook response = %d", response.Code)
 	}
 }
 

@@ -82,7 +82,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 	time.Sleep(2 * time.Millisecond)
 	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "second"})
 	cause := errors.New("fatal")
-	encoded, err := json.Marshal(worlds.NewError(worlds.FatalError{Cause: cause}))
+	encoded, err := worlds.EncodeErrorPayload(worlds.FatalError{Cause: cause}, worlds.PayloadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func conformSteps(t *testing.T, world worlds.World) {
 		t.Fatalf("failed step = %#v err=%v", step, err)
 	}
 	var fatal worlds.FatalError
-	decoded := worlds.DecodeError(step.Error)
+	decoded := worlds.DecodeErrorPayload(step.Error, nil)
 	if !errors.Is(decoded, cause) || !errors.As(decoded, &fatal) {
 		t.Fatalf("stored step error lost its cause or fatal marker: %s", step.Error)
 	}

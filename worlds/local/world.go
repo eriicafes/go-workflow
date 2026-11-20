@@ -5,6 +5,7 @@
 package localworld
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -33,6 +34,11 @@ type Config struct {
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// Empty uses http://localhost:3000/v1/workflow.
 	BaseURL string
+	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
+	// key derived from it for the run, as the Workflow SDK does. Empty leaves
+	// payloads unencrypted. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionKey []byte
 }
 
 // World is the local World. It stores events, run, step, and hook views,
@@ -45,14 +51,16 @@ type World struct {
 	root      *os.Root
 	ownedRoot bool
 	baseURL   string
-	lock      *os.File
-	prepared  bool
-	closed    bool
-	broken    error
-	ctx       context.Context
-	cancel    context.CancelFunc
-	runtime   *worlds.Runtime
-	workers   sync.WaitGroup
+	// encryptionKey is Config.EncryptionKey.
+	encryptionKey []byte
+	lock          *os.File
+	prepared      bool
+	closed        bool
+	broken        error
+	ctx           context.Context
+	cancel        context.CancelFunc
+	runtime       *worlds.Runtime
+	workers       sync.WaitGroup
 
 	changesMu sync.Mutex
 	changes   chan struct{}
@@ -97,6 +105,9 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 	if root == nil {
 		return nil, errors.New("workflow/local: nil storage root")
 	}
+	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
+		return nil, err
+	}
 	baseURL := defaultBaseURL
 	if config.BaseURL != "" {
 		normalized, err := worlds.NormalizeBaseURL(config.BaseURL)
@@ -105,7 +116,7 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 		}
 		baseURL = normalized
 	}
-	world := &World{root: root, baseURL: baseURL, changes: make(chan struct{}), queueWake: make(chan struct{}, 1)}
+	world := &World{root: root, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), changes: make(chan struct{}), queueWake: make(chan struct{}, 1)}
 	world.runtime = worlds.NewRuntime(world, runners)
 	return world, nil
 }
@@ -298,3 +309,9 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // Webhook returns a handler serving only the webhook endpoint, authorized by
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
+
+// EncryptionKeyForRun returns the key of a run's payloads, derived from
+// Config.EncryptionKey, or nil when the World has none.
+func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
+	return worlds.ConfiguredRunKey(w.encryptionKey, runID)
+}

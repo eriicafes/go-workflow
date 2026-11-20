@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +26,11 @@ func (e *pointerError) Error() string { return e.Reason + e.hidden }
 
 func roundTripError(t *testing.T, err error) *worlds.Error {
 	t.Helper()
-	data, marshalErr := json.Marshal(worlds.NewError(err))
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
+	data, encodeErr := worlds.EncodeErrorPayload(err, worlds.PayloadOptions{})
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
 	}
-	return worlds.DecodeError(data)
+	return worlds.DecodeErrorPayload(data, nil)
 }
 
 func TestStepErrorMatchesChainAfterRoundTrip(t *testing.T) {
@@ -67,8 +68,8 @@ func TestStepErrorKeepsRecordedChainWhenWrapped(t *testing.T) {
 	}
 }
 
-func TestDecodeStepErrorAcceptsPlainMessages(t *testing.T) {
-	if err := worlds.DecodeError([]byte("boom")); err.Error() != "boom" {
+func TestDecodeStepErrorReportsInvalidPayloads(t *testing.T) {
+	if err := worlds.DecodeErrorPayload([]byte("boom"), nil); !strings.Contains(err.Error(), "invalid payload") {
 		t.Fatalf("message = %q", err.Error())
 	}
 }

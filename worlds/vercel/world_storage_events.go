@@ -44,6 +44,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		"occurredAt":        time.Now().UTC(),
 		"remoteRefBehavior": "lazy",
 	}
+	if input.EncryptionPublicKey != "" {
+		meta["encryptionPublicKey"] = input.EncryptionPublicKey
+	}
 	if len(input.Attributes) > 0 {
 		meta["attributes"] = input.Attributes
 		for key := range input.Attributes {

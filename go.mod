@@ -13,6 +13,7 @@ require (
 	github.com/eriicafes/go-dev v0.3.0
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/klauspost/compress v1.20.5
 	github.com/oklog/ulid/v2 v2.1.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0

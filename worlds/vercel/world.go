@@ -96,6 +96,9 @@ type World struct {
 	// streamsOverHTTP keeps stream writes on HTTP, as
 	// WORKFLOW_STREAMS_TRANSPORT=http does for the Workflow SDK.
 	streamsOverHTTP bool
+	// runKeyURL overrides the Vercel API route run keys are read from, for
+	// tests.
+	runKeyURL string
 }
 
 // New returns a World for config without contacting Vercel. It returns an

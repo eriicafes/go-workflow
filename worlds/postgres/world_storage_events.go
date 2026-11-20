@@ -16,7 +16,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -30,9 +30,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 1, $6, $6) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, event_count, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, at)
 		if err != nil {
 			return err
 		}
@@ -322,13 +322,6 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return nil, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return nil, worlds.ErrHookNotActive
-		}
 
 	case worlds.EventTypeHookDisposed:
 		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
@@ -496,18 +489,9 @@ func (a *appender) updateStep(ctx context.Context, event worlds.Event, status wo
 func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int64) error {
 	var value worlds.DataHookCreated
 	_ = json.Unmarshal(event.Data, &value)
-	var webhook []byte
-	if value.Webhook != nil {
-		encoded, err := json.Marshal(value.Webhook)
-		if err != nil {
-			return err
-		}
-		webhook = encoded
-	}
-
 	claimed, _ := json.Marshal(value.ForceClaimedFrom)
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, token, created_slot, webhook, created_at, updated_at, token_retention_until, claimed_from)
- VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)`, event.CorrelationID, event.RunID, a.run.WorkflowName, a.run.DeploymentID, value.Token, slot, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, created_slot, is_webhook, created_at, updated_at, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11)`, event.CorrelationID, event.RunID, a.run.WorkflowName, a.run.DeploymentID, a.run.EncryptionPublicKey, value.Token, slot, value.IsWebhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
 		return err
 	}
 
@@ -535,29 +519,8 @@ func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
 	}
 	at := event.CreatedAt
 	hook.UpdatedAt, hook.ReceivedAt = at, &at
-	complete := false
-	value, ok := worlds.DecodeWebhookReceived(event.Data)
-	if hook.Webhook != nil && ok {
-		if value.Request != nil {
-			hook.WebhookEventID = event.EventID
-		}
-		if value.Response != nil && value.ResponseTo == hook.WebhookEventID {
-			complete = true
-		}
-	}
-
-	if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-		complete = true
-	}
-	if complete {
-		hook.DisposedAt = &at
-		if err := releaseToken(ctx, a.tx, hook); err != nil {
-			return err
-		}
-	}
-
-	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3, webhook_event_id = $4, token_retention_until = $5, disposed_at = $6 WHERE hook_id = $1`,
-		hook.HookID, hook.UpdatedAt, hook.ReceivedAt, hook.WebhookEventID, hook.TokenRetentionUntil, hook.DisposedAt)
+	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3 WHERE hook_id = $1`,
+		hook.HookID, hook.UpdatedAt, hook.ReceivedAt)
 	return err
 }
 
@@ -646,9 +609,9 @@ func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, err
 	a := &appender{tx: tx}
 	var attributes []byte
 	var count, inBandCount int64
-	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
+	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, encryption_public_key, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
+		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.EncryptionPublicKey, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}

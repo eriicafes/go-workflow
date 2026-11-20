@@ -140,9 +140,9 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
 
 	token := "fence:" + string(runID)
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
-	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
+	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
 	if err != nil || claimed.InBandCount != 4 || inBandCount() != 4 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
 	}
@@ -198,7 +198,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrRunNotFound, "batch for missing run")
 	completed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a"},
-		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"out"}`)},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"Im91dCI="}`)},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "late"},
 	}})
 	conformExpect(t, err, worlds.ErrRunTerminal, "batch appending after its own terminal event")

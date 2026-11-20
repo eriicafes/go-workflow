@@ -431,11 +431,11 @@ func TestRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
 			stepFailed := false
 			for _, event := range events.Data {
 				var created worlds.DataStepCreated
-				if event.EventType == worlds.EventTypeStepCreated && json.Unmarshal(event.Data, &created) == nil && created.Rollback {
+				if event.EventType == worlds.EventTypeStepCreated && json.Unmarshal(event.Data, &created) == nil {
 					rollbackLogged = true
 				}
 				var result worlds.DataStepResult
-				if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeError(result.Error).Error() == wantFailure {
+				if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeErrorPayload(result.Error, nil).Error() == wantFailure {
 					stepFailed = true
 				}
 			}

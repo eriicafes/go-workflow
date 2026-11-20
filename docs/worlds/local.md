@@ -33,6 +33,7 @@ client := workflow.NewClient(world)
 | --- | --- | --- |
 | `Dir` | required by `Open` | Storage directory. Created with `0700` permissions. |
 | `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
 
 ## Lifecycle
 

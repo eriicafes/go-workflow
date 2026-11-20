@@ -1,7 +1,9 @@
 package vercelworld
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +84,23 @@ func TestWorkflowsRunEndToEnd(t *testing.T) {
 	runEndToEnd(t, all[0], queue)
 	if backend.count("POST v4/runs/:id/events/batch") == 0 {
 		t.Fatal("inline steps were not written as a batch")
+	}
+}
+
+// TestWorkflowsRunEndToEndEncrypted runs the same workflows with the
+// deployment's key set, so every payload is encrypted with the run's key.
+func TestWorkflowsRunEndToEndEncrypted(t *testing.T) {
+	t.Setenv("VERCEL", "1")
+	t.Setenv("VERCEL_DEPLOYMENT_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)))
+	t.Setenv("VERCEL_PROJECT_ID", "prj_e2e")
+	all, queue, backend := newWorlds(t, 1)
+	runEndToEnd(t, all[0], queue)
+	runs, err := backend.store.RunsList(context.Background(), worlds.RunsListInput{})
+	if err != nil || len(runs.Data) != 1 {
+		t.Fatalf("runs = %#v err=%v", runs, err)
+	}
+	if worlds.PayloadLabel(runs.Data[0].Output) != worlds.PayloadEncrypted || runs.Data[0].EncryptionPublicKey == "" {
+		t.Fatalf("run output %q is not encrypted", runs.Data[0].Output)
 	}
 }
 
@@ -211,11 +230,11 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 			continue
 		}
 		var data worlds.DataWaitCreated
-		if err := json.Unmarshal(event.Data, &data); err != nil || data.QueueMessageID != "" || data.Cancellation != nil || data.ResumeAt.IsZero() {
+		if err := json.Unmarshal(event.Data, &data); err != nil || data.ResumeAt.IsZero() {
 			t.Fatalf("wait as the backend keeps it = %s err=%v", event.Data, err)
 		}
-		if position, ok := worlds.OperationPosition(event.CorrelationID); !ok || position != data.Position || position == 0 {
-			t.Fatalf("wait position %d from %s", data.Position, event.CorrelationID)
+		if position, ok := worlds.OperationPosition(event.CorrelationID); !ok || position == 0 {
+			t.Fatalf("wait position from %s", event.CorrelationID)
 		}
 	}
 }

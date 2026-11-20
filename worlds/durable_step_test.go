@@ -100,11 +100,8 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 			if err := json.Unmarshal(event.Data, &result); err != nil {
 				t.Fatal(err)
 			}
-			var recorded worlds.Error
-			if err := json.Unmarshal(result.Error, &recorded); err != nil {
-				t.Fatalf("step event error is not a JSON error object: %s: %v", result.Error, err)
-			}
-			if !errors.Is(&recorded, original) {
+			recorded := worlds.DecodeErrorPayload(result.Error, nil)
+			if !errors.Is(recorded, original) {
 				t.Fatalf("step event lost error chain: %s", result.Error)
 			}
 			step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: event.RunID, StepID: worlds.StepID(event.CorrelationID)})
@@ -112,7 +109,7 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			var fatal worlds.FatalError
-			decoded := worlds.DecodeError(step.Error)
+			decoded := worlds.DecodeErrorPayload(step.Error, nil)
 			if !errors.Is(decoded, original) || !errors.As(decoded, &fatal) {
 				t.Fatalf("stored step error lost its cause or fatal marker: %s", step.Error)
 			}

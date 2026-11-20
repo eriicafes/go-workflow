@@ -182,7 +182,7 @@ func TestViewItems(t *testing.T) {
 	if strings.Join(remove, ",") != "startedAt,cancelledEventId" {
 		t.Fatalf("remove = %v", remove)
 	}
-	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), Webhook: &worlds.Webhook{Method: "POST", Manual: true}, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: &now}
+	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), IsWebhook: true, ResumeContext: worlds.HookResumeContext{EncryptionPublicKey: "pub"}, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: &now}
 	item, err := hookItem(hook)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestViewItems(t *testing.T) {
 	if _, ok := item["metadata"]; ok {
 		t.Fatal("hook item holds metadata")
 	}
-	if err != nil || back.Webhook == nil || !back.Webhook.Manual || !back.TokenRetentionUntil.Equal(now) || back.Metadata != nil {
+	if err != nil || !back.IsWebhook || back.ResumeContext.EncryptionPublicKey != "pub" || !back.TokenRetentionUntil.Equal(now) || back.Metadata != nil {
 		t.Fatalf("hook = %#v err=%v", back, err)
 	}
 	step := stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusRunning, Attempt: 2, CreatedAt: now, UpdatedAt: now, RetryAfter: &now}, createdEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(5)}

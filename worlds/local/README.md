@@ -26,6 +26,10 @@ it defaults to `http://localhost:3000/v1/workflow`. `HTTP` serves the RPC and
 webhook endpoints under `/v1/workflow`, `HTTPPrefix(world, prefix)` serves them
 under `prefix`, and `RPC` and `Webhook` return each endpoint on its own.
 
+`Config.EncryptionKey`, 32 random bytes, encrypts every run's payloads with a
+key derived from it, as the Workflow SDK does. See
+[Data Format and Encryption](https://go-workflow.vercel.app/guide/encryption).
+
 ## Lifecycle
 
 - `Open(config, runners)` creates `Dir` with `0700` permissions and owns the

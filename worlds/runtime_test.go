@@ -719,19 +719,23 @@ func TestDoneGivesTheSameAnswerOnEveryReplay(t *testing.T) {
 // first in-band write of its steps, as a concurrent delivery of the run would.
 type racingWorld struct {
 	*testworld.World
-	raced bool
+	raced     bool
+	otherStep string
 }
 
 func (w *racingWorld) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
 	if !w.raced && input.InBandCount != nil && input.Events[0].EventType == worlds.EventTypeStepCreated {
 		w.raced = true
 		other := input.Events[0]
-		other.CorrelationID = "step_other_flow"
+		// Another flow declared a step at the same position first.
+		position, _ := worlds.OperationPosition(other.CorrelationID)
+		other.CorrelationID = string(worlds.NewStepIDAt(position))
+		w.otherStep = other.CorrelationID
 		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: other, Options: worlds.EventsCreateOptions{InBandCount: input.InBandCount}}); err != nil {
 			return worlds.EventBatchResult{}, err
 		}
 
-		stepID := worlds.StepID("step_other_flow")
+		stepID := worlds.StepID(w.otherStep)
 		if _, err := w.World.Queue(ctx, worlds.QueueInput{RunID: input.RunID, StepID: &stepID}); err != nil {
 			return worlds.EventBatchResult{}, err
 		}
@@ -772,7 +776,7 @@ func TestSupersededFlowReplaysInsteadOfDuplicatingDeclarations(t *testing.T) {
 			declared[event.CorrelationID]++
 		}
 	}
-	if len(declared) != 2 || declared["step_other_flow"] != 1 {
+	if len(declared) != 2 || declared[racing.otherStep] != 1 {
 		t.Fatalf("declared steps = %v, want the other flow's step and beta", declared)
 	}
 
@@ -931,7 +935,7 @@ func TestRuntimeRecordsFailedStepAfterRunCancellationWithoutRetry(t *testing.T) 
 	deliverNext(t, ctx, world, runtime)
 	delivery := deliverNext(t, ctx, world, runtime)
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
-	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeError(step.Error), cause) {
+	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeErrorPayload(step.Error, nil), cause) {
 		t.Fatalf("late failure = %#v, err=%v", step, err)
 	}
 	for _, message := range world.QueuedMessages() {
@@ -1186,7 +1190,11 @@ func TestResumeHookReportsARecordedPayloadItCouldNotQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, []byte(`"value"`))
+	payload, err := worlds.EncodePayload("value", worlds.PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, payload)
 	if !errors.Is(err, worlds.ErrResumeNotQueued) || !errors.Is(err, errQueueUnavailable) || result.EventID == "" {
 		t.Fatalf("result = %#v, err = %v", result, err)
 	}
@@ -1208,11 +1216,11 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 		worlds.FatalError{Cause: cause},
 		worlds.RetryableError{Cause: cause, After: time.Minute},
 	} {
-		data, marshalErr := json.Marshal(worlds.NewError(err))
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
+		data, encodeErr := worlds.EncodeErrorPayload(err, worlds.PayloadOptions{})
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
 		}
-		decoded := worlds.DecodeError(data)
+		decoded := worlds.DecodeErrorPayload(data, nil)
 		var fatal worlds.FatalError
 		var retryable worlds.RetryableError
 		switch {
@@ -1221,7 +1229,8 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 				t.Fatalf("fatal = %v, cause = %v", fatal, fatal.Cause)
 			}
 		case errors.As(decoded, &retryable):
-			if retryable.Error() != "boom" || retryable.After != time.Minute || !errors.Is(retryable, cause) {
+			// The SDK records when to retry, so the delay shrinks as time passes.
+			if retryable.Error() != "boom" || retryable.After <= 59*time.Second || retryable.After > time.Minute || !errors.Is(retryable, cause) {
 				t.Fatalf("retryable = %v, cause = %v", retryable, retryable.Cause)
 			}
 		default:

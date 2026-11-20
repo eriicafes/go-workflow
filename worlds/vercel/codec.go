@@ -10,19 +10,9 @@ import (
 
 // The backend keeps an event as metadata it reads, in a fixed set of fields
 // per event type, plus one opaque payload in the event type's payload field.
-// It drops metadata it does not know. The codec maps each go-workflow event
-// onto that shape so reading it back gives the same Data:
-//
-//   - Payload fields carry the Go payload as is (a run's input and output,
-//     a step's result and error, a hook's payload), so the backend's run and
-//     step views hold them directly.
-//   - step_created and hook_created also carry fields the backend has no
-//     place for (a step's retries, rollback, and cancellation contexts, a
-//     webhook's settings), so their payload is the whole Data, and the
-//     backend's views of their input and metadata are decoded from it.
-//   - wait_created keeps only its resume time. Its position comes back from
-//     its ID (worlds.OperationPosition), and the runtime reads its
-//     cancellation contexts from the replay.
+// go-workflow's events have the Workflow SDK's shape, so the codec maps each
+// field to the backend's: metadata fields to frame meta, and the payload,
+// already in the SDK's envelope, to the frame body.
 
 // payloadFields names the payload field of each event type that has one.
 var payloadFields = map[worlds.EventType]string{
@@ -141,7 +131,7 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			return nil, nil, err
 		}
 		meta["stepName"] = data.StepName
-		return meta, event.Data, nil
+		return meta, data.Input, nil
 	case worlds.EventTypeStepStarted:
 		var data worlds.DataStepStarted
 		if err := decode(&data); err != nil {
@@ -181,7 +171,7 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		if data.Force {
 			meta["hookForce"] = true
 		}
-		return meta, event.Data, nil
+		return meta, data.Metadata, nil
 	case worlds.EventTypeHookReceived:
 		return meta, worlds.DecodeHookReceived(event.Data), nil
 	case worlds.EventTypeWaitCreated:
@@ -238,7 +228,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 	}
 	switch worlds.EventType(wire.EventType) {
 	case worlds.EventTypeRunCreated:
-		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId")})
+		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey")})
 	case worlds.EventTypeRunCompleted:
 		return json.Marshal(worlds.DataRunCompleted{Output: payload("output")})
 	case worlds.EventTypeRunFailed:
@@ -246,11 +236,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 	case worlds.EventTypeAttrSet:
 		return json.Marshal(worlds.DataAttrSet{Changes: attributeChanges(d["changes"]), Writer: attributeWriter(d["writer"])})
 	case worlds.EventTypeStepCreated:
-		if blob := payload("input"); blob != nil {
-			return blob, nil
-		}
-		position, _ := worlds.OperationPosition(wire.CorrelationID)
-		return json.Marshal(worlds.DataStepCreated{Position: position, StepName: str(d, "stepName")})
+		return json.Marshal(worlds.DataStepCreated{StepName: str(d, "stepName"), Input: payload("input")})
 	case worlds.EventTypeStepStarted:
 		return json.Marshal(worlds.DataStepStarted{OwnerMessageID: str(d, "ownerMessageId")})
 	case worlds.EventTypeStepCompleted:
@@ -264,19 +250,12 @@ func eventData(wire wireEvent) ([]byte, error) {
 		}
 		return json.Marshal(worlds.DataStepResult{Error: payload("error"), RetryAfter: retryAfter})
 	case worlds.EventTypeHookCreated, worlds.EventTypeHookConflict:
-		var data worlds.DataHookCreated
-		if blob := payload("metadata"); blob != nil {
-			if err := json.Unmarshal(blob, &data); err != nil {
-				return nil, err
-			}
-		} else {
-			data.Position, _ = worlds.OperationPosition(wire.CorrelationID)
-			data.Token = str(d, "token")
-			data.IsWebhook, _ = d["isWebhook"].(bool)
-			data.IsSystem, _ = d["isSystem"].(bool)
-			if until, ok := asTime(d["tokenRetentionUntil"]); ok {
-				data.TokenRetentionUntil = &until
-			}
+		data := worlds.DataHookCreated{Token: str(d, "token"), Metadata: payload("metadata")}
+		data.IsWebhook, _ = d["isWebhook"].(bool)
+		data.IsSystem, _ = d["isSystem"].(bool)
+		data.Force, _ = d["force"].(bool)
+		if until, ok := asTime(d["tokenRetentionUntil"]); ok {
+			data.TokenRetentionUntil = &until
 		}
 		if claim := hookClaim(d["forceClaimedFrom"]); claim != nil {
 			data.ForceClaimedFrom = claim
@@ -302,8 +281,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 			// Written without Data.
 			return nil, nil
 		}
-		position, _ := worlds.OperationPosition(wire.CorrelationID)
-		return json.Marshal(worlds.DataWaitCreated{Position: position, ResumeAt: resumeAt})
+		return json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt})
 	}
 	// run_started, run_cancelled, wait_completed, and the backend's own
 	// events, such as noop slot fillers, carry no Data.

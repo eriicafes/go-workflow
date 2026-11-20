@@ -78,16 +78,17 @@ func requiredTime(values map[string]any, key string) time.Time {
 // toRun returns the go-workflow view of a backend run.
 func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 	run := worlds.Run{
-		RunID:        worlds.RunID(str(values, "runId")),
-		WorkflowName: str(values, "workflowName"),
-		Status:       worlds.Status(str(values, "status")),
-		Error:        payloadBytes(values["error"]),
-		Attributes:   stringMap(values["attributes"]),
-		DeploymentID: str(values, "deploymentId"),
-		CreatedAt:    requiredTime(values, "createdAt"),
-		UpdatedAt:    requiredTime(values, "updatedAt"),
-		StartedAt:    timeField(values, "startedAt"),
-		CompletedAt:  timeField(values, "completedAt"),
+		RunID:               worlds.RunID(str(values, "runId")),
+		WorkflowName:        str(values, "workflowName"),
+		Status:              worlds.Status(str(values, "status")),
+		Error:               payloadBytes(values["error"]),
+		Attributes:          stringMap(values["attributes"]),
+		DeploymentID:        str(values, "deploymentId"),
+		EncryptionPublicKey: str(values, "encryptionPublicKey"),
+		CreatedAt:           requiredTime(values, "createdAt"),
+		UpdatedAt:           requiredTime(values, "updatedAt"),
+		StartedAt:           timeField(values, "startedAt"),
+		CompletedAt:         timeField(values, "completedAt"),
 	}
 	if resolve != worlds.ResolveDataNone {
 		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
@@ -113,21 +114,13 @@ func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, err
 		RetryAfter:  timeField(values, "retryAfter"),
 	}
 	if resolve != worlds.ResolveDataNone {
-		if blob := payloadBytes(values["input"]); blob != nil {
-			var created worlds.DataStepCreated
-			if err := json.Unmarshal(blob, &created); err != nil {
-				return worlds.Step{}, err
-			}
-			step.Input = created.Input
-		}
+		step.Input = payloadBytes(values["input"])
 		step.Output = payloadBytes(values["output"])
 	}
 	return step, nil
 }
 
-// toHook returns the go-workflow view of a backend hook. Its metadata and
-// webhook settings come from the hook_created Data the World stores as the
-// hook's payload.
+// toHook returns the go-workflow view of a backend hook.
 func toHook(values map[string]any) (worlds.Hook, error) {
 	hook := worlds.Hook{
 		RunID:               worlds.RunID(str(values, "runId")),
@@ -139,15 +132,9 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 	}
 	hook.UpdatedAt = hook.CreatedAt
 	if resume, ok := values["resumeContext"].(map[string]any); ok {
-		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName")}
+		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName"), EncryptionPublicKey: str(resume, "encryptionPublicKey")}
 	}
-	if blob := payloadBytes(values["metadata"]); blob != nil {
-		var created worlds.DataHookCreated
-		if err := json.Unmarshal(blob, &created); err != nil {
-			return worlds.Hook{}, err
-		}
-		hook.Metadata, hook.Webhook = created.Metadata, created.Webhook
-	}
+	hook.Metadata = payloadBytes(values["metadata"])
 	return hook, nil
 }
 
@@ -435,7 +422,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 }
 
 // hookView completes a backend hook with what its events record: when it
-// received a payload, the webhook request event, and its disposal.
+// received a payload, whether it is a webhook, and its disposal.
 func (w *World) hookView(ctx context.Context, values map[string]any, resolve worlds.ResolveData) (worlds.Hook, error) {
 	hook, err := toHook(values)
 	if err != nil {
@@ -450,9 +437,7 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 		case worlds.EventTypeHookCreated:
 			var created worlds.DataHookCreated
 			if json.Unmarshal(event.Data, &created) == nil {
-				if hook.Webhook == nil {
-					hook.Webhook = created.Webhook
-				}
+				hook.IsWebhook = hook.IsWebhook || created.IsWebhook
 				if hook.Metadata == nil {
 					hook.Metadata = created.Metadata
 				}
@@ -464,9 +449,6 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 			if hook.ReceivedAt == nil {
 				at := event.CreatedAt
 				hook.ReceivedAt = &at
-			}
-			if received, ok := worlds.DecodeWebhookReceived(event.Data); ok && hook.Webhook != nil && received.Request != nil && hook.WebhookEventID == "" {
-				hook.WebhookEventID = event.EventID
 			}
 		case worlds.EventTypeHookDisposed:
 			at := event.CreatedAt

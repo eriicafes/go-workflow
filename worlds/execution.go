@@ -50,6 +50,9 @@ type Execution struct {
 	delivery QueueInput
 	// result holds the target step's outcome for the runtime to persist.
 	result *DataStepResult
+	// keys encrypts and opens the run's payloads. It is nil when the run's
+	// payloads are not encrypted.
+	keys *RunKeys
 	// index maps declaration positions to indexes in events.
 	index map[int]int
 	// rollbacks holds compensations in registration order.
@@ -129,11 +132,8 @@ func (e *Execution) trackEvent(index int, event Event) {
 	default:
 		return
 	}
-	var data struct {
-		Position *int `json:"position"`
-	}
-	if json.Unmarshal(event.Data, &data) == nil && data.Position != nil {
-		e.index[*data.Position] = index
+	if position, ok := OperationPosition(event.CorrelationID); ok {
+		e.index[position] = index
 	}
 }
 
@@ -580,4 +580,53 @@ func (e *Execution) finishSteps() error {
 // stepKey identifies stepID of the run in Runtime.running.
 func (e *Execution) stepKey(stepID StepID) string {
 	return string(e.run.RunID) + "/" + string(stepID)
+}
+
+// EncodePayload encodes value as a payload of the run, encrypted when the
+// run's payloads are.
+func (e *Execution) EncodePayload(value any) ([]byte, error) {
+	return EncodePayload(value, PayloadOptions{Keys: e.keys})
+}
+
+// DecodePayload decodes a payload of the run into value, a pointer.
+func (e *Execution) DecodePayload(data []byte, value any) error {
+	return DecodePayload(data, e.keys, value)
+}
+
+// encodeError encodes err as an error payload of the run.
+func (e *Execution) encodeError(err error) []byte {
+	// An Error value always encodes.
+	data, _ := EncodeErrorPayload(err, PayloadOptions{Keys: e.keys})
+	return data
+}
+
+// decodeError decodes an error payload of the run.
+func (e *Execution) decodeError(data []byte) *Error {
+	return DecodeErrorPayload(data, e.keys)
+}
+
+// stepArgs is a step's input as the Workflow SDK records it: its argument
+// list.
+type stepArgs[In any] struct {
+	Args [1]In `json:"args"`
+}
+
+// runFailedData returns the Data of a run_failed event for err.
+func (e *Execution) runFailedData(err error) []byte {
+	// An Error value always encodes.
+	data, _ := EncodeRunFailed(err, PayloadOptions{Keys: e.keys})
+	return data
+}
+
+// StreamFrame returns chunk as a frame of the run's stream, as the Workflow
+// SDK writes one, encrypted when the run's payloads are.
+func (e *Execution) StreamFrame(chunk []byte) ([]byte, error) {
+	return EncodeStreamFrame(chunk, e.keys, nil)
+}
+
+// WriteWebhookResponse writes response as the response to request, a manual
+// webhook's request to the run, as WriteWebhookResponse does with the run's
+// keys.
+func (e *Execution) WriteWebhookResponse(ctx context.Context, request WebhookRequest, response WebhookResponse) error {
+	return WriteWebhookResponse(ctx, e.world, e.run.RunID, request, response, e.keys)
 }

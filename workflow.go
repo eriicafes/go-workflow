@@ -44,7 +44,6 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -323,13 +322,19 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 		return zero, worlds.ErrRunNotFound
 	case !run.Status.Terminal():
 		return zero, ErrRunNotFinished
+	}
+	keys, err := r.client.RunKeys(ctx, worlds.RunKeysInput{RunID: run.RunID, DeploymentID: run.DeploymentID})
+	if err != nil {
+		return zero, err
+	}
+	switch {
 	case run.Status == worlds.StatusCompleted:
 	case len(run.Error) != 0:
-		return zero, worlds.DecodeError(run.Error)
+		return zero, worlds.DecodeErrorPayload(run.Error, keys)
 	default:
 		return zero, ErrRunCancelled
 	}
-	if err := json.Unmarshal(run.Output, &zero); err != nil {
+	if err := worlds.DecodePayload(run.Output, keys, &zero); err != nil {
 		return zero, fmt.Errorf("workflow: decode run output: %w", err)
 	}
 	return zero, nil
@@ -391,7 +396,11 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 	if _, ok := workflowExecutionFromContext(ctx); ok {
 		return nil, ErrNotInStep
 	}
-	return newStreamWriter(ctx, r.client, r.id, writerOption(options).Name)
+	frame, err := outsideStreamFrame(ctx, r.client, r.id)
+	if err != nil {
+		return nil, err
+	}
+	return newStreamWriter(ctx, r.client, r.id, writerOption(options).Name, frame)
 }
 
 // Get returns a handle to the run with runID, using the Client in ctx. It does
@@ -419,34 +428,56 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Ru
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
-	}
 	latest := startsOnLatest(input)
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := InlineStep(execution.Context(), startChild, childStartInput{WorkflowName: name, Input: raw, Latest: latest})
+		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Latest: latest})
 		if err != nil {
 			return nil, err
 		}
 		return &Run[Out]{id: id, client: client}, nil
 	}
-	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{
-		EventsCreateRunInput: worlds.EventsCreateRunInput{WorkflowName: name, Input: raw},
-		Latest:               latest,
-	})
+	// The input is encrypted with the run's key, so the run's ID and
+	// deployment are settled first.
+	runID := worlds.NewRunID()
+	deploymentID, err := client.RunsStartDeployment(ctx, worlds.ClientRunsStartDeploymentInput{Latest: latest})
+	if err != nil {
+		return nil, err
+	}
+	keys, err := client.RunKeys(ctx, worlds.RunKeysInput{RunID: runID, DeploymentID: deploymentID})
+	if err != nil {
+		return nil, err
+	}
+	create, err := runCreateInput(runID, deploymentID, name, input, keys)
+	if err != nil {
+		return nil, err
+	}
+	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: create})
 	if err != nil {
 		return nil, err
 	}
 	return &Run[Out]{id: id, client: client}, nil
 }
 
-type childStartInput struct {
-	WorkflowName string
-	Input        json.RawMessage
+// runCreateInput returns the run_created input of a run of input, its
+// argument list encrypted with keys when they are set.
+func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input In, keys *worlds.RunKeys) (worlds.EventsCreateRunInput, error) {
+	encoded, err := worlds.EncodePayload([1]In{input}, worlds.PayloadOptions{Keys: keys})
+	if err != nil {
+		return worlds.EventsCreateRunInput{}, fmt.Errorf("workflow: encode %s input: %w", name, err)
+	}
+	create := worlds.EventsCreateRunInput{RunID: runID, WorkflowName: name, Input: encoded, DeploymentID: deploymentID}
+	if keys != nil {
+		create.EncryptionPublicKey = worlds.EncodePublicKey(keys.PublicKey)
+	}
+	return create, nil
+}
+
+type childStartInput[In any] struct {
+	WorkflowName string `json:"workflowName"`
+	Input        In     `json:"input"`
 	// Latest pins the child to the World's latest deployment, for a
 	// workflow marked StartOnLatest.
-	Latest bool `json:",omitempty"`
+	Latest bool `json:"latest,omitempty"`
 }
 
 // startChild is the inline step Start uses in workflow context. It creates the
@@ -456,7 +487,7 @@ type childStartInput struct {
 // attempt finds the run an earlier attempt created and queues its first
 // delivery again, to the deployment it was pinned to, while it has not
 // started.
-func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error) {
+func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.RunID, error) {
 	execution, ok := worlds.ExecutionFromContext(ctx)
 	if !ok {
 		return "", ErrNoWorkflow
@@ -471,16 +502,19 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 	if err != nil {
 		return "", err
 	}
-	_, err = execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
-		RunID:        id,
-		DeploymentID: deploymentID,
-		WorkflowName: input.WorkflowName,
-		Input:        input.Input,
-		Attributes: map[string]string{
-			worlds.ParentRunIDAttribute: string(parent.RunID),
-			worlds.RootRunIDAttribute:   root,
-		},
-	})
+	keys, err := worlds.RunKeysFor(ctx, execution.World(), id, deploymentID)
+	if err != nil {
+		return "", err
+	}
+	create, err := runCreateInput(id, deploymentID, input.WorkflowName, input.Input, keys)
+	if err != nil {
+		return "", err
+	}
+	create.Attributes = map[string]string{
+		worlds.ParentRunIDAttribute: string(parent.RunID),
+		worlds.RootRunIDAttribute:   root,
+	}
+	_, err = execution.World().EventsCreateRun(ctx, create)
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
 		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})
 		if err != nil || run.Status != worlds.StatusPending {
@@ -503,16 +537,21 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 // time only through Now.
 func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
 	name := worlds.WorkflowName[In]()
-	return worlds.NewRunner(name, func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
-		var input In
-		if err := json.Unmarshal(raw, &input); err != nil {
+	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
+		execution, ok := worlds.ExecutionFromContext(ctx)
+		if !ok {
+			return nil, ErrNoWorkflow
+		}
+		// The input is the workflow's argument list, as in the Workflow SDK.
+		var args [1]In
+		if err := execution.DecodePayload(raw, &args); err != nil {
 			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
 		}
-		output, err := fn(ctx, input)
+		output, err := fn(ctx, args[0])
 		if err != nil {
 			return nil, err
 		}
-		encoded, err := json.Marshal(output)
+		encoded, err := execution.EncodePayload(output)
 		if err != nil {
 			return nil, fmt.Errorf("workflow: encode %s output: %w", name, err)
 		}

@@ -28,7 +28,7 @@ import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
 
-const HTTP_WORLD_SPEC_VERSION = 1;
+const HTTP_WORLD_SPEC_VERSION = 2;
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
@@ -103,12 +103,27 @@ export class HTTPWorld implements World {
 	readonly createQueueHandler: World["createQueueHandler"] = () => {
 		throw new HTTPWorldError("unsupported", "workflow: HTTP worlds do not create queue handlers");
 	};
+	/**
+	 * The key of a run's payloads, which the Go World resolves, or undefined
+	 * when they are not encrypted. Go runs' payloads are in the Workflow
+	 * SDK's format, so the SDK's tools decrypt and hydrate them with it.
+	 */
+	readonly getEncryptionKeyForRun: NonNullable<World["getEncryptionKeyForRun"]>;
 
 	constructor(client: RPCClient, spec: RPC.Spec) {
 		client.specVersion = HTTP_WORLD_SPEC_VERSION;
 		this._spec = spec;
 		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
 		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});
+		this.getEncryptionKeyForRun = (async (run: string | WorkflowRun, context?: Record<string, unknown>) => {
+			const runId = typeof run === "string" ? run : run.runId;
+			const deploymentId = typeof run === "string" ? context?.deploymentId : run.deploymentId;
+			const key = await client.call<Uint8Array | null>("runs.encryptionKey", {
+				runId,
+				deploymentId: typeof deploymentId === "string" ? deploymentId : "",
+			});
+			return key ?? undefined;
+		}) as NonNullable<World["getEncryptionKeyForRun"]>;
 		this.runs = HTTPWorld.createRuns(client, spec.capabilities);
 		this.steps = HTTPWorld.createSteps(client);
 		this.events = HTTPWorld.createEvents(client);
@@ -206,9 +221,10 @@ export class HTTPWorld implements World {
 						.call<RPC.EventResult>("events.createRun", {
 							runId: runId ?? "",
 							workflowName: event.eventData.workflowName,
-							input: jsonEncoded(event.eventData.input),
+							input: event.eventData.input,
 							...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
 							...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
+							...(event.eventData.encryptionPublicKey ? { encryptionPublicKey: event.eventData.encryptionPublicKey } : {}),
 						})
 						.then(toEventResult) as Promise<EventResult<"run_created">>;
 				}
@@ -428,9 +444,14 @@ function jsonEncoded(value: unknown): Uint8Array {
 	return new TextEncoder().encode(text);
 }
 
+// payloadFields are the eventData fields that hold payloads, in the Workflow
+// SDK's serialized form. The Go World stores event data as JSON, with
+// payload bytes as base64 strings.
+const payloadFields = ["input", "output", "result", "error", "payload", "metadata"];
+
 // withEventData exposes an event's stored data as the eventData object the
-// Workflow SDK reads, with Go workflow and step names in SDK form. The Go
-// runtime stores event data as JSON, and this client writes it as CBOR.
+// Workflow SDK reads: its payloads as bytes, and Go workflow and step names
+// in SDK form.
 function withEventData(event: RPC.Event): Event {
 	const { data, ...rest } = event;
 	const eventData = decodeData(data);
@@ -445,12 +466,17 @@ function withEventData(event: RPC.Event): Event {
 		if (typeof fields.stepName === "string") {
 			fields.stepName = devkitName("step", fields.stepName);
 		}
+		for (const field of payloadFields) {
+			if (typeof fields[field] === "string") {
+				fields[field] = new Uint8Array(Buffer.from(fields[field] as string, "base64"));
+			}
+		}
 	}
 	return { ...rest, eventData } as Event;
 }
 
-// decodeData decodes stored bytes as the JSON the Go runtime writes, or the
-// CBOR this client writes. Empty or undecodable bytes are undefined.
+// decodeData decodes stored event data, the JSON the Go World writes.
+// Empty or undecodable bytes are undefined.
 function decodeData(data: Uint8Array | null | undefined): unknown {
 	if (!data || data.byteLength === 0) {
 		return undefined;
@@ -458,38 +484,27 @@ function decodeData(data: Uint8Array | null | undefined): unknown {
 	try {
 		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
 	} catch {
-		try {
-			return decode(data);
-		} catch {
-			return undefined;
-		}
-	}
-}
-
-// decodeError decodes a stored error, the Go runtime's {message, chain}
-// JSON, as the Workflow SDK's structured error.
-function decodeError(data: Uint8Array | null | undefined): { message: string } | undefined {
-	const value = decodeData(data);
-	if (value === undefined) {
 		return undefined;
 	}
-	if (value && typeof value === "object" && typeof (value as { message?: unknown }).message === "string") {
-		return { message: (value as { message: string }).message };
-	}
-	return { message: typeof value === "string" ? value : JSON.stringify(value) };
 }
 
-// toRun exposes a run's stored input, output, and error as decoded values,
-// the legacy JSON form the Workflow SDK reads for runs without a spec version.
+// payload returns stored payload bytes as the Workflow SDK reads them, or
+// undefined when there are none.
+function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
+	return data && data.byteLength > 0 ? data : undefined;
+}
+
+// toRun exposes a run as the Workflow SDK reads one. Its payloads are in the
+// SDK's format, so it reports the spec version that reads them.
 function toRun(run: RPC.Run): WorkflowRun {
 	const { input, output, error, ...rest } = run;
-	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as WorkflowRun;
+	return { ...rest, specVersion: SPEC_VERSION_CURRENT, input: payload(input), output: payload(output), error: payload(error) } as WorkflowRun;
 }
 
-// toStep exposes a step's stored input, output, and error as decoded values.
+// toStep exposes a step as the Workflow SDK reads one.
 function toStep(step: RPC.Step): Step {
 	const { input, output, error, ...rest } = step;
-	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as Step;
+	return { ...rest, input: payload(input), output: payload(output), error: payload(error) } as Step;
 }
 
 // terminalWaitMs is how long one runs.waitForTerminalStatus request waits.

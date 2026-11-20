@@ -60,7 +60,7 @@ func Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) 
 		return nil, ErrNoWorkflow
 	}
 	opts := writerOption(options)
-	writer, err := newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name)
+	writer, err := newStreamWriter(ctx, NewClient(execution.World()), execution.Run().RunID, opts.Name, execution.StreamFrame)
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +83,10 @@ var errStreamWriterClosed = errors.New("workflow: stream writer is closed")
 type streamWriter struct {
 	ctx    context.Context
 	writer worlds.StreamWriter
-	mu     sync.Mutex
-	cond   *sync.Cond
+	// frame encodes a chunk as a stream frame.
+	frame func([]byte) ([]byte, error)
+	mu    sync.Mutex
+	cond  *sync.Cond
 	// pending holds the buffered chunks, pendingBytes their size, and
 	// storing reports a store in flight.
 	pending      [][]byte
@@ -94,14 +96,14 @@ type streamWriter struct {
 	closed       bool
 }
 
-func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string) (*streamWriter, error) {
+func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string, frame func([]byte) ([]byte, error)) (*streamWriter, error) {
 	writer, err := client.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID, Name: name, WriterID: worlds.NewWriterID()})
 	if err != nil {
 		return nil, err
 	}
 	// Stores outlive the step's context, so a step that returns, or is
 	// cancelled, still stores what it wrote.
-	w := &streamWriter{ctx: context.WithoutCancel(ctx), writer: writer}
+	w := &streamWriter{ctx: context.WithoutCancel(ctx), writer: writer, frame: frame}
 	w.cond = sync.NewCond(&w.mu)
 	return w, nil
 }
@@ -118,8 +120,12 @@ func (w *streamWriter) Write(data []byte) (int, error) {
 	if w.err != nil {
 		return 0, w.err
 	}
-	w.pending = append(w.pending, bytes.Clone(data))
-	w.pendingBytes += len(data)
+	frame, err := w.frame(data)
+	if err != nil {
+		return 0, err
+	}
+	w.pending = append(w.pending, frame)
+	w.pendingBytes += len(frame)
 	if !w.storing {
 		w.storing = true
 		go w.store()
@@ -254,8 +260,11 @@ type StreamReader interface {
 }
 
 type streamReader struct {
-	ctx        context.Context
-	client     Client
+	ctx    context.Context
+	client Client
+	// keys opens the run's stream frames, once resolved.
+	keys       *worlds.RunKeys
+	resolved   bool
 	runID      worlds.RunID
 	name       string
 	startIndex int
@@ -314,10 +323,60 @@ func (r *streamReader) fill() error {
 		}
 		r.cursor, r.closed = result.Cursor, result.Done && !result.HasMore
 		for _, chunk := range result.Data {
+			if len(chunk.Data) == 0 {
+				continue
+			}
+			if err := r.resolveKeys(); err != nil {
+				return err
+			}
+			values, err := worlds.DecodeStreamFrames(chunk.Data, r.keys)
+			if err != nil {
+				return err
+			}
+			chunk.Data = bytes.Join(values, nil)
 			if len(chunk.Data) > 0 {
 				r.chunks = append(r.chunks, chunk)
 			}
 		}
 	}
 	return nil
+}
+
+// resolveKeys resolves the keys of the run's stream frames.
+func (r *streamReader) resolveKeys() error {
+	if r.resolved {
+		return nil
+	}
+	run, err := r.client.RunsGet(r.ctx, worlds.RunsGetInput{RunID: r.runID, ResolveData: worlds.ResolveDataNone})
+	if err != nil {
+		return err
+	}
+	if r.keys, err = r.client.RunKeys(r.ctx, worlds.RunKeysInput{RunID: r.runID, DeploymentID: run.DeploymentID}); err != nil {
+		return err
+	}
+	r.resolved = true
+	return nil
+}
+
+// outsideStreamFrame returns how a writer outside the run writes its stream
+// frames, as the Workflow SDK writes them: sealed to the run's public key,
+// or, for a run that published none, encrypted with its key, or plain when
+// it has none.
+func outsideStreamFrame(ctx context.Context, client Client, runID worlds.RunID) (func([]byte) ([]byte, error), error) {
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
+	if err != nil {
+		return nil, err
+	}
+	if publicKey := worlds.DecodePublicKey(run.EncryptionPublicKey); publicKey != nil {
+		sealer, err := worlds.NewPayloadSealer(publicKey)
+		if err != nil {
+			return nil, err
+		}
+		return func(chunk []byte) ([]byte, error) { return worlds.EncodeStreamFrame(chunk, nil, sealer) }, nil
+	}
+	keys, err := client.RunKeys(ctx, worlds.RunKeysInput{RunID: runID, DeploymentID: run.DeploymentID})
+	if err != nil {
+		return nil, err
+	}
+	return func(chunk []byte) ([]byte, error) { return worlds.EncodeStreamFrame(chunk, keys, nil) }, nil
 }

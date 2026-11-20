@@ -3,7 +3,6 @@ package testworld
 import (
 	"bytes"
 	"maps"
-	"slices"
 	"strconv"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -82,26 +81,8 @@ func cloneEvent(value worlds.Event) worlds.Event {
 	return value
 }
 
-func cloneWebhook(value *worlds.Webhook) *worlds.Webhook {
-	if value == nil {
-		return nil
-	}
-	result := *value
-	if value.Response != nil {
-		response := *value.Response
-		response.Body = bytes.Clone(value.Response.Body)
-		response.Header = maps.Clone(value.Response.Header)
-		for key, values := range response.Header {
-			response.Header[key] = slices.Clone(values)
-		}
-		result.Response = &response
-	}
-	return &result
-}
-
 func cloneHook(value worlds.Hook) worlds.Hook {
 	value.Metadata = bytes.Clone(value.Metadata)
-	value.Webhook = cloneWebhook(value.Webhook)
 	if value.TokenRetentionUntil != nil {
 		until := *value.TokenRetentionUntil
 		value.TokenRetentionUntil = &until

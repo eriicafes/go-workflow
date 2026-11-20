@@ -359,10 +359,11 @@ Creation is local and returns only a handle. Receiving from or selecting that ho
 err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
 ```
 
-A webhook is a hook resumed by an HTTP request to its URL, with the JSON body
-decoded as the payload. `WebhookOption` can require a method, set a static
-response, or hold the request until a step calls `WebhookRequest.RespondWith`. The token
-in the URL is its only authorization, so verify provider signatures before
+A webhook is a hook resumed by each HTTP request to its URL, as the Workflow
+SDK's `createWebhook` is. Each request's body is a stream of the run, so a step
+reads it with `JSON` or `Body`. `WebhookOption` can set a static response, or
+hold each request until a step calls `WebhookRequest.RespondWith`. The token in
+the URL is its only authorization, so verify provider signatures before
 trusting the payload.
 
 ```go
@@ -379,7 +380,9 @@ request, err := webhook.Request(ctx)
 if err != nil {
 	return Result{}, err
 }
-payment, err := request.JSON()
+payment, err := workflow.Step(ctx, func(ctx context.Context, request *workflow.WebhookRequest[Payment]) (Payment, error) {
+	return request.JSON(ctx)
+}, request)
 ```
 
 `WithCancel` and `WithCancelCause` return a durable cancellation context, a cancel function, and a creation error. Their cancel functions also return errors. Pass cancellation contexts to steps; cancel runs explicitly with `Run.Cancel`; use `CancelAny(ctx, sources...)` to combine cancellation while preserving base values. Cancelled steps fail without retrying; cancelled runs let running steps finish naturally. `Then` follows the result returned by `func(T, error) *Result[U]`; use `NewResult(value, err)` for immediate values and failures.

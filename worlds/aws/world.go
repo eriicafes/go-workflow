@@ -50,6 +50,11 @@ type Config struct {
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
 	// forever. Any retention over 15 minutes requires Scheduler.
 	Retentions map[string]time.Duration
+	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
+	// key derived from it for the run, as the Workflow SDK does. Empty leaves
+	// payloads unencrypted. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionKey []byte
 }
 
 // QueueConfig is an SQS queue that deliveries can be routed to.
@@ -112,6 +117,9 @@ func New(config Config, dynamoClient *dynamodb.Client, sqsClient *sqs.Client) (*
 func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, schedulerClient schedulerAPI) (*World, error) {
 	if config.BaseURL == "" || config.TableName == "" || config.QueueURL == "" {
 		return nil, errors.New("workflow/aws: base URL, table name, and queue URL are required")
+	}
+	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
+		return nil, err
 	}
 	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
 	if err != nil {
@@ -188,4 +196,10 @@ func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.
 	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
 		return world.consume(ctx, runtime, event), nil
 	}
+}
+
+// EncryptionKeyForRun returns the key of a run's payloads, derived from
+// Config.EncryptionKey, or nil when the World has none.
+func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
+	return worlds.ConfiguredRunKey(w.config.EncryptionKey, runID)
 }

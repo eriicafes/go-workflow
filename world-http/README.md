@@ -8,7 +8,10 @@ Go.
 object, so the [Workflow SDK](https://workflow-sdk.dev) CLI and web UI can
 inspect Go runs. It sends its operations to the handler's CBOR RPC endpoint,
 uses bounded polling for stream chunks, and writes streams over the handler's
-stream socket, falling back to RPC writes.
+stream socket, falling back to RPC writes. Go runs' payloads are in the SDK's
+format, so it passes them through, and `getEncryptionKeyForRun` reads a run's
+key with the `runs.encryptionKey` RPC method for the SDK's tools to decrypt
+them.
 
 ```sh
 npm install go-workflow

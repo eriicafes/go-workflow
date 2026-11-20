@@ -84,11 +84,11 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey})
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
@@ -309,13 +309,6 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			}
 			return worlds.EventResult{}, false, worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(requested.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
-		}
 	}
 
 	if requested.EventType == worlds.EventTypeHookCreated {
@@ -429,24 +422,12 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName}, HookID: id, Token: value.Token, Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)
 		hook := m.hooks[id]
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		value, ok := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && ok {
-			if value.Request != nil {
-				hook.WebhookEventID = event.EventID
-			}
-			if value.Response != nil && value.ResponseTo == hook.WebhookEventID {
-				m.completeHookLocked(&hook, now)
-			}
-		}
-		if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-			m.completeHookLocked(&hook, now)
-		}
 		m.hooks[id] = hook
 
 	case worlds.EventTypeHookDisposed:

@@ -18,10 +18,9 @@ type Event struct {
 Event IDs encode the event's **slot**, its 1-based position in the log.
 `worlds.EventSlot(id)` and `worlds.EventIDForSlot(slot)` convert between them.
 
-The runtime and Worlds share these JSON payload types, defined with their
-helpers in `worlds/data.go`. As in the
-Workflow SDK, event data is a JSON object and each type keeps its payload in
-one named field:
+The runtime and Worlds share these event data types, defined with their
+helpers in `worlds/data.go`. Event data has the Workflow SDK's fields, as a
+JSON object, and each type keeps its payload in one named field:
 
 | Type | Events | Payload field |
 | --- | --- | --- |
@@ -36,28 +35,28 @@ one named field:
 | `DataWaitCreated` | `wait_created` | |
 | `DataAttrSet` | `attr_set` | |
 
-Metadata fields also follow
-the SDK: a wait records `resumeAt`, `attr_set` records its `changes` as
-`key`/`value` pairs and the `writer` that set them, and a hook records
-`isWebhook`, `isSystem` for hooks the runtime creates for itself, and
-`forceClaimedFrom` for a forced claim and `tokenRetentionUntil` for a
-reserved token. Go keeps a few extra metadata fields,
-such as a declaration's `position` and a hook's `webhook` settings. A webhook's `hook_received`
-payload is a `WebhookReceivedEventData`. Helpers named `Decode*` read a
-payload from event data, such as `worlds.DecodeRunCompleted`,
-`worlds.DecodeRunFailed`, `worlds.DecodeHookReceived`, and
-`worlds.DecodeWebhookReceived`, and helpers named `Encode*` build event data,
+Metadata fields are the SDK's: a step records `stepName`, a wait `resumeAt`,
+`attr_set` its `changes` as `key`/`value` pairs and the `writer` that set them,
+`run_created` the run's `encryptionPublicKey` when its payloads are encrypted,
+and a hook `token`, `isWebhook`, `isSystem` for hooks the runtime creates for
+itself, `forceClaimedFrom` for a forced claim, and `tokenRetentionUntil` for a
+reserved token. A declaration's position is in its ID
+(`worlds.OperationPosition`), and a step's retries and cancellation contexts
+come from the replay that declares it. Helpers named `Decode*` read a payload
+from event data, such as `worlds.DecodeRunCompleted`, `worlds.DecodeRunFailed`,
+and `worlds.DecodeHookReceived`, and helpers named `Encode*` build event data,
 such as `worlds.EncodeRunFailed`, `worlds.EncodeHookReceived`, and
 `worlds.EncodeAttrSet`.
 
-Payload fields are `json.RawMessage`, except a hook's `metadata`, which is
-`[]byte`. An error is embedded as a JSON object
-containing its message and recorded chain. `worlds.DecodeError` decodes the
-bytes in an `error` field or the materialized `Run.Error` and `Step.Error`
-fields.
+Payload fields are `[]byte`, base64 in the JSON, holding payloads in the SDK's
+format, possibly encrypted (see [Data Format and Encryption](/guide/encryption)).
+A run's input is its argument list, a step's input `{args: [input]}`, an error
+an SDK `Error`, and a webhook's payload a `worlds.WebhookRequest`, the SDK's
+`Request`. `worlds.DecodePayload` and `worlds.DecodeErrorPayload` read them;
+Worlds never do.
 
 Reading events with `EventsResolveDataNone` removes each event's payload field
-and keeps the rest, such as a step's name and position.
+and keeps the rest, such as a step's name.
 `worlds.ResolveEventData` applies this rule for a World.
 
 ## Event types
@@ -88,7 +87,7 @@ and keeps the rest, such as a step's name and position.
 | Type | Records |
 | --- | --- |
 | `hook_created` | A hook and the token it claims. |
-| `hook_received` | A hook's payload, or a webhook's request or response. |
+| `hook_received` | A hook's payload, or a webhook's request. |
 | `hook_disposed` | The hook released its token, or lost it to a forced claim (`forceClaimedBy` set). |
 | `hook_conflict` | The hook could not be created because another run owns its token. |
 
@@ -113,9 +112,7 @@ rules atomically:
 - `hook_disposed` only targets a hook of the same run (`ErrHookNotActive`).
 - `hook_received` only targets an active hook of the same run that still owns
   its token (`ErrHookNotActive`, or `ErrHookForceClaimed` after a forced claim).
-  A webhook accepts one request. A plain hook receives repeated payloads, consumed in order with `Next`.
-- A `hook_received` that carries a webhook's response is refused with
-  `ErrHookNotActive` once that webhook has responded, because each webhook request has one response.
+  A hook, a webhook included, receives repeated payloads, consumed in order with `Next`.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
 - An event that repeats an admitted transition, such as a second
   `run_started`, `step_created`, or `hook_disposed`, returns the earlier event

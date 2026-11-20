@@ -5,7 +5,11 @@
 JavaScript. It sends its operations to the handler's CBOR
 [RPC endpoint](/reference/http#rpc), uses bounded polling for stream chunks,
 and writes streams over the handler's [stream socket](/reference/http#stream-socket),
-falling back to RPC writes.
+falling back to RPC writes. Go runs' payloads are in the Workflow SDK's format,
+so it passes them through as they are stored, and its `getEncryptionKeyForRun`
+reads a run's key with the `runs.encryptionKey` RPC method, so SDK tools decrypt
+and hydrate Go runs as they do JS runs. See
+[Data Format and Encryption](/guide/encryption).
 
 Most projects never import it: the [web UI](/tooling/web-ui) loads it for you
 through `WORKFLOW_TARGET_WORLD`. Use it directly when JavaScript or TypeScript

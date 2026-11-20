@@ -195,7 +195,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.token, " + metadata + ", h.webhook, h.webhook_event_id, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
+	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", h.is_webhook, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
 }
 
 // hookJoin joins the hook's hook_created event in its own run, unless resolve
@@ -209,8 +209,8 @@ func hookJoin(resolve worlds.ResolveData) string {
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
-	var metadata, webhook, claimed, taken []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.Token, &metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
+	var metadata, claimed, taken []byte
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
 		return worlds.Hook{}, err
 	}
 	if metadata != nil {
@@ -223,12 +223,6 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 	}
 	if len(taken) > 0 {
 		if err := json.Unmarshal(taken, &hook.ForceClaimedBy); err != nil {
-			return worlds.Hook{}, err
-		}
-	}
-	if webhook != nil {
-		hook.Webhook = &worlds.Webhook{}
-		if err := json.Unmarshal(webhook, hook.Webhook); err != nil {
 			return worlds.Hook{}, err
 		}
 	}

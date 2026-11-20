@@ -37,6 +37,7 @@ context before calling `Close`.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
 | `URL` | required by `Open` | Connection string. |
 | `PollInterval` | 250 ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |

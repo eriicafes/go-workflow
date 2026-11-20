@@ -155,19 +155,21 @@ func TestViewsHoldNoPayloads(t *testing.T) {
 	dir := t.TempDir()
 	world := startWorld(t, dir, nil)
 	runID := worlds.RunID("wrun_payloads")
-	metadata := base64.StdEncoding.EncodeToString([]byte(`"hook-metadata-bytes"`))
+	// Payloads are bytes, base64 in event JSON.
+	b64 := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+	metadata := b64(`"hook-metadata-bytes"`)
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "payloads", Input: []byte(`"run-input-bytes"`)}); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeRunStarted},
-		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a","input":"step-input-bytes"}`)},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a","input":"` + b64(`"step-input-bytes"`) + `"}`)},
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
-		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: []byte(`{"error":{"message":"step-error-bytes"}}`)},
+		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: []byte(`{"error":"` + b64(`"step-error-bytes"`) + `"}`)},
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
-		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a", Data: []byte(`{"result":"step-output-bytes"}`)},
+		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a", Data: []byte(`{"result":"` + b64(`"step-output-bytes"`) + `"}`)},
 		{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"payload-token","metadata":"` + metadata + `"}`)},
-		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"run-output-bytes"}`)},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"` + b64(`"run-output-bytes"`) + `"}`)},
 	} {
 		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event}); err != nil {
 			t.Fatalf("%s: %v", event.EventType, err)
@@ -176,7 +178,7 @@ func TestViewsHoldNoPayloads(t *testing.T) {
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
-	payloads := []string{"run-input-bytes", "run-output-bytes", "step-input-bytes", "step-error-bytes", "step-output-bytes", metadata}
+	payloads := []string{b64(`"run-input-bytes"`), b64(`"run-output-bytes"`), b64(`"step-input-bytes"`), b64(`"step-error-bytes"`), b64(`"step-output-bytes"`), metadata}
 	assertNoPayloads := func() {
 		t.Helper()
 		for _, name := range []string{"runs/" + key(string(runID)) + ".json", "steps/" + key(string(runID)) + "/" + key("step_a") + ".json", "hooks/" + key("hook_a") + ".json"} {
@@ -462,7 +464,7 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	runners := worlds.Runners(workflow.Use(double))
 	world := startWorld(t, dir, runners)
-	input, err := json.Marshal(doubleInput{Value: 4})
+	input, err := worlds.EncodePayload([1]doubleInput{{Value: 4}}, worlds.PayloadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +487,8 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 
 	reopened := startWorld(t, dir, runners)
 	run, err := reopened.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: "wrun_restart", Timeout: 10 * time.Second})
-	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `{"Value":8}` {
+	var output doubleInput
+	if err != nil || run.Status != worlds.StatusCompleted || worlds.DecodePayload(run.Output, nil, &output) != nil || output.Value != 8 {
 		t.Fatalf("run after restart = %#v err=%v", run, err)
 	}
 	if !time.Now().After(notBefore) {

@@ -102,6 +102,13 @@ type Client interface {
 	HooksResume(context.Context, ClientHooksResumeInput) error
 	// Spec returns the RPC protocol version and capabilities of the World.
 	Spec(context.Context) (ClientSpec, error)
+	// RunKeys returns the keys of a run's payloads, or nil when they are not
+	// encrypted, as the World's EncryptionKeys resolves them.
+	RunKeys(context.Context, RunKeysInput) (*RunKeys, error)
+	// RunsStartDeployment returns the deployment a new run starts on, as
+	// StartDeploymentID does, so its payloads can be encrypted for it
+	// before it is created.
+	RunsStartDeployment(context.Context, ClientRunsStartDeploymentInput) (string, error)
 }
 
 // ClientSpec describes the World a Client calls.
@@ -237,6 +244,14 @@ func (c worldClient) Spec(context.Context) (ClientSpec, error) {
 	return ClientSpec{SpecVersion: c.world.SpecVersion(), Capabilities: c.world.Capabilities()}, nil
 }
 
+func (c worldClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
+	return RunKeysFor(ctx, c.world, input.RunID, input.DeploymentID)
+}
+
+func (c worldClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
+	return StartDeploymentID(ctx, c.world, input.Latest)
+}
+
 // maxHTTPWait caps how long one RPC request may block in
 // runs.waitForTerminalStatus or streams.getChunks, so a long wait never holds a
 // request open past common proxy and server timeouts. Callers loop until they
@@ -268,6 +283,8 @@ type httpClient struct {
 	// socketDeclinedUntil is when the client next tries a stream socket
 	// after the server declined one.
 	socketDeclinedUntil time.Time
+	// runKeys caches the keys of runs' payloads by run ID.
+	runKeys sync.Map
 }
 
 func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
@@ -446,6 +463,31 @@ func (c *httpClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 
 // Spec calls client.spec once and returns its result from then on, since a
 // World's spec does not change while it serves.
+func (c *httpClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
+	if cached, ok := c.runKeys.Load(input.RunID); ok {
+		return cached.(*RunKeys), nil
+	}
+	var key []byte
+	if err := c.call(ctx, "runs.encryptionKey", input, &key); err != nil {
+		return nil, err
+	}
+	var keys *RunKeys
+	if key != nil {
+		var err error
+		if keys, err = NewRunKeys(key); err != nil {
+			return nil, err
+		}
+	}
+	c.runKeys.Store(input.RunID, keys)
+	return keys, nil
+}
+
+func (c *httpClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
+	var deploymentID string
+	err := c.call(ctx, "client.runs.startDeployment", input, &deploymentID)
+	return deploymentID, err
+}
+
 func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
