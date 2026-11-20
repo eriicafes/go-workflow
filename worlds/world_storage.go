@@ -33,6 +33,14 @@ type StorageRuns interface {
 	// whose Capabilities report SetAttributes as false ignores the call and
 	// returns nil.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
+	// RunsDeleteDataMany deletes the data of finished runs, as the Workflow
+	// SDK's runs.deleteDataMany does: their payloads, the payloads in their
+	// events, their hooks' metadata, and their streams' chunks, leaving each
+	// stream empty and closed. The run, step, event, and hook records stay,
+	// and the run's ExpiredAt is set. It returns one result per RunID, in
+	// order. A World whose Capabilities report DeleteData as false returns an
+	// error wrapping errors.ErrUnsupported.
+	RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error)
 }
 
 // StorageSteps reads the steps of a run.
@@ -137,6 +145,39 @@ type (
 		// Value is the new value. Nil deletes the attribute.
 		Value *string `json:"value"`
 	}
+	// RunsDeleteDataManyInput holds the arguments to RunsDeleteDataMany:
+	// one to MaxDeleteDataRunIDs unique run IDs.
+	RunsDeleteDataManyInput struct {
+		RunIDs []RunID
+	}
+	// RunsDeleteDataManyResult is the result of RunsDeleteDataMany, as the
+	// Workflow SDK's DeleteRunsDataResult: one result per requested run, in
+	// order, and a count of each outcome.
+	RunsDeleteDataManyResult struct {
+		Summary DeleteDataSummary
+		Results []DeleteDataResult
+	}
+	// DeleteDataSummary counts the outcomes of RunsDeleteDataMany.
+	DeleteDataSummary struct {
+		Requested      int
+		Deleted        int
+		AlreadyDeleted int
+		Skipped        int
+		NotCreated     int
+		NotFound       int
+		Failed         int
+	}
+	// DeleteDataResult is the outcome of deleting one run's data. Reason and
+	// Status are set for DeleteDataSkipped, and Code and Retryable for
+	// DeleteDataFailed.
+	DeleteDataResult struct {
+		RunID     RunID
+		Outcome   DeleteDataOutcome
+		Reason    string `cbor:",omitempty"`
+		Status    Status `cbor:",omitempty"`
+		Code      string `cbor:",omitempty"`
+		Retryable bool   `cbor:",omitempty"`
+	}
 	// RunsSetAttributesInput holds the arguments to RunsSetAttributes.
 	RunsSetAttributesInput struct {
 		RunID   RunID
@@ -187,6 +228,11 @@ type Run struct {
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
 	CompletedAt *time.Time
+	// ExpiredAt is when the run's data was deleted, or is deleted for a
+	// World's retention, as the Workflow SDK's expiredAt records it. Once it
+	// has passed, the run's payloads are gone and Run.Value returns
+	// ErrRunExpired. See RunDataExpired.
+	ExpiredAt *time.Time
 }
 
 type (
@@ -495,4 +541,73 @@ func EventSlot(id EventID) (uint64, error) {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
 	return slot, nil
+}
+
+// MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes,
+// as in the Workflow SDK.
+const MaxDeleteDataRunIDs = 100
+
+// DeleteDataOutcome is the outcome of deleting one run's data.
+type DeleteDataOutcome string
+
+const (
+	// DeleteDataDeleted reports that the call deleted the run's data.
+	DeleteDataDeleted DeleteDataOutcome = "deleted"
+	// DeleteDataAlreadyDeleted reports that the run's data was already
+	// gone, and whatever an earlier deletion left was deleted.
+	DeleteDataAlreadyDeleted DeleteDataOutcome = "already_deleted"
+	// DeleteDataSkipped reports that the run has not finished, so nothing
+	// was deleted. Its Reason is DeleteDataRunNotTerminal.
+	DeleteDataSkipped DeleteDataOutcome = "skipped"
+	// DeleteDataNotCreated reports a run cancelled before it was created.
+	// go-workflow creates a run before queueing it, so its Worlds never
+	// report it, but the Workflow SDK's do.
+	DeleteDataNotCreated DeleteDataOutcome = "not_created"
+	// DeleteDataNotFound reports that no run has the ID.
+	DeleteDataNotFound DeleteDataOutcome = "not_found"
+	// DeleteDataFailed reports that the deletion did not complete. Deleting
+	// is idempotent, so retrying finishes it.
+	DeleteDataFailed DeleteDataOutcome = "failed"
+)
+
+// DeleteDataRunNotTerminal is the Reason of a DeleteDataSkipped result.
+const DeleteDataRunNotTerminal = "run_not_terminal"
+
+// CheckDeleteDataInput returns ErrDeleteDataInvalid unless input names one
+// to MaxDeleteDataRunIDs unique run IDs.
+func CheckDeleteDataInput(input RunsDeleteDataManyInput) error {
+	if len(input.RunIDs) == 0 || len(input.RunIDs) > MaxDeleteDataRunIDs {
+		return fmt.Errorf("%w: %d run IDs, want 1 to %d", ErrDeleteDataInvalid, len(input.RunIDs), MaxDeleteDataRunIDs)
+	}
+	seen := make(map[RunID]bool, len(input.RunIDs))
+	for _, id := range input.RunIDs {
+		if seen[id] {
+			return fmt.Errorf("%w: run ID %s repeated", ErrDeleteDataInvalid, id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+// NewDeleteDataResult returns the result of RunsDeleteDataMany for results,
+// counting their outcomes.
+func NewDeleteDataResult(results []DeleteDataResult) RunsDeleteDataManyResult {
+	summary := DeleteDataSummary{Requested: len(results)}
+	for _, result := range results {
+		switch result.Outcome {
+		case DeleteDataDeleted:
+			summary.Deleted++
+		case DeleteDataAlreadyDeleted:
+			summary.AlreadyDeleted++
+		case DeleteDataSkipped:
+			summary.Skipped++
+		case DeleteDataNotCreated:
+			summary.NotCreated++
+		case DeleteDataNotFound:
+			summary.NotFound++
+		case DeleteDataFailed:
+			summary.Failed++
+		}
+	}
+	return RunsDeleteDataManyResult{Summary: summary, Results: results}
 }

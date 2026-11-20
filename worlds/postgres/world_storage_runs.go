@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -122,4 +123,9 @@ func statusStrings(values []worlds.Status) []string {
 		result[i] = string(value)
 	}
 	return result
+}
+
+// RunsDeleteDataMany is not supported yet.
+func (w *World) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, fmt.Errorf("workflow/postgres: delete run data: %w", errors.ErrUnsupported)
 }

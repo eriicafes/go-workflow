@@ -48,6 +48,10 @@ type Client interface {
 	RunsWaitForTerminalStatus(context.Context, RunsWaitForTerminalStatusInput) (Run, error)
 	// RunsSetAttributes applies attribute changes to a run.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
+	// RunsDeleteDataMany deletes the data of finished runs. It returns an
+	// error wrapping errors.ErrUnsupported when the World does not delete
+	// run data.
+	RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error)
 
 	// StepsGet returns a step of a run. It returns ErrStepNotFound when
 	// the step does not exist.
@@ -170,6 +174,10 @@ func (c worldClient) RunsWaitForTerminalStatus(ctx context.Context, input RunsWa
 
 func (c worldClient) RunsSetAttributes(ctx context.Context, input RunsSetAttributesInput) error {
 	return c.world.RunsSetAttributes(ctx, input)
+}
+
+func (c worldClient) RunsDeleteDataMany(ctx context.Context, input RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
+	return c.world.RunsDeleteDataMany(ctx, input)
 }
 
 func (c worldClient) StepsGet(ctx context.Context, input StepsGetInput) (Step, error) {
@@ -351,6 +359,10 @@ func (c *httpClient) RunsWaitForTerminalStatus(ctx context.Context, input RunsWa
 
 func (c *httpClient) RunsSetAttributes(ctx context.Context, input RunsSetAttributesInput) error {
 	return c.call(ctx, "runs.setAttributes", input, nil)
+}
+
+func (c *httpClient) RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
+	return RunsDeleteDataManyResult{}, fmt.Errorf("workflow: delete run data over HTTP: %w", errors.ErrUnsupported)
 }
 
 func (c *httpClient) StepsGet(ctx context.Context, input StepsGetInput) (Step, error) {

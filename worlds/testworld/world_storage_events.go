@@ -450,6 +450,13 @@ func (m *World) materializeLocked(event worlds.Event) {
 				delete(m.tokens, hook.Token)
 			}
 		}
+		if worlds.ReadRunRetention(run.Attributes) == worlds.RetainNone {
+			m.purgeLocked(event.RunID, now)
+		}
+	} else if worlds.RunDataExpired(run, now) {
+		// A step still running when its run's data was deleted settles
+		// after it. What it brought is deleted as it lands.
+		m.scrubLastEventLocked(event.RunID)
 	}
 }
 

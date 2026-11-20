@@ -40,6 +40,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"Batch", conformBatch},
 		{"EventsList", conformEventsList},
 		{"Attributes", conformAttributes},
+		{"DeleteData", conformDeleteData},
 		{"HookTokens", conformHookTokens},
 		{"HooksForce", conformHooksForce},
 		{"HooksRetention", conformHooksRetention},

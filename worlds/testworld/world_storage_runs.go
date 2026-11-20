@@ -84,3 +84,60 @@ func (m *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 	_, err = m.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, Data: data}})
 	return err
 }
+
+func (m *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	if err := worlds.CheckDeleteDataInput(input); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	defer m.notify()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+	for index, id := range input.RunIDs {
+		results[index] = worlds.DeleteDataResult{RunID: id}
+		run, ok := m.runs[id]
+		switch {
+		case !ok:
+			results[index].Outcome = worlds.DeleteDataNotFound
+		case !run.Status.Terminal():
+			results[index].Outcome = worlds.DeleteDataSkipped
+			results[index].Reason, results[index].Status = worlds.DeleteDataRunNotTerminal, run.Status
+		case worlds.RunDataExpired(run, now):
+			results[index].Outcome = worlds.DeleteDataAlreadyDeleted
+			m.purgeLocked(id, now)
+		default:
+			results[index].Outcome = worlds.DeleteDataDeleted
+			m.purgeLocked(id, now)
+		}
+	}
+	return worlds.NewDeleteDataResult(results), nil
+}
+
+// purgeLocked deletes a finished run's data, as the Workflow SDK does: the
+// payloads in its events, which are also its run, step, and hook payloads,
+// and its streams' chunks, leaving each stream empty and closed. It sets the
+// run's ExpiredAt unless it has already passed.
+func (m *World) purgeLocked(runID worlds.RunID, now time.Time) {
+	run := m.runs[runID]
+	if !worlds.RunDataExpired(run, now) {
+		run.ExpiredAt = &now
+		m.runs[runID] = run
+	}
+	for index, event := range m.events[runID] {
+		m.events[runID][index].Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
+	for _, stream := range m.streams[runID] {
+		stream.chunks, stream.closed = nil, true
+	}
+}
+
+// scrubLastEventLocked deletes the payload of a run's latest event.
+func (m *World) scrubLastEventLocked(runID worlds.RunID) {
+	events := m.events[runID]
+	last := &events[len(events)-1]
+	last.Data = worlds.ScrubEventData(last.EventType, last.Data)
+}

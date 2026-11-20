@@ -68,6 +68,12 @@ var (
 	// while the run was in flight. The run fails without running its
 	// compensations, since they would replay against the same log.
 	ErrCorruptedEventLog = errors.New("workflow: corrupted event log")
+	// ErrRunExpired is returned when reading the result of a run whose data
+	// was deleted, as the Workflow SDK's RunExpiredError.
+	ErrRunExpired = errors.New("workflow: run data expired")
+	// ErrDeleteDataInvalid is returned by RunsDeleteDataMany for a request
+	// without one to MaxDeleteDataRunIDs unique run IDs.
+	ErrDeleteDataInvalid = errors.New("workflow: invalid delete data request")
 
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")

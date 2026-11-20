@@ -86,6 +86,13 @@ func EventPayload(event Event) []byte {
 	return nil
 }
 
+// ScrubEventData returns event Data without its user data, as the Workflow
+// SDK deletes a run's data: the payload field of eventType is removed and its
+// metadata, such as a step's name or a hook's token, is kept.
+func ScrubEventData(eventType EventType, data []byte) []byte {
+	return ResolveEventData(eventType, data, EventsResolveDataNone)
+}
+
 // ResolveEvents applies ResolveEventData to each event's Data in place and
 // returns events.
 func ResolveEvents(events []Event, resolve EventsResolveData) []Event {
