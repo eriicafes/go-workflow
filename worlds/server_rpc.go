@@ -77,6 +77,8 @@ var rpcSentinels = []struct {
 	{"deployment_unavailable", "internal", ErrDeploymentUnavailable},
 	{"deployment_mismatch", "internal", ErrDeploymentMismatch},
 	{"corrupted_event_log", "internal", ErrCorruptedEventLog},
+	{"delete_data_invalid", "invalid_argument", ErrDeleteDataInvalid},
+	{"unsupported", "unimplemented", errors.ErrUnsupported},
 	{"cancelled", "cancelled", context.Canceled},
 	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
 }
@@ -177,6 +179,16 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
+	case "runs.deleteDataMany":
+		input, err := decodeRPC[RunsDeleteDataManyInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		value, err := world.RunsDeleteDataMany(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(value)
 	case "steps.get":
 		input, err := decodeRPC[StepsGetInput](request.Input)
 		if err != nil {
@@ -802,6 +814,8 @@ func rpcErrorStatus(code string) int {
 		return http.StatusBadRequest
 	case "conflict":
 		return http.StatusConflict
+	case "unimplemented":
+		return http.StatusNotImplemented
 	}
 	return http.StatusInternalServerError
 }

@@ -280,6 +280,44 @@ func TestRunValueReportsDeletedData(t *testing.T) {
 	}
 }
 
+func TestDeleteRuns(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+		return pointerWorkflowOutput{Value: input.Value}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, &pointerWorkflowInput{Value: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.DeleteRuns(ctx, run.ID(), "wrun_missing")
+	if err != nil || result.Summary.Deleted != 1 || result.Summary.NotFound != 1 || result.Results[0].Outcome != worlds.DeleteDataDeleted {
+		t.Fatalf("DeleteRuns = %+v, %v", result, err)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("deleted run error = %v", err)
+	}
+	if _, err := workflow.DeleteRuns(ctx); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("DeleteRuns without runs error = %v", err)
+	}
+	if _, err := workflow.DeleteRuns(ctx, run.ID(), run.ID()); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("DeleteRuns with a repeated run error = %v", err)
+	}
+	local := workflow.NewContext(context.Background(), workflow.NewClient(noDeleteWorld{world}))
+	if _, err := workflow.DeleteRuns(local, run.ID()); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteRuns on a World without it error = %v", err)
+	}
+}
+
+// noDeleteWorld is a World that does not delete run data.
+type noDeleteWorld struct{ *testworld.World }
+
+func (noDeleteWorld) Capabilities() worlds.Capabilities { return worlds.Capabilities{} }
+
 func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)

@@ -411,3 +411,43 @@ func TestHTTPHandlerWithClientMiddlewareWrapsInOrder(t *testing.T) {
 		t.Fatalf("webhook ran RPC middleware: %v", order)
 	}
 }
+
+// noDeleteWorld is a World that does not delete run data.
+type noDeleteWorld struct{ *testworld.World }
+
+func (noDeleteWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, errors.ErrUnsupported
+}
+
+func TestRPCDeletesRunData(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_delete", WorkflowName: "wf", Input: []byte(`"input"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []worlds.EventType{worlds.EventTypeRunStarted, worlds.EventTypeRunCancelled} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_delete", Event: worlds.EventsCreateEvent{EventType: eventType}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete", "wrun_missing"}})
+	want := worlds.RunsDeleteDataManyResult{
+		Summary: worlds.DeleteDataSummary{Requested: 2, Deleted: 1, NotFound: 1},
+		Results: []worlds.DeleteDataResult{{RunID: "wrun_delete", Outcome: worlds.DeleteDataDeleted}, {RunID: "wrun_missing", Outcome: worlds.DeleteDataNotFound}},
+	}
+	if err != nil || result.Summary != want.Summary || len(result.Results) != 2 || result.Results[0] != want.Results[0] || result.Results[1] != want.Results[1] {
+		t.Fatalf("delete = %+v, %v", result, err)
+	}
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_delete"})
+	if err != nil || run.ExpiredAt == nil || run.Input != nil {
+		t.Fatalf("deleted run = %+v, %v", run, err)
+	}
+	if _, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{}); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("empty delete error = %v", err)
+	}
+	unsupported := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(noDeleteWorld{world}, "")))
+	if _, err := unsupported.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("unsupported delete error = %v", err)
+	}
+}

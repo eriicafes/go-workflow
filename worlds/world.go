@@ -25,7 +25,7 @@ import (
 
 // SpecVersion is the RPC protocol version implemented by this package. A
 // World returns it from its SpecVersion method.
-const SpecVersion = 2
+const SpecVersion = 3
 
 // World is the backend a run is recorded in. It provides event storage, a
 // delivery queue, and streams. The runtime, the client, and HTTPHandler all
