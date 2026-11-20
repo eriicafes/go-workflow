@@ -65,6 +65,7 @@ var storedKeys = map[string]string{
 	"writer":                  "writer",
 	"errorCode":               "errorCode",
 	"cancelReason":            "cancelReason",
+	"executionContext":        "executionContext",
 }
 
 func (f *fakeBackend) count(route string) int {
@@ -385,7 +386,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	if eventType == worlds.EventTypeRunCreated {
 		var created worlds.DataRunCreated
 		_ = json.Unmarshal(data, &created)
-		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey}); err != nil {
+		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext}); err != nil {
 			return refuse(err)
 		}
 		run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
@@ -513,6 +514,9 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		if len(created.Input) > 0 {
 			stored["input"] = []byte(created.Input)
 		}
+		if len(created.ExecutionContext) > 0 {
+			stored["executionContext"] = created.ExecutionContext
+		}
 	case worlds.EventTypeHookConflict:
 		var created worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &created)
@@ -566,6 +570,9 @@ func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[str
 	}
 	if run.ExpiredAt != nil {
 		wire["expiredAt"] = *run.ExpiredAt
+	}
+	if len(run.ExecutionContext) > 0 {
+		wire["executionContext"] = run.ExecutionContext
 	}
 	if len(run.Error) > 0 {
 		wire["error"] = run.Error

@@ -231,6 +231,7 @@ export class HTTPWorld implements World {
 							...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
 							...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
 							...(event.eventData.encryptionPublicKey ? { encryptionPublicKey: event.eventData.encryptionPublicKey } : {}),
+							...(event.eventData.executionContext ? { executionContext: event.eventData.executionContext } : {}),
 						})
 						.then(toEventResult) as Promise<EventResult<"run_created">>;
 				}
@@ -503,10 +504,11 @@ function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
 // toRun exposes a run as the Workflow SDK reads one. Its payloads are in the
 // SDK's format, so it reports the spec version that reads them.
 function toRun(run: RPC.Run): WorkflowRun {
-	const { input, output, error, expiredAt, ...rest } = run;
+	const { input, output, error, expiredAt, executionContext, ...rest } = run;
 	return {
 		...rest,
 		...(expiredAt ? { expiredAt } : {}),
+		...(executionContext ? { executionContext } : {}),
 		specVersion: SPEC_VERSION_CURRENT,
 		input: payload(input),
 		output: payload(output),

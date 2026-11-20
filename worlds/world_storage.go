@@ -228,6 +228,9 @@ type Run struct {
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
 	CompletedAt *time.Time
+	// ExecutionContext is plain-text metadata about how the run was started,
+	// as the Workflow SDK's executionContext. See EventsCreateRunInput.
+	ExecutionContext map[string]any
 	// ExpiredAt is when the run's data was deleted, or is deleted for a
 	// World's retention, as the Workflow SDK's expiredAt records it. Once it
 	// has passed, the run's payloads are gone and Run.Value returns
@@ -417,6 +420,11 @@ type (
 		// payloads are encrypted. The World records it in run_created, on the
 		// Run, and in the ResumeContext of the run's hooks.
 		EncryptionPublicKey string
+		// ExecutionContext is plain-text metadata about how the run was
+		// started, as the Workflow SDK's executionContext, such as
+		// ExecutionContextReplayedFromRunID. The World records it in
+		// run_created and on the Run.
+		ExecutionContext map[string]any
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {

@@ -14,7 +14,9 @@ import (
 func conformRunCreate(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformRunID("create")
-	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"team": "a"}})
+	source := "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	executionContext := map[string]any{worlds.ExecutionContextReplayedFromRunID: source}
+	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"team": "a"}, ExecutionContext: executionContext})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +35,9 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 	if run.RunID != runID || run.WorkflowName != "conformance" || run.Status != worlds.StatusPending || string(run.Input) != `"input"` || run.Attributes["team"] != "a" || run.CreatedAt.IsZero() || run.StartedAt != nil {
 		t.Fatalf("run = %#v", run)
 	}
+	if run.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != source {
+		t.Fatalf("run executionContext = %#v", run.ExecutionContext)
+	}
 	stripped, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if err != nil || stripped.Input != nil {
 		t.Fatalf("ResolveDataNone run = %#v err=%v", stripped, err)
@@ -44,11 +49,8 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 	if len(events) != 1 || events[0].EventType != worlds.EventTypeRunCreated || events[0].RunID != runID || events[0].CreatedAt.IsZero() {
 		t.Fatalf("events = %#v", events)
 	}
-	var data struct {
-		WorkflowName string `json:"workflowName"`
-		Input        []byte `json:"input"`
-	}
-	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` {
+	var data worlds.DataRunCreated
+	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` || data.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != source {
 		t.Fatalf("run_created data = %s err=%v", events[0].Data, err)
 	}
 

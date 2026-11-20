@@ -559,6 +559,10 @@ type StartOptions struct {
 	// NoArgumentCompression stores the run's input uncompressed, for input
 	// that does not compress, such as media or encrypted bytes.
 	NoArgumentCompression bool
+	// ReplayedFromRunID is the ID of the run this run replays, wrun_ and a
+	// ULID. It is recorded in the run's ExecutionContext, so tools such as
+	// the Workflow web UI link the replay to its source.
+	ReplayedFromRunID string
 }
 
 func startOptions(values []StartOptions) StartOptions {
@@ -573,6 +577,7 @@ type startSettings struct {
 	DeploymentID  string            `json:"deploymentId,omitempty"`
 	Latest        bool              `json:"latest,omitempty"`
 	Retention     string            `json:"retention,omitempty"`
+	ReplayedFrom  string            `json:"replayedFrom,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
 }
@@ -582,13 +587,26 @@ func (options StartOptions) settings() (startSettings, error) {
 	if err := worlds.CheckAttributes(options.Attributes, options.AllowReservedAttributes); err != nil {
 		return startSettings{}, err
 	}
+	if id := options.ReplayedFromRunID; id != "" && !worlds.ValidRunID(worlds.RunID(id)) {
+		return startSettings{}, fmt.Errorf("%w: ReplayedFromRunID %.64q is not wrun_ and a ULID", ErrInvalidStartOptions, id)
+	}
 	return startSettings{
 		DeploymentID:  options.Deployment.ID(),
 		Latest:        options.Deployment.Latest(),
 		Retention:     options.Retention.String(),
+		ReplayedFrom:  options.ReplayedFromRunID,
 		Attributes:    options.Attributes,
 		NoCompression: options.NoArgumentCompression,
 	}, nil
+}
+
+// executionContext returns the run's ExecutionContext, or nil when it has
+// none.
+func (settings startSettings) executionContext() map[string]any {
+	if settings.ReplayedFrom == "" {
+		return nil
+	}
+	return map[string]any{worlds.ExecutionContextReplayedFromRunID: settings.ReplayedFrom}
 }
 
 // deployment returns the Deployment settings record.
@@ -662,6 +680,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 		return nil, err
 	}
 	create.Attributes = settings.attributes(nil)
+	create.ExecutionContext = settings.executionContext()
 	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: create})
 	if err != nil {
 		return nil, err
@@ -724,6 +743,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		worlds.ParentRunIDAttribute: string(parent.RunID),
 		worlds.RootRunIDAttribute:   root,
 	})
+	create.ExecutionContext = input.Settings.executionContext()
 	_, err = execution.World().EventsCreateRun(ctx, create)
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
 		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})

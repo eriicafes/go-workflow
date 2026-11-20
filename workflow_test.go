@@ -381,6 +381,19 @@ func TestStartOptions(t *testing.T) {
 		t.Fatalf("child attributes = %#v", childRun.Attributes)
 	}
 
+	// A replay records the run it replays, which must be a run ID.
+	replay, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{ReplayedFromRunID: run.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(replay.ID())})
+	if err != nil || replayed.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != run.ID() {
+		t.Fatalf("replay = %+v, %v", replayed.ExecutionContext, err)
+	}
+	if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{ReplayedFromRunID: "wrun_missing"}); !errors.Is(err, workflow.ErrInvalidStartOptions) {
+		t.Fatalf("Start replaying a non-run ID error = %v", err)
+	}
+
 	// Attributes outside the SDK's limits start nothing.
 	for _, attributes := range []map[string]string{
 		{"$reserved": "x"},

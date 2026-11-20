@@ -84,11 +84,11 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey})
+	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}

@@ -235,7 +235,8 @@ func eventData(wire wireEvent) ([]byte, error) {
 	}
 	switch worlds.EventType(wire.EventType) {
 	case worlds.EventTypeRunCreated:
-		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey")})
+		executionContext, _ := d["executionContext"].(map[string]any)
+		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey"), ExecutionContext: executionContext})
 	case worlds.EventTypeRunCompleted:
 		return json.Marshal(worlds.DataRunCompleted{Output: payload("output")})
 	case worlds.EventTypeRunFailed:

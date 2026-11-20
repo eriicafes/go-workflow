@@ -48,6 +48,9 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.EncryptionPublicKey != "" {
 		meta["encryptionPublicKey"] = input.EncryptionPublicKey
 	}
+	if len(input.ExecutionContext) > 0 {
+		meta["executionContext"] = input.ExecutionContext
+	}
 	attributes := input.Attributes
 	if retention := w.config.retentionFor(input.WorkflowName); retention != worlds.RetainDefault {
 		if _, set := attributes[worlds.RetentionAttribute]; !set {

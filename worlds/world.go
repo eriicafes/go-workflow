@@ -179,6 +179,17 @@ func NewChildRunID(stepID StepID) RunID {
 // NewRunID returns a new unique run ID.
 func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
 
+// ValidRunID reports whether id is wrun_ and a ULID, as the Workflow SDK
+// mints run IDs.
+func ValidRunID(id RunID) bool {
+	rest, ok := strings.CutPrefix(string(id), "wrun_")
+	if !ok {
+		return false
+	}
+	_, err := ulid.ParseStrict(rest)
+	return err == nil
+}
+
 // NewStepID returns a new unique step ID.
 func NewStepID() StepID { return StepID("step_" + ulid.Make().String()) }
 
