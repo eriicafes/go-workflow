@@ -225,8 +225,7 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body strin
 		}
 	}
 	if record.expire {
-		rescheduled, err := w.expireRun(ctx, record.input)
-		if err != nil || rescheduled {
+		if err := w.expireRun(ctx, record.input); err != nil {
 			return err
 		}
 		return w.deleteQueueRecord(ctx, message.ID)

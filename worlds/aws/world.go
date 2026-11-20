@@ -40,11 +40,12 @@ type Config struct {
 	// it, queueing such a delivery returns an error.
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
-	// fails, or is cancelled. Finishing a run queues a delivery due Retention
-	// later, which deletes its run partition and its hooks. A run with a hook
-	// whose token retention has not ended is kept until it ends. Zero keeps
-	// runs forever. Retention over 15 minutes, the SQS delay limit, requires
-	// Scheduler.
+	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
+	// delivery due then, which deletes its data as the Workflow SDK does: the
+	// run, step, event, hook, and token items stay, and its streams are left
+	// empty and closed. Zero keeps the data. A run created with $retention
+	// "0" loses its data as it finishes, whatever Retention is. Retention
+	// over 15 minutes, the SQS delay limit, requires Scheduler.
 	Retention time.Duration
 	// Retentions overrides Retention for the workflows it names, by workflow
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
@@ -163,7 +164,7 @@ func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true}
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under

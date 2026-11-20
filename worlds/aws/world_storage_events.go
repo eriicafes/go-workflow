@@ -790,8 +790,26 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 		Data:          bytes.Clone(requested.Data),
 		CreatedAt:     time.Now().UTC(),
 	}
+	if worlds.RunDataExpired(run.view.Run, event.CreatedAt) {
+		// A step still running when its run's data was deleted settles after
+		// it. What it brought is deleted as it lands.
+		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
 	run.events = append(run.events, event)
-	return event, tx.materialize(ctx, run, event)
+	if err := tx.materialize(ctx, run, event); err != nil {
+		return event, err
+	}
+	if finishes(event.EventType) && run.view.ExpiredAt == nil {
+		// The run's data expires with the commit that finishes it under
+		// $retention "0", or at its workflow's retention after it.
+		if worlds.ReadRunRetention(run.view.Attributes) == worlds.RetainNone {
+			run.view.ExpiredAt = &event.CreatedAt
+		} else if retention := worlds.RetentionFor(tx.world.config.Retention, tx.world.config.Retentions, run.view.WorkflowName); retention > 0 {
+			expires := event.CreatedAt.Add(retention)
+			run.view.ExpiredAt = &expires
+		}
+	}
+	return event, nil
 }
 
 func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds.Event) error {

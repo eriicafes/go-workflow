@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -242,8 +244,50 @@ func (f *fakeDynamo) BatchGetItem(_ context.Context, input *dynamodb.BatchGetIte
 	return output, nil
 }
 
-func (f *fakeDynamo) UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-	return nil, errUnsupported
+// UpdateItem applies an UpdateExpression of plain SET name = :value and
+// REMOVE name clauses, with an attribute_exists(pk) condition.
+func (f *fakeDynamo) UpdateItem(_ context.Context, input *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := itemID(input.Key)
+	item := f.items[id]
+	switch awsv2.ToString(input.ConditionExpression) {
+	case "":
+	case "attribute_exists(pk)":
+		if item == nil {
+			return nil, &ddb.ConditionalCheckFailedException{}
+		}
+	default:
+		return nil, errUnsupported
+	}
+	if item == nil {
+		item = maps.Clone(input.Key)
+	}
+	name := func(value string) string {
+		if resolved, ok := input.ExpressionAttributeNames[value]; ok {
+			return resolved
+		}
+		return value
+	}
+	expression := awsv2.ToString(input.UpdateExpression)
+	if rest, ok := strings.CutPrefix(expression, "REMOVE "); ok {
+		for _, path := range strings.Split(rest, ",") {
+			delete(item, name(strings.TrimSpace(path)))
+		}
+	} else if rest, ok := strings.CutPrefix(expression, "SET "); ok {
+		for _, assignment := range strings.Split(rest, ",") {
+			path, value, ok := strings.Cut(assignment, "=")
+			attribute, found := input.ExpressionAttributeValues[strings.TrimSpace(value)]
+			if !ok || !found {
+				return nil, errUnsupported
+			}
+			item[name(strings.TrimSpace(path))] = attribute
+		}
+	} else {
+		return nil, errUnsupported
+	}
+	f.items[id] = item
+	return &dynamodb.UpdateItemOutput{}, nil
 }
 
 // Query returns the items whose partition key, or list_group_pk on the
