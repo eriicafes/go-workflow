@@ -3,8 +3,11 @@ package worlds
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
+	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 // eventPayloadFields names the payload field of each event type's Data.
@@ -280,6 +283,44 @@ func EncodeAttrSet(input RunsSetAttributesInput) ([]byte, error) {
 		data.Writer = *input.Writer
 	}
 	return json.Marshal(data)
+}
+
+// Run attribute limits, as in the Workflow SDK.
+const (
+	// MaxAttributeKeyLength is the longest attribute key, in UTF-16 code
+	// units as JavaScript counts a string's length.
+	MaxAttributeKeyLength = 256
+	// MaxAttributeValueBytes is the longest attribute value in UTF-8 bytes.
+	MaxAttributeValueBytes = 256
+	// MaxAttributesPerRun is the most attributes one run holds.
+	MaxAttributesPerRun = 64
+	// ReservedAttributePrefix starts the keys reserved for framework and
+	// library code, such as RetentionAttribute.
+	ReservedAttributePrefix = "$"
+)
+
+// CheckAttributes returns ErrAttributeInvalid unless attributes are within
+// the Workflow SDK's limits: at most MaxAttributesPerRun, with non-empty keys
+// of at most MaxAttributeKeyLength and values of at most
+// MaxAttributeValueBytes. Keys starting with ReservedAttributePrefix are
+// refused unless allowReserved.
+func CheckAttributes(attributes map[string]string, allowReserved bool) error {
+	if len(attributes) > MaxAttributesPerRun {
+		return fmt.Errorf("%w: %d attributes, over the limit of %d", ErrAttributeInvalid, len(attributes), MaxAttributesPerRun)
+	}
+	for key, value := range attributes {
+		switch {
+		case key == "":
+			return fmt.Errorf("%w: empty key", ErrAttributeInvalid)
+		case len(utf16.Encode([]rune(key))) > MaxAttributeKeyLength:
+			return fmt.Errorf("%w: key %.32q is longer than %d", ErrAttributeInvalid, key, MaxAttributeKeyLength)
+		case !allowReserved && strings.HasPrefix(key, ReservedAttributePrefix):
+			return fmt.Errorf("%w: key %q starts with the reserved prefix %q", ErrAttributeInvalid, key, ReservedAttributePrefix)
+		case len(value) > MaxAttributeValueBytes:
+			return fmt.Errorf("%w: value of %q is %d bytes, over the limit of %d", ErrAttributeInvalid, key, len(value), MaxAttributeValueBytes)
+		}
+	}
+	return nil
 }
 
 // AttributeWriter names what set run attributes: the workflow, or one

@@ -46,6 +46,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"time"
@@ -537,23 +538,100 @@ func retryableDeletions(results []worlds.DeleteDataResult) []worlds.RunID {
 	return ids
 }
 
+// Retention is how long a finished run's data is kept, as the Workflow SDK's
+// $retention attribute records it. Its zero value is RetainDefault.
+type Retention = worlds.Retention
+
+var (
+	// RetainDefault leaves a run's data to the World's retention.
+	RetainDefault = worlds.RetainDefault
+	// RetainNone deletes a run's data as soon as the run finishes. Its
+	// metadata, such as its ID, status, and attributes, is kept, and
+	// Run.Value returns ErrRunExpired.
+	RetainNone = worlds.RetainNone
+)
+
+// StartOptions holds the options to Start, as the Workflow SDK's start
+// options. The zero value starts a run as Start without options does.
+type StartOptions struct {
+	// Retention is how long the run's data is kept after it finishes.
+	// RetainNone deletes it as soon as the run finishes, recorded as the
+	// $retention attribute, and wins over one in Attributes. The zero value,
+	// RetainDefault, leaves it to the World.
+	Retention Retention
+	// Attributes are plain-text attributes set on the run as it is created,
+	// within the Workflow SDK's limits (see worlds.CheckAttributes).
+	Attributes map[string]string
+	// AllowReservedAttributes permits keys in Attributes that start with "$",
+	// which are reserved for framework and library code.
+	AllowReservedAttributes bool
+	// NoArgumentCompression stores the run's input uncompressed, for input
+	// that does not compress, such as media or encrypted bytes.
+	NoArgumentCompression bool
+}
+
+func startOptions(values []StartOptions) StartOptions {
+	if len(values) == 0 {
+		return StartOptions{}
+	}
+	return values[len(values)-1]
+}
+
+// startSettings are StartOptions as a child run's start step records them.
+type startSettings struct {
+	Retention     string            `json:"retention,omitempty"`
+	Attributes    map[string]string `json:"attributes,omitempty"`
+	NoCompression bool              `json:"noCompression,omitempty"`
+}
+
+// settings checks options and returns them as a start step records them.
+func (options StartOptions) settings() (startSettings, error) {
+	if err := worlds.CheckAttributes(options.Attributes, options.AllowReservedAttributes); err != nil {
+		return startSettings{}, err
+	}
+	return startSettings{Retention: options.Retention.String(), Attributes: options.Attributes, NoCompression: options.NoArgumentCompression}, nil
+}
+
+// attributes returns the run's attributes: lineage, then the caller's, which
+// may replace it with AllowReservedAttributes, then the retention, as the
+// Workflow SDK merges them.
+func (settings startSettings) attributes(lineage map[string]string) map[string]string {
+	if len(lineage) == 0 && len(settings.Attributes) == 0 && settings.Retention == "" {
+		return nil
+	}
+	attributes := make(map[string]string, len(lineage)+len(settings.Attributes)+1)
+	maps.Copy(attributes, lineage)
+	maps.Copy(attributes, settings.Attributes)
+	if settings.Retention != "" {
+		attributes[worlds.RetentionAttribute] = settings.Retention
+	}
+	return attributes
+}
+
 // Start starts a run of workflow In with input and returns a handle to the run
 // without waiting for it. It needs only the workflow type, not its runner.
+// options set its retention, attributes, and how its input is stored, as the
+// Workflow SDK's start options do. Attributes outside the SDK's limits return
+// worlds.ErrAttributeInvalid.
 //
 // Called in workflow context, Start starts a child run in a step, so replay
 // returns the same run. The child run carries
 // worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Cancellation of ctx
 // does not cancel the child; use Run.Cancel explicitly. Called elsewhere,
 // it uses the Client in ctx and returns ErrNoClient when ctx carries none.
-func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
+func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, options ...StartOptions) (*Run[Out], error) {
 	name := worlds.WorkflowName[In]()
 	client, err := clientFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
+	settings, err := startOptions(options).settings()
+	if err != nil {
+		return nil, err
+	}
 	latest := startsOnLatest(input)
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Latest: latest})
+		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Latest: latest, Settings: settings})
 		if err != nil {
 			return nil, err
 		}
@@ -570,10 +648,11 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Ru
 	if err != nil {
 		return nil, err
 	}
-	create, err := runCreateInput(runID, deploymentID, name, input, keys)
+	create, err := runCreateInput(runID, deploymentID, name, input, keys, settings)
 	if err != nil {
 		return nil, err
 	}
+	create.Attributes = settings.attributes(nil)
 	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: create})
 	if err != nil {
 		return nil, err
@@ -583,8 +662,8 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Ru
 
 // runCreateInput returns the run_created input of a run of input, its
 // argument list encrypted with keys when they are set.
-func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input In, keys *worlds.RunKeys) (worlds.EventsCreateRunInput, error) {
-	encoded, err := worlds.EncodePayload([1]In{input}, worlds.PayloadOptions{Keys: keys})
+func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input In, keys *worlds.RunKeys, settings startSettings) (worlds.EventsCreateRunInput, error) {
+	encoded, err := worlds.EncodePayload([1]In{input}, worlds.PayloadOptions{Keys: keys, NoCompression: settings.NoCompression})
 	if err != nil {
 		return worlds.EventsCreateRunInput{}, fmt.Errorf("workflow: encode %s input: %w", name, err)
 	}
@@ -601,6 +680,8 @@ type childStartInput[In any] struct {
 	// Latest pins the child to the World's latest deployment, for a
 	// workflow marked StartOnLatest.
 	Latest bool `json:"latest,omitempty"`
+	// Settings are the child's StartOptions.
+	Settings startSettings `json:"settings,omitzero"`
 }
 
 // startChild is the inline step Start uses in workflow context. It creates the
@@ -629,14 +710,14 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	if err != nil {
 		return "", err
 	}
-	create, err := runCreateInput(id, deploymentID, input.WorkflowName, input.Input, keys)
+	create, err := runCreateInput(id, deploymentID, input.WorkflowName, input.Input, keys, input.Settings)
 	if err != nil {
 		return "", err
 	}
-	create.Attributes = map[string]string{
+	create.Attributes = input.Settings.attributes(map[string]string{
 		worlds.ParentRunIDAttribute: string(parent.RunID),
 		worlds.RootRunIDAttribute:   root,
-	}
+	})
 	_, err = execution.World().EventsCreateRun(ctx, create)
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
 		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})

@@ -318,6 +318,81 @@ type noDeleteWorld struct{ *testworld.World }
 
 func (noDeleteWorld) Capabilities() worlds.Capabilities { return worlds.Capabilities{} }
 
+type optionsChildInput struct{ Data string }
+type optionsParentInput struct{}
+
+func (optionsChildInput) Workflow(string)        {}
+func (optionsParentInput) Workflow(worlds.RunID) {}
+
+func TestStartOptions(t *testing.T) {
+	child := func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }
+	parent := func(ctx context.Context, _ optionsParentInput) (worlds.RunID, error) {
+		run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: map[string]string{"tier": "child"}, Retention: workflow.RetainNone})
+		if err != nil {
+			return "", err
+		}
+		return worlds.RunID(run.ID()), nil
+	}
+	world := testworld.New(workflow.Use(child), workflow.Use(parent))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+
+	// A top-level run records its retention and attributes, and its input
+	// as given.
+	large := strings.Repeat("compressible ", 1000)
+	run, err := workflow.Start(ctx, optionsChildInput{Data: large}, workflow.StartOptions{
+		Retention:               workflow.RetainNone,
+		Attributes:              map[string]string{"tier": "gold", worlds.RetentionAttribute: "default"},
+		AllowReservedAttributes: true,
+		NoArgumentCompression:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Attributes["tier"] != "gold" || created.Attributes[worlds.RetentionAttribute] != "0" {
+		t.Fatalf("attributes = %#v", created.Attributes)
+	}
+	if label := worlds.PayloadLabel(created.Input); label != worlds.PayloadDevalue {
+		t.Fatalf("uncompressed input label = %q", label)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("RetainNone run error = %v", err)
+	}
+
+	// A child run takes its options beside its lineage.
+	parentRun, err := workflow.Start(ctx, optionsParentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := parentRun.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childRun, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRun.Attributes["tier"] != "child" || childRun.Attributes[worlds.RetentionAttribute] != "0" || childRun.Attributes[worlds.ParentRunIDAttribute] != parentRun.ID() {
+		t.Fatalf("child attributes = %#v", childRun.Attributes)
+	}
+
+	// Attributes outside the SDK's limits start nothing.
+	for _, attributes := range []map[string]string{
+		{"$reserved": "x"},
+		{"": "x"},
+		{"key": strings.Repeat("v", worlds.MaxAttributeValueBytes+1)},
+	} {
+		if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: attributes}); !errors.Is(err, worlds.ErrAttributeInvalid) {
+			t.Fatalf("Start with attributes %v error = %v", attributes, err)
+		}
+	}
+}
+
 func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)
