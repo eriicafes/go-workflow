@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Store streams, run failure codes, and compressed payloads as the Workflow SDK does: a run's streams are named `strm_<ULID>_user`, run_failed events carry the SDK's `errorCode`, the Vercel World tags events with the delivery's `vercelId`, and payloads compress with zstd unless `WORKFLOW_COMPRESSION_CODEC=gzip`.
+Name a run's streams `strm_<ULID>_user` and `strm_<ULID>_user_<base64url name>`, record `errorCode` on `run_failed` and `vercelId` on Vercel events, and compress payloads with zstd.

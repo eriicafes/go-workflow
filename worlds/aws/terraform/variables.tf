@@ -35,9 +35,14 @@ variable "message_retention_seconds" {
 }
 
 variable "max_receive_count" {
-  description = "Deliveries of one message before it moves to the dead-letter queue."
+  description = "Deliveries of one message before it moves to the dead-letter queue. It must exceed the runtime's 48 deliveries, so the runtime fails a run or step that keeps failing before SQS moves its message."
   type        = number
-  default     = 10
+  default     = 50
+
+  validation {
+    condition     = var.max_receive_count > 48
+    error_message = "max_receive_count must exceed the runtime's 48 deliveries."
+  }
 }
 
 variable "enable_scheduler" {
@@ -86,4 +91,9 @@ variable "queues" {
     max_receive_count          = optional(number)
   }))
   default = {}
+
+  validation {
+    condition     = alltrue([for queue in var.queues : queue.max_receive_count == null || queue.max_receive_count > 48])
+    error_message = "Each queue's max_receive_count must exceed the runtime's 48 deliveries."
+  }
 }

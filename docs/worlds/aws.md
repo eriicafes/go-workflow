@@ -139,8 +139,11 @@ early is sent again with the remaining delay. Otherwise it executes the
 delivery, extending the message's visibility every 30 seconds while it runs,
 and deletes the record on success. On failure it reports the message in
 `BatchItemFailures` so SQS redelivers only that message, after a backoff that
-doubles from one second with each receive up to 15 minutes. Configure a
-dead-letter queue to collect deliveries that keep failing.
+doubles from one second with each receive up to 15 minutes. The receive count
+is the delivery's attempt, so after 48 the runtime fails the run or step and
+the message is deleted. Give the dead-letter queue a `max_receive_count` above
+48, as the Terraform module does, so it only collects messages the runtime
+could not settle.
 
 Lambda runs the handler with the invocation's deadline. Once a batch is
 halfway to it, the handler starts no further messages and reports them in
@@ -267,7 +270,7 @@ and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP
 | `deletion_protection` | `true` | Table deletion protection. |
 | `visibility_timeout_seconds` | `360` | Keep above the worker Lambda timeout. |
 | `message_retention_seconds` | `1209600` | Queue and dead-letter retention (14 days). |
-| `max_receive_count` | `10` | Deliveries before a message moves to the dead-letter queue. |
+| `max_receive_count` | `50` | Deliveries before a message moves to the dead-letter queue. Must exceed the runtime's 48, so it fails the run first. |
 | `enable_scheduler` | `true` | Create the schedule group and Scheduler role. |
 | `worker_function_name` | `null` | Worker Lambda. Setting it creates the event source mapping. |
 | `batch_size` | `10` | Messages per worker invocation. |
