@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"net/http"
@@ -372,5 +373,36 @@ func TestWriteGoPayloadVectors(t *testing.T) {
 	data, _ := json.MarshalIndent(result, "", "\t")
 	if err := os.WriteFile(out, data, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// bigID marshals itself as JSON holding a 64-bit integer.
+type bigID struct{ N uint64 }
+
+func (b bigID) MarshalJSON() ([]byte, error) { return []byte(fmt.Sprintf(`{"n":%d}`, b.N)), nil }
+
+func (b *bigID) UnmarshalJSON(data []byte) error {
+	var value struct{ N uint64 }
+	err := json.Unmarshal(data, &value)
+	b.N = value.N
+	return err
+}
+
+func TestPayloadKeepsJSONNumbersAndKeyOrder(t *testing.T) {
+	type record struct {
+		Raw json.RawMessage `json:"raw"`
+		ID  bigID           `json:"id"`
+	}
+	raw := `{"z":12345678901234567890,"a":[1.50,-0,1e400],"m":{"b":null,"a":"x"}}`
+	payload, err := EncodePayload(record{Raw: json.RawMessage(raw), ID: bigID{N: math.MaxUint64}}, PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got record
+	if err := DecodePayload(payload, nil, &got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Raw) != raw || got.ID.N != math.MaxUint64 {
+		t.Fatalf("raw = %s, id = %d", got.Raw, got.ID.N)
 	}
 }

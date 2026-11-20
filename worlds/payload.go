@@ -1070,13 +1070,73 @@ func readJSONNode(decoder *json.Decoder) (any, error) {
 	return nil, fmt.Errorf("unexpected JSON token %v", token)
 }
 
-// nodeJSON returns a node as JSON text, for types decoded from JSON.
+// nodeJSON returns a node as JSON text, for types decoded from JSON. Numbers
+// keep their text and objects their key order, so JSON written by jsonNode
+// reads back as it was, including integers beyond float64's precision.
 func nodeJSON(node any) ([]byte, error) {
-	value, err := nodeAny(node)
-	if err != nil {
+	var buffer bytes.Buffer
+	if err := writeNodeJSON(&buffer, node); err != nil {
 		return nil, err
 	}
-	return json.Marshal(value)
+	return buffer.Bytes(), nil
+}
+
+func writeNodeJSON(buffer *bytes.Buffer, node any) error {
+	switch value := node.(type) {
+	case nil, dvUndefined:
+		buffer.WriteString("null")
+		return nil
+	case dvNumber:
+		if !json.Valid([]byte(value)) {
+			return fmt.Errorf("%w: number %s", ErrPayloadInvalid, value)
+		}
+		buffer.WriteString(string(value))
+		return nil
+	case []any:
+		buffer.WriteByte('[')
+		for i, item := range value {
+			if i > 0 {
+				buffer.WriteByte(',')
+			}
+			if err := writeNodeJSON(buffer, item); err != nil {
+				return err
+			}
+		}
+		buffer.WriteByte(']')
+		return nil
+	case *dvObject:
+		buffer.WriteByte('{')
+		first := true
+		for i, key := range value.keys {
+			if _, ok := value.values[i].(dvUndefined); ok {
+				continue
+			}
+			if !first {
+				buffer.WriteByte(',')
+			}
+			first = false
+			name, _ := json.Marshal(key)
+			buffer.Write(name)
+			buffer.WriteByte(':')
+			if err := writeNodeJSON(buffer, value.values[i]); err != nil {
+				return err
+			}
+		}
+		buffer.WriteByte('}')
+		return nil
+	}
+	// Strings, booleans, special numbers, and the SDK's types are written as
+	// encoding/json writes their Go values.
+	converted, err := nodeAny(node)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(converted)
+	if err != nil {
+		return err
+	}
+	buffer.Write(data)
+	return nil
 }
 
 // parseDevalue parses devalue text into its root node.
