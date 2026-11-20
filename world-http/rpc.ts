@@ -26,6 +26,7 @@ export namespace RPC {
 		setAttributes: boolean;
 		deploymentAffinity?: boolean;
 		deleteData?: boolean;
+		startHook?: boolean;
 	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";
 	export type EventType = string;
@@ -143,6 +144,7 @@ export namespace RPC {
 		code: string;
 		message: string;
 		sentinel?: string;
+		conflictingRunId?: string;
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
@@ -211,13 +213,16 @@ export class HTTPWorldError extends Error {
 	readonly status?: number;
 	/** The Go sentinel error the server reported, such as run_not_found. */
 	readonly sentinel?: string;
+	/** The run holding a hook token, for a hook_conflict failure. */
+	readonly conflictingRunId?: string;
 
-	constructor(code: string, message: string, status?: number, sentinel?: string) {
+	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string) {
 		super(message);
 		this.name = "HTTPWorldError";
 		this.code = code;
 		this.status = status;
 		this.sentinel = sentinel;
+		this.conflictingRunId = conflictingRunId;
 	}
 }
 
@@ -288,8 +293,8 @@ export class RPCClient {
 			);
 		}
 		if (envelope.error) {
-			const { code, message, sentinel } = envelope.error;
-			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel);
+			const { code, message, sentinel, conflictingRunId } = envelope.error;
+			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId);
 		}
 		if (envelope.output === undefined) {
 			return undefined as T;

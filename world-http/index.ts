@@ -139,6 +139,7 @@ export class HTTPWorld implements World {
 			hookRetention: { active: true },
 			hookForceClaim: true,
 			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
+			...(capabilities.startHook ? { atomicStartHook: { active: true } } : {}),
 		};
 	}
 
@@ -222,6 +223,7 @@ export class HTTPWorld implements World {
 				options?: CreateEventParams,
 			) => {
 				if (event.eventType === "run_created") {
+					const { startHook } = event.eventData;
 					// An empty run ID asks the server to generate one.
 					return client
 						.call<RPC.EventResult>("events.createRun", {
@@ -232,8 +234,19 @@ export class HTTPWorld implements World {
 							...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
 							...(event.eventData.encryptionPublicKey ? { encryptionPublicKey: event.eventData.encryptionPublicKey } : {}),
 							...(event.eventData.executionContext ? { executionContext: event.eventData.executionContext } : {}),
+							...(startHook ? { startHook: { token: startHook.token, tokenRetentionUntil: startHook.tokenRetentionUntil, metadata: startHook.metadata } } : {}),
 						})
-						.then(toEventResult) as Promise<EventResult<"run_created">>;
+						.then((result) => {
+							const created = toEventResult(result);
+							// The run echoes its start hook, as world-vercel's does,
+							// which is how start() knows the World created it.
+							if (startHook && created.run && runId) {
+								created.run = { ...created.run, startHook: { ...startHook, hookId: `hook_${runId.slice("wrun_".length)}` } } as typeof created.run;
+							}
+							return created;
+						}, (error: unknown) => {
+							throw startHook ? startHookConflict(error, startHook.token) : error;
+						}) as Promise<EventResult<"run_created">>;
 				}
 				return client
 					.call<RPC.EventResult>("events.create", {
@@ -555,4 +568,19 @@ function durationMilliseconds(nanoseconds: number | undefined): number {
 		return 0;
 	}
 	return Number(nanoseconds) / 1_000_000;
+}
+
+// startHookConflict returns a refused start hook as the Workflow SDK's
+// HookConflictError, which start() recognizes by its name, naming the run that
+// holds the token. Other errors are returned as they are.
+function startHookConflict(error: unknown, token: string): unknown {
+	if (!(error instanceof HTTPWorldError) || error.sentinel !== "hook_conflict" || !error.conflictingRunId) {
+		return error;
+	}
+	return Object.assign(new Error(`No run was created: workflow run "${error.conflictingRunId}" already owns this hook token`), {
+		name: "HookConflictError",
+		token,
+		conflictingRunId: error.conflictingRunId,
+		cause: error,
+	});
 }

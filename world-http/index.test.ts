@@ -502,3 +502,34 @@ test("passes a run's executionContext through with its keys as written", async (
 	const run = await world.runs.get("wrun_01");
 	expect(run.executionContext).toEqual({ replayedFromRunId: "wrun_00" });
 });
+
+test("creates a start hook with its run and reports a refused one as the SDK's HookConflictError", async () => {
+	const inputs: Record<string, unknown>[] = [];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 3, Capabilities: { StartHook: true } });
+			}
+			const input = envelope.input as Record<string, unknown>;
+			inputs.push(input);
+			if (input.RunID === "wrun_02") {
+				const encoded = encode({ error: { code: "conflict", message: "taken", sentinel: "hook_conflict", conflictingRunId: "wrun_01" } });
+				return new Response(new Uint8Array(encoded), { headers: { "Content-Type": "application/cbor" } });
+			}
+			return rpcResponse({ Event: { RunID: "wrun_01", EventID: "evnt_01", EventType: "run_created", Data: null }, Run: { RunID: "wrun_01", StartedAt: null, CompletedAt: null }, Allocated: 1 });
+		},
+	});
+	expect(world.capabilities).toMatchObject({ atomicStartHook: { active: true } });
+	const create = (runId: string) =>
+		world.events.create(runId, {
+			eventType: "run_created",
+			specVersion: SPEC_VERSION_CURRENT,
+			eventData: { workflowName: "wf", input: new Uint8Array(), startHook: { token: "tok" } },
+		} as never);
+	const created = (await create("wrun_01")) as { run?: { startHook?: { token: string; hookId: string } } };
+	expect(inputs[0]?.StartHook).toEqual({ Token: "tok" });
+	expect(created.run?.startHook).toEqual({ token: "tok", hookId: "hook_01" });
+	await expect(create("wrun_02")).rejects.toMatchObject({ name: "HookConflictError", token: "tok", conflictingRunId: "wrun_01" });
+});
