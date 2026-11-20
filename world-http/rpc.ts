@@ -25,6 +25,7 @@ export namespace RPC {
 		analytics: boolean;
 		setAttributes: boolean;
 		deploymentAffinity?: boolean;
+		deleteData?: boolean;
 	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";
 	export type EventType = string;
@@ -48,6 +49,7 @@ export namespace RPC {
 		updatedAt: Date;
 		startedAt: Date | null;
 		completedAt: Date | null;
+		expiredAt?: Date | null;
 	};
 	export type Step = {
 		runId: string;
@@ -224,6 +226,7 @@ const rpcErrorStatus: Record<string, number> = {
 	not_found: 404,
 	invalid_argument: 400,
 	conflict: 409,
+	unimplemented: 501,
 	cancelled: 499,
 	deadline_exceeded: 504,
 };

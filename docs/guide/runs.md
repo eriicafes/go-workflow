@@ -113,6 +113,26 @@ passed to `Start` does not control the run's lifetime. See
 [Cancellation](/guide/cancellation#cancelling-a-run) for examples and step
 cancellation behavior.
 
+## Deleting run data
+
+`workflow.DeleteRuns` deletes the data of up to 100 finished runs, as the
+Workflow SDK's `deleteRuns` does: their inputs, outputs and errors, the
+payloads of their steps, events and hooks, and their streams' chunks. It
+cannot be undone.
+
+```go
+result, err := workflow.DeleteRuns(ctx, runA.ID(), runB.ID())
+// result.Results[i].Outcome: deleted, already_deleted, skipped, not_found, failed
+```
+
+The runs stay listed, with their steps, events and hooks, IDs, statuses,
+timestamps and attributes. Their `ExpiredAt` is set, the Workflow web UI shows
+their data as expired, and `Run.Value` returns `workflow.ErrRunExpired`. A run
+that has not finished is skipped; cancel it first. Called in a step,
+`DeleteRuns` sends retryable failures again once and then fails the step with a
+`RetryableError`. A World without `Capabilities().DeleteData` returns an error
+wrapping `errors.ErrUnsupported`.
+
 ## Resuming hooks
 
 `workflow.ResumeHook`, `ResumeHookWithRetries`, and `GetHook` also use the

@@ -361,8 +361,10 @@ func (c *httpClient) RunsSetAttributes(ctx context.Context, input RunsSetAttribu
 	return c.call(ctx, "runs.setAttributes", input, nil)
 }
 
-func (c *httpClient) RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
-	return RunsDeleteDataManyResult{}, fmt.Errorf("workflow: delete run data over HTTP: %w", errors.ErrUnsupported)
+func (c *httpClient) RunsDeleteDataMany(ctx context.Context, input RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
+	var output RunsDeleteDataManyResult
+	err := c.call(ctx, "runs.deleteDataMany", input, &output)
+	return output, err
 }
 
 func (c *httpClient) StepsGet(ctx context.Context, input StepsGetInput) (Step, error) {

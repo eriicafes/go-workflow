@@ -1,6 +1,7 @@
 import type {
 	CreateEventParams,
 	CreateEventRequest,
+	DeleteRunsDataResult,
 	RunCreatedEventRequest,
 	AnalyticsAttributeKey,
 	AnalyticsEvent,
@@ -28,7 +29,7 @@ import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
 
-const HTTP_WORLD_SPEC_VERSION = 2;
+const HTTP_WORLD_SPEC_VERSION = 3;
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
@@ -185,6 +186,11 @@ export class HTTPWorld implements World {
 						const run = await client.call<Pick<RPC.Run, "attributes">>("runs.get", { runId });
 						return { attributes: run.attributes };
 					},
+				}
+				: {}),
+			...(capabilities.deleteData
+				? {
+					deleteDataMany: (request) => client.call<DeleteRunsDataResult>("runs.deleteDataMany", request),
 				}
 				: {}),
 		};
@@ -497,8 +503,15 @@ function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
 // toRun exposes a run as the Workflow SDK reads one. Its payloads are in the
 // SDK's format, so it reports the spec version that reads them.
 function toRun(run: RPC.Run): WorkflowRun {
-	const { input, output, error, ...rest } = run;
-	return { ...rest, specVersion: SPEC_VERSION_CURRENT, input: payload(input), output: payload(output), error: payload(error) } as WorkflowRun;
+	const { input, output, error, expiredAt, ...rest } = run;
+	return {
+		...rest,
+		...(expiredAt ? { expiredAt } : {}),
+		specVersion: SPEC_VERSION_CURRENT,
+		input: payload(input),
+		output: payload(output),
+		error: payload(error),
+	} as WorkflowRun;
 }
 
 // toStep exposes a step as the Workflow SDK reads one.

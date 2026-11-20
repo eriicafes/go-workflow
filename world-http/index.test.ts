@@ -37,7 +37,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 
 	expect(world.specVersion).toBe(SPEC_VERSION_CURRENT);
 	expect(world._spec).toEqual({ specVersion: 1, capabilities: { analytics: false, setAttributes: true } });
-	expect(requests[0]?.envelope.specVersion).toBe(2);
+	expect(requests[0]?.envelope.specVersion).toBe(3);
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
 		hookForceClaim: true,
@@ -47,7 +47,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 	expect(run.runId).toBe("wrun_01");
 	expect(run.workflowName).toBe("report");
 	expect(run.attributes).toEqual({ "external-id": "42" });
-	expect(requests[1]?.envelope.specVersion).toBe(2);
+	expect(requests[1]?.envelope.specVersion).toBe(3);
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
 });
@@ -435,4 +435,44 @@ test("reads a run's encryption key from the Go world", async () => {
 		{ RunID: "wrun_01", DeploymentID: "dpl_1" },
 		{ RunID: "wrun_plain", DeploymentID: "" },
 	]);
+});
+
+test("deletes run data only when the Go world supports it, and reports deleted runs as expired", async () => {
+	const inputs: unknown[] = [];
+	const create = (deleteData: boolean) =>
+		createWorld({
+			baseURL: "https://workflow.example/v1/workflow",
+			fetch: async (_url, init) => {
+				const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+				if (envelope.method === "client.spec") {
+					return rpcResponse({ SpecVersion: 3, Capabilities: { Analytics: false, SetAttributes: false, DeleteData: deleteData } });
+				}
+				if (envelope.method === "runs.get") {
+					return rpcResponse({ RunID: "wrun_01", Status: "completed", ExpiredAt: new Date("2026-01-02T03:04:05Z"), StartedAt: null, CompletedAt: null });
+				}
+				expect(envelope.method).toBe("runs.deleteDataMany");
+				inputs.push(envelope.input);
+				return rpcResponse({
+					Summary: { Requested: 2, Deleted: 1, AlreadyDeleted: 0, Skipped: 1, NotCreated: 0, NotFound: 0, Failed: 0 },
+					Results: [
+						{ RunID: "wrun_01", Outcome: "deleted" },
+						{ RunID: "wrun_02", Outcome: "skipped", Reason: "run_not_terminal", Status: "running" },
+					],
+				});
+			},
+		});
+
+	expect((await create(false)).runs.deleteDataMany).toBeUndefined();
+	const world = await create(true);
+	const result = await world.runs.deleteDataMany!({ runIds: ["wrun_01", "wrun_02"] });
+	expect(result).toEqual({
+		summary: { requested: 2, deleted: 1, alreadyDeleted: 0, skipped: 1, notCreated: 0, notFound: 0, failed: 0 },
+		results: [
+			{ runId: "wrun_01", outcome: "deleted" },
+			{ runId: "wrun_02", outcome: "skipped", reason: "run_not_terminal", status: "running" },
+		],
+	});
+	expect(inputs).toHaveLength(1);
+	const run = await world.runs.get("wrun_01");
+	expect(run.expiredAt).toEqual(new Date("2026-01-02T03:04:05Z"));
 });
