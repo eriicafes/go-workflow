@@ -57,9 +57,9 @@ If changing an existing deployed runner, consider its in-flight event logs:
 reordering durable operations can break replay. Use a separate workflow type
 for incompatible changes when old runs still need to execute. On a World with
 deployment affinity, a workflow that starts its own next run, such as a daily
-chain, stays on its first deployment unless it embeds
-`workflow.StartOnLatest`, which starts each new run on the latest deployment.
-Embed it only in workflows nothing waits on the output of.
+chain, stays on its first deployment unless it starts its next run with
+`workflow.StartOptions{Deployment: workflow.LatestDeployment}`, which starts it
+on the latest deployment. Use it only for runs nothing waits on the output of.
 
 ## Deferred cleanup
 

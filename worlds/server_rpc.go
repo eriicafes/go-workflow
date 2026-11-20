@@ -561,7 +561,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		deploymentID, err := StartDeploymentID(ctx, world, input.Latest)
+		deploymentID, err := StartDeploymentID(ctx, world, input.deployment())
 		if err != nil {
 			return nil, err
 		}
@@ -653,7 +653,7 @@ type (
 	ClientRunsCreateInput struct {
 		EventsCreateRunInput
 		// Latest pins a run with no DeploymentID to the World's latest
-		// deployment, for a workflow marked workflow.StartOnLatest.
+		// deployment, as LatestDeployment does.
 		Latest bool
 	}
 	// RunKeysInput holds the arguments to Client.RunKeys and the
@@ -667,7 +667,10 @@ type (
 	// Client.RunsStartDeployment and the client.runs.startDeployment RPC
 	// method.
 	ClientRunsStartDeploymentInput struct {
-		Latest bool
+		// DeploymentID names the deployment, as OnDeployment does, and
+		// Latest asks for LatestDeployment.
+		DeploymentID string
+		Latest       bool
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
 	// method, which cancels the run.
@@ -857,4 +860,16 @@ var rpcEncoding = func() cbor.EncMode {
 func encodeRPC(value any) (cbor.RawMessage, error) {
 	encoded, err := rpcEncoding.Marshal(value)
 	return cbor.RawMessage(encoded), err
+}
+
+// NewClientRunsStartDeploymentInput returns the RPC input naming deployment.
+func NewClientRunsStartDeploymentInput(deployment Deployment) ClientRunsStartDeploymentInput {
+	return ClientRunsStartDeploymentInput{DeploymentID: deployment.id, Latest: deployment.latest}
+}
+
+func (input ClientRunsStartDeploymentInput) deployment() Deployment {
+	if input.DeploymentID != "" {
+		return OnDeployment(input.DeploymentID)
+	}
+	return Deployment{latest: input.Latest}
 }

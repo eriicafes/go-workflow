@@ -67,6 +67,7 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, wo
 
 | Field | Effect |
 | --- | --- |
+| `Deployment` | The deployment the run starts on and stays pinned to: `workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`, or `workflow.OnDeployment(id)`. It needs a World with deployment affinity. See [moving chains to the latest deployment](/guide/replay#moving-chains-to-the-latest-deployment). |
 | `Retention` | `workflow.RetainNone` deletes the run's data as soon as it finishes, recorded as `$retention: "0"`. `Run.Value` then returns `workflow.ErrRunExpired`, so return a result you need through storage you control. The zero value, `workflow.RetainDefault`, leaves it to the World. |
 | `Attributes` | Plain-text attributes set on the run as it is created: at most 64, keys up to 256 characters, values up to 256 bytes. Otherwise `Start` returns `worlds.ErrAttributeInvalid`. |
 | `AllowReservedAttributes` | Permits keys starting with `$`, which are reserved for framework and library code. |

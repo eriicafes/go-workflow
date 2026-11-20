@@ -72,10 +72,9 @@ type Capabilities struct {
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that
-// tracks its newest deployment. Runs of workflows marked
-// workflow.StartOnLatest are pinned to LatestDeploymentID instead of the
-// deployment that starts them, so a chain of runs that each start the next
-// moves to new code as it is deployed.
+// tracks its newest deployment. Runs started with LatestDeployment are pinned
+// to LatestDeploymentID instead of the deployment that starts them, so a chain
+// of runs that each start the next moves to new code as it is deployed.
 type LatestDeployments interface {
 	// LatestDeploymentID returns the newest deployment this World's
 	// deployment knows of, or "" when it tracks none.
@@ -427,14 +426,45 @@ func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, err
 	return run.DeploymentID, err
 }
 
-// StartDeploymentID returns the deployment a new run is pinned to: the
-// World's latest deployment when latest is true and the World implements
-// LatestDeployments and knows one, otherwise World.DeploymentID.
-func StartDeploymentID(ctx context.Context, world World, latest bool) (string, error) {
-	if tracker, ok := world.(LatestDeployments); ok && latest && world.Capabilities().DeploymentAffinity {
-		id, err := tracker.LatestDeploymentID(ctx)
-		if err != nil || id != "" {
-			return id, err
+// Deployment is the deployment a new run starts on, as the Workflow SDK's
+// deploymentId start option names it. Its zero value is the deployment that
+// starts the run.
+type Deployment struct {
+	id     string
+	latest bool
+}
+
+// LatestDeployment starts a run on the World's latest deployment, as the
+// Workflow SDK's deploymentId: 'latest' does.
+var LatestDeployment = Deployment{latest: true}
+
+// OnDeployment starts a run on the deployment id. An empty id is the zero
+// Deployment.
+func OnDeployment(id string) Deployment { return Deployment{id: id} }
+
+// ID returns the deployment OnDeployment named, or "" for the current or
+// latest deployment.
+func (d Deployment) ID() string { return d.id }
+
+// Latest reports whether d is LatestDeployment.
+func (d Deployment) Latest() bool { return d.latest }
+
+// StartDeploymentID returns the deployment a new run is pinned to. On a World
+// with DeploymentAffinity, that is the deployment OnDeployment named, or for
+// LatestDeployment the World's latest one when it implements
+// LatestDeployments and knows one. Otherwise it is World.DeploymentID, so on
+// Worlds without deployments the option changes nothing, as in the Workflow
+// SDK.
+func StartDeploymentID(ctx context.Context, world World, deployment Deployment) (string, error) {
+	if world.Capabilities().DeploymentAffinity {
+		if deployment.id != "" {
+			return deployment.id, nil
+		}
+		if tracker, ok := world.(LatestDeployments); ok && deployment.latest {
+			id, err := tracker.LatestDeploymentID(ctx)
+			if err != nil || id != "" {
+				return id, err
+			}
 		}
 	}
 	return world.DeploymentID(), nil
