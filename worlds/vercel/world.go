@@ -71,6 +71,43 @@ type Config struct {
 	// environment variable, which Vercel sets in every deployment. With
 	// neither, deployment affinity is off.
 	DeploymentID string
+	// Retention is how long a run's data is kept after the run completes,
+	// fails, or is cancelled: worlds.RetainDefault leaves it to Vercel's
+	// plan, and worlds.RetainNone deletes it as soon as the run finishes. A
+	// run created with its own $retention attribute keeps it.
+	Retention worlds.Retention
+	// Retentions overrides Retention for the workflows it names, by workflow
+	// name, as Retentions builds it.
+	Retentions map[string]worlds.Retention
+}
+
+// WorkflowRetention sets the retention of one workflow's finished runs.
+type WorkflowRetention struct {
+	Workflow  string
+	Retention worlds.Retention
+}
+
+// Retain sets the retention of finished runs of the workflow type In.
+func Retain[In worlds.Workflow[Out], Out any](retention worlds.Retention) WorkflowRetention {
+	return WorkflowRetention{Workflow: worlds.WorkflowName[In](), Retention: retention}
+}
+
+// Retentions returns the retention of each listed workflow, by workflow
+// name, for Config.Retentions.
+func Retentions(retentions ...WorkflowRetention) map[string]worlds.Retention {
+	byWorkflow := make(map[string]worlds.Retention, len(retentions))
+	for _, retention := range retentions {
+		byWorkflow[retention.Workflow] = retention.Retention
+	}
+	return byWorkflow
+}
+
+// retentionFor returns the retention of runs of workflow.
+func (c Config) retentionFor(workflow string) worlds.Retention {
+	if retention, ok := c.Retentions[workflow]; ok {
+		return retention
+	}
+	return c.Retention
 }
 
 // World is the Vercel World. It is safe for concurrent use, and any number of

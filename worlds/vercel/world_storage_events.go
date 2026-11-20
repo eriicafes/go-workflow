@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"time"
@@ -47,9 +48,17 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.EncryptionPublicKey != "" {
 		meta["encryptionPublicKey"] = input.EncryptionPublicKey
 	}
-	if len(input.Attributes) > 0 {
-		meta["attributes"] = input.Attributes
-		for key := range input.Attributes {
+	attributes := input.Attributes
+	if retention := w.config.retentionFor(input.WorkflowName); retention != worlds.RetainDefault {
+		if _, set := attributes[worlds.RetentionAttribute]; !set {
+			attributes = make(map[string]string, len(input.Attributes)+1)
+			maps.Copy(attributes, input.Attributes)
+			attributes[worlds.RetentionAttribute] = retention.String()
+		}
+	}
+	if len(attributes) > 0 {
+		meta["attributes"] = attributes
+		for key := range attributes {
 			if len(key) > 0 && key[0] == '$' {
 				meta["allowReservedAttributes"] = true
 			}

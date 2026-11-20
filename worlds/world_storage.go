@@ -154,6 +154,9 @@ const (
 	// RootRunIDAttribute holds the ID of the run at the root of a child run's
 	// lineage.
 	RootRunIDAttribute = "$rootRunId"
+	// RetentionAttribute holds a run's data retention, as the Workflow SDK
+	// records it. See Retention.
+	RetentionAttribute = "$retention"
 )
 
 // Run is the view of one run derived from its event log.
