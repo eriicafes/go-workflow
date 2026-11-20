@@ -390,3 +390,38 @@ func TestQueueConsumerPublishesNextHop(t *testing.T) {
 		t.Fatalf("last hop delay = %s, want about 20 hours", remaining)
 	}
 }
+
+func TestVQSRoutesByRegion(t *testing.T) {
+	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
+	world := newQueueWorld(t, server)
+	t.Setenv("VERCEL_REGION", "cdg1")
+	ctx := context.Background()
+
+	// A message goes to the region its run ID carries, else VERCEL_REGION's.
+	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", worlds.RegionSYD1)
+	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1"} {
+		if err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, "id", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, want := range []string{"syd1", "cdg1", "cdg1"} {
+		if got := server.all()[index].Header.Get("X-Vercel-Queue-Region"); got != want {
+			t.Errorf("message %d region = %q, want %s", index, got, want)
+		}
+	}
+
+	// A delivery's lease is released in the region that delivered it.
+	request := deliveryRequest("msg_1", `{"id":"foreign"}`)
+	request.Header.Set("Ce-Vqsregion", "hnd1")
+	Queue(world, nil).ServeHTTP(httptest.NewRecorder(), request)
+	requests := server.all()
+	if ack := requests[len(requests)-1]; ack.Method != http.MethodDelete || ack.Header.Get("X-Vercel-Queue-Region") != "hnd1" {
+		t.Fatalf("ack = %+v", ack)
+	}
+
+	// Without Config.QueueURL, each region has its own host.
+	world.config.QueueURL = ""
+	if queue, header := world.queueURL(worlds.RegionSYD1); queue != "https://syd1.vercel-queue.com/api/v3" || header != nil {
+		t.Fatalf("syd1 queue = %q, %v", queue, header)
+	}
+}

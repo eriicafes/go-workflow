@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
@@ -39,7 +41,29 @@ const (
 	vqsPayloadMaxSize = 1 << 20
 )
 
-func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte, header http.Header) (*http.Response, error) {
+// queueURL returns the Vercel Queues API root of region: Config.QueueURL when
+// it was set, which forwards to region by the x-vercel-queue-region header,
+// and region's own host otherwise, as world-vercel routes each message.
+func (w *World) queueURL(region worlds.Region) (string, http.Header) {
+	if w.config.QueueURL != "" {
+		return w.config.QueueURL, http.Header{"X-Vercel-Queue-Region": {region.String()}}
+	}
+	return "https://" + region.String() + ".vercel-queue.com/api/v3", nil
+}
+
+// messageRegion returns the region a message of runID is sent to: the region
+// its run ID carries, else that of VERCEL_REGION, else iad1.
+func messageRegion(runID worlds.RunID) worlds.Region {
+	rest, _ := strings.CutPrefix(string(runID), runIDPrefix)
+	if value, err := ulid.ParseStrict(rest); err == nil && value[0]&runIDTagBit != 0 {
+		if region, ok := runRegion(runID); ok {
+			return region
+		}
+	}
+	return envRegion()
+}
+
+func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, path string, body []byte, header http.Header) (*http.Response, error) {
 	token, err := w.config.OIDCToken(ctx)
 	if err != nil {
 		return nil, err
@@ -48,12 +72,15 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, w.config.QueueURL+path, reader)
+	base, routing := w.queueURL(region)
+	request, err := http.NewRequestWithContext(ctx, method, base+path, reader)
 	if err != nil {
 		return nil, err
 	}
-	for key, values := range header {
-		request.Header[key] = values
+	for _, values := range []http.Header{routing, header} {
+		for key, value := range values {
+			request.Header[key] = value
+		}
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
@@ -88,7 +115,7 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, key string
 	if deploymentID != "" {
 		header.Set("Vqs-Deployment-Id", deploymentID)
 	}
-	response, err := w.vqsRequest(ctx, http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
+	response, err := w.vqsRequest(ctx, messageRegion(message.RunID), http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: publish queue message: %w", err)
 	}
@@ -112,6 +139,9 @@ type vqsDelivery struct {
 	// VisibilityDeadline is when the current lease expires, when known.
 	VisibilityDeadline time.Time
 	Body               []byte
+	// Region is the region of the queue that delivered the message, which
+	// its lease is renewed and released in.
+	Region worlds.Region
 }
 
 // parseDelivery reads a push delivery. Binary-mode deliveries (ce-type
@@ -157,6 +187,12 @@ func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	if delivery.Topic == "" || delivery.ConsumerGroup == "" || delivery.MessageID == "" {
 		return vqsDelivery{}, errors.New("workflow/vercel: invalid queue delivery")
 	}
+	// Leases live in the region whose queue delivered the message, which
+	// Vercel names in ce-vqsregion, as @vercel/queue routes its acks.
+	var ok bool
+	if delivery.Region, ok = worlds.ParseRegion(request.Header.Get("Ce-Vqsregion")); !ok {
+		delivery.Region = envRegion()
+	}
 	if delivery.ReceiptHandle == "" {
 		return w.receiveByID(request.Context(), delivery)
 	}
@@ -171,7 +207,7 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 	header := http.Header{}
 	header.Set("Accept", "application/x-ndjson")
 	header.Set("Vqs-Visibility-Timeout-Seconds", strconv.Itoa(int(vqsLease/time.Second)))
-	response, err := w.vqsRequest(ctx, http.MethodPost, w.consumerPath(delivery)+"/id/"+url.PathEscape(delivery.MessageID), nil, header)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPost, w.consumerPath(delivery)+"/id/"+url.PathEscape(delivery.MessageID), nil, header)
 	if err != nil {
 		return vqsDelivery{}, fmt.Errorf("workflow/vercel: receive queue message: %w", err)
 	}
@@ -205,7 +241,7 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 
 // acknowledge removes the delivery from its consumer group.
 func (w *World) acknowledge(ctx context.Context, delivery vqsDelivery) error {
-	response, err := w.vqsRequest(ctx, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, nil)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, nil)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: acknowledge queue message: %w", err)
 	}
@@ -223,7 +259,7 @@ func (w *World) setVisibility(ctx context.Context, delivery vqsDelivery, timeout
 	if err != nil {
 		return err
 	}
-	response, err := w.vqsRequest(ctx, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, nil)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, nil)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: extend queue lease: %w", err)
 	}
