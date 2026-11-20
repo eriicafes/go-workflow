@@ -101,6 +101,12 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 }
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
+	// A deleted run's streams take no more data.
+	if item, found, err := w.item(ctx, runKey(string(input.RunID))); err != nil {
+		return err
+	} else if found && worlds.RunDataExpired(runFromItem(item).Run, time.Now()) {
+		return worlds.ErrStreamClosed
+	}
 	// Concurrent writers race on count and retry.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {

@@ -161,6 +161,7 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	})
 	setTime(item, "startedAt", run.StartedAt)
 	setTime(item, "completedAt", run.CompletedAt)
+	setTime(item, "expiredAt", run.ExpiredAt)
 	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "encryptionPublicKey", run.EncryptionPublicKey)
 	setString(item, "startedEventId", string(view.startedEventID))
@@ -189,6 +190,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			UpdatedAt:           readTime(item, "updatedAt"),
 			StartedAt:           readTimePtr(item, "startedAt"),
 			CompletedAt:         readTimePtr(item, "completedAt"),
+			ExpiredAt:           readTimePtr(item, "expiredAt"),
 		},
 		eventCount:       int(readInt(item, "eventCount")),
 		startedEventID:   worlds.EventID(read(item, "startedEventId")),

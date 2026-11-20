@@ -72,7 +72,7 @@ lambdaurl.Start(awsworld.HTTP(world))
 | `Queues` | Optional. Further queues by name, standard or FIFO. See [Queue routing](#queue-routing). |
 | `Routes` | Optional. Workflow name to queue name, built with `Routes` and `Route`. |
 | `Scheduler` | Optional. Delivers work due more than 15 minutes ahead, and every delayed delivery to a FIFO queue. |
-| `Retention`, `Retentions` | Optional. How long finished runs are kept, by default and per workflow. Over 15 minutes requires `Scheduler`. See [Retention](#retention). |
+| `Retention`, `Retentions` | Optional. How long finished runs keep their data, by default and per workflow. Over 15 minutes requires `Scheduler`. See [Retention](#retention). |
 
 `SchedulerConfig` requires `Client`, `TargetARN` (the queue's ARN), and
 `RoleARN` (the role Scheduler assumes to send to the queue). `Group` defaults to
@@ -167,23 +167,29 @@ delay is longer than 15 minutes.
 
 ## Retention
 
-With `Config.Retention` set, appending a run's `run_completed`, `run_failed`
-or `run_cancelled` also queues an expiry delivery due its workflow's retention
-(`Config.Retentions`, else `Retention`) later, as a
-`QUEUE#expire-<runID>` record published like any delivery (through Scheduler
-beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
-ID is fixed per run, so an append retried after publishing failed schedules
-it again rather than twice, and a retried append of a terminal event does so
-too.
+A run's data is deleted as the Workflow SDK deletes it: the run, step, event,
+hook and token items stay with their IDs, statuses, timestamps and attributes,
+the payloads in the run's `EVENT#` items are removed, and its streams' chunk
+items are deleted, leaving each `STREAM#` item empty and closed. The run's
+`expiredAt` is set first, so its payloads read as gone before they are
+deleted, and `dataPurged` is set last.
 
-When the delivery is due, the `Queue` handler deletes the run's hooks (found
-through `HOOKS#<runID>` on `list_group`), the tokens they still own, and every
-item of the `RUN#<runID>` partition with `BatchWriteItem`, the run's view last,
-so a cleanup cut short is retried by SQS while the run still exists. Index
-entries are attributes of these items, so the run leaves `RunsList` and
-`HooksList` with them. A hook whose token retention has not ended defers the
-expiry until it ends. Runs that are still pending or running never expire,
-and runs that finished before `Retention` was set are kept.
+- **`$retention: "0"`.** The commit that finishes the run sets `expiredAt`,
+  and the process that appended it deletes the data right after. If that
+  fails, it queues an expiry delivery to finish it.
+- **`RunsDeleteDataMany`.** Deletes a finished run's data on demand.
+- **`Config.Retention`.** The commit that finishes the run sets `expiredAt` to
+  its completion time plus its workflow's retention (`Config.Retentions`, else
+  `Retention`), and the append queues an expiry delivery due then, as a
+  `QUEUE#expire-<runID>` record published like any delivery (through Scheduler
+  beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
+  ID is fixed per run, so a retried append schedules it again rather than
+  twice. The `Queue` handler deletes the data when it is due, and SQS retries a
+  deletion cut short. Changing the retention applies to runs that finish
+  afterwards.
+
+A step that settles after its run's data was deleted has its result scrubbed as
+it lands, and a deleted run's streams refuse writes.
 
 ## Table
 
@@ -284,9 +290,9 @@ and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP
 Both roles need, on the table and its indexes (`<table-arn>` and
 `<table-arn>/index/*`): `dynamodb:GetItem`, `PutItem`, `UpdateItem`,
 `DeleteItem`, `Query`, and `BatchGetItem`. Both need `sqs:SendMessage` on the
-queue. With `Retention`, the worker also needs `dynamodb:BatchWriteItem` to
-delete expired runs, and the API role needs `scheduler:CreateSchedule` if it
-cancels runs, since a finished run schedules its own expiry.
+queue. Both need `dynamodb:BatchWriteItem` to delete a finished run's stream
+chunks, and with `Retention` the API role needs `scheduler:CreateSchedule` if
+it cancels runs, since a finished run schedules its own expiry.
 
 The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 `ChangeMessageVisibility`, and `GetQueueAttributes`, and, with `Scheduler`, `scheduler:CreateSchedule` and

@@ -2,6 +2,7 @@ package awsworld
 
 import (
 	"context"
+	"time"
 
 	ddb "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/eriicafes/go-workflow/worlds"
@@ -75,7 +76,13 @@ func wantsResult(resultEventID worlds.EventID, status worlds.Status, resolve wor
 // read from their events. ResolveDataNone leaves out the input and output.
 func (w *World) resolveRuns(ctx context.Context, views []runView, resolve worlds.ResolveData) ([]worlds.Run, error) {
 	var refs []eventRef
+	now := time.Now()
 	for _, view := range views {
+		// A run's payloads are gone once its ExpiredAt has passed, even
+		// before its expiry delivery deletes them.
+		if worlds.RunDataExpired(view.Run, now) {
+			continue
+		}
 		if resolve != worlds.ResolveDataNone {
 			refs = append(refs, eventRef{view.RunID, runInputEventID})
 		}
