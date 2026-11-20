@@ -51,6 +51,16 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if len(input.ExecutionContext) > 0 {
 		meta["executionContext"] = input.ExecutionContext
 	}
+	if start := input.StartHook; start != nil {
+		hook := map[string]any{"token": start.Token}
+		if start.TokenRetentionUntil != nil {
+			hook["tokenRetentionUntil"] = start.TokenRetentionUntil.UTC()
+		}
+		if len(start.Metadata) > 0 {
+			hook["metadata"] = start.Metadata
+		}
+		meta["startHook"] = hook
+	}
 	attributes := input.Attributes
 	if retention := w.config.retentionFor(input.WorkflowName); retention != worlds.RetainDefault {
 		if _, set := attributes[worlds.RetentionAttribute]; !set {

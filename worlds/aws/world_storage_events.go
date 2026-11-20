@@ -38,8 +38,24 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
-	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
+	items := []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))}
+	if input.StartHook != nil {
+		hookItems, err := w.startHookItems(ctx, input, now)
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		items = append(items, hookItems...)
+	}
+	err = w.transact(ctx, items)
 	if conditional(err) {
+		if input.StartHook != nil {
+			// The run may exist, or a concurrent claimant took the token.
+			if _, found, getErr := w.item(ctx, runKey(string(input.RunID))); getErr == nil && !found {
+				if item, found, getErr := w.item(ctx, tokenKey(input.StartHook.Token)); getErr == nil && found {
+					return worlds.EventResult{}, &worlds.HookConflictError{RunID: tokenFromItem(item).runID}
+				}
+			}
+		}
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	if err != nil {
@@ -1095,4 +1111,39 @@ func sortedKeys[V any](values map[string]V) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// startHookItems returns the writes creating a run's start hook with the run:
+// its hook item, naming run_created as its created event, and its token item,
+// conditioned on the token being as read. It returns a *HookConflictError
+// naming the run holding the token.
+func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRunInput, now time.Time) ([]ddb.TransactWriteItem, error) {
+	start := input.StartHook
+	if start.Token == "" {
+		return nil, worlds.ErrEventInvalid
+	}
+	tx := newAppendTx(w)
+	tx.now = now
+	token, err := tx.token(ctx, start.Token)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.releaseLapsed(ctx, token); err != nil {
+		return nil, err
+	}
+	if token.cur != nil {
+		return nil, &worlds.HookConflictError{RunID: token.cur.runID}
+	}
+	id := worlds.StartHookID(input.RunID)
+	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		return nil, err
+	}
+	hook["createdEventId"] = avs(string(worlds.EventIDForSlot(1)))
+	condition, values := tokenCondition(token.seen)
+	table := awsv2.String(w.config.TableName)
+	return []ddb.TransactWriteItem{
+		put(w.config.TableName, hook),
+		{Put: &ddb.Put{TableName: table, Item: tokenItem(start.Token, tokenView{hookID: id, runID: input.RunID}), ConditionExpression: awsv2.String(condition), ExpressionAttributeValues: values}},
+	}, nil
 }

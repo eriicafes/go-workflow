@@ -66,6 +66,7 @@ var storedKeys = map[string]string{
 	"errorCode":               "errorCode",
 	"cancelReason":            "cancelReason",
 	"executionContext":        "executionContext",
+	"startHook":               "startHook",
 }
 
 func (f *fakeBackend) count(route string) int {
@@ -261,6 +262,9 @@ type outcome struct {
 	answer  map[string]any
 	// seqInBand is the run's in-band count, for an in-band refusal.
 	seqInBand int
+	// details is the structured body of a refusal, such as the owner of a
+	// start hook's token.
+	details map[string]any
 }
 
 func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID) {
@@ -281,6 +285,10 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(result.status)
 		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "seqInBand": result.seqInBand})
+	case result.details != nil:
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(result.status)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "details": result.details})
 	case result.status != http.StatusOK:
 		writeError(writer, result.status, result.code, result.message)
 	default:
@@ -356,6 +364,10 @@ func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWrite
 // keeps of it.
 func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, fence *int) outcome {
 	refuse := func(err error) outcome {
+		var conflict *worlds.HookConflictError
+		if errors.As(err, &conflict) {
+			return outcome{status: http.StatusConflict, code: "start-hook-conflict", message: err.Error(), details: map[string]any{"conflictingRunId": string(conflict.RunID)}}
+		}
 		status, code := goErrorStatus(err)
 		return outcome{status: status, code: code, message: err.Error()}
 	}
@@ -386,7 +398,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	if eventType == worlds.EventTypeRunCreated {
 		var created worlds.DataRunCreated
 		_ = json.Unmarshal(data, &created)
-		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext}); err != nil {
+		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}); err != nil {
 			return refuse(err)
 		}
 		run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
@@ -516,6 +528,16 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		}
 		if len(created.ExecutionContext) > 0 {
 			stored["executionContext"] = created.ExecutionContext
+		}
+		if hook := created.StartHook; hook != nil {
+			wire := map[string]any{"token": hook.Token, "hookId": string(hook.HookID)}
+			if hook.TokenRetentionUntil != nil {
+				wire["tokenRetentionUntil"] = *hook.TokenRetentionUntil
+			}
+			if len(hook.Metadata) > 0 {
+				wire["metadata"] = hook.Metadata
+			}
+			stored["startHook"] = wire
 		}
 	case worlds.EventTypeHookConflict:
 		var created worlds.DataHookCreated

@@ -165,6 +165,13 @@ deletes every message, so failed deliveries are not retried.
 `Scheduler` can be omitted when the World only serves HTTP requests, or when no
 delay is longer than 15 minutes.
 
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` writes the run, its `run_created`, the hook
+`hook_<run ULID>` and its `TOKEN#` item in one transaction, conditioned on the
+token being unheld. When another run holds it, nothing is written and it
+returns a `*worlds.HookConflictError` naming that run.
+
 ## Retention
 
 A run's data is deleted as the Workflow SDK deletes it: the run, step, event,
