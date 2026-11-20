@@ -100,7 +100,14 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 	case worlds.EventTypeRunCompleted:
 		return meta, worlds.DecodeRunCompleted(event.Data), nil
 	case worlds.EventTypeRunFailed:
-		return meta, worlds.DecodeRunFailed(event.Data), nil
+		var data worlds.DataRunFailed
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		if data.ErrorCode != "" {
+			meta["errorCode"] = data.ErrorCode
+		}
+		return meta, data.Error, nil
 	case worlds.EventTypeRunCancelled, worlds.EventTypeWaitCompleted, worlds.EventTypeHookDisposed:
 		return meta, nil, nil
 	case worlds.EventTypeAttrSet:
@@ -232,7 +239,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 	case worlds.EventTypeRunCompleted:
 		return json.Marshal(worlds.DataRunCompleted{Output: payload("output")})
 	case worlds.EventTypeRunFailed:
-		return json.Marshal(worlds.DataRunFailed{Error: payload("error")})
+		return json.Marshal(worlds.DataRunFailed{Error: payload("error"), ErrorCode: str(d, "errorCode")})
 	case worlds.EventTypeAttrSet:
 		return json.Marshal(worlds.DataAttrSet{Changes: attributeChanges(d["changes"]), Writer: attributeWriter(d["writer"])})
 	case worlds.EventTypeStepCreated:

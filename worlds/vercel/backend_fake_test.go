@@ -31,6 +31,8 @@ type fakeBackend struct {
 	requests map[string]int
 	// sockets serves stream sockets; the backend declines them otherwise.
 	sockets bool
+	// vercelIDs holds the vercelId of each event frame written with one.
+	vercelIDs []string
 }
 
 func newFakeBackend(t testing.TB) *fakeBackend {
@@ -355,6 +357,11 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		return outcome{status: status, code: code, message: err.Error()}
 	}
 	eventType := worlds.EventType(str(in.Meta, "eventType"))
+	if id := str(in.Meta, "vercelId"); id != "" {
+		f.mu.Lock()
+		f.vercelIDs = append(f.vercelIDs, id)
+		f.mu.Unlock()
+	}
 	if spec, _ := asInt(in.Meta["specVersion"]); spec != specVersion {
 		return outcome{status: http.StatusBadRequest, code: "spec-version", message: "unexpected spec version"}
 	}

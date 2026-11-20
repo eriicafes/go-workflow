@@ -298,7 +298,7 @@ func TestHTTPClientWritesStreamsOverTheSocket(t *testing.T) {
 	if err := writer.CloseStream(); err != nil {
 		t.Fatal(err)
 	}
-	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID()), Name: "remote"})
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID()), Name: worlds.UserStreamName(worlds.RunID(run.ID()), "remote")})
 	var last [][]byte
 	if err == nil && len(chunks.Data) == 3 {
 		last, err = worlds.DecodeStreamFrames(chunks.Data[2].Data, nil)

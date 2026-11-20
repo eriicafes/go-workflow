@@ -6,12 +6,26 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
+
+// requestIDKey holds, in a delivery's context, the Vercel request ID of its
+// invocation from the x-vercel-id header.
+type requestIDKey struct{}
+
+// setRequestID records in an event's frame meta the Vercel request ID of the
+// delivery writing it, as the Workflow SDK does, so the dashboard links the
+// event to the invocation's logs.
+func setRequestID(ctx context.Context, meta map[string]any) {
+	if id, ok := ctx.Value(requestIDKey{}).(string); ok {
+		meta["vercelId"] = id
+	}
+}
 
 // queueMessage is the Vercel Queues payload: the whole delivery, so the
 // World keeps no record of queued work.
@@ -100,6 +114,9 @@ func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 	}
 	defer request.Body.Close()
 	ctx := request.Context()
+	if id := strings.TrimSpace(request.Header.Get("x-vercel-id")); id != "" {
+		ctx = context.WithValue(ctx, requestIDKey{}, id)
+	}
 	delivery, err := c.world.parseDelivery(request)
 	if errors.Is(err, errDeliveryGone) {
 		writer.WriteHeader(http.StatusOK)

@@ -97,7 +97,7 @@ type streamWriter struct {
 }
 
 func newStreamWriter(ctx context.Context, client Client, runID worlds.RunID, name string, frame func([]byte) ([]byte, error)) (*streamWriter, error) {
-	writer, err := client.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID, Name: name, WriterID: worlds.NewWriterID()})
+	writer, err := client.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID, Name: worlds.UserStreamName(runID, name), WriterID: worlds.NewWriterID()})
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ type streamReader struct {
 }
 
 func newStreamReader(ctx context.Context, client Client, runID worlds.RunID, options ReaderOption) *streamReader {
-	return &streamReader{ctx: ctx, client: client, runID: runID, name: options.Name, startIndex: options.StartIndex}
+	return &streamReader{ctx: ctx, client: client, runID: runID, name: worlds.UserStreamName(runID, options.Name), startIndex: options.StartIndex}
 }
 
 func (r *streamReader) Read(data []byte) (int, error) {

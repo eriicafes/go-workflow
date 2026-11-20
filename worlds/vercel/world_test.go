@@ -2,6 +2,7 @@ package vercelworld
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,5 +154,39 @@ func waitFor(t *testing.T, condition func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatal("condition not met")
 		}
+	}
+}
+
+func TestRunFailedKeepsItsErrorCodeAndRequestID(t *testing.T) {
+	all, _, backend := newWorlds(t, 1)
+	world := all[0]
+	ctx := context.WithValue(context.Background(), requestIDKey{}, "iad1::abc-123")
+	runID, err := worlds.CreateRun(ctx, world, worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{WorkflowName: "wf"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := worlds.EncodeRunFailed(worlds.ErrMaxDeliveriesExceeded, worlds.PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events.Data[len(events.Data)-1]
+	var failed worlds.DataRunFailed
+	if err := json.Unmarshal(last.Data, &failed); err != nil || failed.ErrorCode != "MAX_DELIVERIES_EXCEEDED" {
+		t.Fatalf("run_failed data = %s, err=%v", last.Data, err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.vercelIDs) < 2 || backend.vercelIDs[len(backend.vercelIDs)-1] != "iad1::abc-123" {
+		t.Fatalf("vercelIds = %q", backend.vercelIDs)
 	}
 }

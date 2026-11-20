@@ -132,6 +132,10 @@ stores its buffered chunks through the World's
 writer's lifetime where the World offers one, as the HTTP client and the Vercel
 World do, and otherwise one request per batch of chunks.
 
+Streams are stored under the Workflow SDK's names: a run's default stream is
+`strm_<ULID>_user`, from its `wrun_<ULID>` run ID, and a named stream adds `_`
+and its name in base64url, so `progress` is `strm_<ULID>_user_cHJvZ3Jlc3M`.
+
 Each chunk is stored as the Workflow SDK stores a value of a stream: a frame
 holding the chunk as a `Uint8Array` payload, encrypted with the run's key when
 its payloads are, or sealed to the run's public key when written from outside

@@ -17,7 +17,7 @@ func writeThroughWriter(t *testing.T, world *World) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writer, err := world.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID})
+	writer, err := world.StreamsOpenWriter(ctx, worlds.StreamsOpenWriterInput{RunID: runID, Name: worlds.UserStreamName(runID, "")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func writeThroughWriter(t *testing.T, world *World) []string {
 	if err := writer.CloseStream(ctx); err != nil {
 		t.Fatal(err)
 	}
-	result, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID})
+	result, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: worlds.UserStreamName(runID, "")})
 	if err != nil {
 		t.Fatal(err)
 	}
