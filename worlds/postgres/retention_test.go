@@ -182,3 +182,22 @@ func rowCounts(t *testing.T, world *World, runID worlds.RunID) map[string]int {
 	}
 	return counts
 }
+
+func TestPurgeDeletesStartHookMetadata(t *testing.T) {
+	url, schema := testSchema(t)
+	world := testWorld(t, testPool(t, url, schema), Config{})
+	ctx := context.Background()
+	runID := worlds.RunID("wrun_retention_start_hook")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "retention", StartHook: &worlds.StartHook{Token: "purged-start", Metadata: []byte(`"metadata"`)}, Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}}); err != nil {
+		t.Fatal(err)
+	}
+	writeEvent(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
+	var left int
+	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE run_id = $1 AND convert_from(data, 'UTF8')::jsonb #> '{startHook,metadata}' IS NOT NULL`, runID).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("run_created rows still holding start hook metadata = %d, %v", left, err)
+	}
+	var token string
+	if err := world.pool.QueryRow(ctx, `SELECT convert_from(data, 'UTF8')::jsonb #>> '{startHook,token}' FROM go_workflow_events WHERE run_id = $1 AND slot = 1`, runID).Scan(&token); err != nil || token != "purged-start" {
+		t.Fatalf("start hook token after purge = %q, %v", token, err)
+	}
+}

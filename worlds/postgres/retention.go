@@ -87,8 +87,8 @@ func (w *World) retentionFor(workflow string) time.Duration {
 }
 
 // scrubEventsSQL removes the payload field from the Data of a run's events,
-// as worlds.ScrubEventData does, and leaves events whose Data has nothing
-// else empty.
+// and a run_created's startHook.metadata, as worlds.ScrubEventData does, and
+// leaves events whose Data has nothing else empty.
 var scrubEventsSQL = func() string {
 	fields := worlds.EventPayloadFields()
 	types := make([]string, 0, len(fields))
@@ -102,11 +102,15 @@ var scrubEventsSQL = func() string {
 		field.WriteString(" WHEN '" + eventType + "' THEN '" + fields[worlds.EventType(eventType)] + "'")
 	}
 	field.WriteString(" END")
-	return `WITH scrubbed AS (
-	SELECT slot, convert_from(data, 'UTF8')::jsonb - (` + field.String() + `) AS data
+	return `WITH events AS (
+	SELECT slot, type, convert_from(data, 'UTF8')::jsonb AS data
 	FROM go_workflow_events
 	WHERE run_id = $1 AND data IS NOT NULL AND type IN ('` + strings.Join(types, "', '") + `')
-		AND convert_from(data, 'UTF8')::jsonb ? (` + field.String() + `)
+),
+scrubbed AS (
+	SELECT slot, (data - (` + field.String() + `)) #- '{startHook,metadata}' AS data
+	FROM events
+	WHERE data ? (` + field.String() + `) OR (type = '` + string(worlds.EventTypeRunCreated) + `' AND data #> '{startHook,metadata}' IS NOT NULL)
 )
 UPDATE go_workflow_events e
 SET data = CASE WHEN s.data = '{}'::jsonb THEN NULL ELSE convert_to(s.data::text, 'UTF8') END
