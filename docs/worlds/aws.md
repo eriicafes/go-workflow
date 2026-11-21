@@ -122,29 +122,72 @@ still interleave when one waits.
 
 ## Queue delivery
 
-`Queue` writes a `QUEUE#<id>` record holding the delivery, then publishes the
-message ID:
+`Queue` writes a `QUEUE#<id>` record holding the delivery, every `QueueInput`
+field included, then publishes the message ID:
 
 - due within 15 minutes: `SendMessage` with `DelaySeconds`.
 - due later: a one-time EventBridge schedule named `go-workflow-<id>` that sends
-  the same body to the queue and is deleted after it runs.
+  the message to the queue and is deleted after it runs. A schedule takes at
+  most 8 KB of input, so a delivery too large for it (such as a step delivery
+  carrying its input) is sent as its ID alone; the record holds the delivery
+  either way.
 
-Without `Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
-error. SQS standard queues do not deduplicate, so `IdempotencyKey` is not used.
-Delivery is at least once and the runtime is idempotent.
+If publishing fails the record is deleted and the error returned. Without
+`Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
+error, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the runtime
+reaches a later timer in hops of at most 15 minutes. With `Scheduler`,
+`MaxQueueDelay` is zero and any delay is scheduled directly.
 
-The `Queue` handler loads the record for each SQS message. A missing record or
-a body that is not a queue message is acknowledged. A message that arrives
-early is sent again with the remaining delay. Otherwise it executes the
-delivery, extending the message's visibility every 30 seconds while it runs,
-and deletes the record on success. On failure it reports the message in
-`BatchItemFailures` so SQS redelivers only that message, after a backoff that
-doubles from one second with each receive up to 15 minutes, or the wait a
-`*worlds.ThrottleError` asks for when that is longer, up to 12 hours. The receive count
-is the delivery's attempt, so after 48 the runtime fails the run or step and
-the message is deleted. Give the dead-letter queue a `max_receive_count` above
-48, as the Terraform module does, so it only collects messages the runtime
-could not settle.
+**Deduplication.** A delivery with an `IdempotencyKey` claims the key with a
+`DEDUPE#<runID>#<sha256(key)>` item that lasts 24 hours
+(`worlds.MinDeduplicationWindow`), through a conditional put. Queueing the same
+key of the same run again while the claim lasts and its message lives (its
+`QUEUE#` record exists) stores and sends nothing, and returns the first
+message's ID. A claim whose window has passed, or whose message was
+acknowledged or never published, is taken over by the next message. A delivery
+without a key is never deduplicated.
+
+**Delivery.** The `Queue` handler loads the record for each SQS message. A
+missing record (already done or cancelled) or a body that is not a queue
+message is acknowledged, and so is a record past its `Retention`, counted from
+when the message is first due, without executing it. A message that arrives
+early is sent again for the rest of the delay. Otherwise the handler counts the
+delivery on the record (`deliveries`) and executes it with a `MessageID` that
+stays the same across redeliveries, a `DeliveryCount` of `deliveries`, and an
+`Attempt` of `deliveries` minus the handoffs recorded on the record
+(`handoffs`). It extends the message's visibility every 30 seconds while the
+delivery runs, and deletes the record on success. On failure it reports the
+message in `BatchItemFailures` so SQS redelivers only that message, after a
+backoff that doubles from one second with each receive up to 15 minutes, or the
+wait a `*worlds.ThrottleError` asks for when that is longer, up to 12 hours.
+After 48 attempts the runtime fails the run or step and the message is deleted.
+Give the dead-letter queue a `max_receive_count` above 48, as the Terraform
+module does, so it only collects messages the runtime could not settle.
+
+**Redelivery.** When the runtime asks for its message again
+(`worlds.Redelivery`), the handler records it and sends the same message ID
+again as a new SQS message, then acknowledges the old one, so redeliveries
+never count toward the redrive policy and are not bound by SQS's 12-hour
+visibility limit:
+
+- a handoff (`After` zero) adds one to `handoffs`, so it does not count as an
+  attempt, and is sent again at once.
+- a redelivery after a delay sets the record's due time and is sent again after
+  it: through SQS within 15 minutes, through Scheduler beyond that, or, without
+  Scheduler, after 15 minutes, arriving early and waiting again for the rest.
+
+A FIFO queue gives a message sent again at once its own deduplication ID, so the
+queue does not drop it as a duplicate of its first send.
+
+**One flow of a run at a time.** Before executing a serialized flow
+(`QueueInput.SerializedFlow`), the handler takes the run's flow lease, a
+`LEASE#<runID>` item put on condition that no lease exists or the one there has
+expired. The lease lasts two minutes and is renewed every 30 seconds while the
+flow executes, then deleted. A flow that finds the lease taken is sent again
+two seconds later without counting a delivery. Step deliveries, intermediate
+hops of a wait's timer, and retention deliveries never take the lease. The
+lease makes overlapping flows rare and the run's in-band fence keeps them safe,
+so `Capabilities()` reports `MaxConcurrency` and `InBandFence`.
 
 Lambda runs the handler with the invocation's deadline. Once a batch is
 halfway to it, the handler starts no further messages and reports them in
@@ -215,6 +258,8 @@ project only keys and `status`:
 | hook | `HOOK#<hookID>` | `META` |
 | token owner | `TOKEN#<token>` | `META` |
 | queue record | `QUEUE#<messageID>` | `META` |
+| idempotency-key claim | `DEDUPE#<runID>#<base64url(sha256(key))>` | `META` |
+| run's flow lease | `LEASE#<runID>` | `META` |
 
 | Index | Partition key values | Sort key |
 | --- | --- | --- |
@@ -226,8 +271,13 @@ Listings read an index and then fetch the matching items with consistent
 hook created a moment ago may be missing from a listing. All other reads are
 consistent reads of the base table.
 
+Claims and leases carry a `ttl` attribute (epoch seconds) after which they are
+no longer needed. The World checks their expiry itself, so enabling the table's
+TTL on `ttl`, as the Terraform module does, only reclaims their space.
+
 Create the table with the [Terraform module](#terraform), or with
 `awsworld.CreateTable(ctx, dynamoClient, name)` for tests and DynamoDB Local.
+`CreateTable` does not enable TTL.
 
 ## Terraform
 
@@ -318,7 +368,9 @@ The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 - **100 actions per transaction (4 MB).** One append writes the run view, each
   event, and each changed step, hook, token, and wait marker in one transaction.
   A stream write holds at most 99 chunks.
-- **15-minute SQS delay.** Longer delays need `Scheduler`.
+- **15-minute SQS delay.** Queueing a longer delay needs `Scheduler`.
+  Without it, the runtime reaches its timers in 15-minute hops, and a longer
+  redelivery waits in 15-minute hops too.
 - **Hot keys.** Appends to one run are serialized by its event count and
   retried with jittered backoff, so heavy concurrent appends to one run trade
   throughput for retries.

@@ -77,7 +77,7 @@ connection string or pool config to use a dedicated schema.
 | `go_workflow_steps` | Step view keyed by `(run_id, step_id)`. |
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
 | `go_workflow_hook_tokens` | Token ownership. The primary key makes a token single-owner. |
-| `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
+| `go_workflow_queue` | Live messages: the whole delivery in `payload`, with `not_before`, `deliveries`, `handoffs`, `lease_until`, `running`, and `expires_at`. |
 | `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
@@ -113,19 +113,38 @@ workflows' on `DefaultQueue`. A worker without `Queues` claims every queue.
 
 ## Worker model
 
-`Queue` inserts a row and sends `NOTIFY go_workflow_queue` in the same
-transaction. An `IdempotencyKey` deduplicates against a pending row of the same
-run. Claiming the row releases the key, so a message queued
-during execution is never dropped.
+`Queue` inserts a row holding the whole delivery and sends
+`NOTIFY go_workflow_queue` in the same transaction. A delivery with an
+`IdempotencyKey` is stored once while its message lives: a unique index on the
+run and key makes a `Queue` with the key of a queued or executing message store
+nothing and return that message's ID. A delivery without a key is never
+deduplicated. A delivery with `Retention` expires that long after it was
+queued, and workers delete expired rows before claiming.
 
-`Worker` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`,
-increments `attempts`, and executes each:
+`Worker` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`, and
+increments `deliveries`, which fences the lease. Every delivery of a message
+has the row's ID as its `MessageID`, `deliveries` as its `DeliveryCount`, and
+`deliveries - handoffs` as its `Attempt`. The worker executes each:
 
 - success deletes the row.
-- failure keeps it and sets `not_before` to now plus a capped exponential
-  backoff (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
+- a `worlds.Redelivery` keeps the row and makes it due again after its delay.
+  A handoff (a delay of zero) increments `handoffs`, so it is not an attempt.
+- failure keeps the row and sets `not_before` to now plus a capped exponential
+  backoff by attempt (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
   `*worlds.ThrottleError` asks for when that is longer, and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
+
+Flows of one run execute one at a time across every worker
+(`Capabilities().MaxConcurrency`). A claimed serialized flow
+(`QueueInput.SerializedFlow`) is marked `running`, and the claim skips a
+serialized flow while another of its run is running, taking at most one per
+run. A unique index on the run's running flow turns a race between two workers
+into a retried claim. A running flow whose worker crashed holds the run's other
+flows back until its lease expires and it is claimed again. Step deliveries and
+intermediate hops of a wait's timer are never held back.
+
+Delivery is at least once. The runtime's event admission and the in-band fence
+make duplicate deliveries inert.
 
 ## Start hooks
 

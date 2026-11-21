@@ -179,8 +179,8 @@ log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
 log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
 ```
 
-Vercel Queues delays deliveries by at most 23 hours here, as in the Workflow
-SDK. Work due later is delivered in hops of up to 23 hours.
+Vercel Queues delays deliveries by at most 23 hours here. The runtime reaches
+timers due later in hops of up to 23 hours.
 
 
 ### AWS

@@ -18,22 +18,34 @@ either a flow or a step of one run.
   has not settled and no step the flow runs inline can settle it, the flow
   **suspends**. When the runner returns, the flow
   records `run_completed` or `run_failed`.
-- New steps wait until the runner waits for a result that is not recorded.
-  The flow then records them with one write, runs the first few
-  [inline](/guide/steps#running-steps-inline), and queues a step delivery for
-  each of the rest. Instead of suspending, the runner waits: as each inline
-  step finishes, the flow records its result and the runner continues from
-  where it waited. The flow suspends once nothing it runs inline is left.
-- A **step delivery** replays the runner up to the target step, calls the step
-  function with its recorded input, and records the result with
-  `step_completed`, `step_retrying`, or `step_failed`. It then queues a flow
-  delivery so the runner can continue, or, after `step_retrying`, a step
-  delivery for the next attempt.
+- New steps and timers wait until the runner waits for a result that is not
+  recorded. The flow then records them with one write. Each step's mode is
+  fixed there and never changes: up to
+  [the limit](/guide/steps#running-steps-inline) run inline, each created by a
+  `step_started` that starts its first attempt, and the rest are recorded with
+  `step_created` and queued as step deliveries once the write commits. Instead
+  of suspending, the runner waits: as each inline step finishes, the flow
+  records its result and the runner continues from where it waited. While it
+  waits, the flow completes the timers that fall due and reads what others
+  append to the log every two seconds, so a payload or a cancellation reaches
+  the runner. The flow suspends once nothing it runs inline is left.
+- A **step delivery** reads the log and decides: a finished step or run is
+  acknowledged, a retry not yet due asks for its message again when it is,
+  and a step whose attempts are all used fails. Otherwise it records
+  `step_started`, replays the runner up to the step, calls the step function
+  with its recorded input, and records the result with `step_completed`,
+  `step_retrying`, or `step_failed`. A retry keeps the step's message: the
+  delivery asks the queue for it again when the retry is due. A final result
+  queues a flow delivery so the runner can continue.
+- A failed inline attempt that may retry is handed to a step delivery: the
+  flow records `step_retrying` and queues the step's message for the next
+  attempt.
 
 ```
 Start ──► run_created ──► flow delivery
+                            │  record run_started
                             │  replay: Step(findSources) is new, the runner waits
-                            │  record step_created and step_started
+                            │  record step_started, creating the inline step
                             │  call findSources, record step_completed
                             │  the runner continues with the result
                             │  runner returns
@@ -46,9 +58,10 @@ delivery:
 ```
 Start ──► run_created ──► flow delivery
                             │  replay: Step(findSources) is new
-                            │  suspend, record step_created, queue step delivery
+                            │  record step_created, queue step delivery, suspend
                             ▼
                           step delivery
+                            │  record step_started
                             │  replay up to findSources, call it
                             │  record step_completed, queue flow delivery
                             ▼
@@ -58,31 +71,32 @@ Start ──► run_created ──► flow delivery
                             ▼  record run_completed
 ```
 
-Whether a delivery may run is decided by appending events, which the World
-admits or rejects atomically. Duplicate and stale deliveries are therefore
-safe: a delivery for a run or step that is already terminal returns without
-running runner or step code. A delivery that dies before recording its result is
-redelivered by the queue and runs the step again as a new attempt. A step that
-ran inline in a flow that died runs again when the queue redelivers that
-flow's message. Another flow takes it over only when it replays after the
-owning message's 15-minute lease on it ends.
+Whether a delivery may run is decided from the event log, so duplicate and
+stale deliveries are safe: a delivery for a run or step that is already
+terminal returns without running runner or step code. A step delivery that
+dies before recording its result is redelivered by the queue and runs the step
+again as a new attempt. A step that ran inline in a flow that died runs again
+in the next flow that finds its attempt without a result. A flow that is not
+its message's first delivery queues again every step delivery a delivery that
+died may have recorded and not queued, under the step's stable key, so the
+queue keeps one message per step.
 
 ### Concurrent flows
 
-Two flow deliveries of the same run can replay at once, for example when two
-steps finish together. Each loaded the log before the other wrote, so each
-would declare the next operation on its own. The flow's writes are therefore
-**in-band** and fenced: the run keeps a count of them (`Run.InBandCount`), and
-every flow write carries the count it last saw. When another flow has written
-since, the World refuses the write with `worlds.ErrInBandSuperseded`. The refused flow
-stops and queues one follow-up flow, which replays the run and sees the other
-flow's declarations. Since the write that starts an inline step is fenced too,
-two flows never both run it. Flows refused by the same write share one
-follow-up on a World that deduplicates deliveries. Writes from step deliveries, hook resumes, `WakeUp`, and
-cancellation are out-of-band: they are never fenced and don't move the count.
-So are the results of inline steps, like a step delivery's, so a flow that ran
-a step records its result even when another flow has written since. A step
-whose result is already recorded refuses a second one.
+A run's flow is its only orchestrator, and its writes are **in-band**: the
+run counts the positions they take (`Run.InBandCount`, `run_created`
+included), a flow reads the count with its log, and every write it makes
+carries the count. When another flow has written in-band since, the World
+refuses the write with `worlds.ErrInBandSuperseded` and appends nothing. The
+refused flow stops writing and starting steps, and asks the queue for its
+message again a second later, when it replays the run with the other flow's
+writes. Since every event of an inline step is in-band too, two flows never
+both record one. Worlds deliver one flow of a run at a time where their queue
+can (`Capabilities().MaxConcurrency`), which makes such an overlap rare; the
+fence is what keeps it safe. Writes from step deliveries, hook resumes,
+cancellation, and clients are out-of-band: they are never fenced and don't
+move the count. Replay ignores any event of a step, hook, or timer after its
+final one, so the first writer of a step's result wins.
 
 ## Identifying operations
 
@@ -107,7 +121,8 @@ promise. So:
   settled, the one whose result was recorded first wins, not the first in
   argument order. Every replay picks the same winner.
 - **Timers fire where they are declared.** A flow that replays past a timer's
-  declaration once it is due records its `wait_completed`. The runner sees it
+  declaration once it is due records its `wait_completed`, and so does a flow
+  that waits for an inline step when the timer falls due. The runner sees it
   when the walk reaches it, like any other result. `WithTimeout` and
   `WithDeadline` attach a `Then` continuation that cancels their context when
   the timer settles.

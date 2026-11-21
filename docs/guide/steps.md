@@ -53,10 +53,10 @@ ctx = workflow.SetMaxInlineSteps(ctx, 0)
 ctx = workflow.SetMaxInlineSteps(ctx, 8)
 ```
 
-A step that runs inline is recorded with one write that also starts it, so it
-takes two writes instead of three, like the Workflow SDK's
-[lazy inline steps](https://workflow-sdk.dev/docs/changelog/lazy-event-creation).
-A retry is queued as a step delivery after its delay.
+A step's mode is decided once, when the flow records it, and never changes. A
+step that runs inline is created by the `step_started` of its first attempt,
+with no `step_created`, so it takes two writes instead of three. A failed
+attempt that may retry is handed to a step delivery, due when the retry is.
 
 After two minutes, the delivery queues new steps instead of running them, so a
 long-running flow hands its work to other deliveries.
@@ -70,11 +70,10 @@ steps it started can finish before it:
 ctx = workflow.SetMaxInlineStepsDuration(ctx, 30*time.Second)
 ```
 
-The flow that starts a step inline records its queued message as the step's
-owner. If the flow dies before the step finishes, the queue redelivers that
-message, which runs the step again at once. Any other flow that finds the step
-running leaves it to its owner, and only one that replays more than 15 minutes
-after the step started hands it to a step delivery.
+If the flow dies before an inline step finishes, the next flow of the run
+finds its attempt without a result and runs another. Only one flow of a run
+writes at a time, so a second flow that replays while the first still runs
+the step stops at its first write and replays again a second later.
 
 The delivery ends once every step it runs inline has finished, so a slow step
 keeps it open. On workers whose queue limits how long a delivery may run, run

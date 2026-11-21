@@ -50,8 +50,8 @@ steps or external callers, not the workflow body. The retry helper takes
 Place `defer hook.Dispose(ctx)` in the workflow runner directly after creation.
 This releases the token on successful return
 or failure while preserving the hook across replay suspensions. Dispose is a
-workflow-only durable inline operation; it returns nothing and panics on
-failure. Call it directly to release the hook before the runner exits.
+workflow-only durable operation the flow records; it returns nothing and
+panics on failure. Call it directly to release the hook before the runner exits.
 Disposal stops further delivery and makes a generated webhook endpoint
 inactive. Disposing a local, unregistered hook needs no durable registration.
 

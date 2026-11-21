@@ -1,7 +1,7 @@
 # Inline Steps
 
-`workflow.InlineStep` records a result in the current flow delivery. It never
-uses the queue, unlike a regular [step](/guide/steps), which only runs inline
+`workflow.InlineStep` records a result in the current flow delivery. It always
+runs inline, unlike a regular [step](/guide/steps), which only runs inline
 within [a limit](/guide/steps#running-steps-inline). That makes it useful for
 quick work such as generating an ID or reading another run.
 
@@ -33,9 +33,8 @@ use the original input.
 ## Choosing suitable work
 
 Keep inline steps short and idempotent or free of side effects. If a delivery
-stops before recording the result, the queue redelivers its message, which
-calls the function again. Another flow calls it only when it replays more
-than 15 minutes after the attempt started.
+stops before recording the result, the next flow of the run calls the
+function again.
 
 Use `workflow.Step` for longer operations or work that needs a separate
 worker delivery. Both forms can execute more than once, so protect external
@@ -80,21 +79,22 @@ if err != nil {
 }
 ```
 
-A failed attempt that can retry suspends the run. A later flow delivery
-starts the next attempt when its retry is due. Retries never run back to back
-in one delivery. After retries run out, or on a fatal error, the caller
-receives a `*workflow.Error`.
+A failed attempt that can retry is handed to a step delivery, which runs the
+next attempt when its retry is due, and the runner waits for it like any
+step's result. Retries never run back to back in one delivery. After retries
+run out, or on a fatal error, the caller receives a `*workflow.Error`.
 
 ## Replay behavior
 
-An inline step records `step_created` and `step_started` in one write,
-followed by the attempt's outcome. Storage failures retry the delivery. The
-[event reference](/reference/events) describes the recorded events.
+An inline step is created by the `step_started` of its first attempt, which
+carries its name and input, followed by the attempt's outcome. Storage
+failures retry the delivery. The [event reference](/reference/events)
+describes the recorded events.
 
 Most `Run` methods use inline steps when called in workflow context, so their reads and changes
 are preserved across replay. See [Starting and Reading Runs](/guide/runs#in-workflow-context).
 
-A step delivery cannot execute an unsettled inline step while replaying toward
-its target. It suspends until a flow delivery records the outcome. Like
+A step delivery runs an inline step only once its retry was handed to one.
+Like
 `Step`, `InlineStep` returns `workflow.ErrNoWorkflow` outside workflow
 context, including inside a step function.
