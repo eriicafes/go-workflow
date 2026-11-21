@@ -30,7 +30,9 @@ const schemaLockKey int64 = 0x676f5f776f726b66
 //   - Steps are keyed by run and step, since a step ID is unique only within
 //     its run, and stream chunks by run as well as stream.
 //   - Hooks keep the run's workflow, deployment, public key, and spec
-//     version, which wake the run, and the times and claims Go reads.
+//     version, which wake the run, and the time a payload was received.
+//     A hook's row goes when it is disposed or done with its token, as in
+//     world-postgres.
 //   - workflow_runs.data_purged records that a run's rows no longer hold its
 //     data, for Config.Retention's background purge.
 //   - There are no snapshots, invocations, dynamic workflow code, or
@@ -143,9 +145,7 @@ CREATE TABLE workflow.workflow_hooks (
 	encryption_public_key varchar NOT NULL DEFAULT '',
 	run_spec_version integer NOT NULL,
 	updated_at timestamptz NOT NULL DEFAULT now(),
-	received_at timestamptz,
-	disposed_at timestamptz,
-	force_claimed_by jsonb
+	received_at timestamptz
 );
 CREATE INDEX workflow_hooks_run_id_idx ON workflow.workflow_hooks (run_id, created_at, hook_id);
 CREATE INDEX workflow_hooks_token_idx ON workflow.workflow_hooks (token);

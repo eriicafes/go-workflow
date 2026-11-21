@@ -301,16 +301,38 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	}
 	setTime(item, "receivedAt", hook.ReceivedAt)
 	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
-	setTime(item, "disposedAt", hook.DisposedAt)
 	if hook.ClaimedFrom != nil {
 		data, _ := json.Marshal(hook.ClaimedFrom)
 		item["claimedFrom"] = avs(string(data))
 	}
-	if hook.ForceClaimedBy != nil {
-		data, _ := json.Marshal(hook.ForceClaimedBy)
-		item["forceClaimedBy"] = avs(string(data))
-	}
 	return item, nil
+}
+
+// disposalItem replaces a disposed hook's HOOK# item: the hook is gone, and
+// the item keeps only what refuses its later deliveries and answers a
+// repeated disposal. It is in no index.
+func disposalItem(id worlds.HookID, disposal hookDisposal) map[string]ddb.AttributeValue {
+	item := merge(hookKey(string(id)), map[string]ddb.AttributeValue{
+		"runId":           avs(string(disposal.runID)),
+		"disposedEventId": avs(string(disposal.eventID)),
+	})
+	if disposal.forced {
+		item["forceClaimed"] = &ddb.AttributeValueMemberBOOL{Value: true}
+	}
+	return item
+}
+
+// isDisposal reports that a HOOK# item records a disposed hook.
+func isDisposal(item map[string]ddb.AttributeValue) bool {
+	return read(item, "disposedEventId") != ""
+}
+
+func disposalFromItem(item map[string]ddb.AttributeValue) *hookDisposal {
+	disposal := &hookDisposal{runID: worlds.RunID(read(item, "runId")), eventID: worlds.EventID(read(item, "disposedEventId"))}
+	if value, ok := item["forceClaimed"].(*ddb.AttributeValueMemberBOOL); ok {
+		disposal.forced = value.Value
+	}
+	return disposal
 }
 
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
@@ -325,14 +347,8 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 		ReceivedAt:          readTimePtr(item, "receivedAt"),
 		TokenRetentionUntil: readTimePtr(item, "tokenRetentionUntil"),
 	}
-	hook.DisposedAt = readTimePtr(item, "disposedAt")
 	if data := read(item, "claimedFrom"); data != "" {
 		if err := json.Unmarshal([]byte(data), &hook.ClaimedFrom); err != nil {
-			return worlds.Hook{}, err
-		}
-	}
-	if data := read(item, "forceClaimedBy"); data != "" {
-		if err := json.Unmarshal([]byte(data), &hook.ForceClaimedBy); err != nil {
 			return worlds.Hook{}, err
 		}
 	}

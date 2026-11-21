@@ -456,7 +456,8 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 }
 
 // hookView completes a backend hook with what its events record: when it
-// received a payload, whether it is a webhook, and its disposal.
+// received a payload and whether it is a webhook. The backend deletes a
+// disposed hook.
 func (w *World) hookView(ctx context.Context, values map[string]any, resolve worlds.ResolveData) (worlds.Hook, error) {
 	hook, err := toHook(values)
 	if err != nil {
@@ -483,13 +484,6 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 			if hook.ReceivedAt == nil {
 				at := event.CreatedAt
 				hook.ReceivedAt = &at
-			}
-		case worlds.EventTypeHookDisposed:
-			at := event.CreatedAt
-			hook.DisposedAt = &at
-			var disposed worlds.HookDisposedEventData
-			if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil {
-				hook.ForceClaimedBy = disposed.ForceClaimedBy
 			}
 		}
 		if event.CreatedAt.After(hook.UpdatedAt) {

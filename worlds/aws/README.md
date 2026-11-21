@@ -176,7 +176,7 @@ that project only keys and `status`:
 | completed wait marker | `RUN#<runID>` | `WAIT#<correlationID>` |
 | stream state | `RUN#<runID>` | `STREAM#<base64url(name)>` |
 | stream chunk | `RUN#<runID>` | `CHUNK#<base64url(name)>#<index, 10 digits>` |
-| hook | `HOOK#<hookID>` | `META` |
+| hook, or its disposal once disposed | `HOOK#<hookID>` | `META` |
 | token owner | `TOKEN#<token>` | `META` |
 | queue record | `QUEUE#<messageID>` | `META` |
 | idempotency-key claim | `DEDUPE#<runID>#<base64url(sha256(key))>` | `META` |
@@ -206,6 +206,11 @@ be missing from a listing. Since only `status` is projected, ordinary appends
 do not write to the indexes. All other reads are consistent reads of the base
 table. Stream names are base64url-encoded in keys so names containing `#` do
 not overlap.
+
+A disposed hook's item is replaced by a record of its disposal, which no
+index lists. A finished run's hooks are hidden once their token retention
+ends, as the Workflow SDK deletes them, and their items are replaced when
+their token is next claimed.
 
 Claims and leases carry a `ttl` attribute (epoch seconds) after which they
 are no longer needed. The World checks their expiry itself, so enabling the

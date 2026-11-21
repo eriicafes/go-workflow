@@ -79,7 +79,7 @@ The schema is world-local's:
 | `events` | One row per event, keyed by run and slot, with its type and correlation ID. |
 | `steps`, `waits`, `hooks` | The views the events build. A run's waits are deleted when it ends. |
 | `hook_tokens` | Each token's owner, unique across runs, kept past its run's end while the hook's retention lasts. |
-| `hook_disposals` | Hooks whose disposal committed, and the hook that took the token from a force-claimed one. |
+| `hook_disposals` | Hooks whose disposal committed, and the claim that took the token from a force-claimed one. The hook's own row is deleted, as is a finished run's hook once its token retention ends. |
 | `hook_resumes` | Deduplicated hook resumes, by run and resume ID. |
 | `start_hook_rejections` | Start hook candidates refused for good. |
 | `stream_chunks` | Stream chunks, numbered from 1, and each closed stream's end marker. |
@@ -124,7 +124,7 @@ refused with `ErrStartHookRejected`.
 
 A run created with `$retention: "0"` loses its data when it finishes, and
 `RunsDeleteDataMany` deletes a finished run's data on demand, as world-local
-does. The run, step, event, and hook rows stay. The payloads in the run's
+does. The run, step, event, and remaining hook rows stay. The payloads in the run's
 events go, and its streams are cut to their end markers, in the same
 transaction that finishes the run or sets its `ExpiredAt`. A step that
 settles after its run's data was deleted has its result scrubbed as it lands,

@@ -35,7 +35,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	// An expired retention counts as released without writing. The row itself
 	// is removed by the next claim of the token.
 	hook, err := scanHook(w.pool.QueryRow(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h
-		JOIN workflow.workflow_runs r ON r.id = h.run_id`+hookJoin(input.ResolveData)+` WHERE h.token = $1 AND h.claims_token AND h.disposed_at IS NULL AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`), input.Token, now()))
+		JOIN workflow.workflow_runs r ON r.id = h.run_id`+hookJoin(input.ResolveData)+` WHERE h.token = $1 AND h.claims_token AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`), input.Token, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
@@ -147,7 +147,8 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 				}
 				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID, WorkflowName: owner.run.WorkflowName, DeploymentID: owner.run.DeploymentID, RunSpecVersion: owner.run.SpecVersion}
 				if owner.run.Status.Terminal() {
-					if _, err := tx.Exec(ctx, w.q(`UPDATE workflow.workflow_hooks SET claims_token = false WHERE hook_id = $1`), holder.hookID); err != nil {
+					// A finished owner's hook goes with its token.
+					if _, err := tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), holder.hookID); err != nil {
 						return err
 					}
 				} else {
@@ -199,7 +200,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::varchar, NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", coalesce(h.is_webhook, false), h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at, coalesce(h.spec_version, 0), h.run_spec_version"
+	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", coalesce(h.is_webhook, false), h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, coalesce(h.spec_version, 0), h.run_spec_version"
 }
 
 // hookJoin joins the event holding the hook's metadata, its hook_created or
@@ -215,8 +216,8 @@ func hookJoin(resolve worlds.ResolveData) string {
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
 	var metadataType *worlds.EventType
-	var metadata, claimed, taken []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt, &hook.SpecVersion, &hook.ResumeContext.RunSpecVersion); err != nil {
+	var metadata, claimed []byte
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &hook.SpecVersion, &hook.ResumeContext.RunSpecVersion); err != nil {
 		return worlds.Hook{}, err
 	}
 	if metadataType != nil && metadata != nil {
@@ -238,13 +239,8 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 			return worlds.Hook{}, err
 		}
 	}
-	if len(taken) > 0 {
-		if err := json.Unmarshal(taken, &hook.ForceClaimedBy); err != nil {
-			return worlds.Hook{}, err
-		}
-	}
 	hook.CreatedAt, hook.UpdatedAt = hook.CreatedAt.UTC(), hook.UpdatedAt.UTC()
-	hook.ReceivedAt, hook.TokenRetentionUntil, hook.DisposedAt = utc(hook.ReceivedAt), utc(hook.TokenRetentionUntil), utc(hook.DisposedAt)
+	hook.ReceivedAt, hook.TokenRetentionUntil = utc(hook.ReceivedAt), utc(hook.TokenRetentionUntil)
 	return hook, nil
 }
 
@@ -266,8 +262,8 @@ func (w *World) tokenOwner(ctx context.Context, tx pgx.Tx, token string) (worlds
 	return owner, err
 }
 
-// lockToken locks the hook claiming token, releases its claim when its run
-// finished and its retention expired at at, and returns the remaining
+// lockToken locks the hook claiming token, deletes it when its run finished
+// and its retention expired at at, and returns the remaining
 // holder. A token nobody claims is not locked: the claimant's insert detects
 // a concurrent claim instead. A token is held while its run is live or its
 // retention lasts (world-postgres storage.js).
@@ -287,6 +283,8 @@ func (w *World) lockToken(ctx context.Context, tx pgx.Tx, token string, at time.
 	if !status.Terminal() || retainUntil != nil && retainUntil.After(at) {
 		return holder, nil
 	}
-	_, err = tx.Exec(ctx, w.q(`UPDATE workflow.workflow_hooks SET claims_token = false, token_retention_until = NULL WHERE hook_id = $1`), holder.hookID)
+	// The lapsed holder's hook goes with its token, as world-postgres
+	// deletes it.
+	_, err = tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), holder.hookID)
 	return tokenHolder{}, err
 }

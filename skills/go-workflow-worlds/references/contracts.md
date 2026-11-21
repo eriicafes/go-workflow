@@ -71,7 +71,10 @@ new hook. If the backend cannot update both runs in one transaction, use a
 recoverable protocol that preserves the same observable contract. An
 uncoordinated read-then-write token lookup is insufficient.
 
-Disposal deactivates registration and releases its token immediately.
+Disposal deletes the hook and releases its token immediately, but the World
+remembers the disposal: a repeat returns the first, and a delivery to a
+force-claimed hook gets ErrHookForceClaimed. A finished run's hooks are
+deleted once their token retention ends.
 A hook's TokenRetentionUntil can preserve token ownership after run
 termination; it does not
 keep a completed webhook available for another request or response.

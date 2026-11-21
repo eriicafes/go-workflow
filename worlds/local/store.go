@@ -442,14 +442,44 @@ func (s *store) listHooks(runID worlds.RunID) ([]hookRecord, error) {
 	return records, rows.Err()
 }
 
+// deleteHook deletes the hook.
+func (s *store) deleteHook(hookID worlds.HookID) error {
+	return s.exec("DELETE FROM hooks WHERE hook_id = ?", string(hookID))
+}
+
+// getDisposal returns the hook's disposal, or nil when it was not disposed.
+func (s *store) getDisposal(hookID worlds.HookID) (*disposalRecord, error) {
+	var record disposalRecord
+	var runID string
+	var claimedBy sql.NullString
+	err := s.q.QueryRowContext(s.ctx, "SELECT run_id, force_claimed_by FROM hook_disposals WHERE hook_id = ?", string(hookID)).Scan(&runID, &claimedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	record.RunID = worlds.RunID(runID)
+	if claimedBy.Valid {
+		if err := json.Unmarshal([]byte(claimedBy.String), &record.ForceClaimedBy); err != nil {
+			return nil, fmt.Errorf("workflow/local: decode hook disposal: %w", err)
+		}
+	}
+	return &record, nil
+}
+
 // putDisposal records that the hook's disposal committed, and the hook that
 // took its token when a forced claim disposed it.
-func (s *store) putDisposal(hook *hookRecord) error {
+func (s *store) putDisposal(hookID worlds.HookID, record *disposalRecord) error {
 	var claimedBy any
-	if hook.ForceClaimedBy != nil {
-		claimedBy = string(hook.ForceClaimedBy.HookID)
+	if record.ForceClaimedBy != nil {
+		data, err := json.Marshal(record.ForceClaimedBy)
+		if err != nil {
+			return err
+		}
+		claimedBy = string(data)
 	}
-	return s.exec("INSERT INTO hook_disposals (hook_id, run_id, force_claimed_by) VALUES (?, ?, ?) ON CONFLICT (hook_id) DO NOTHING", string(hook.HookID), string(hook.RunID), claimedBy)
+	return s.exec("INSERT INTO hook_disposals (hook_id, run_id, force_claimed_by) VALUES (?, ?, ?) ON CONFLICT (hook_id) DO NOTHING", string(hookID), string(record.RunID), claimedBy)
 }
 
 // Tokens.

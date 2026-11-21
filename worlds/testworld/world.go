@@ -26,9 +26,13 @@ type World struct {
 	events        map[worlds.RunID][]worlds.Event
 	steps         map[worlds.RunID]map[worlds.StepID]worlds.Step
 	hooks         map[worlds.HookID]worlds.Hook
-	tokens        map[string]worlds.HookID
-	streams       map[worlds.RunID]map[string]*memoryStream
-	queued        []queuedMessage
+	// disposals holds each disposed hook's run and, after a forced claim,
+	// the claimant, as world-local's hook_disposals. The hook itself is
+	// deleted.
+	disposals map[worlds.HookID]hookDisposal
+	tokens    map[string]worlds.HookID
+	streams   map[worlds.RunID]map[string]*memoryStream
+	queued    []queuedMessage
 	// handedOff counts the handoffs of each message, which do not count as
 	// attempts.
 	handedOff map[string]int
@@ -70,7 +74,7 @@ func NewManual(runners ...core.Runner) *World {
 
 func newWorld(autoRun bool, runners ...core.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), resumes: make(map[string]resumeClaim), startDecisions: make(map[worlds.RunID]worlds.StartHookDecision), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
+	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), disposals: make(map[worlds.HookID]hookDisposal), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), resumes: make(map[string]resumeClaim), startDecisions: make(map[worlds.RunID]worlds.StartHookDecision), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
 	w.runtime = core.NewRuntime(w, core.Runners(runners...))
 	return w
 }
@@ -120,4 +124,10 @@ func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ str
 type resumeClaim struct {
 	digest  string
 	eventID worlds.EventID
+}
+
+// hookDisposal records a disposed hook.
+type hookDisposal struct {
+	runID          worlds.RunID
+	forceClaimedBy *worlds.HookForceClaim
 }

@@ -149,8 +149,6 @@ export namespace RPC {
 		receivedAt: Date | null;
 		tokenRetentionUntil: Date | null;
 		claimedFrom: { runId: string; hookId: string } | null;
-		forceClaimedBy: { runId: string; hookId: string } | null;
-		disposedAt: Date | null;
 	};
 	export type QueueResult = { messageId: string };
 	export type StreamInfo = { tailIndex: number; done: boolean };

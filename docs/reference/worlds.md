@@ -233,6 +233,8 @@ type Step struct {
 	RetryAfter  *time.Time
 }
 
+// Hook exists until it is disposed, loses its token to a forced claim, or its
+// run ends without retaining its token.
 type Hook struct {
 	RunID               RunID
 	ResumeContext       HookResumeContext // copied from the run when the hook is created
@@ -245,9 +247,7 @@ type Hook struct {
 	ReceivedAt          *time.Time
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim // with the previous owner run's workflow, deployment, and spec version
-	ForceClaimedBy      *HookForceClaim
 	SpecVersion         int // of the event that created it
-	DisposedAt          *time.Time
 	ResumeDedup         bool // the World deduplicates this hook's resumes by ResumeID
 }
 

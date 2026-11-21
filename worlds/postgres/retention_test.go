@@ -19,7 +19,9 @@ func TestExpireRuns(t *testing.T) {
 	ctx := context.Background()
 
 	done := retentionRun(t, world, "done")
-	writeEvent(t, world, done, worlds.EventTypeHookCreated, "hook_done", worlds.DataHookCreated{Token: "token_done", Metadata: []byte(`"metadata"`)})
+	// The hook's retained token keeps its row past the run's end.
+	retained := time.Now().Add(time.Hour)
+	writeEvent(t, world, done, worlds.EventTypeHookCreated, "hook_done", worlds.DataHookCreated{Token: "token_done", Metadata: []byte(`"metadata"`), TokenRetentionUntil: &retained})
 	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: done, Name: "out", Chunk: []byte("chunk")}); err != nil {
 		t.Fatal(err)
 	}

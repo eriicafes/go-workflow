@@ -620,9 +620,17 @@ type hookEntry struct {
 	// createdEventID is the hook's hook_created event, which holds its
 	// metadata.
 	createdEventID worlds.EventID
-	// disposedEventID is the hook's hook_disposed event, which a repeated
-	// disposal returns.
-	disposedEventID worlds.EventID
+	// disposal is set once the hook is disposed: its item then records only
+	// the disposal, as world-local's hook_disposals row.
+	disposal *hookDisposal
+}
+
+// hookDisposal is a disposed hook's run, its hook_disposed event, which a
+// repeated disposal returns, and whether a forced claim disposed it.
+type hookDisposal struct {
+	runID   worlds.RunID
+	eventID worlds.EventID
+	forced  bool
 }
 
 type tokenEntry struct {
@@ -729,14 +737,15 @@ func (tx *appendTx) load(ctx context.Context, keys []map[string]ddb.AttributeVal
 				continue
 			}
 			entry := &hookEntry{}
-			if found {
+			if found && isDisposal(item) {
+				entry.disposal = disposalFromItem(item)
+			} else if found {
 				hook, err := hookFromItem(item)
 				if err != nil {
 					return err
 				}
 				entry.hook = &hook
 				entry.createdEventID = worlds.EventID(read(item, "createdEventId"))
-				entry.disposedEventID = worlds.EventID(read(item, "disposedEventId"))
 			}
 			tx.hooks[id] = entry
 		case strings.HasPrefix(pk, "TOKEN#"):
@@ -940,18 +949,21 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if err != nil {
 			return nil, err
 		}
+		if disposal := entry.disposal; disposal != nil && disposal.runID == run.view.RunID {
+			// A hook another run took over redirects the delivery.
+			if disposal.forced {
+				return nil, worlds.ErrHookForceClaimed
+			}
+			return nil, worlds.ErrHookNotActive
+		}
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
 			return nil, worlds.ErrHookNotActive
 		}
-		hook := entry.hook
-		_, owned, err := tx.owns(ctx, hook)
+		_, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return nil, err
 		}
-		if !owned || hook.DisposedAt != nil {
-			if hook.ForceClaimedBy != nil {
-				return nil, worlds.ErrHookForceClaimed
-			}
+		if !owned {
 			return nil, worlds.ErrHookNotActive
 		}
 
@@ -960,11 +972,11 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if err != nil {
 			return nil, err
 		}
+		if disposal := entry.disposal; disposal != nil && disposal.runID == run.view.RunID {
+			return replay(disposal.eventID), nil
+		}
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
 			return nil, worlds.ErrHookNotActive
-		}
-		if entry.hook.DisposedAt != nil && entry.disposedEventID != "" {
-			return replay(entry.disposedEventID), nil
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -1110,11 +1122,8 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if err != nil || entry.hook == nil {
 			return err
 		}
-		entry.dirty, entry.disposedEventID = true, event.EventID
-		entry.hook.DisposedAt, entry.hook.UpdatedAt = &now, now
 		var disposed worlds.HookDisposedEventData
 		_ = json.Unmarshal(event.Data, &disposed)
-		entry.hook.ForceClaimedBy = disposed.ForceClaimedBy
 		token, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return err
@@ -1122,22 +1131,10 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		if owned {
 			token.cur = nil
 		}
+		// The hook is deleted, leaving the record of its disposal.
+		entry.dirty, entry.hook = true, nil
+		entry.disposal = &hookDisposal{runID: event.RunID, eventID: event.EventID, forced: disposed.ForceClaimedBy != nil}
 	}
-	return nil
-}
-
-// completeHook releases the hook's token now, or keeps it until the hook's
-// minimum retention elapses.
-func (tx *appendTx) completeHook(ctx context.Context, hook *worlds.Hook, now time.Time) error {
-	token, owned, err := tx.owns(ctx, hook)
-	if err != nil {
-		return err
-	}
-	hook.DisposedAt = &now
-	if owned {
-		token.cur = nil
-	}
-
 	return nil
 }
 
@@ -1237,14 +1234,17 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: stepItem(*entry.view)}})
 		}
 	}
-	for _, entry := range tx.hooks {
-		if entry.dirty && entry.hook != nil {
+	for id, entry := range tx.hooks {
+		switch {
+		case !entry.dirty:
+		case entry.disposal != nil:
+			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: disposalItem(id, *entry.disposal)}})
+		case entry.hook != nil:
 			item, err := hookItem(*entry.hook)
 			if err != nil {
 				return err
 			}
 			setString(item, "createdEventId", string(entry.createdEventID))
-			setString(item, "disposedEventId", string(entry.disposedEventID))
 			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: item}})
 		}
 	}

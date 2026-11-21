@@ -78,7 +78,7 @@ The tables are world-postgres's, with its names and columns:
 | `workflow_events` | The event log, keyed by `(run_id, id)`, where `id` is the slot's `evnt_` ID. `payload_cbor` holds the event's data. |
 | `workflow_event_slots` | Each run's in-band fence, `seq_in_band`. |
 | `workflow_steps` | Steps, keyed by `(run_id, step_id)`, with the slots of their input and result. |
-| `workflow_hooks` | Hooks. `claims_token` marks the hook that holds its token, unique per token. |
+| `workflow_hooks` | Hooks. `claims_token` marks the hook that holds its token, unique per token. A hook's row is deleted when it is disposed, and when its run ends unless its token is retained, then when its token is next claimed. |
 | `workflow_waits` | A run's waits, deleted when it ends. |
 | `workflow_start_hook_admissions` | Each start hook candidate's decision, kept for a day. |
 | `workflow_stream_chunks` | Stream chunks, ordered by their `chnk_` ID. An `eof` chunk closes a stream. |
@@ -176,7 +176,7 @@ deleted as new ones are made.
 ## Retention
 
 A run's data is deleted as the Workflow SDK deletes it: the run, step, event
-and hook rows stay with their IDs, statuses, timestamps and attributes, the
+and remaining hook rows stay with their IDs, statuses, timestamps and attributes, the
 payloads in the run's events are removed from their CBOR, keeping the rest of
 each event's data, and its streams' chunks are deleted, leaving each stream
 empty and closed. The run's `expired_at` is set and

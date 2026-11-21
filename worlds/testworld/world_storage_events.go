@@ -273,6 +273,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID, WorkflowName: owner.ResumeContext.WorkflowName, DeploymentID: owner.ResumeContext.DeploymentID, RunSpecVersion: owner.ResumeContext.RunSpecVersion}
 			if m.runs[owner.RunID].Status.Terminal() {
 				delete(m.tokens, created.Token)
+				delete(m.hooks, ownerID)
 			} else {
 				data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
 				forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookDisposed, CorrelationID: string(ownerID), Data: data, CreatedAt: time.Now().UTC(), SpecVersion: worlds.SpecVersion}
@@ -338,14 +339,14 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeHookDisposed:
-		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
-		if !exists || hook.RunID != runID {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
-		}
-		if hook.DisposedAt != nil {
+		if disposal, disposed := m.disposals[worlds.HookID(requested.CorrelationID)]; disposed && disposal.runID == runID {
 			if earlier := m.lastResultLocked(runID, requested.EventType, requested.CorrelationID); earlier.EventID != "" {
 				return earlier, true, nil
 			}
+		}
+		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
+		if !exists || hook.RunID != runID {
+			return worlds.EventResult{}, false, worlds.ErrHookNotActive
 		}
 	}
 
@@ -358,11 +359,14 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	}
 
 	if requested.EventType == worlds.EventTypeHookReceived {
-		hook := m.hooks[worlds.HookID(requested.CorrelationID)]
-		if hook.HookID == "" || hook.RunID != runID || m.tokens[hook.Token] != hook.HookID || hook.DisposedAt != nil {
-			if hook.ForceClaimedBy != nil {
+		if disposal, disposed := m.disposals[worlds.HookID(requested.CorrelationID)]; disposed && disposal.runID == runID {
+			if disposal.forceClaimedBy != nil {
 				return worlds.EventResult{}, false, worlds.ErrHookForceClaimed
 			}
+			return worlds.EventResult{}, false, worlds.ErrHookNotActive
+		}
+		hook := m.hooks[worlds.HookID(requested.CorrelationID)]
+		if hook.HookID == "" || hook.RunID != runID || m.tokens[hook.Token] != hook.HookID {
 			return worlds.EventResult{}, false, worlds.ErrHookNotActive
 		}
 	}
@@ -509,22 +513,25 @@ func (m *World) materializeLocked(event worlds.Event) {
 
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)
-		hook := m.hooks[id]
-		hook.DisposedAt, hook.UpdatedAt = &now, now
 		var disposed worlds.HookDisposedEventData
 		_ = json.Unmarshal(event.Data, &disposed)
-		hook.ForceClaimedBy = disposed.ForceClaimedBy
-		m.hooks[id] = hook
-		if m.tokens[hook.Token] == id {
+		m.disposals[id] = hookDisposal{runID: event.RunID, forceClaimedBy: disposed.ForceClaimedBy}
+		if hook, ok := m.hooks[id]; ok && m.tokens[hook.Token] == id {
 			delete(m.tokens, hook.Token)
 		}
+		delete(m.hooks, id)
 
 	}
 	m.runs[event.RunID] = run
 	if event.EventType == worlds.EventTypeRunCompleted || event.EventType == worlds.EventTypeRunFailed || event.EventType == worlds.EventTypeRunCancelled {
+		// A hook whose token is retained stays until its retention ends;
+		// every other hook of the run is deleted.
 		for id, hook := range m.hooks {
-			if hook.RunID == event.RunID && m.tokens[hook.Token] == id && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(now)) {
-				delete(m.tokens, hook.Token)
+			if hook.RunID == event.RunID && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(now)) {
+				if m.tokens[hook.Token] == id {
+					delete(m.tokens, hook.Token)
+				}
+				delete(m.hooks, id)
 			}
 		}
 		if worlds.ReadRunRetention(run.Attributes) == worlds.RetainNone {
@@ -537,13 +544,6 @@ func (m *World) materializeLocked(event worlds.Event) {
 	}
 }
 
-func (m *World) completeHookLocked(hook *worlds.Hook, now time.Time) {
-	hook.DisposedAt = &now
-	if m.tokens[hook.Token] == hook.HookID {
-		delete(m.tokens, hook.Token)
-	}
-}
-
 func (m *World) expireTokenLocked(token string, now time.Time) {
 	id := m.tokens[token]
 	if id == "" {
@@ -552,8 +552,7 @@ func (m *World) expireTokenLocked(token string, now time.Time) {
 	hook := m.hooks[id]
 	if m.runs[hook.RunID].Status.Terminal() && hook.TokenRetentionUntil != nil && !hook.TokenRetentionUntil.After(now) {
 		delete(m.tokens, token)
-		hook.TokenRetentionUntil = nil
-		m.hooks[id] = hook
+		delete(m.hooks, id)
 	}
 }
 
