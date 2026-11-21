@@ -1,6 +1,7 @@
 package vercelworld
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -11,8 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
@@ -35,6 +39,12 @@ type fakeBackend struct {
 	vercelIDs []string
 	// specs holds the spec version each run was created with.
 	specs map[worlds.RunID]int
+	// heartbeat, when set, is the interval of the events socket's
+	// heartbeats; noEventsSocket declines the events socket.
+	heartbeat      time.Duration
+	noEventsSocket bool
+	// dropPush is a slot whose push the events socket loses.
+	dropPush uint64
 }
 
 func newFakeBackend(t testing.TB) *fakeBackend {
@@ -93,6 +103,8 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 	f.mu.Unlock()
 	query := request.URL.Query()
 	switch {
+	case len(parts) == 4 && parts[0] == "websockets" && parts[1] == "v1" && parts[2] == "runs":
+		f.eventsSocket(ctx, writer, request, worlds.RunID(parts[3]))
 	case len(parts) == 6 && parts[0] == "websockets" && parts[1] == "v1" && parts[2] == "runs" && parts[4] == "streams":
 		if !f.sockets {
 			writeError(writer, http.StatusNotFound, "not_found", "no stream sockets")
@@ -912,4 +924,70 @@ func wireClaim(claim *worlds.HookForceClaim) map[string]any {
 		wire["runSpecVersion"] = claim.RunSpecVersion
 	}
 	return wire
+}
+
+// eventsSocket serves a run's events socket: it acknowledges a subscription,
+// then pushes each event of the run above its afterSlot, and heartbeats
+// naming the last slot pushed when f.heartbeat is set.
+func (f *fakeBackend) eventsSocket(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID) {
+	if f.noEventsSocket {
+		writeError(writer, http.StatusNotFound, "not_found", "no events socket")
+		return
+	}
+	conn, err := websocket.Accept(writer, request, nil)
+	if err != nil {
+		return
+	}
+	defer conn.CloseNow()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, raw, err := conn.Read(ctx)
+	if err != nil {
+		return
+	}
+	subscribe, err := newFrameReader(bytes.NewReader(raw)).next()
+	if err != nil || str(subscribe.Meta, "type") != "subscribe" {
+		return
+	}
+	reqID, _ := asInt(subscribe.Meta["reqId"])
+	after, _ := asInt(subscribe.Meta["afterSlot"])
+	ack := map[string]any{"reqId": reqID, "type": "subscribe_ack", "status": http.StatusOK}
+	if f.heartbeat > 0 {
+		ack["heartbeatMs"] = f.heartbeat.Milliseconds()
+	}
+	var mu sync.Mutex
+	send := func(meta map[string]any, body []byte) {
+		frame, _ := encodeFrame(nil, meta, body)
+		mu.Lock()
+		defer mu.Unlock()
+		_ = conn.Write(ctx, websocket.MessageBinary, frame)
+	}
+	send(ack, nil)
+	var last atomic.Int64
+	last.Store(int64(after))
+	unsubscribe := f.store.EventsSubscribe(ctx, runID, uint64(after), func(event worlds.Event) {
+		slot, _ := worlds.EventSlot(event.EventID)
+		last.Store(int64(slot))
+		if slot == f.dropPush {
+			return
+		}
+		send(map[string]any{"reqId": reqID, "type": "run_event", "slot": slot}, f.eventFrame(event))
+	}, func(error) { cancel() })
+	defer unsubscribe()
+	if f.heartbeat > 0 {
+		go func() {
+			ticker := time.NewTicker(f.heartbeat)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					send(map[string]any{"reqId": reqID, "type": "run_heartbeat", "slot": last.Load()}, nil)
+				}
+			}
+		}()
+	}
+	// The client sends nothing more: the read ends when it closes.
+	_, _, _ = conn.Read(ctx)
 }
