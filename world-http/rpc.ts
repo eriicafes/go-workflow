@@ -145,6 +145,8 @@ export namespace RPC {
 		message: string;
 		sentinel?: string;
 		conflictingRunId?: string;
+		/** Nanoseconds a throttled failure asks the caller to wait. */
+		retryAfter?: number;
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
@@ -215,14 +217,19 @@ export class HTTPWorldError extends Error {
 	readonly sentinel?: string;
 	/** The run holding a hook token, for a hook_conflict failure. */
 	readonly conflictingRunId?: string;
+	/** Seconds a throttled failure asks the caller to wait, when it says. */
+	readonly retryAfter?: number;
 
-	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string) {
+	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string, retryAfter?: number) {
 		super(message);
-		this.name = "HTTPWorldError";
+		// A throttled failure is named as the Workflow SDK's ThrottleError,
+		// which its callers recognize by name and read retryAfter from.
+		this.name = sentinel === "throttled" ? "ThrottleError" : "HTTPWorldError";
 		this.code = code;
 		this.status = status;
 		this.sentinel = sentinel;
 		this.conflictingRunId = conflictingRunId;
+		this.retryAfter = retryAfter;
 	}
 }
 
@@ -233,6 +240,7 @@ const rpcErrorStatus: Record<string, number> = {
 	invalid_argument: 400,
 	conflict: 409,
 	unimplemented: 501,
+	resource_exhausted: 429,
 	cancelled: 499,
 	deadline_exceeded: 504,
 };
@@ -293,8 +301,9 @@ export class RPCClient {
 			);
 		}
 		if (envelope.error) {
-			const { code, message, sentinel, conflictingRunId } = envelope.error;
-			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId);
+			const { code, message, sentinel, conflictingRunId, retryAfter } = envelope.error;
+			const seconds = retryAfter ? Math.ceil(retryAfter / 1e9) : undefined;
+			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId, seconds);
 		}
 		if (envelope.output === undefined) {
 			return undefined as T;

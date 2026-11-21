@@ -577,6 +577,9 @@ func newRPCClientError(failure RPCError) error {
 	if failure.Sentinel == "hook_conflict" && failure.ConflictingRunID != "" {
 		return &HookConflictError{RunID: failure.ConflictingRunID}
 	}
+	if failure.Sentinel == "throttled" {
+		return &ThrottleError{Cause: rpcClientError{RPCError: failure}, After: failure.RetryAfter}
+	}
 	err := rpcClientError{RPCError: failure}
 	for _, sentinel := range rpcSentinels {
 		if sentinel.name == failure.Sentinel {

@@ -533,3 +533,18 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 	expect(created.run?.startHook).toEqual({ token: "tok", hookId: "hook_01" });
 	await expect(create("wrun_02")).rejects.toMatchObject({ name: "HookConflictError", token: "tok", conflictingRunId: "wrun_01" });
 });
+
+test("raises a throttled RPC failure as the SDK's ThrottleError", async () => {
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ SpecVersion: 2, Capabilities: { DeleteData: true } });
+			}
+			const encoded = encode({ error: { code: "resource_exhausted", message: "busy", sentinel: "throttled", retryAfter: 2_500_000_000 } });
+			return new Response(new Uint8Array(encoded), { headers: { "Content-Type": "application/cbor" } });
+		},
+	});
+	await expect(world.runs.deleteDataMany!({ runIds: ["wrun_01"] })).rejects.toMatchObject({ name: "ThrottleError", retryAfter: 3, status: 429 });
+});

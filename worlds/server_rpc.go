@@ -45,6 +45,9 @@ type RPCError struct {
 	// ConflictingRunID names the run holding a hook token, for a
 	// hook_conflict failure of a *HookConflictError.
 	ConflictingRunID RunID `cbor:"conflictingRunId,omitempty"`
+	// RetryAfter is how long a throttled failure of a *ThrottleError asks
+	// the caller to wait, or zero when the World did not say.
+	RetryAfter time.Duration `cbor:"retryAfter,omitempty"`
 }
 
 // maxRPCWait caps how long one RPC request may block in a World wait, so a
@@ -82,6 +85,7 @@ var rpcSentinels = []struct {
 	{"corrupted_event_log", "internal", ErrCorruptedEventLog},
 	{"delete_data_invalid", "invalid_argument", ErrDeleteDataInvalid},
 	{"unsupported", "unimplemented", errors.ErrUnsupported},
+	{"throttled", "resource_exhausted", ErrThrottled},
 	{"cancelled", "cancelled", context.Canceled},
 	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
 }
@@ -834,6 +838,8 @@ func rpcErrorStatus(code string) int {
 		return http.StatusConflict
 	case "unimplemented":
 		return http.StatusNotImplemented
+	case "resource_exhausted":
+		return http.StatusTooManyRequests
 	}
 	return http.StatusInternalServerError
 }
@@ -845,6 +851,10 @@ func newRPCError(err error) *RPCError {
 			var conflict *HookConflictError
 			if errors.As(err, &conflict) {
 				failure.ConflictingRunID = conflict.RunID
+			}
+			var throttle *ThrottleError
+			if errors.As(err, &throttle) {
+				failure.RetryAfter = throttle.After
 			}
 			return failure
 		}

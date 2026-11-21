@@ -156,7 +156,8 @@ timestamps and attributes. Their `ExpiredAt` is set, the Workflow web UI shows
 their data as expired, and `Run.Value` returns `workflow.ErrRunExpired`. A run
 that has not finished is skipped; cancel it first. Called in a step,
 `DeleteRuns` sends retryable failures again once and then fails the step with a
-`RetryableError`. A World without `Capabilities().DeleteData` returns an error
+`RetryableError`, and a World's rate limit (`*worlds.ThrottleError`) retries the
+step after the wait the World asked for. A World without `Capabilities().DeleteData` returns an error
 wrapping `errors.ErrUnsupported`.
 
 ## Resuming hooks

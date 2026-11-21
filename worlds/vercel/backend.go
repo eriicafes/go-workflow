@@ -140,7 +140,25 @@ func (b *backend) request(ctx context.Context, method, path string, query url.Va
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	return nil, decodeAPIError(response.StatusCode, response.Header.Get("Content-Type"), data)
+	err = decodeAPIError(response.StatusCode, response.Header.Get("Content-Type"), data)
+	// A 429 is the backend's rate limit, unless Vercel's firewall answered
+	// it with a challenge, which is a transport failure to retry.
+	if response.StatusCode == http.StatusTooManyRequests && response.Header.Get("X-Vercel-Mitigated") != "challenge" {
+		return nil, &worlds.ThrottleError{Cause: err, After: retryAfter(response.Header.Get("Retry-After"))}
+	}
+	return nil, err
+}
+
+// retryAfter returns the wait a Retry-After header asks for, in seconds or
+// as an HTTP date, or zero when it has none.
+func retryAfter(value string) time.Duration {
+	if seconds, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return max(time.Until(at), 0)
+	}
+	return 0
 }
 
 // authorize sets the credentials of a request: a Vercel access token and the
