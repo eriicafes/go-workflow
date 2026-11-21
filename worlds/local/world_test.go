@@ -181,7 +181,8 @@ func TestViewsHoldNoPayloadsAndEventsHoldCBOR(t *testing.T) {
 		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: []byte(`{"error":"` + b64(`"step-error-bytes"`) + `"}`)},
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
 		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a", Data: []byte(`{"result":"` + b64(`"step-output-bytes"`) + `"}`)},
-		{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"payload-token","metadata":"` + metadata + `"}`)},
+		// The hook's retained token keeps it readable after its run ends.
+		{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_a", Data: []byte(`{"token":"payload-token","metadata":"` + metadata + `","tokenRetentionUntil":"` + time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano) + `"}`)},
 		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"` + b64(`"run-output-bytes"`) + `"}`)},
 	} {
 		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event}); err != nil {

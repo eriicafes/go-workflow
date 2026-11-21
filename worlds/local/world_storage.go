@@ -47,6 +47,13 @@ type hookRecord struct {
 	MetadataSlot int `json:"metadataSlot,omitempty"`
 }
 
+// disposalRecord is a disposed hook's run, and the hook that took its token
+// when a forced claim disposed it, as world-local's hook_disposals row.
+type disposalRecord struct {
+	RunID          worlds.RunID
+	ForceClaimedBy *worlds.HookForceClaim
+}
+
 // tokenRecord is a token's owner. A token is held while its row exists and
 // TokenRetentionUntil has not passed.
 type tokenRecord struct {

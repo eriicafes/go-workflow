@@ -119,14 +119,17 @@ type StorageEvents interface {
 // StorageHooks reads hooks and claims hook tokens.
 type StorageHooks interface {
 	// HooksGet returns the hook identified by HookID. It returns ErrHookNotFound
-	// when the hook does not exist. It applies ResolveData to the returned hook.
+	// when the hook does not exist, including once it is disposed or its
+	// run ended without retaining its token. It applies ResolveData to the
+	// returned hook.
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
 	// HooksGetByToken returns the hook that owns Token. It returns
 	// ErrHookNotFound when no hook owns the token, including after its
 	// retention has ended. It applies ResolveData to the returned hook.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
-	// HooksList returns hooks that match the input filters. It applies Pagination
-	// and ResolveData to the result.
+	// HooksList returns hooks that match the input filters, which never
+	// include a disposed hook. It applies Pagination and ResolveData to the
+	// result.
 	HooksList(context.Context, HooksListInput) (Page[Hook], error)
 }
 
@@ -351,7 +354,10 @@ type HookResumeContext struct {
 	RunSpecVersion int
 }
 
-// Hook is the view of one hook derived from its run's event log.
+// Hook is the view of one hook derived from its run's event log. A hook
+// exists from its hook_created until its hook_disposed, a forced claim of its
+// token, or the end of its run once its token retention ends, as the Workflow
+// SDK's Worlds keep it.
 type Hook struct {
 	RunID RunID
 	// ResumeContext is copied from the hook's run when the hook is created, so
@@ -371,7 +377,6 @@ type Hook struct {
 	// immediately.
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim
-	ForceClaimedBy      *HookForceClaim
 	// SpecVersion is the spec version of the event that created the hook.
 	SpecVersion int
 	// ResumeDedup reports, on a read by token, that the World deduplicates
@@ -381,7 +386,6 @@ type Hook struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ReceivedAt  *time.Time
-	DisposedAt  *time.Time
 }
 
 // WaitStatus is the status of a wait.

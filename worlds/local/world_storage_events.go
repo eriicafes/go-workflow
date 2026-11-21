@@ -24,10 +24,13 @@ type txn struct {
 	// by its slot.
 	digests map[int]string
 	steps   map[worlds.StepID]*stepRecord
-	hooks   map[worlds.HookID]*hookRecord
-	tokens  map[string]*tokenRecord
-	waits   map[string]*worlds.Wait
-	dirty   map[any]bool
+	// hooks holds the staged hooks, nil for one the txn deleted.
+	hooks map[worlds.HookID]*hookRecord
+	// disposals holds the hooks the txn disposed.
+	disposals map[worlds.HookID]*disposalRecord
+	tokens    map[string]*tokenRecord
+	waits     map[string]*worlds.Wait
+	dirty     map[any]bool
 	// purged reports that the commit deleted the run's data.
 	purged bool
 }
@@ -44,7 +47,7 @@ func newTxn(s *store, run runRecord) *txn {
 	if run.Attributes == nil {
 		run.Attributes = map[string]string{}
 	}
-	return &txn{s: s, run: run, digests: map[int]string{}, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*hookRecord{}, tokens: map[string]*tokenRecord{}, waits: map[string]*worlds.Wait{}, dirty: map[any]bool{}}
+	return &txn{s: s, run: run, digests: map[int]string{}, steps: map[worlds.StepID]*stepRecord{}, hooks: map[worlds.HookID]*hookRecord{}, disposals: map[worlds.HookID]*disposalRecord{}, tokens: map[string]*tokenRecord{}, waits: map[string]*worlds.Wait{}, dirty: map[any]bool{}}
 }
 
 // begin stages appends to a run the store's tag sees.
@@ -78,6 +81,14 @@ func (t *txn) hook(id worlds.HookID) (*hookRecord, error) {
 	return value, err
 }
 
+// disposal returns the hook's disposal, or nil when it was not disposed.
+func (t *txn) disposal(id worlds.HookID) (*disposalRecord, error) {
+	if value, ok := t.disposals[id]; ok {
+		return value, nil
+	}
+	return t.s.getDisposal(id)
+}
+
 func (t *txn) token(token string) (*tokenRecord, error) {
 	if value, ok := t.tokens[token]; ok {
 		return value, nil
@@ -95,6 +106,12 @@ func (t *txn) setStep(value *stepRecord) {
 
 func (t *txn) setHook(value *hookRecord) {
 	t.hooks[value.HookID], t.dirty[hookKey(value.HookID)] = value, true
+}
+
+// deleteHook deletes the hook, as world-local deletes a hook once disposed or
+// done with its token.
+func (t *txn) deleteHook(id worlds.HookID) {
+	t.hooks[id], t.dirty[hookKey(id)] = nil, true
 }
 
 func (t *txn) setToken(token string, value *tokenRecord) {
@@ -184,6 +201,13 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		return t.findEvent(worlds.EventTypeWaitCompleted, event.CorrelationID)
 
 	case worlds.EventTypeHookDisposed:
+		disposal, err := t.disposal(worlds.HookID(event.CorrelationID))
+		if err != nil {
+			return "", err
+		}
+		if disposal != nil && disposal.RunID == t.run.RunID {
+			return t.findEvent(worlds.EventTypeHookDisposed, event.CorrelationID)
+		}
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -191,11 +215,20 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if hook == nil || hook.RunID != t.run.RunID {
 			return "", worlds.ErrHookNotActive
 		}
-		if hook.DisposedAt != nil {
-			return t.findEvent(worlds.EventTypeHookDisposed, event.CorrelationID)
-		}
 
 	case worlds.EventTypeHookReceived:
+		// A disposed hook refuses deliveries, redirecting them when another
+		// run took its token, as world-local's refuseDisposedHookDelivery.
+		disposal, err := t.disposal(worlds.HookID(event.CorrelationID))
+		if err != nil {
+			return "", err
+		}
+		if disposal != nil && disposal.RunID == t.run.RunID {
+			if disposal.ForceClaimedBy != nil {
+				return "", worlds.ErrHookForceClaimed
+			}
+			return "", worlds.ErrHookNotActive
+		}
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -207,10 +240,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if err != nil {
 			return "", err
 		}
-		if owner == nil || owner.HookID != hook.HookID || hook.DisposedAt != nil {
-			if hook.ForceClaimedBy != nil {
-				return "", worlds.ErrHookForceClaimed
-			}
+		if owner == nil || owner.HookID != hook.HookID {
 			return "", worlds.ErrHookNotActive
 		}
 
@@ -352,6 +382,14 @@ func (t *txn) materialize(event worlds.Event) error {
 		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
+			// A previous owner whose claim lapsed is deleted with its token.
+			previous, err := t.token(value.Token)
+			if err != nil {
+				return err
+			}
+			if previous != nil && previous.HookID != id {
+				t.deleteHook(previous.HookID)
+			}
 			t.setToken(value.Token, &tokenRecord{HookID: id, RunID: run.RunID})
 		}
 	case worlds.EventTypeHookReceived:
@@ -363,41 +401,48 @@ func (t *txn) materialize(event worlds.Event) error {
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
 		t.setHook(&hook)
 	case worlds.EventTypeHookDisposed:
-		hook, err := t.hook(worlds.HookID(event.CorrelationID))
+		id := worlds.HookID(event.CorrelationID)
+		var disposed worlds.HookDisposedEventData
+		_ = json.Unmarshal(event.Data, &disposed)
+		t.disposals[id] = &disposalRecord{RunID: run.RunID, ForceClaimedBy: disposed.ForceClaimedBy}
+		hook, err := t.hook(id)
 		if err != nil || hook == nil {
 			return err
 		}
-		value := *hook
-		value.DisposedAt, value.UpdatedAt = &now, now
-		var disposed worlds.HookDisposedEventData
-		_ = json.Unmarshal(event.Data, &disposed)
-		value.ForceClaimedBy = disposed.ForceClaimedBy
-		t.setHook(&value)
+		t.deleteHook(id)
 		return t.releaseToken(hook.Token, hook.HookID)
 	}
 
 	if event.EventType == worlds.EventTypeRunCompleted || event.EventType == worlds.EventTypeRunFailed || event.EventType == worlds.EventTypeRunCancelled {
-		// The run's tokens are released, or kept until their retention ends.
+		// A hook whose token is retained stays until its retention ends,
+		// holding the token; every other hook of the run is deleted and its
+		// token released, as world-local's releaseRunResources.
 		hooks, err := t.s.runHooks(run.RunID)
 		if err != nil {
 			return err
 		}
 		for _, hook := range hooks {
-			if staged, ok := t.hooks[hook.HookID]; ok && staged != nil {
+			if staged, ok := t.hooks[hook.HookID]; ok {
+				if staged == nil {
+					continue
+				}
 				hook = *staged
 			}
 			owner, err := t.token(hook.Token)
 			if err != nil {
 				return err
 			}
-			if owner == nil || owner.HookID != hook.HookID {
+			owns := owner != nil && owner.HookID == hook.HookID
+			if hook.TokenRetentionUntil != nil && hook.TokenRetentionUntil.After(now) {
+				if owns {
+					t.setToken(hook.Token, &tokenRecord{HookID: hook.HookID, RunID: hook.RunID, TokenRetentionUntil: hook.TokenRetentionUntil})
+				}
 				continue
 			}
-			if hook.TokenRetentionUntil != nil && hook.TokenRetentionUntil.After(now) {
-				t.setToken(hook.Token, &tokenRecord{HookID: hook.HookID, RunID: hook.RunID, TokenRetentionUntil: hook.TokenRetentionUntil})
-			} else {
+			if owns {
 				t.setToken(hook.Token, nil)
 			}
+			t.deleteHook(hook.HookID)
 		}
 	}
 	return nil
@@ -458,9 +503,10 @@ func (t *txn) commit() error {
 		case stepKey:
 			err = t.s.putStep(t.steps[worlds.StepID(key)])
 		case hookKey:
-			hook := t.hooks[worlds.HookID(key)]
-			if err = t.s.putHook(hook); err == nil && hook.DisposedAt != nil {
-				err = t.s.putDisposal(hook)
+			if hook := t.hooks[worlds.HookID(key)]; hook != nil {
+				err = t.s.putHook(hook)
+			} else {
+				err = t.s.deleteHook(worlds.HookID(key))
 			}
 		case tokenKey:
 			err = t.s.putToken(string(key), t.tokens[string(key)])
@@ -470,6 +516,11 @@ func (t *txn) commit() error {
 			}
 		}
 		if err != nil {
+			return err
+		}
+	}
+	for id, disposal := range t.disposals {
+		if err := t.s.putDisposal(id, disposal); err != nil {
 			return err
 		}
 	}
@@ -689,6 +740,12 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 			return worlds.EventResult{}, &refused{decision.Err()}
 		}
 		hook := &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}}
+		if owner != nil {
+			// The previous owner's claim lapsed: it goes with its token.
+			if err := s.deleteHook(owner.HookID); err != nil {
+				return worlds.EventResult{}, err
+			}
+		}
 		if err := s.putHook(hook); err != nil {
 			return worlds.EventResult{}, err
 		}

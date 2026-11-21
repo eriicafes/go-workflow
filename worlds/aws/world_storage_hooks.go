@@ -19,11 +19,54 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	if !found {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	hooks, err := w.resolveHooks(ctx, []map[string]ddb.AttributeValue{item}, input.ResolveData)
+	live, err := w.liveHooks(ctx, []map[string]ddb.AttributeValue{item})
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	if len(live) == 0 {
+		return worlds.Hook{}, worlds.ErrHookNotFound
+	}
+	hooks, err := w.resolveHooks(ctx, live, input.ResolveData)
 	if err != nil {
 		return worlds.Hook{}, err
 	}
 	return hooks[0], nil
+}
+
+// liveHooks returns the items of the hooks that still exist. A disposed
+// hook's item records only its disposal, and a hook of a finished run whose
+// token retention has lapsed is gone, as the Workflow SDK's Worlds delete
+// it when its run ends: its item stays until a claim of its token replaces
+// it, since DynamoDB cannot delete a run's hooks with its last event.
+func (w *World) liveHooks(ctx context.Context, items []map[string]ddb.AttributeValue) ([]map[string]ddb.AttributeValue, error) {
+	keys := make([]map[string]ddb.AttributeValue, 0, len(items))
+	for _, item := range items {
+		if !isDisposal(item) {
+			keys = append(keys, runKey(read(item, "runId")))
+		}
+	}
+	runs, err := w.items(ctx, keys...)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	live := make([]map[string]ddb.AttributeValue, 0, len(items))
+	for _, item := range items {
+		if isDisposal(item) {
+			continue
+		}
+		runItem, found := runs[itemID(runKey(read(item, "runId")))]
+		if !found {
+			continue
+		}
+		if runFromItem(runItem).Status.Terminal() {
+			if until := readTimePtr(item, "tokenRetentionUntil"); until == nil || !until.After(now) {
+				continue
+			}
+		}
+		live = append(live, item)
+	}
+	return live, nil
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -50,22 +93,14 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	if !found {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	hook, err := hookFromItem(item)
+	live, err := w.liveHooks(ctx, []map[string]ddb.AttributeValue{item})
 	if err != nil {
 		return worlds.Hook{}, err
 	}
-	runItem, found, err := w.item(ctx, runKey(string(hook.RunID)))
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	if !found {
-		return worlds.Hook{}, worlds.ErrRunNotFound
-	}
-	run := runFromItem(runItem)
-	if hook.DisposedAt != nil || run.Status.Terminal() && (hook.TokenRetentionUntil == nil || !hook.TokenRetentionUntil.After(time.Now())) {
+	if len(live) == 0 {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
-	hooks, err := w.resolveHooks(ctx, []map[string]ddb.AttributeValue{item}, input.ResolveData)
+	hooks, err := w.resolveHooks(ctx, live, input.ResolveData)
 	if err != nil {
 		return worlds.Hook{}, err
 	}
@@ -86,6 +121,9 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	pagination := worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit}
 	items, cursor, more, err := w.indexPage(ctx, query, pagination, nil)
 	if err != nil {
+		return worlds.Page[worlds.Hook]{}, err
+	}
+	if items, err = w.liveHooks(ctx, items); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
 	hooks, err := w.resolveHooks(ctx, items, input.ResolveData)

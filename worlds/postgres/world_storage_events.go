@@ -473,17 +473,26 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if err != nil {
 			return nil, err
 		}
-		if !found || hook.RunID != a.run.RunID {
+		if !found {
+			// A disposed hook is gone. One another run took over redirects
+			// the delivery, as world-postgres's forceClaimRefusal.
+			forced, err := a.forceClaimed(ctx, event.CorrelationID)
+			if err != nil {
+				return nil, err
+			}
+			if forced {
+				return nil, worlds.ErrHookForceClaimed
+			}
+			return nil, worlds.ErrHookNotActive
+		}
+		if hook.RunID != a.run.RunID {
 			return nil, worlds.ErrHookNotActive
 		}
 		owner, err := a.w.tokenOwner(ctx, a.tx, hook.Token)
 		if err != nil {
 			return nil, err
 		}
-		if owner != hook.HookID || hook.DisposedAt != nil {
-			if hook.ForceClaimedBy != nil {
-				return nil, worlds.ErrHookForceClaimed
-			}
+		if owner != hook.HookID {
 			return nil, worlds.ErrHookNotActive
 		}
 
@@ -492,14 +501,15 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if err != nil {
 			return nil, err
 		}
-		if !found || hook.RunID != a.run.RunID {
-			return nil, worlds.ErrHookNotActive
-		}
-		if hook.DisposedAt != nil {
+		if !found {
+			// A repeated disposal answers with the committed one.
 			result, err := a.replay(ctx, event.EventType, event.CorrelationID, true)
 			if err != nil || result.EventID != "" {
 				return result, err
 			}
+		}
+		if !found || hook.RunID != a.run.RunID {
+			return nil, worlds.ErrHookNotActive
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -520,6 +530,26 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 
 // replay finds the latest (or, when latest is false, the earliest) event of
 // eventType for correlationID. A missing event yields an empty result.
+// forceClaimed reports that the run's hook was disposed by another run's
+// forced claim of its token: its hook_disposed names the claimant.
+func (a *appender) forceClaimed(ctx context.Context, hookID string) (bool, error) {
+	var data []byte
+	err := a.tx.QueryRow(ctx, a.w.q(`SELECT payload_cbor FROM workflow.workflow_events WHERE run_id = $1 AND correlation_id = $2 AND type = $3 LIMIT 1`),
+		a.run.RunID, hookID, worlds.EventTypeHookDisposed).Scan(&data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	decoded, err := eventData(worlds.EventTypeHookDisposed, data)
+	if err != nil {
+		return false, err
+	}
+	var disposed worlds.HookDisposedEventData
+	return len(decoded) > 0 && json.Unmarshal(decoded, &disposed) == nil && disposed.ForceClaimedBy != nil, nil
+}
+
 func (a *appender) replay(ctx context.Context, eventType worlds.EventType, correlationID string, latest bool) (*worlds.EventResult, error) {
 	direction := "ASC"
 	if latest {
@@ -653,11 +683,9 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 		_, err := a.tx.Exec(ctx, a.w.q(`UPDATE workflow.workflow_hooks SET updated_at = $2, received_at = $2 WHERE hook_id = $1`), event.CorrelationID, at)
 		return err
 	case worlds.EventTypeHookDisposed:
-		var disposed worlds.HookDisposedEventData
-		_ = json.Unmarshal(event.Data, &disposed)
-		taken, _ := json.Marshal(disposed.ForceClaimedBy)
-		// Disposal releases the hook's token.
-		_, err := a.tx.Exec(ctx, a.w.q(`UPDATE workflow.workflow_hooks SET disposed_at = $2, updated_at = $2, force_claimed_by = $3, claims_token = false WHERE hook_id = $1`), event.CorrelationID, at, taken)
+		// Disposal deletes the hook, which releases its token. The event
+		// records the disposal and any forced claim.
+		_, err := a.tx.Exec(ctx, a.w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), event.CorrelationID)
 		return err
 	}
 	return nil
@@ -802,8 +830,12 @@ func (a *appender) flush(ctx context.Context) error {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
-		// A run's waits go when it ends.
+		// A run's waits go when it ends, and so do its hooks but those
+		// whose token is retained, which stay until their retention ends.
 		if _, err := a.tx.Exec(ctx, a.w.q(`DELETE FROM workflow.workflow_waits WHERE run_id = $1`), a.run.RunID); err != nil {
+			return err
+		}
+		if _, err := a.tx.Exec(ctx, a.w.q(`DELETE FROM workflow.workflow_hooks WHERE run_id = $1 AND (token_retention_until IS NULL OR token_retention_until <= $2)`), a.run.RunID, now()); err != nil {
 			return err
 		}
 		if err := a.expire(ctx); err != nil {

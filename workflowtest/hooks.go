@@ -61,7 +61,7 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_c", conformReceived(t, map[string]any{"request": map[string]any{"method": "hello"}, "response": map[string]any{"status": 42}}))
 	plainHook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: second})
-	if err != nil || plainHook.DisposedAt != nil {
+	if err != nil || plainHook.HookID != "hook_c" {
 		t.Fatalf("ordinary payload was interpreted as webhook metadata: %#v err=%v", plainHook, err)
 	}
 	if _, err := conformClaim(world, other, "hook_d", token+"-other", false); err != nil {
@@ -83,11 +83,20 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	conformExpect(t, err, worlds.ErrHookNotFound, "disposed token")
+	// A disposed hook is deleted, as the Workflow SDK's Worlds delete it.
+	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "disposed hook")
+	if hooks, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(hooks.Data) != 1 || hooks.Data[0].HookID != "hook_c" {
+		t.Fatalf("hooks of run after disposal = %#v err=%v", hooks, err)
+	}
 	if _, err := conformClaim(world, other, "hook_b", token, false); err != nil {
 		t.Fatalf("claim released token: %v", err)
 	}
 
 	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
+	// The run's hooks without a retained token end with it.
+	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_c"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "hook of an ended run")
 	_, err = conformClaim(world, runID, "hook_e", token+"-terminal", false)
 	conformExpect(t, err, worlds.ErrRunTerminal, "claim from terminal run")
 }
@@ -202,7 +211,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 		conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_web", conformReceived(t, []byte("devl-request")))
 	}
 	hook, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
-	if err != nil || hook.ReceivedAt == nil || hook.DisposedAt != nil {
+	if err != nil || hook.ReceivedAt == nil {
 		t.Fatalf("webhook after requests = %#v err=%v", hook, err)
 	}
 	plain := token + "-plain"
@@ -250,10 +259,13 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_f", nil)}); err != nil {
 		t.Fatalf("dispose a force-claimed hook: %v", err)
 	}
-	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_f"})
-	if err != nil || hook.DisposedAt == nil || hook.ForceClaimedBy == nil || hook.ForceClaimedBy.HookID != "hook_g" {
-		t.Fatalf("force-claimed hook = %#v err=%v", hook, err)
+	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_f"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "force-claimed hook")
+	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: forced}); err != nil || owner.HookID != "hook_g" {
+		t.Fatalf("force-claimed token owner = %#v err=%v", owner, err)
 	}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_f", conformReceived(t, []byte("late")))})
+	conformExpect(t, err, worlds.ErrHookForceClaimed, "resume a force-claimed hook")
 }
 
 func conformStartHook(t *testing.T, world worlds.World) {
