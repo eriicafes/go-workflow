@@ -2,7 +2,9 @@
 
 Use a durable cancellation context to stop a group of steps or timers while
 the workflow continues. Cancellation is recorded for replay and delivered to
-running steps across workers.
+running steps across workers. Each context is a system hook whose token is
+`abrt_` and an ID drawn from the run's seed, and running steps read its
+cancellation from the stream `strm_<ID>_system_abort`.
 
 Cancelling an entire run has a different scope: it prevents new work and lets
 already-running steps finish. See [Cancelling a run](#cancelling-a-run).

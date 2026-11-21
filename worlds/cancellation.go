@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,11 +17,20 @@ type cancellationContext struct {
 	cancel context.CancelCauseFunc
 }
 
-// cancellationReference is the durable identity of a cancellation context.
-// It is runtime metadata rather than part of a user's step input.
+// cancellationReference is the durable identity of a cancellation context:
+// its system hook, and the hook's token, abrt_ and an ID, which names the
+// stream that notifies running steps. It is runtime metadata rather than
+// part of a user's step input.
 type cancellationReference struct {
 	HookID    HookID `json:"hookId"`
+	Token     string `json:"token"`
 	CanCancel bool   `json:"canCancel,omitempty"`
+}
+
+// stream returns the name of the stream that notifies running steps of the
+// cancellation: strm_, the token's ID, and _system_abort.
+func (r cancellationReference) stream() string {
+	return "strm_" + strings.TrimPrefix(r.Token, "abrt_") + "_system_abort"
 }
 
 // cancellationData is a cancellation's hook payload and stream chunk:
@@ -35,8 +45,11 @@ type cancelContextInput struct {
 }
 
 // NewCancelContext creates a durable workflow cancellation context with hook and stream backing.
+// It draws an ID from the run's seed for the hook's token, abrt_ and the ID,
+// and then the hook's ID.
 func NewCancelContext(ctx context.Context, execution *Execution) (context.Context, func(error) error, error) {
-	hook := DurableHook[cancellationData](DurableHookOptions{Execution: execution, System: true})
+	token := "abrt_" + execution.seed.ulid()
+	hook := DurableHook[cancellationData](DurableHookOptions{Execution: execution, Token: token, System: true})
 	if hook.Err != nil {
 		return nil, nil, hook.Err
 	}
@@ -45,7 +58,7 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 	for i := range refs {
 		refs[i].CanCancel = false
 	}
-	ref := cancellationReference{HookID: hook.HookID, CanCancel: true}
+	ref := cancellationReference{HookID: hook.HookID, Token: token, CanCancel: true}
 	refs = append(refs, ref)
 	execution.OnAdvance(func() {
 		for _, event := range execution.events[:execution.horizon] {
@@ -96,7 +109,7 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 	execution, _ := ExecutionFromContext(ctx)
 	world := execution.World()
 	runID := execution.Run().RunID
-	stream := "cancel:" + string(ref.HookID)
+	stream := ref.stream()
 
 	data, err := readCancellation(ctx, execution, ref)
 	if err != nil {
@@ -246,7 +259,7 @@ func stepCancelContext(ctx context.Context, execution *Execution, refs []cancell
 
 	var wg sync.WaitGroup
 	for _, ref := range refs {
-		stream := "cancel:" + string(ref.HookID)
+		stream := ref.stream()
 		page, err := execution.World().StreamsGetChunks(readerCtx, StreamsGetChunksInput{RunID: runID, Name: stream})
 		if err != nil {
 			stop()
