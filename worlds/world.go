@@ -335,7 +335,7 @@ func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, erro
 // When queueing fails after the payload is recorded, it returns an error
 // wrapping ErrResumeNotQueued.
 func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (EventResult, error) {
-	data, err := EncodeHookReceived(payload)
+	data, err := EncodeHookReceived(payload, hook.ResumeContext.WorkflowName)
 	if err != nil {
 		return EventResult{}, err
 	}

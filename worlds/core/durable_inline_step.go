@@ -109,7 +109,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step input: %w", err)}
 		}
-		created := worlds.DataStepCreated{StepName: options.Name, Input: encoded}
+		created := worlds.DataStepCreated{StepName: options.Name, WorkflowName: options.Execution.run.WorkflowName, Input: encoded, CreatorMessageID: options.Execution.delivery.MessageID}
 		options.Execution.hold(pendingStep{
 			stepID:   stepID,
 			created:  &created,

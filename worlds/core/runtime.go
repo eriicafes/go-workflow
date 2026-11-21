@@ -345,9 +345,14 @@ func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) erro
 	// never executes user code again. Starting a running step records a new
 	// attempt, which is how a redelivery re-runs a step whose delivery died.
 	eventsCount := len(events)
+	startedData, err := json.Marshal(worlds.DataStepStarted{StepName: step.StepName, Attempt: startedAttempts(events, *input.StepID) + 1})
+	if err != nil {
+		return err
+	}
 	startedEvent := worlds.EventsCreateEvent{
 		EventType:     worlds.EventTypeStepStarted,
 		CorrelationID: string(*input.StepID),
+		Data:          startedData,
 	}
 	started, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID:   input.RunID,
@@ -635,7 +640,8 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 	if !step.Status.Terminal() {
 		if step.Status != worlds.StatusRunning {
 			// A step result needs a running step.
-			_, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.StepID)}})
+			started, _ := json.Marshal(worlds.DataStepStarted{StepName: step.StepName, Attempt: step.Attempt + 1})
+			_, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.StepID), Data: started}})
 			if errors.Is(err, worlds.ErrRunTerminal) {
 				return nil
 			}
@@ -651,7 +657,7 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(worlds.DataStepResult{Error: payload})
+		data, err := json.Marshal(worlds.DataStepResult{StepName: step.StepName, Attempt: max(step.Attempt, 1), Error: payload})
 		if err != nil {
 			return err
 		}
@@ -665,6 +671,17 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 	}
 	_, err = r.world.Queue(ctx, worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 	return err
+}
+
+// startedAttempts counts the step_started events of stepID among events.
+func startedAttempts(events []worlds.Event, stepID worlds.StepID) int {
+	count := 0
+	for _, event := range events {
+		if event.EventType == worlds.EventTypeStepStarted && event.CorrelationID == string(stepID) {
+			count++
+		}
+	}
+	return count
 }
 
 // runFailedData returns the Data of a run_failed event for err, encrypted
