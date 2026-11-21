@@ -227,7 +227,7 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 	case ctx.Err() != nil:
 		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL WHERE id = $1 AND attempts = $2`, item.id, item.attempts)
 	default:
-		delay := backoff(item.attempts)
+		delay := worlds.DeliveryRetryDelay(err, backoff(item.attempts))
 		log.Printf("workflow/postgres: delivery %s for run %s failed (attempt %d, retry in %v): %v", item.id, item.input.RunID, item.attempts, delay, err)
 		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL, not_before = now() + make_interval(secs => $3) WHERE id = $1 AND attempts = $2`,
 			item.id, item.attempts, delay.Seconds())

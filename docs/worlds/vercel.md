@@ -263,9 +263,10 @@ The consumer handles each delivery as follows:
    one.
 3. Executes the delivery, renewing the lease every minute.
 4. On success acknowledges the message.
-5. On failure sets the visibility to the Workflow SDK's backoff, a second
-   doubling with each delivery up to 15 minutes with 25% jitter, and at least
-   the 5 seconds Vercel Queues accepts, and answers `500`, so Vercel
+5. On failure sets the visibility to a backoff of a second doubling with each
+   delivery up to 15 minutes with 25% jitter, and at least the 5 seconds
+   Vercel Queues accepts, or to the backend's `Retry-After` when a rate limit
+   asks for longer, up to an hour, and answers `500`, so Vercel
    redelivers. A delivery for a run that no longer exists is dropped. The
    delivery count is the delivery's `Attempt`, so the runtime gives up after
    48 deliveries.

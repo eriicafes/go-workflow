@@ -432,3 +432,21 @@ func TestVQSRoutesByRegion(t *testing.T) {
 		t.Fatalf("syd1 queue = %q, %v", queue, header)
 	}
 }
+
+func TestQueueConsumerWaitsForAThrottle(t *testing.T) {
+	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
+	world := newQueueWorld(t, server)
+	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Retry-After", "120")
+		writer.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer backend.Close()
+	world.api.baseURL = backend.URL
+	data, _ := json.Marshal(queueMessage{ID: "throttled", RunID: "wrun_1"})
+	response := httptest.NewRecorder()
+	Queue(world, nil).ServeHTTP(response, deliveryRequest("msg_1", string(data)))
+	retry := server.all()[0]
+	if response.Code != http.StatusInternalServerError || retry.Method != http.MethodPatch || retry.Body != `{"visibilityTimeoutSeconds":120}` {
+		t.Fatalf("throttled delivery: status %d request %+v", response.Code, retry)
+	}
+}

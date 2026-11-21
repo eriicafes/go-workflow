@@ -451,3 +451,15 @@ func (e *ThrottleError) Error() string {
 func (e *ThrottleError) Unwrap() error { return e.Cause }
 
 func (e *ThrottleError) Is(target error) bool { return target == ErrThrottled }
+
+// DeliveryRetryDelay returns how long a World waits before retrying a
+// delivery that failed with err: backoff, or longer when err is a
+// *ThrottleError asking for more, so a retry does not run into the same rate
+// limit.
+func DeliveryRetryDelay(err error, backoff time.Duration) time.Duration {
+	var throttle *ThrottleError
+	if errors.As(err, &throttle) && throttle.After > backoff {
+		return throttle.After
+	}
+	return backoff
+}

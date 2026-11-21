@@ -161,3 +161,16 @@ func TestRetryBackoffGrowsWithReceives(t *testing.T) {
 		}
 	}
 }
+
+func TestConsumerWaitsForAThrottle(t *testing.T) {
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	dynamo.getErr = &worlds.ThrottleError{After: 2 * time.Minute}
+	world := testWorld(t, dynamo, queue, nil)
+	if _, err := Queue(world, worlds.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, "id", worlds.QueueInput{RunID: "wrun"})}}); err != nil {
+		t.Fatal(err)
+	}
+	// The third receive would back off 4s; the throttle asked for 2m.
+	if len(queue.visibility) != 1 || queue.visibility[0].VisibilityTimeout != 120 {
+		t.Fatalf("visibility = %+v", queue.visibility)
+	}
+}

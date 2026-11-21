@@ -123,7 +123,8 @@ increments `attempts`, and executes each:
 
 - success deletes the row.
 - failure keeps it and sets `not_before` to now plus a capped exponential
-  backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error.
+  backoff (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
+  `*worlds.ThrottleError` asks for when that is longer, and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
 
 ## Start hooks

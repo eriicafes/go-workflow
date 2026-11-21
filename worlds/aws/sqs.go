@@ -23,6 +23,8 @@ type sqsAPI interface {
 const (
 	// maxSQSDelay is the longest DelaySeconds SQS accepts.
 	maxSQSDelay = 15 * time.Minute
+	// maxSQSVisibility is the longest visibility timeout SQS accepts.
+	maxSQSVisibility = 12 * time.Hour
 	// visibilityHeartbeat is how often a running delivery extends its
 	// message's visibility, by visibilityExtension each time, so the message
 	// is not redelivered to another consumer while it runs.
@@ -145,7 +147,8 @@ func (w *World) consume(ctx context.Context, runtime *worlds.Runtime, event even
 		stop()
 		if err != nil {
 			log.Printf("workflow/aws: delivery %s failed: %v", record.MessageId, err)
-			w.setVisibility(ctx, queueURL, record.ReceiptHandle, retryBackoff(record.Attributes["ApproximateReceiveCount"]))
+			delay := worlds.DeliveryRetryDelay(err, retryBackoff(record.Attributes["ApproximateReceiveCount"]))
+			w.setVisibility(ctx, queueURL, record.ReceiptHandle, min(delay, maxSQSVisibility))
 			response.BatchItemFailures = append(response.BatchItemFailures, events.SQSBatchItemFailure{ItemIdentifier: record.MessageId})
 		}
 	}

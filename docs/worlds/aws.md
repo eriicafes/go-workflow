@@ -139,7 +139,8 @@ early is sent again with the remaining delay. Otherwise it executes the
 delivery, extending the message's visibility every 30 seconds while it runs,
 and deletes the record on success. On failure it reports the message in
 `BatchItemFailures` so SQS redelivers only that message, after a backoff that
-doubles from one second with each receive up to 15 minutes. The receive count
+doubles from one second with each receive up to 15 minutes, or the wait a
+`*worlds.ThrottleError` asks for when that is longer, up to 12 hours. The receive count
 is the delivery's attempt, so after 48 the runtime fails the run or step and
 the message is deleted. Give the dead-letter queue a `max_receive_count` above
 48, as the Terraform module does, so it only collects messages the runtime

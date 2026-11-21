@@ -115,3 +115,21 @@ func TestRetryableErrorRecordsMarkerAndCauseInErrorChain(t *testing.T) {
 		}
 	}
 }
+
+func TestDeliveryRetryDelayWaitsForAThrottle(t *testing.T) {
+	throttle := &worlds.ThrottleError{After: time.Minute}
+	for _, test := range []struct {
+		err  error
+		want time.Duration
+	}{
+		{errors.New("failed"), 5 * time.Second},
+		{throttle, time.Minute},
+		{&worlds.ThrottleError{After: time.Second}, 5 * time.Second},
+		{&worlds.ThrottleError{}, 5 * time.Second},
+		{fmt.Errorf("deliver: %w", throttle), time.Minute},
+	} {
+		if got := worlds.DeliveryRetryDelay(test.err, 5*time.Second); got != test.want {
+			t.Errorf("DeliveryRetryDelay(%v) = %v, want %v", test.err, got, test.want)
+		}
+	}
+}
