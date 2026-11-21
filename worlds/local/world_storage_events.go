@@ -201,19 +201,14 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		return t.findEvent(worlds.EventTypeWaitCompleted, event.CorrelationID)
 
 	case worlds.EventTypeHookDisposed:
-		disposal, err := t.disposal(worlds.HookID(event.CorrelationID))
-		if err != nil {
-			return "", err
-		}
-		if disposal != nil && disposal.RunID == t.run.RunID {
-			return t.findEvent(worlds.EventTypeHookDisposed, event.CorrelationID)
-		}
+		// A disposed hook is gone, so disposing it again finds no hook, as
+		// in world-local.
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
 		}
 		if hook == nil || hook.RunID != t.run.RunID {
-			return "", worlds.ErrHookNotActive
+			return "", worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookReceived:
@@ -227,21 +222,21 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			if disposal.ForceClaimedBy != nil {
 				return "", worlds.ErrHookForceClaimed
 			}
-			return "", worlds.ErrHookNotActive
+			return "", worlds.ErrHookNotFound
 		}
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
 		}
 		if hook == nil || hook.RunID != t.run.RunID {
-			return "", worlds.ErrHookNotActive
+			return "", worlds.ErrHookNotFound
 		}
 		owner, err := t.token(hook.Token)
 		if err != nil {
 			return "", err
 		}
 		if owner == nil || owner.HookID != hook.HookID {
-			return "", worlds.ErrHookNotActive
+			return "", worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -1045,7 +1040,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 // refusal reports whether err is an event's refusal rather than a storage
 // failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}

@@ -66,7 +66,7 @@ func TestClassify(t *testing.T) {
 	}{
 		{http.StatusPreconditionFailed, "in-band-superseded", worlds.EventTypeStepCreated, worlds.ErrInBandSuperseded},
 		{http.StatusNotFound, "run-not-found", worlds.EventTypeRunStarted, worlds.ErrRunNotFound},
-		{http.StatusNotFound, "hook-not-found", worlds.EventTypeHookReceived, worlds.ErrHookNotActive},
+		{http.StatusNotFound, "hook-not-found", worlds.EventTypeHookReceived, worlds.ErrHookNotFound},
 		{http.StatusConflict, "hook-force-claimed", worlds.EventTypeHookReceived, worlds.ErrHookForceClaimed},
 		{http.StatusConflict, "", worlds.EventTypeRunCreated, worlds.ErrRunAlreadyExists},
 		{http.StatusConflict, "", worlds.EventTypeStepCompleted, worlds.ErrStepNotStartable},

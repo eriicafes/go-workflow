@@ -291,7 +291,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an event's refusal by the transition rules,
 // rather than a failure to read or write.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -954,17 +954,17 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			if disposal.forced {
 				return nil, worlds.ErrHookForceClaimed
 			}
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 		_, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return nil, err
 		}
 		if !owned {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookDisposed:
@@ -972,11 +972,10 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if err != nil {
 			return nil, err
 		}
-		if disposal := entry.disposal; disposal != nil && disposal.runID == run.view.RunID {
-			return replay(disposal.eventID), nil
-		}
+		// A disposed hook is gone, so disposing it again finds no hook, as
+		// in the Workflow SDK's Worlds.
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookCreated:

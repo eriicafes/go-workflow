@@ -339,14 +339,11 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeHookDisposed:
-		if disposal, disposed := m.disposals[worlds.HookID(requested.CorrelationID)]; disposed && disposal.runID == runID {
-			if earlier := m.lastResultLocked(runID, requested.EventType, requested.CorrelationID); earlier.EventID != "" {
-				return earlier, true, nil
-			}
-		}
+		// A disposed hook is gone, so disposing it again finds no hook, as
+		// in the Workflow SDK's Worlds.
 		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if !exists || hook.RunID != runID {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			return worlds.EventResult{}, false, worlds.ErrHookNotFound
 		}
 	}
 
@@ -363,11 +360,11 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			if disposal.forceClaimedBy != nil {
 				return worlds.EventResult{}, false, worlds.ErrHookForceClaimed
 			}
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			return worlds.EventResult{}, false, worlds.ErrHookNotFound
 		}
 		hook := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if hook.HookID == "" || hook.RunID != runID || m.tokens[hook.Token] != hook.HookID {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
+			return worlds.EventResult{}, false, worlds.ErrHookNotFound
 		}
 	}
 

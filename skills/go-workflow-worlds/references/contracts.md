@@ -11,14 +11,14 @@ the batch with the same correlation ID is refused too.
 
 Repeated admitted lifecycle transitions return the existing event with
 `AllocatedEventCount == 0`. A `step_started` for a started step is a new
-attempt, not a repeat. A repeated `step_created` or `hook_disposed`, or an
-inline step's creating `step_started` (`worlds.StartCreatesStep`), is a repeat.
+attempt, not a repeat. A repeated `step_created`, or an inline step's
+creating `step_started` (`worlds.StartCreatesStep`), is a repeat.
 A finished run refuses `step_created`, `step_started`, `step_retrying`, and
 `wait_created` (`ErrRunTerminal`) and accepts `step_completed`, `step_failed`,
 and `wait_completed`. Other step and wait checks are optional, and a World
 that checks accepts a step's result while the step is not finished and a
-`step_started` that creates its step. `hook_disposed` needs a hook of the same
-run (`ErrHookNotActive`).
+`step_started` that creates its step. `hook_disposed` and `hook_received` need
+a hook of the same run (`ErrHookNotFound`), so a repeated disposal is refused.
 
 Preserve event order, correlation IDs, timestamps, pagination, ResolveData,
 and catch-up results. `EventsCreateOptions.EventCount` takes precedence over
@@ -72,8 +72,8 @@ recoverable protocol that preserves the same observable contract. An
 uncoordinated read-then-write token lookup is insufficient.
 
 Disposal deletes the hook and releases its token immediately, but the World
-remembers the disposal: a repeat returns the first, and a delivery to a
-force-claimed hook gets ErrHookForceClaimed. A finished run's hooks are
+remembers a forced claim's disposal: a delivery to a force-claimed hook gets
+ErrHookForceClaimed, and one to another disposed hook ErrHookNotFound. A finished run's hooks are
 deleted once their token retention ends.
 A hook's TokenRetentionUntil can preserve token ownership after run
 termination; it does not

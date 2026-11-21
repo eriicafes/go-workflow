@@ -166,16 +166,18 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	if err != nil || claimed.InBandCount != 5 || inBandCount() != 5 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
 	}
-	// A repeat allocates nothing, so the count stays.
 	five := 5
 	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &five}})
 	if err != nil || repeat.AllocatedEventCount != 1 || inBandCount() != 6 {
 		t.Fatalf("fenced disposal = %#v err=%v, run InBandCount %d", repeat, err, inBandCount())
 	}
+	// A repeated disposal finds no hook and allocates nothing, so the count
+	// stays.
 	six := 6
-	repeat, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &six}})
-	if err != nil || repeat.AllocatedEventCount != 0 || repeat.InBandCount != 6 || inBandCount() != 6 {
-		t.Fatalf("repeated fenced disposal = %#v err=%v, run InBandCount %d", repeat, err, inBandCount())
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &six}})
+	conformExpect(t, err, worlds.ErrHookNotFound, "repeated fenced disposal")
+	if inBandCount() != 6 {
+		t.Fatalf("repeated fenced disposal moved run InBandCount to %d", inBandCount())
 	}
 }
 

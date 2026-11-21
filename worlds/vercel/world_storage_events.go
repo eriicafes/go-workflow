@@ -35,7 +35,6 @@ var repeatable = map[worlds.EventType]bool{
 	worlds.EventTypeRunCancelled:  true,
 	worlds.EventTypeStepCreated:   true,
 	worlds.EventTypeHookCreated:   true,
-	worlds.EventTypeHookDisposed:  true,
 	worlds.EventTypeWaitCreated:   true,
 	worlds.EventTypeWaitCompleted: true,
 }

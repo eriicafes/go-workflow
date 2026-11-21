@@ -301,8 +301,8 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_resumed"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := worlds.ResumeHook(ctx, world, hook, payload, ""); !errors.Is(err, worlds.ErrHookNotActive) {
-		t.Fatalf("error = %v, want ErrHookNotActive", err)
+	if _, err := worlds.ResumeHook(ctx, world, hook, payload, ""); !errors.Is(err, worlds.ErrHookNotFound) {
+		t.Fatalf("error = %v, want ErrHookNotFound", err)
 	}
 	if queued := world.QueuedMessages(); len(queued) != 2 || queued[1].Input.RunID != "wrun_resume" || queued[1].Input.StepID != nil {
 		t.Fatalf("queued = %#v, want a flow of the run for each resume", queued)

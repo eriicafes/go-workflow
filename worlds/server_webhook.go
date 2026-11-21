@@ -298,7 +298,7 @@ func WebhookHandler(world World) http.Handler {
 			switch {
 			case errors.Is(err, ErrHookForceClaimed):
 				status = http.StatusServiceUnavailable
-			case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrHookNotActive):
+			case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrHookNotActive):
 				// Another run that took the token over is served by its own
 				// requests, so this one is refused rather than redirected.
 				status, err = http.StatusNotFound, ErrHookNotFound
