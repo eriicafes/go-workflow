@@ -48,10 +48,15 @@ type World interface {
   invalid event, a missing run, or a stale fence. Otherwise each event gets
   its own outcome in `Results`, and once one is refused, every later event
   of the batch with the same correlation ID is refused too.
-- **Idempotent repeats.** An event that repeats an admitted transition, such as
-  a second `run_started`, `step_created`, or `hook_disposed`, returns the
-  earlier event with `AllocatedEventCount` zero instead of appending. A
-  `step_started` for a started step is not a repeat: it appends a new attempt.
+- **Refused repeats.** Refuse an event that repeats a creation the log holds,
+  a second `step_created`, `wait_created`, `wait_completed`, `hook_created`,
+  inline step creation, or workflow `attr_set` of one correlation ID, with
+  `ErrEventConflict`, as the Workflow SDK's Worlds refuse it with
+  `EntityConflictError`. The runtime then reads the log. Answer a
+  `run_started` of a running run with no event and nothing appended (or
+  `ErrEventConflict`), and append a `run_cancelled` of a cancelled run
+  without changing it. A `step_started` for a started step is not a repeat:
+  it appends a new attempt.
 - **One copy of each payload.** The built-in Worlds keep run, step, and hook
   payloads only in their events. Their views store the slot of the event that
   holds each one, and reads decode it with `worlds.EventPayload`. A payload

@@ -70,10 +70,8 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 	first := conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
 	one := 1
 	replay, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}, Options: worlds.EventsCreateOptions{EventCount: &one}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if replay.EventID != first.EventID || replay.AllocatedEventCount != 0 || len(replay.Events) != 1 || replay.Events[0].EventID != first.EventID {
+	conformStartedAgain(t, replay, err)
+	if err == nil && (len(replay.Events) != 1 || replay.Events[0].EventID != first.EventID) {
 		t.Fatalf("run_started replay = %#v", replay)
 	}
 	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
@@ -106,12 +104,17 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 
 	cancelled := conformCreateRun(t, world, "cancelled")
 	cancel := conformAppend(t, world, cancelled, worlds.EventTypeRunCancelled, "", nil)
+	// Cancelling a cancelled run records the request, as in the Workflow
+	// SDK's Worlds, and leaves the run as it was.
 	again, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: cancelled, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}})
-	if err != nil || again.EventID != cancel.EventID || again.AllocatedEventCount != 0 {
-		t.Fatalf("run_cancelled replay = %#v err=%v", again, err)
+	if err != nil || again.EventID == cancel.EventID || again.AllocatedEventCount != 1 {
+		t.Fatalf("repeated run_cancelled = %#v err=%v", again, err)
 	}
-	if events := conformAllEvents(t, world, cancelled); len(events) != 2 {
-		t.Fatalf("cancelled run events = %d, want 2", len(events))
+	if events := conformAllEvents(t, world, cancelled); len(events) != 3 {
+		t.Fatalf("cancelled run events = %d, want 3", len(events))
+	}
+	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: cancelled}); err != nil || run.Status != worlds.StatusCancelled || run.CompletedAt == nil || !run.CompletedAt.Equal(cancel.CreatedAt) {
+		t.Fatalf("run cancelled twice = %#v err=%v", run, err)
 	}
 }
 
@@ -391,7 +394,19 @@ func conformResilientStart(t *testing.T, world worlds.World) {
 	// On a run that exists, the creation is ignored, and a repeat appends
 	// nothing.
 	again, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data}})
-	if err != nil || again.AllocatedEventCount != 0 {
-		t.Fatalf("repeated run_started = %+v err = %v", again, err)
+	conformStartedAgain(t, again, err)
+}
+
+// conformStartedAgain checks the answer to a run_started of a run that
+// started before. It is not started again: world-local and world-postgres
+// accept it and append nothing, so the answer holds no event, and Vercel's
+// backend refuses it as a conflict (ErrEventConflict).
+func conformStartedAgain(t *testing.T, result worlds.EventResult, err error) {
+	t.Helper()
+	if errors.Is(err, worlds.ErrEventConflict) {
+		return
+	}
+	if err != nil || result.EventID != "" || result.AllocatedEventCount != 0 {
+		t.Fatalf("repeated run_started = %#v err = %v, want no event or ErrEventConflict", result, err)
 	}
 }

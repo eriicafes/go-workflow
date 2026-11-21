@@ -166,7 +166,7 @@ resume time.
 | Contract | On Vercel |
 | --- | --- |
 | Batches | One request and one fenced allocation. As the contract allows, the backend keeps the events it admitted when another is refused, and the runtime replays whatever the log holds. |
-| Repeated transitions | The backend refuses them as conflicts. The World finds and returns the event that admitted the transition, as the contract asks. |
+| Repeated transitions | The backend refuses them as conflicts, which the World returns as `ErrEventConflict`, as world-vercel returns `EntityConflictError`. A `run_started` of a running run is one of them (`run-already-started`). |
 | Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. |
 | Stream reads | Cursors are chunk indexes. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. The default stream, whose name is empty, is stored as `_default`. |
 | `RunsList` by several statuses | The backend filters by one status, so `RunsList` with several is refused with `ErrEventInvalid`, as world-vercel refuses it. |

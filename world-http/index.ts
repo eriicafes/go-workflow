@@ -461,7 +461,8 @@ function createOptions(options: CreateEventParams | undefined): Record<string, u
 // toEventResult shapes an RPC event result as the Workflow SDK's EventResult.
 function toEventResult(result: RPC.EventResult): EventResult {
 	return {
-		event: withEventData(result.event),
+		// A run_started of a running run appends no event.
+		...(result.event ? { event: withEventData(result.event) } : {}),
 		...(result.run ? { run: toRun(result.run) } : {}),
 		...(result.step ? { step: toStep(result.step) } : {}),
 		...(result.hook ? { hook: result.hook } : {}),

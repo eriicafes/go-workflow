@@ -53,6 +53,11 @@ var (
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
 	// malformed or names an unknown event type.
 	ErrEventInvalid = errors.New("workflow: event is invalid")
+	// ErrEventConflict reports an event that repeats one the run's log
+	// already holds, such as a second step_created or wait_completed for
+	// the same step or wait, as the Workflow SDK's EntityConflictError does.
+	// What the event records is already in the log.
+	ErrEventConflict = errors.New("workflow: event conflicts with the run's log")
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
 	ErrWebhookRequestTooLarge = errors.New("workflow: webhook request is too large")

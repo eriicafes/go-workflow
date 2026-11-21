@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -313,7 +314,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	if err != nil || len(mixed.Results) != 4 || mixed.AllocatedEventCount != 2 {
 		t.Fatalf("mixed batch = %#v err=%v", mixed, err)
 	}
-	if mixed.Results[0].Err != nil || !errors.Is(mixed.Results[1].Err, worlds.ErrEventInvalid) || mixed.Results[2].Err != nil || mixed.Results[3].Err == nil {
+	if mixed.Results[0].Err != nil || !errors.Is(mixed.Results[1].Err, worlds.ErrEventConflict) || mixed.Results[2].Err != nil || mixed.Results[3].Err == nil {
 		t.Fatalf("mixed batch outcomes = %v, %v, %v, %v", mixed.Results[0].Err, mixed.Results[1].Err, mixed.Results[2].Err, mixed.Results[3].Err)
 	}
 
@@ -433,11 +434,10 @@ func conformEventsList(t *testing.T, world worlds.World) {
 func conformWaits(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "waits")
-	completed := conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
-	replay, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
-	if err != nil || replay.EventID != completed.EventID || replay.AllocatedEventCount != 0 {
-		t.Fatalf("wait_completed replay = %#v err=%v", replay, err)
-	}
+	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
+	// A wait completes once, as in the Workflow SDK's Worlds.
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated wait_completed")
 	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_b"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -541,4 +541,33 @@ func conformEventShapes(t *testing.T, world worlds.World) {
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeNoop}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "noop append")
+}
+
+// conformRepeats checks that a World refuses an event that repeats a
+// creation the run's log holds, as the Workflow SDK's Worlds refuse it with
+// EntityConflictError: a wait_created, a hook_created, and an attr_set of
+// the workflow.
+func conformRepeats(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "repeats")
+	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
+	resumeAt := time.Now().Add(time.Hour).UTC()
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})})
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated wait_created")
+
+	token := fmt.Sprintf("repeat-%d", time.Now().UnixNano())
+	if _, err := conformClaim(world, runID, "hook_a", token, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err = conformClaim(world, runID, "hook_a", token, false)
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated hook_created")
+
+	attributes := worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "tier", Value: new("gold")}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}}
+	conformAppend(t, world, runID, worlds.EventTypeAttrSet, "attr_a", attributes)
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeAttrSet, "attr_a", attributes)})
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated attr_set")
+	if events := conformAllEvents(t, world, runID); len(events) != 5 {
+		t.Fatalf("events after refused repeats = %d, want 5", len(events))
+	}
 }

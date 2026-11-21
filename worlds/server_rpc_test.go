@@ -266,7 +266,7 @@ func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
 	if err := cbor.Unmarshal(batch["Results"], &results); err != nil || len(results) != 3 {
 		t.Fatalf("batch results = %#v err=%v", results, err)
 	}
-	if results[0].Status != http.StatusOK || results[1].Status != http.StatusBadRequest || results[1].Error != "invalid_argument" || results[1].Event != nil {
+	if results[0].Status != http.StatusOK || results[1].Status != http.StatusConflict || results[1].Error != "conflict" || results[1].Event != nil {
 		t.Fatalf("run_started results = %#v, %#v", results[0], results[1])
 	}
 	if results[2].Status != http.StatusOK || results[2].Event == nil || results[2].Event.CorrelationID != "wait_rpc" {

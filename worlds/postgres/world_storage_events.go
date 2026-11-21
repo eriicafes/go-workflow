@@ -240,7 +240,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 				return err
 			}
 			if err == nil && replay != nil {
-				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
 			}
 			if err != nil {
 				item.Err = err
@@ -272,7 +272,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an admission refusal, as opposed to a
 // storage failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -407,8 +407,10 @@ type appender struct {
 	errorCode  *string
 }
 
-// admit applies the transition rules. It returns a non-nil result when the
-// event is an idempotent replay of an earlier one.
+// admit applies the transition rules, as world-postgres's storage does. An
+// event that repeats a creation the log holds is refused with
+// ErrEventConflict. It returns a non-nil result, holding no event, for a
+// run_started of a run that started before, which appends nothing.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
 	var step *worlds.Step
 	switch event.EventType {
@@ -427,30 +429,27 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		event.EventType == worlds.EventTypeWaitCompleted
 	if a.run.Status.Terminal() && !finishing {
 		if event.EventType == worlds.EventTypeRunCancelled && a.run.Status == worlds.StatusCancelled {
-			return a.replay(ctx, event.EventType, event.CorrelationID, true)
+			// Cancelling a cancelled run records the request.
+			return nil, nil
 		}
 		return nil, worlds.ErrRunTerminal
 	}
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		if a.run.Status == worlds.StatusRunning {
-			return a.replay(ctx, event.EventType, "", true)
+			// A run that started before is not started again.
+			return &worlds.EventResult{}, nil
 		}
 	case worlds.EventTypeStepCreated:
-		if step == nil {
-			return nil, nil
+		if step != nil {
+			return nil, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
 		}
-		result, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
-		if err == nil {
-			result.Step = step
-		}
-		return result, err
 	case worlds.EventTypeStepStarted:
 		creates := worlds.StartCreatesStep(event.Data)
 		switch {
 		case creates && step != nil:
 			// An inline step is created once.
-			return a.replay(ctx, event.EventType, event.CorrelationID, false)
+			return nil, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
 		case step == nil && !creates:
 			return nil, worlds.ErrStepNotStartable
 		case step != nil && step.Status.Terminal():
@@ -463,10 +462,18 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if step == nil || step.Status.Terminal() {
 			return nil, worlds.ErrStepNotStartable
 		}
-	case worlds.EventTypeWaitCompleted:
-		result, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
-		if err != nil || result.EventID != "" {
-			return result, err
+	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		// A wait is created and completed once, and an attribute write of
+		// the workflow is recorded once.
+		if event.CorrelationID == "" || event.EventType == worlds.EventTypeAttrSet && !worlds.WorkflowAttrSet(event.Data) {
+			break
+		}
+		earlier, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
+		if err != nil {
+			return nil, err
+		}
+		if earlier.EventID != "" {
+			return nil, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
 		}
 
 	case worlds.EventTypeHookReceived:
@@ -629,7 +636,9 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 			a.run.ErrorCode, a.errorCode = code, &code
 		}
 	case worlds.EventTypeRunCancelled:
-		a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at
+		if a.run.Status != worlds.StatusCancelled {
+			a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at
+		}
 	case worlds.EventTypeAttrSet:
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {

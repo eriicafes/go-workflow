@@ -560,6 +560,7 @@ checking ownership.
 | `ErrStepNotFound` | No step has the ID. |
 | `ErrStepNotStartable` | Step transition not allowed. |
 | `ErrEventNotFound` | No event (or wait) has the ID. |
+| `ErrEventConflict` | The event repeats a creation the run's log holds, such as a second `step_created`. |
 | `ErrEventInvalid` | Malformed event, ID, or cursor, or an item over a backend limit. |
 | `ErrHookNotFound` | No hook has the ID, no hook owns the token, or a `hook_received` or `hook_disposed` names a hook its run doesn't have. |
 | `ErrHookNotActive` | The hook can no longer receive payloads, or a backend refused a hook event as a conflict. |

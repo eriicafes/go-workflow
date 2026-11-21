@@ -108,6 +108,18 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
+	// A hook is created once, as in world-local.
+	id := worlds.HookID(input.Event.CorrelationID)
+	if disposal, err := claimant.disposal(id); err != nil {
+		return worlds.EventResult{}, err
+	} else if disposal != nil {
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, id)
+	}
+	if earlier, err := claimant.findEvent(worlds.EventTypeHookCreated, string(id)); err != nil {
+		return worlds.EventResult{}, err
+	} else if earlier != "" {
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, id)
+	}
 	delta, err := s.delta(claimant.run, input.Options)
 	if err != nil {
 		return worlds.EventResult{}, err

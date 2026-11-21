@@ -132,8 +132,13 @@ func (t *txn) releaseToken(token string, hookID worlds.HookID) error {
 	return nil
 }
 
-// admit applies the transition rules to the staged state. A non-empty event
-// ID is an idempotent replay of that earlier event.
+// noEvent is admit's answer for an event accepted without appending
+// anything: a run_started for a run that started before.
+const noEvent worlds.EventID = "-"
+
+// admit applies the transition rules to the staged state, as world-local's
+// events-storage does. An event that repeats a creation the log holds is
+// refused with ErrEventConflict. A non-empty event ID is noEvent.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
 	if t.run.Status.Terminal() {
 		// A finished run still records what was running when it finished: a
@@ -148,7 +153,8 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 		if !finishing {
 			if event.EventType == worlds.EventTypeRunCancelled && t.run.Status == worlds.StatusCancelled {
-				return t.run.CancelledEventID, nil
+				// Cancelling a cancelled run records the request.
+				return "", nil
 			}
 			return "", worlds.ErrRunTerminal
 		}
@@ -156,7 +162,8 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		if t.run.Status == worlds.StatusRunning {
-			return t.run.StartedEventID, nil
+			// A run that started before is not started again.
+			return noEvent, nil
 		}
 	case worlds.EventTypeStepStarted:
 		step, err := t.step(worlds.StepID(event.CorrelationID))
@@ -166,10 +173,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		creates := worlds.StartCreatesStep(event.Data)
 		if creates && step != nil {
 			// An inline step is created once.
-			earlier, err := t.findEvent(worlds.EventTypeStepStarted, event.CorrelationID)
-			if err != nil || earlier != "" {
-				return earlier, err
-			}
+			return "", fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
 		}
 		if step == nil {
 			if !creates {
@@ -184,10 +188,12 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 	case worlds.EventTypeStepCreated:
 		step, err := t.step(worlds.StepID(event.CorrelationID))
-		if err != nil || step == nil {
+		if err != nil {
 			return "", err
 		}
-		return t.findEvent(worlds.EventTypeStepCreated, event.CorrelationID)
+		if step != nil {
+			return "", fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
+		}
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		step, err := t.step(worlds.StepID(event.CorrelationID))
 		if err != nil {
@@ -197,8 +203,19 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if step == nil || step.Status.Terminal() {
 			return "", worlds.ErrStepNotStartable
 		}
-	case worlds.EventTypeWaitCompleted:
-		return t.findEvent(worlds.EventTypeWaitCompleted, event.CorrelationID)
+	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		// A wait is created and completed once, and an attribute write of
+		// the workflow is recorded once.
+		if event.CorrelationID == "" || event.EventType == worlds.EventTypeAttrSet && !worlds.WorkflowAttrSet(event.Data) {
+			break
+		}
+		earlier, err := t.findEvent(event.EventType, event.CorrelationID)
+		if err != nil {
+			return "", err
+		}
+		if earlier != "" {
+			return "", fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
+		}
 
 	case worlds.EventTypeHookDisposed:
 		// A disposed hook is gone, so disposing it again finds no hook, as
@@ -322,7 +339,9 @@ func (t *txn) materialize(event worlds.Event) error {
 		run.Status, run.CompletedAt, run.ErrorSlot = worlds.StatusFailed, &now, eventSlot(event)
 		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
-		run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
+		if run.Status != worlds.StatusCancelled {
+			run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
+		}
 	case worlds.EventTypeAttrSet:
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
@@ -817,25 +836,16 @@ func (w *World) appendEvent(s *store, input worlds.EventsCreateInput) (worlds.Ev
 	if err != nil {
 		return worlds.EventResult{}, false, err
 	}
+	if replay == noEvent {
+		return worlds.EventResult{Events: delta, InBandCount: t.run.InBandCount}, false, nil
+	}
 	if replay != "" {
+		// A repeat of a resume returns the event it committed.
 		result := worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}
 		if earlier, ok, err := t.load(eventSlot(worlds.Event{EventID: replay})); err != nil {
 			return worlds.EventResult{}, false, err
 		} else if ok {
 			result.CreatedAt, result.Data = earlier.CreatedAt, earlier.Data
-		}
-		if input.Event.EventType == worlds.EventTypeStepCreated {
-			step, err := t.step(worlds.StepID(input.Event.CorrelationID))
-			if err != nil {
-				return worlds.EventResult{}, false, err
-			}
-			if step != nil {
-				value, err := stepView(*step, t.load, worlds.ResolveDataAll)
-				if err != nil {
-					return worlds.EventResult{}, false, err
-				}
-				result.Step = &value
-			}
 		}
 		return result, false, nil
 	}
@@ -901,7 +911,7 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 		now := time.Now().UTC()
 		replay, err := t.admit(value, now)
 		if err == nil && replay != "" {
-			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
+			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
 		}
 		if err != nil && !refusal(err) {
 			return worlds.EventBatchResult{}, false, err
@@ -1033,7 +1043,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 // refusal reports whether err is an event's refusal rather than a storage
 // failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}

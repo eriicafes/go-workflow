@@ -195,7 +195,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		}
 		if _, duplicate, err := m.admitLocked(input.RunID, value); err != nil || duplicate {
 			if err == nil {
-				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
 			}
 			result.Results[index].Err = err
 			refused[value.CorrelationID] = value.CorrelationID != ""
@@ -260,6 +260,10 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
+	// A hook is created once, as in the Workflow SDK's Worlds.
+	if _, disposed := m.disposals[worlds.HookID(input.Event.CorrelationID)]; disposed || m.hasEventLocked(input.RunID, worlds.EventTypeHookCreated, input.Event.CorrelationID) {
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, input.Event.CorrelationID)
+	}
 	m.expireTokenLocked(created.Token, time.Now().UTC())
 	before := len(m.events[input.RunID])
 	result := worlds.EventResult{Events: m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor)}
@@ -306,19 +310,23 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		requested.EventType == worlds.EventTypeWaitCompleted
 	if run.Status.Terminal() && !finishing {
 		if requested.EventType == worlds.EventTypeRunCancelled && run.Status == worlds.StatusCancelled {
-			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+			// Cancelling a cancelled run records the request, as in the
+			// Workflow SDK's Worlds.
+			return worlds.EventResult{}, false, nil
 		}
 		return worlds.EventResult{}, false, worlds.ErrRunTerminal
 	}
 	if requested.EventType == worlds.EventTypeRunStarted && run.Status == worlds.StatusRunning {
-		return m.lastResultLocked(runID, requested.EventType, ""), true, nil
+		// The run started before: no second run_started is appended, and
+		// the answer holds no event.
+		return worlds.EventResult{}, true, nil
 	}
 	if requested.EventType == worlds.EventTypeStepStarted {
 		creates := worlds.StartCreatesStep(requested.Data)
 		switch {
 		case creates && stepExists:
 			// An inline step is created once.
-			return m.firstResultLocked(runID, worlds.EventTypeStepStarted, requested.CorrelationID), true, nil
+			return worlds.EventResult{}, false, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, requested.CorrelationID)
 		case !stepExists && !creates:
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		case stepExists && step.Status.Terminal():
@@ -330,8 +338,15 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 
 	switch requested.EventType {
 	case worlds.EventTypeStepCreated:
-		if _, exists := m.steps[runID][worlds.StepID(requested.CorrelationID)]; exists {
-			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
+		if stepExists {
+			return worlds.EventResult{}, false, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, requested.CorrelationID)
+		}
+	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		// A wait is created and completed once, and an attribute write of
+		// the workflow is recorded once.
+		once := requested.EventType != worlds.EventTypeAttrSet || worlds.WorkflowAttrSet(requested.Data)
+		if once && requested.CorrelationID != "" && m.hasEventLocked(runID, requested.EventType, requested.CorrelationID) {
+			return worlds.EventResult{}, false, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
 		}
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		// A step's result is recorded while the step is not finished.
@@ -344,14 +359,6 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if !exists || hook.RunID != runID {
 			return worlds.EventResult{}, false, worlds.ErrHookNotFound
-		}
-	}
-
-	if requested.EventType == worlds.EventTypeWaitCompleted {
-		for _, event := range m.events[runID] {
-			if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == requested.CorrelationID {
-				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt}, true, nil
-			}
 		}
 	}
 
@@ -378,6 +385,17 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		}
 	}
 	return worlds.EventResult{}, false, nil
+}
+
+// hasEventLocked reports whether the run's log holds an eventType event of
+// correlation.
+func (m *World) hasEventLocked(runID worlds.RunID, eventType worlds.EventType, correlation string) bool {
+	for _, event := range m.events[runID] {
+		if event.EventType == eventType && event.CorrelationID == correlation {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *World) firstResultLocked(runID worlds.RunID, eventType worlds.EventType, correlation string) worlds.EventResult {
@@ -460,7 +478,9 @@ func (m *World) materializeLocked(event worlds.Event) {
 		run.Status, run.CompletedAt = worlds.StatusFailed, &now
 		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
-		run.Status, run.CompletedAt = worlds.StatusCancelled, &now
+		if run.Status != worlds.StatusCancelled {
+			run.Status, run.CompletedAt = worlds.StatusCancelled, &now
+		}
 	case worlds.EventTypeAttrSet:
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {

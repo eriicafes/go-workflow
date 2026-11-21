@@ -334,7 +334,7 @@ func (e *Execution) startWriter() {
 					Options: worlds.EventsCreateOptions{EventCount: &held, InBandCount: &fence},
 				})
 				write.createdAt = []time.Time{write.result.CreatedAt}
-				if write.event.EventType == worlds.EventTypeRunStarted && (write.err == nil && write.result.AllocatedEventCount == 0 || errors.Is(write.err, worlds.ErrInBandSuperseded)) {
+				if write.event.EventType == worlds.EventTypeRunStarted && (write.err == nil && write.result.AllocatedEventCount == 0 || errors.Is(write.err, worlds.ErrInBandSuperseded) || errors.Is(write.err, worlds.ErrEventConflict)) {
 					// The run started before: a repeat, or a fence that
 					// moved past run_started.
 					write.err = errStartedAlready

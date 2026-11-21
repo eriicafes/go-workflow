@@ -86,18 +86,24 @@ type StorageEvents interface {
 	// inline step's first step_started, whose DataStepStarted has Inline,
 	// StepName, and Input, and which no step_created precedes.
 	//
-	// An event that repeats an admitted transition, such as a second
-	// run_started, step_created, or hook_disposed, returns the earlier event
-	// with AllocatedEventCount zero instead of appending. A step_started for a
-	// step already started is not a repeat. It appends a new attempt.
+	// An event that repeats a creation the run's log holds, a second
+	// step_created, wait_created, wait_completed, hook_created, an inline
+	// step's creating step_started, or an attr_set of the workflow with the
+	// same correlation ID, is refused with ErrEventConflict, as the Workflow
+	// SDK's Worlds refuse it with EntityConflictError. A run_started of a
+	// running run appends nothing and returns a result without an event (no
+	// EventID), or is refused with ErrEventConflict, as Vercel's backend
+	// does. A run_cancelled of a cancelled run is appended and leaves the run
+	// as it was. A step_started for a step already started is not a repeat.
+	// It appends a new attempt.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	// EventsCreateBatch appends Events to a run in order, as one in-band
 	// write when InBandCount is set, fenced as one block. It appends none of
 	// them, and returns an error, when any event is invalid, the run does not
 	// exist, or the fence refuses the block. Otherwise each event has a
 	// result in EventBatchResult.Results, refused or appended as EventsCreate
-	// would refuse or append it alone, and a repeated transition is refused
-	// with ErrEventInvalid. A batch is not all-or-nothing, but it is ordered
+	// would refuse or append it alone, and a repeated run_started is refused
+	// with ErrEventConflict. A batch is not all-or-nothing, but it is ordered
 	// per correlation ID: once an event is refused, every later event of the
 	// batch with the same correlation ID is refused too, so a step's outcome
 	// never lands behind its refused creation.
@@ -623,7 +629,8 @@ type (
 		// StepCreated reports whether this call appended the step_created event.
 		StepCreated bool
 		// AllocatedEventCount is the number of positions this call
-		// allocated: one for an appended event, zero for a repeat.
+		// allocated: one for an appended event, zero when nothing was
+		// appended.
 		AllocatedEventCount int
 		// InBandCount is the run's InBandCount after the call.
 		InBandCount int

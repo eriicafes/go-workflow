@@ -96,7 +96,7 @@ export namespace RPC {
 		specVersion: number;
 	};
 	export type EventResult = {
-		event: Event;
+		event?: Event;
 		run?: Run;
 		step?: Step;
 		hook?: Hook;
@@ -222,6 +222,17 @@ export namespace RPC {
 	};
 }
 
+// sdkErrorNames names the Go sentinels whose Workflow SDK error class the
+// runtime checks for, by that class's name.
+const sdkErrorNames: Record<string, string> = {
+	throttled: "ThrottleError",
+	event_conflict: "EntityConflictError",
+	run_already_exists: "EntityConflictError",
+	run_terminal: "RunExpiredError",
+	run_not_found: "WorkflowRunNotFoundError",
+	hook_not_found: "HookNotFoundError",
+};
+
 export class HTTPWorldError extends Error {
 	readonly code: string;
 	readonly status?: number;
@@ -234,9 +245,10 @@ export class HTTPWorldError extends Error {
 
 	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string, retryAfter?: number) {
 		super(message);
-		// A throttled failure is named as the Workflow SDK's ThrottleError,
-		// which its callers recognize by name and read retryAfter from.
-		this.name = sentinel === "throttled" ? "ThrottleError" : "HTTPWorldError";
+		// A failure the Workflow SDK's runtime acts on is named as its error
+		// class, which callers recognize by name (EntityConflictError.is,
+		// ThrottleError.is reading retryAfter, and so on).
+		this.name = (sentinel && sdkErrorNames[sentinel]) || "HTTPWorldError";
 		this.code = code;
 		this.status = status;
 		this.sentinel = sentinel;

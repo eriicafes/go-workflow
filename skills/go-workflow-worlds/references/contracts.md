@@ -9,10 +9,15 @@ Otherwise each event gets its own `EventBatchItem` outcome: refused events
 leave the others appended, and once an event is refused, every later event of
 the batch with the same correlation ID is refused too.
 
-Repeated admitted lifecycle transitions return the existing event with
-`AllocatedEventCount == 0`. A `step_started` for a started step is a new
-attempt, not a repeat. A repeated `step_created`, or an inline step's
-creating `step_started` (`worlds.StartCreatesStep`), is a repeat.
+An event that repeats a creation the log holds is refused with
+`ErrEventConflict`, as the Workflow SDK's Worlds refuse it with
+`EntityConflictError`: a second `step_created`, `wait_created`,
+`wait_completed`, or `hook_created`, an inline step's creating `step_started`
+(`worlds.StartCreatesStep`), or a workflow `attr_set`
+(`worlds.WorkflowAttrSet`) with a recorded correlation ID. A `run_started` of
+a running run appends nothing and returns no event (or `ErrEventConflict`), a
+`run_cancelled` of a cancelled run is appended without changing the run, and
+a `step_started` for a started step is a new attempt, not a repeat.
 A finished run refuses `step_created`, `step_started`, `step_retrying`, and
 `wait_created` (`ErrRunTerminal`) and accepts `step_completed`, `step_failed`,
 and `wait_completed`. Other step and wait checks are optional, and a World
