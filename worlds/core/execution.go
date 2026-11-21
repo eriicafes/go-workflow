@@ -105,6 +105,8 @@ type Execution struct {
 	// completedChains holds the chains of the waits this delivery
 	// completed, whose timers it arms.
 	completedChains map[string]bool
+	// armedWaits holds the waits whose timer the delivery queued.
+	armedWaits map[string]bool
 	// aheadDepth is how many inline steps' results the flow may hand to the
 	// runner ahead of their writes, ahead holds those writes in order, and
 	// writer sends them. See runahead.go.

@@ -46,8 +46,13 @@ func StepMessageKey(stepID worlds.StepID, name string) string {
 // delivery of a World that does not count deliveries, re-sends. A step last
 // sent more than resendMaxAge ago is left alone, since a second message past
 // the World's deduplication would be a second owner of its attempts.
+//
+// A recovery delivery, of a World that lost its messages, sends again the
+// message of every unfinished step that runs from one, started or not and
+// whatever its age: the messages it lost.
 func (e *Execution) resendSteps() {
-	if e.delivery.DeliveryCount == 1 {
+	recovery := e.recovery()
+	if e.delivery.DeliveryCount == 1 && !recovery {
 		return
 	}
 	type state struct {
@@ -59,6 +64,7 @@ func (e *Execution) resendSteps() {
 		attempt   int
 		retryAt   *time.Time
 		handedOff bool
+		retried   bool
 	}
 	var order []worlds.StepID
 	steps := map[worlds.StepID]*state{}
@@ -80,7 +86,7 @@ func (e *Execution) resendSteps() {
 				steps[id], order = step, append(order, id)
 			}
 			if step != nil {
-				step.started, step.handedOff = true, false
+				step.started, step.handedOff, step.retryAt = true, false, nil
 				step.attempt++
 			}
 		case worlds.EventTypeStepRetrying:
@@ -88,6 +94,7 @@ func (e *Execution) resendSteps() {
 				var data worlds.DataStepResult
 				_ = json.Unmarshal(event.Data, &data)
 				step.handedOff, step.sentAt, step.retryAt = data.CreatorMessageID != "", event.CreatedAt, data.RetryAfter
+				step.retried = true
 			}
 		case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed:
 			if step != nil {
@@ -97,12 +104,24 @@ func (e *Execution) resendSteps() {
 	}
 	for _, id := range order {
 		step := steps[id]
-		resend := !step.finished && (!step.inline && !step.started || step.inline && step.handedOff)
-		if !resend || time.Since(step.sentAt) >= resendMaxAge {
+		if step.finished {
+			continue
+		}
+		if recovery {
+			if step.inline && !step.retried {
+				continue
+			}
+		} else if resend := !step.inline && !step.started || step.inline && step.handedOff; !resend || time.Since(step.sentAt) >= resendMaxAge {
 			continue
 		}
 		message := stepMessage(id, step.name, step.attempt+1, true)
 		message.NotBefore = step.retryAt
 		e.queue(message)
 	}
+}
+
+// recovery reports whether the delivery is a flow a World queued after it
+// lost its messages.
+func (e *Execution) recovery() bool {
+	return e.delivery.Recovery && e.delivery.StepID == nil
 }

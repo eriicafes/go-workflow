@@ -101,6 +101,7 @@ func fullInput() worlds.QueueInput {
 		StepName: "step", StepAttempt: 3, StepResent: true, StepInput: []byte("input"),
 		RunSpecVersion: worlds.SpecVersion, RunInput: &worlds.RunInput{WorkflowName: "flow", DeploymentID: "dpl", SpecVersion: worlds.SpecVersion},
 		CompleteWaits:    []string{"wait_1"},
+		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_1", Attempt: 2, ResumeAt: &resumeAt, HopAt: &hopAt},
 		Retention:        worlds.StepRetention,
 	}

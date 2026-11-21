@@ -98,6 +98,11 @@ type (
 		// CompleteWaits holds the waits a flow that wakes the run completes
 		// first, whether or not they are due. See WakeRun.
 		CompleteWaits []string
+		// Recovery marks a flow a World queued after it lost the messages
+		// it held. The flow sends again the message of every step that
+		// runs from one, started or not, and arms the timer of every open
+		// wait.
+		Recovery bool
 		// WaitContinuation marks a timer of a wait. See WaitContinuation.
 		WaitContinuation *WaitContinuation
 		// Retention is how long the message may live, redeliveries

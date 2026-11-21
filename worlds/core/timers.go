@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -61,6 +62,85 @@ func hopDeadline(resumeAt, now time.Time, after *time.Time, maxDelay time.Durati
 	return hopAt
 }
 
+// NearDueWaitWindow is how close to due an open wait is when a delivery that
+// may hold a coalesced timer arms it whatever chain it is in.
+const NearDueWaitWindow = 5 * time.Second
+
+// mayHoldCoalescedTimer reports whether the queue may have coalesced a timer
+// into the delivery: any delivery but its message's first.
+func (e *Execution) mayHoldCoalescedTimer() bool {
+	return e.delivery.DeliveryCount != 1
+}
+
+// armWait queues the timer of the open wait waitID due at resumeAt, once per
+// delivery. A queue can coalesce a wait's last hop that came due before the
+// wait into a delivery, which then finds the wait not due while the queue
+// still holds the hop's key, so a delivery that may hold one keys a last hop
+// it arms afresh by its own second instead, wait:<id>:<resumeAtMs>:s<second>,
+// as it does a near-due re-arm. A re-arm of a timer delivery's own wait
+// carries the next attempt and keeps its hop's key.
+func (e *Execution) armWait(waitID string, resumeAt time.Time, attempt int, nearDue bool) {
+	if e.armedWaits[waitID] {
+		return
+	}
+	if e.armedWaits == nil {
+		e.armedWaits = map[string]bool{}
+	}
+	e.armedWaits[waitID] = true
+	timer := e.waitTimer(waitID, resumeAt, attempt, nil)
+	intermediate := timer.WaitContinuation.ResumeAt != nil
+	if !nearDue && !(e.mayHoldCoalescedTimer() && !intermediate && attempt == 0) {
+		e.queue(timer)
+		return
+	}
+	now := time.Now()
+	timer.IdempotencyKey = fmt.Sprintf("wait:%s:%d:s%d", waitID, resumeAt.UnixMilli(), now.Unix())
+	if !sentNearDue.remember(timer.IdempotencyKey) {
+		return
+	}
+	if _, err := e.world.Queue(e.ctx, e.addressed(timer)); err != nil {
+		sentNearDue.forget(timer.IdempotencyKey)
+		panic(e.exit(deliveryError{cause: err}))
+	}
+}
+
+// sentNearDue holds the near-due keys this process sent, so the re-runs of
+// a busy run's deliveries do not each send the re-arms the queue would drop.
+var sentNearDue = &sentKeys{limit: 10_000}
+
+type sentKeys struct {
+	mu    sync.Mutex
+	limit int
+	keys  map[string]bool
+	order []string
+}
+
+// remember reports whether key is new, and records it.
+func (s *sentKeys) remember(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.keys[key] {
+		return false
+	}
+	if s.keys == nil {
+		s.keys = map[string]bool{}
+	}
+	s.keys[key] = true
+	s.order = append(s.order, key)
+	for len(s.order) > s.limit {
+		delete(s.keys, s.order[0])
+		s.order = s.order[1:]
+	}
+	return true
+}
+
+// forget drops key, so a later delivery sends it again.
+func (s *sentKeys) forget(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.keys, key)
+}
+
 // continueWaitHop queues the hop after input, an intermediate hop of a
 // wait's timer, which is all its delivery does.
 func (r *Runtime) continueWaitHop(ctx context.Context, input worlds.QueueInput) error {
@@ -113,13 +193,14 @@ func (e *Execution) armChainBefore(completing string) {
 		}
 	}
 	if next != "" {
-		e.queue(e.waitTimer(next, open[next].resumeAt, 0, nil))
+		e.armWait(next, open[next].resumeAt, 0, false)
 	}
 }
 
 // armTimers queues the timers the flow owns: the earliest open wait of each
 // chain it owns, and the re-arm of its own timer's wait when that came
-// before the wait was due.
+// before the wait was due. A delivery that may hold a coalesced timer first
+// arms every open wait due within NearDueWaitWindow, whatever its chain.
 func (e *Execution) armTimers() {
 	owned := map[string]bool{e.delivery.MessageID: true}
 	for chain := range e.completedChains {
@@ -130,17 +211,27 @@ func (e *Execution) armTimers() {
 	if continuation := e.delivery.WaitContinuation; continuation != nil {
 		timerFor = continuation.CorrelationID
 		if wait, ok := open[timerFor]; ok {
-			if e.delivery.DeliveryCount != 1 {
+			if e.mayHoldCoalescedTimer() {
 				owned[wait.creator] = true
 			}
 			if time.Now().Before(wait.resumeAt) {
-				e.queue(e.waitTimer(timerFor, wait.resumeAt, continuation.Attempt+1, nil))
+				e.armWait(timerFor, wait.resumeAt, continuation.Attempt+1, false)
+			}
+		}
+	}
+	if e.mayHoldCoalescedTimer() {
+		horizon := time.Now().Add(NearDueWaitWindow)
+		for id, wait := range open {
+			if !wait.resumeAt.After(horizon) {
+				e.armWait(id, wait.resumeAt, 0, true)
 			}
 		}
 	}
 	earliest := map[string]string{}
 	for id, wait := range open {
-		if !owned[wait.creator] || id == timerFor {
+		// A recovery delivery owns every chain: the queue that held their
+		// timers is gone.
+		if !owned[wait.creator] && !e.recovery() || id == timerFor {
 			continue
 		}
 		if current, ok := earliest[wait.creator]; !ok || wait.resumeAt.Before(open[current].resumeAt) {
@@ -148,7 +239,7 @@ func (e *Execution) armTimers() {
 		}
 	}
 	for _, id := range earliest {
-		e.queue(e.waitTimer(id, open[id].resumeAt, 0, nil))
+		e.armWait(id, open[id].resumeAt, 0, false)
 	}
 }
 

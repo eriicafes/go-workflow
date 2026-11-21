@@ -34,6 +34,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 		StepName: "step", StepAttempt: 4, StepResent: true, StepInput: []byte("input"), RunSpecVersion: worlds.SpecVersion,
 		RunInput:         &worlds.RunInput{WorkflowName: "wf", DeploymentID: "dpl_1", SpecVersion: worlds.SpecVersion},
 		CompleteWaits:    []string{"wait_a", "wait_b"},
+		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_a", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
 		Retention:        time.Hour,
 	}
