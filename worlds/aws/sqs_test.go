@@ -205,7 +205,7 @@ func lastBody(t *testing.T, queue *fakeSQS) string {
 	return awsv2.ToString(sent[len(sent)-1].MessageBody)
 }
 
-func TestDeliverRedeliversAndCountsAttempts(t *testing.T) {
+func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	world := testWorld(t, dynamo, queue, nil)
@@ -327,7 +327,7 @@ func TestDeliverHandsOffOnAFIFOQueueWithANewDeduplicationID(t *testing.T) {
 	}
 }
 
-func TestDeliverDropsAMessagePastItsRetention(t *testing.T) {
+func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	world := testWorld(t, dynamo, queue, nil)

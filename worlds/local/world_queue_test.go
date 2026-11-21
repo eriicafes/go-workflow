@@ -39,7 +39,7 @@ func receive(t *testing.T, deliveries <-chan worlds.QueueInput) worlds.QueueInpu
 	}
 }
 
-func TestQueueRedelivery(t *testing.T) {
+func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 10)
 	// The first delivery asks for a redelivery after a delay, the second
@@ -76,7 +76,7 @@ func TestQueueRedelivery(t *testing.T) {
 	waitQueueEmpty(t, world)
 }
 
-func TestQueueFailureCountsAttempt(t *testing.T) {
+func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 10)
 	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
@@ -122,7 +122,7 @@ func TestQueueRedeliverySurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestQueueDeduplicatesWhileMessageLives(t *testing.T) {
+func TestQueueDeduplicatesOnlyWhileTheMessageLives(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
 	deliveries := make(chan worlds.QueueInput, 10)
@@ -151,7 +151,7 @@ func TestQueueDeduplicatesWhileMessageLives(t *testing.T) {
 	receive(t, deliveries)
 }
 
-func TestQueueSerializesFlowsOfARun(t *testing.T) {
+func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	t.Parallel()
 	var running, overlap, steps atomic.Int32
 	var stepsTogether atomic.Bool
@@ -234,7 +234,7 @@ func TestQueueIntermediateHopIsNotHeld(t *testing.T) {
 	}
 }
 
-func TestQueueRoundTripsInput(t *testing.T) {
+func TestQueueRoundTripsEveryField(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 1)
 	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
@@ -266,7 +266,7 @@ func TestQueueRoundTripsInput(t *testing.T) {
 	}
 }
 
-func TestCapabilities(t *testing.T) {
+func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	t.Parallel()
 	capabilities := (*World)(nil).Capabilities()
 	if !capabilities.InBandFence || !capabilities.MaxConcurrency || capabilities.MaxQueueDelay != 0 {

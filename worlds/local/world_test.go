@@ -564,29 +564,6 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestQueueIdempotencyKey(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	world := startWorld(t, t.TempDir(), nil)
-	later := time.Now().Add(time.Hour)
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || again.MessageID != first.MessageID {
-		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
-	}
-	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || other.MessageID != first.MessageID {
-		t.Fatalf("same key on another run = %#v err=%v, want %s", other, err, first.MessageID)
-	}
-	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
-	if err != nil || unkeyed.MessageID == first.MessageID {
-		t.Fatalf("unkeyed = %#v err=%v", unkeyed, err)
-	}
-}
-
 func TestClear(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -688,4 +665,27 @@ func writeRecord(t *testing.T, dir string, name string, value any) {
 func double(ctx context.Context, input doubleInput) (doubleOutput, error) {
 	value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) { return value * 2, nil }, input.Value)
 	return doubleOutput{Value: value}, err
+}
+
+func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	world := startWorld(t, t.TempDir(), nil)
+	later := time.Now().Add(time.Hour)
+	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
+	if err != nil || again.MessageID != first.MessageID {
+		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
+	}
+	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", NotBefore: &later, IdempotencyKey: "k"})
+	if err != nil || other.MessageID != first.MessageID {
+		t.Fatalf("same key on another run = %#v err=%v, want %s", other, err, first.MessageID)
+	}
+	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
+	if err != nil || unkeyed.MessageID == first.MessageID {
+		t.Fatalf("unkeyed = %#v err=%v", unkeyed, err)
+	}
 }

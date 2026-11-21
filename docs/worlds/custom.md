@@ -147,7 +147,10 @@ func TestConformanceShared(t *testing.T) {
 
 - **`Conformance`** gives each subtest a fresh World from `newWorld`. Worlds
   backed by shared storage must isolate state per call, for example with a
-  unique table, prefix, schema, or directory.
+  unique table, prefix, schema, or directory. Its `RunAhead` cases run a flow
+  against your World with their own runtime and append another writer's
+  events while its writes are in flight, so they check the in-band fence,
+  skipped-slot reports, and stored write times end to end.
 - **`ConformanceShared`** covers behavior across instances: concurrent appends,
   hook claims, and stream writers. `newPair` returns two Worlds backed by the
   same storage, as two processes would be.
