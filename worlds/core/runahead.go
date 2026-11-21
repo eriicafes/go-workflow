@@ -458,7 +458,7 @@ func admitBelow(event worlds.Event, observed map[worlds.HookID]bool) bool {
 	switch event.EventType {
 	case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed, worlds.EventTypeHookConflict:
 		return !observed[worlds.HookID(event.CorrelationID)]
-	case worlds.EventTypeAttrSet:
+	case worlds.EventTypeAttrSet, worlds.EventTypeNoop:
 		return true
 	}
 	return false

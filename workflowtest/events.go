@@ -491,3 +491,52 @@ func conformEventsSubscribe(t *testing.T, world worlds.World) {
 	mu.Unlock()
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_after", nil)
 }
+
+// conformEventShapes checks the shapes the Workflow SDK gives events and the
+// entities writes return: every event and entity carries its spec version, a
+// hook its run's, a wait write returns the wait, a run's attributes are never
+// nil, and no writer may append a noop.
+func conformEventShapes(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "shapes")
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.Attributes == nil || run.SpecVersion != worlds.SpecVersion {
+		t.Fatalf("run = %+v err = %v, want attributes and spec version %d", run, err, worlds.SpecVersion)
+	}
+	step := conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_shape", worlds.DataStepCreated{StepName: "shape", Input: []byte(`"x"`)})
+	if step.Step == nil || step.Step.SpecVersion != worlds.SpecVersion {
+		t.Fatalf("step_created step = %+v", step.Step)
+	}
+	if got, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_shape"}); err != nil || got.SpecVersion != worlds.SpecVersion {
+		t.Fatalf("step = %+v err = %v", got, err)
+	}
+	hook := conformAppend(t, world, runID, worlds.EventTypeHookCreated, "hook_shape", conformHookData("shape:"+string(runID), false, 0))
+	if hook.Hook == nil || hook.Hook.SpecVersion != worlds.SpecVersion || hook.Hook.ResumeContext.RunSpecVersion != worlds.SpecVersion {
+		t.Fatalf("hook_created hook = %+v", hook.Hook)
+	}
+	if got, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_shape"}); err != nil || got.SpecVersion != worlds.SpecVersion || got.ResumeContext.RunSpecVersion != worlds.SpecVersion {
+		t.Fatalf("hook = %+v err = %v", got, err)
+	}
+	resumeAt := time.Now().Add(time.Hour).UTC().Truncate(time.Millisecond)
+	created := conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_shape", worlds.DataWaitCreated{ResumeAt: resumeAt})
+	wait := created.Wait
+	if wait == nil || wait.WaitID != worlds.WaitIDOf(runID, "wait_shape") || wait.RunID != runID || wait.Status != worlds.WaitStatusWaiting || wait.ResumeAt == nil || !wait.ResumeAt.Equal(resumeAt) || wait.CompletedAt != nil || wait.SpecVersion != worlds.SpecVersion {
+		t.Fatalf("wait_created wait = %+v", wait)
+	}
+	completed := conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_shape", worlds.DataWaitCompleted{ResumeAt: &resumeAt})
+	wait = completed.Wait
+	if wait == nil || wait.Status != worlds.WaitStatusCompleted || wait.CompletedAt == nil || wait.ResumeAt == nil || !wait.ResumeAt.Equal(resumeAt) {
+		t.Fatalf("wait_completed wait = %+v", wait)
+	}
+	batch, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{conformEvent(t, worlds.EventTypeWaitCreated, "wait_batch", worlds.DataWaitCreated{ResumeAt: resumeAt})}})
+	if err != nil || len(batch.Results) != 1 || batch.Results[0].Wait == nil || batch.Results[0].Wait.Status != worlds.WaitStatusWaiting {
+		t.Fatalf("batch = %+v err = %v", batch, err)
+	}
+	for _, event := range conformAllEvents(t, world, runID) {
+		if event.SpecVersion != worlds.SpecVersion {
+			t.Fatalf("event %s %s spec version = %d, want %d", event.EventID, event.EventType, event.SpecVersion, worlds.SpecVersion)
+		}
+	}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeNoop}})
+	conformExpect(t, err, worlds.ErrEventInvalid, "noop append")
+}

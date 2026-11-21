@@ -2,6 +2,7 @@ package worlds
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -290,7 +291,9 @@ type Step struct {
 	// DecodeErrorPayload decodes it.
 	Error []byte
 	// Attempt is the number of attempts started so far.
-	Attempt     int
+	Attempt int
+	// SpecVersion is the spec version of the event that created the step.
+	SpecVersion int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
@@ -322,10 +325,16 @@ type (
 	HookForceClaim struct {
 		RunID  RunID  `json:"runId"`
 		HookID HookID `json:"hookId"`
+		// WorkflowName, DeploymentID, and RunSpecVersion address the run a
+		// forced claim took its token from, so the claimant wakes it without
+		// reading it. A World sets them on a hook's ClaimedFrom when it has
+		// the run.
+		WorkflowName   string `json:"workflowName,omitempty"`
+		DeploymentID   string `json:"deploymentId,omitempty"`
+		RunSpecVersion int    `json:"runSpecVersion,omitempty"`
 	}
 )
 
-// Hook is the view of one hook derived from its run's event log.
 // HookResumeContext is the part of a hook's run that addresses the
 // deliveries its payloads queue: the run's deployment and workflow.
 type HookResumeContext struct {
@@ -335,8 +344,11 @@ type HookResumeContext struct {
 	// payload sent to the hook is sealed to. It is empty when the run's
 	// payloads are not encrypted.
 	EncryptionPublicKey string
+	// RunSpecVersion is the spec version of the hook's run.
+	RunSpecVersion int
 }
 
+// Hook is the view of one hook derived from its run's event log.
 type Hook struct {
 	RunID RunID
 	// ResumeContext is copied from the hook's run when the hook is created, so
@@ -357,10 +369,39 @@ type Hook struct {
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim
 	ForceClaimedBy      *HookForceClaim
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	ReceivedAt          *time.Time
-	DisposedAt          *time.Time
+	// SpecVersion is the spec version of the event that created the hook.
+	SpecVersion int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ReceivedAt  *time.Time
+	DisposedAt  *time.Time
+}
+
+// WaitStatus is the status of a wait.
+type WaitStatus string
+
+const (
+	WaitStatusWaiting   WaitStatus = "waiting"
+	WaitStatusCompleted WaitStatus = "completed"
+)
+
+// Wait is the view of one wait derived from its run's event log, which a
+// wait_created or wait_completed write returns. Its WaitID is the run's ID and
+// the wait's correlation ID joined by a hyphen.
+type Wait struct {
+	WaitID      string
+	RunID       RunID
+	Status      WaitStatus
+	ResumeAt    *time.Time
+	CompletedAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	SpecVersion int
+}
+
+// WaitIDOf returns the ID of the wait correlationID of run runID.
+func WaitIDOf(runID RunID, correlationID string) string {
+	return string(runID) + "-" + correlationID
 }
 
 // EventType names the kind of an event and determines the shape of its Data.
@@ -409,6 +450,9 @@ const (
 	EventTypeWaitCreated EventType = "wait_created"
 	// EventTypeWaitCompleted records that a wait completed.
 	EventTypeWaitCompleted EventType = "wait_completed"
+	// EventTypeNoop fills a position whose writer allocated it and stopped.
+	// Only a World writes it, and it means nothing to a replay.
+	EventTypeNoop EventType = "noop"
 )
 
 // Valid reports whether t is one of the defined event types.
@@ -517,6 +561,9 @@ type (
 		// reads the time the writer used. A zero OccurredAt, or an
 		// out-of-band write, takes the World's clock.
 		OccurredAt time.Time
+		// SpecVersion is the spec version of the writer, which the World
+		// records on the event. Zero records SpecVersion.
+		SpecVersion int
 	}
 	// EventsListInput holds the arguments to EventsList.
 	EventsListInput struct {
@@ -548,6 +595,9 @@ type (
 		// Step is the step created by a step_created event.
 		Step *Step
 		Hook *Hook
+		// Wait is the wait a wait_created or wait_completed event created
+		// or completed.
+		Wait *Wait
 		Data []byte
 		// StepCreated reports whether this call appended the step_created event.
 		StepCreated bool
@@ -604,6 +654,20 @@ type Event struct {
 	CorrelationID string
 	Data          []byte
 	CreatedAt     time.Time
+	// OccurredAt is when the writer decided the event, where the World
+	// stores it apart from CreatedAt.
+	OccurredAt *time.Time
+	// SpecVersion is the spec version of the event's writer.
+	SpecVersion int
+}
+
+// EventSpecVersion returns the spec version a World records for an event
+// written with version: SpecVersion when it is zero.
+func EventSpecVersion(version int) int {
+	if version == 0 {
+		return SpecVersion
+	}
+	return version
 }
 
 // EventIDForSlot returns the ID of the event at the given 1-based position in
@@ -692,4 +756,57 @@ func NewDeleteDataResult(results []DeleteDataResult) RunsDeleteDataManyResult {
 		}
 	}
 	return RunsDeleteDataManyResult{Summary: summary, Results: results}
+}
+
+// WaitFrom returns the wait correlationID of run runID as its events record
+// it: created is its wait_created and completed its wait_completed, either
+// nil when the log has none.
+func WaitFrom(runID RunID, correlationID string, created, completed *Event) *Wait {
+	if created == nil && completed == nil {
+		return nil
+	}
+	wait := &Wait{WaitID: WaitIDOf(runID, correlationID), RunID: runID, Status: WaitStatusWaiting}
+	if created != nil {
+		var data DataWaitCreated
+		if json.Unmarshal(created.Data, &data) == nil && !data.ResumeAt.IsZero() {
+			resumeAt := data.ResumeAt
+			wait.ResumeAt = &resumeAt
+		}
+		wait.CreatedAt, wait.UpdatedAt, wait.SpecVersion = created.CreatedAt, created.CreatedAt, EventSpecVersion(created.SpecVersion)
+	}
+	if completed != nil {
+		completedAt := completed.CreatedAt
+		wait.Status, wait.CompletedAt, wait.UpdatedAt = WaitStatusCompleted, &completedAt, completedAt
+		if created == nil {
+			var data DataWaitCompleted
+			if json.Unmarshal(completed.Data, &data) == nil {
+				wait.ResumeAt = data.ResumeAt
+			}
+			wait.CreatedAt, wait.SpecVersion = completedAt, EventSpecVersion(completed.SpecVersion)
+		}
+	}
+	return wait
+}
+
+// WaitOfEvents returns the wait correlationID of run runID from its events,
+// or nil when they record none.
+func WaitOfEvents(runID RunID, correlationID string, events []Event) *Wait {
+	var created, completed *Event
+	for index := range events {
+		event := &events[index]
+		if event.CorrelationID != correlationID {
+			continue
+		}
+		switch event.EventType {
+		case EventTypeWaitCreated:
+			if created == nil {
+				created = event
+			}
+		case EventTypeWaitCompleted:
+			if completed == nil {
+				completed = event
+			}
+		}
+	}
+	return WaitFrom(runID, correlationID, created, completed)
 }

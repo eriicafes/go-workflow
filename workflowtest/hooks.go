@@ -105,6 +105,10 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	if forced.Hook == nil || forced.Hook.ClaimedFrom == nil || forced.Hook.ClaimedFrom.RunID != owner || forced.EventType != worlds.EventTypeHookCreated || forced.AllocatedEventCount != 1 {
 		t.Fatalf("forced claim = %#v", forced)
 	}
+	// The claim names the run it took the token from by what wakes it.
+	if from := forced.Hook.ClaimedFrom; from.WorkflowName != "conformance" || from.RunSpecVersion != worlds.SpecVersion {
+		t.Fatalf("claimed from = %#v, want the owner run's workflow and spec version", from)
+	}
 	events := conformAllEvents(t, world, owner)
 	last := events[len(events)-1]
 	var disposed worlds.HookDisposedEventData

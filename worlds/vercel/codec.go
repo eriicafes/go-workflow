@@ -38,6 +38,8 @@ type wireEvent struct {
 	CorrelationID string
 	Data          map[string]any
 	CreatedAt     time.Time
+	OccurredAt    *time.Time
+	SpecVersion   int
 }
 
 // decodeWireEvent reads an event frame: meta is the event and body is the
@@ -70,12 +72,16 @@ func wireEventFromMap(value map[string]any) wireEvent {
 	}
 	event.Data, _ = value["eventData"].(map[string]any)
 	event.CreatedAt, _ = asTime(value["createdAt"])
+	if occurred, ok := asTime(value["occurredAt"]); ok {
+		event.OccurredAt = &occurred
+	}
+	event.SpecVersion, _ = asInt(value["specVersion"])
 	return event
 }
 
 // encodeEvent returns the frame meta and payload of a go-workflow event.
 func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error) {
-	meta := map[string]any{"eventType": string(event.EventType), "specVersion": specVersion}
+	meta := map[string]any{"eventType": string(event.EventType), "specVersion": worlds.EventSpecVersion(event.SpecVersion)}
 	if event.CorrelationID != "" {
 		meta["correlationId"] = event.CorrelationID
 	}
@@ -108,7 +114,16 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			meta["errorCode"] = data.ErrorCode
 		}
 		return meta, data.Error, nil
-	case worlds.EventTypeRunCancelled, worlds.EventTypeWaitCompleted, worlds.EventTypeHookDisposed:
+	case worlds.EventTypeWaitCompleted:
+		var data worlds.DataWaitCompleted
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		if data.ResumeAt != nil {
+			meta["eventData"] = map[string]any{"resumeAt": data.ResumeAt.UTC()}
+		}
+		return meta, nil, nil
+	case worlds.EventTypeRunCancelled, worlds.EventTypeHookDisposed:
 		return meta, nil, nil
 	case worlds.EventTypeAttrSet:
 		var data worlds.DataAttrSet
@@ -246,6 +261,8 @@ func toEvent(runID worlds.RunID, wire wireEvent, resolve worlds.EventsResolveDat
 		CorrelationID: wire.CorrelationID,
 		Data:          worlds.ResolveEventData(eventType, data, resolve),
 		CreatedAt:     wire.CreatedAt,
+		OccurredAt:    wire.OccurredAt,
+		SpecVersion:   wire.SpecVersion,
 	}, nil
 }
 
@@ -322,9 +339,15 @@ func eventData(wire wireEvent) ([]byte, error) {
 			return nil, nil
 		}
 		return json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt, CreatorMessageID: str(d, "creatorMessageId")})
+	case worlds.EventTypeWaitCompleted:
+		resumeAt, ok := asTime(d["resumeAt"])
+		if !ok {
+			return nil, nil
+		}
+		return json.Marshal(worlds.DataWaitCompleted{ResumeAt: &resumeAt})
 	}
-	// run_started, run_cancelled, wait_completed, and the backend's own
-	// events, such as noop slot fillers, carry no Data.
+	// run_started, run_cancelled, and the backend's noop slot fillers carry
+	// no Data.
 	return nil, nil
 }
 
@@ -380,7 +403,9 @@ func hookClaim(value any) *worlds.HookForceClaim {
 	if !ok || str(values, "runId") == "" {
 		return nil
 	}
-	return &worlds.HookForceClaim{RunID: worlds.RunID(str(values, "runId")), HookID: worlds.HookID(str(values, "hookId"))}
+	claim := &worlds.HookForceClaim{RunID: worlds.RunID(str(values, "runId")), HookID: worlds.HookID(str(values, "hookId")), WorkflowName: str(values, "workflowName"), DeploymentID: str(values, "deploymentId")}
+	claim.RunSpecVersion, _ = asInt(values["runSpecVersion"])
+	return claim
 }
 
 // startHook reads a run_created's startHook, or nil.

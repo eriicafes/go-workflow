@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"testing/synctest"
@@ -33,6 +34,27 @@ func TestDurableWaitCompletes(t *testing.T) {
 	if _, err := completed.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// The wait_completed records when the wait was due, as its wait_created.
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(completed.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var due time.Time
+	for _, event := range events.Data {
+		switch event.EventType {
+		case worlds.EventTypeWaitCreated:
+			var data worlds.DataWaitCreated
+			_ = json.Unmarshal(event.Data, &data)
+			due = data.ResumeAt
+		case worlds.EventTypeWaitCompleted:
+			var data worlds.DataWaitCompleted
+			if json.Unmarshal(event.Data, &data) != nil || data.ResumeAt == nil || !data.ResumeAt.Equal(due) {
+				t.Fatalf("wait_completed data = %s, want resumeAt %v", event.Data, due)
+			}
+			return
+		}
+	}
+	t.Fatal("no wait_completed")
 }
 
 func TestWakeRunCompletesOnlySelectedWaits(t *testing.T) {

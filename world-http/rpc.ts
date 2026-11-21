@@ -70,6 +70,7 @@ export namespace RPC {
 		startedAt: Date | null;
 		completedAt: Date | null;
 		retryAfter: Date | null;
+		specVersion: number;
 	};
 	export type Event = {
 		runId: string;
@@ -78,12 +79,25 @@ export namespace RPC {
 		correlationId: string;
 		data: Uint8Array;
 		createdAt: Date;
+		occurredAt: Date | null;
+		specVersion: number;
+	};
+	export type Wait = {
+		waitId: string;
+		runId: string;
+		status: "waiting" | "completed";
+		resumeAt: Date | null;
+		completedAt: Date | null;
+		createdAt: Date;
+		updatedAt: Date;
+		specVersion: number;
 	};
 	export type EventResult = {
 		event: Event;
 		run?: Run;
 		step?: Step;
 		hook?: Hook;
+		wait?: Wait;
 		stepCreated?: boolean;
 		allocated: number;
 		inBandCount: number;
@@ -97,6 +111,7 @@ export namespace RPC {
 		event?: Event;
 		run?: Run;
 		step?: Step;
+		wait?: Wait;
 	};
 	export type EventBatchResult = {
 		results: BatchEventResult[];
@@ -120,7 +135,8 @@ export namespace RPC {
 	};
 	export type Hook = {
 		runId: string;
-		resumeContext: { deploymentId: string; workflowName: string };
+		resumeContext: { deploymentId: string; workflowName: string; runSpecVersion: number };
+		specVersion: number;
 		hookId: string;
 		token: string;
 		metadata: Uint8Array;

@@ -56,6 +56,7 @@ CREATE TABLE go_workflow_events (
 	correlation_id text NOT NULL DEFAULT '',
 	data bytea,
 	created_at timestamptz NOT NULL,
+	spec_version integer NOT NULL,
 	PRIMARY KEY (run_id, slot)
 );
 CREATE INDEX go_workflow_events_correlation_idx ON go_workflow_events (run_id, correlation_id, slot);
@@ -73,6 +74,7 @@ CREATE TABLE go_workflow_steps (
 	started_at timestamptz,
 	completed_at timestamptz,
 	retry_after timestamptz,
+	spec_version integer NOT NULL,
 	PRIMARY KEY (run_id, step_id)
 );
 CREATE INDEX go_workflow_steps_created_idx ON go_workflow_steps (run_id, created_at, step_id);
@@ -92,7 +94,9 @@ CREATE TABLE go_workflow_hooks (
 	token_retention_until timestamptz,
 	claimed_from jsonb,
 	force_claimed_by jsonb,
-	disposed_at timestamptz
+	disposed_at timestamptz,
+	spec_version integer NOT NULL,
+	run_spec_version integer NOT NULL
 );
 CREATE INDEX go_workflow_hooks_run_idx ON go_workflow_hooks (run_id, created_at, hook_id);
 CREATE INDEX go_workflow_hooks_created_idx ON go_workflow_hooks (created_at, hook_id);

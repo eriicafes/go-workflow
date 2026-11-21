@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,5 +256,41 @@ func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 		if attributes["workflow.run.id"].AsString() != run.ID() || attributes["workflow.step.attempt"].AsInt64() != int64(i+1) {
 			t.Fatalf("attributes = %v", span.Attributes)
 		}
+	}
+}
+
+type unencodableStepInput struct{}
+type unencodableStepOutput struct{}
+
+func (unencodableStepInput) Workflow(unencodableStepOutput) {}
+
+func TestStepWhoseInputDoesNotEncodeIsCreatedWithThePlaceholderAndFailed(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ unencodableStepInput) (unencodableStepOutput, error) {
+		_, err := workflow.Step(ctx, func(context.Context, chan int) (int, error) { return 0, nil }, make(chan int))
+		if err == nil {
+			return unencodableStepOutput{}, errors.New("the step ran")
+		}
+		return unencodableStepOutput{}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, unencodableStepInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil || len(steps.Data) != 1 || steps.Data[0].Status != worlds.StatusFailed {
+		t.Fatalf("steps = %+v err = %v", steps.Data, err)
+	}
+	var input struct {
+		Args []string `json:"args"`
+		Flag bool     `json:"__workflowUnserializableStepInput"`
+	}
+	if err := worlds.DecodePayload(steps.Data[0].Input, nil, &input); err != nil || !input.Flag || len(input.Args) != 1 || !strings.Contains(input.Args[0], "input unavailable") {
+		t.Fatalf("input = %+v err = %v", input, err)
 	}
 }

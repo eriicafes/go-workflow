@@ -68,11 +68,13 @@ and keeps the rest, such as a step's name.
 
 ## Event types
 
+Every event carries the `specVersion` of its writer, 9.
+
 ### Runs
 
 | Type | Records |
 | --- | --- |
-| `run_created` | A new run with its workflow name, input, attributes, the `deploymentId` it is pinned to, and its `specVersion`, 9. Always the first event. |
+| `run_created` | A new run with its workflow name, input, attributes, and the `deploymentId` it is pinned to. Always the first event; its `specVersion`, 9, is the run's. |
 | `run_started` | A flow started replaying the runner. |
 | `run_completed` | The run's output. |
 | `run_failed` | The run's error. |
@@ -83,7 +85,7 @@ and keeps the rest, such as a step's name.
 
 | Type | Records |
 | --- | --- |
-| `step_created` | A step queued as a step delivery, with its name and input, or one whose input did not encode, failed at once. |
+| `step_created` | A step queued as a step delivery, with its name and input, or one whose input did not encode, created `inline` with the SDK's placeholder input and failed at once. |
 | `step_started` | A delivery started an attempt. Each start is a new attempt. An inline step's first `step_started` creates it, with its name, input, and `inline` set, and no `step_created` precedes it. |
 | `step_completed` | The step's output. |
 | `step_retrying` | A failed attempt and when the step is retried. |
@@ -103,7 +105,13 @@ and keeps the rest, such as a step's name.
 | Type | Records |
 | --- | --- |
 | `wait_created` | A timer. |
-| `wait_completed` | The timer fired or was woken. |
+| `wait_completed` | The timer fired or was woken, with the `resumeAt` it was due at. |
+
+### Other
+
+| Type | Records |
+| --- | --- |
+| `noop` | A position whose writer allocated it and stopped. Only a World writes it, and a replay passes over it. |
 
 ## Writers
 

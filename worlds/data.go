@@ -141,8 +141,6 @@ type DataRunCreated struct {
 	ExecutionContext map[string]any `json:"executionContext,omitempty"`
 	// StartHook is the hook created with the run. See StartHook.
 	StartHook *StartHook `json:"startHook,omitempty"`
-	// SpecVersion is the spec version the World created the run under.
-	SpecVersion int `json:"specVersion,omitempty"`
 }
 
 // StartHook is a hook a World creates in the same write as its run, so a
@@ -190,7 +188,6 @@ func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
 		EncryptionPublicKey: input.EncryptionPublicKey,
 		ExecutionContext:    input.ExecutionContext,
 		StartHook:           startHookOf(input),
-		SpecVersion:         SpecVersion,
 	})
 }
 
@@ -286,7 +283,7 @@ type DataStepCreated struct {
 	// Inline reports that the flow runs the step itself. A step_created
 	// records a step queued as a step delivery, or one that failed before
 	// it started, and an inline step is created by its first step_started.
-	Inline bool `json:"inline"`
+	Inline bool `json:"inline,omitempty"`
 	// CreatorMessageID is the queued message of the flow that created the
 	// step.
 	CreatorMessageID string `json:"creatorMessageId,omitempty"`
@@ -337,6 +334,12 @@ type DataWaitCreated struct {
 	// CreatorMessageID is the queued message of the flow that created the
 	// wait, whose chain of timer messages arms it.
 	CreatorMessageID string `json:"creatorMessageId,omitempty"`
+}
+
+// DataWaitCompleted is the Data of a wait_completed event.
+type DataWaitCompleted struct {
+	// ResumeAt is when the wait was due, as its wait_created records it.
+	ResumeAt *time.Time `json:"resumeAt,omitempty"`
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.

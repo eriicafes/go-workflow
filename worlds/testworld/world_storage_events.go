@@ -38,7 +38,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 		return result, err
 	}
-	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: createdAt(input.Event, input.Options.InBandCount)}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: createdAt(input.Event, input.Options.InBandCount), SpecVersion: worlds.EventSpecVersion(input.Event.SpecVersion)}
 	before := worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
@@ -115,10 +115,10 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		run.Attributes = make(map[string]string)
 	}
 	m.runs[input.RunID] = run
-	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}}
+	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now, SpecVersion: worlds.SpecVersion}}
 	if hook := input.StartHook; hook != nil {
 		id := worlds.StartHookID(input.RunID)
-		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}
+		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}
 		m.tokens[hook.Token] = id
 	}
 	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
@@ -160,7 +160,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			refused[value.CorrelationID] = value.CorrelationID != ""
 			continue
 		}
-		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: createdAt(value, input.InBandCount)}
+		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: createdAt(value, input.InBandCount), SpecVersion: worlds.EventSpecVersion(value.SpecVersion)}
 		m.events[input.RunID] = append(m.events[input.RunID], event)
 		m.materializeLocked(event)
 		result.Results[index].EventResult = m.eventResultLocked(event, nil, true)
@@ -228,12 +228,12 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			created.ConflictingRunID = owner.RunID
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
-			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID}
+			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID, WorkflowName: owner.ResumeContext.WorkflowName, DeploymentID: owner.ResumeContext.DeploymentID, RunSpecVersion: owner.ResumeContext.RunSpecVersion}
 			if m.runs[owner.RunID].Status.Terminal() {
 				delete(m.tokens, created.Token)
 			} else {
 				data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
-				forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookDisposed, CorrelationID: string(ownerID), Data: data, CreatedAt: time.Now().UTC()}
+				forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookDisposed, CorrelationID: string(ownerID), Data: data, CreatedAt: time.Now().UTC(), SpecVersion: worlds.SpecVersion}
 				m.events[owner.RunID] = append(m.events[owner.RunID], forced)
 				m.materializeLocked(forced)
 			}
@@ -241,7 +241,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	}
 	input.Event.Data, _ = json.Marshal(created)
 
-	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC(), SpecVersion: worlds.EventSpecVersion(input.Event.SpecVersion)}
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
 	result.Events = append(result.Events, m.events[input.RunID][before:len(m.events[input.RunID])-1]...)
@@ -361,6 +361,9 @@ func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, cre
 	if created {
 		result.AllocatedEventCount = 1
 	}
+	if event.EventType == worlds.EventTypeWaitCreated || event.EventType == worlds.EventTypeWaitCompleted {
+		result.Wait = worlds.WaitOfEvents(event.RunID, event.CorrelationID, m.events[event.RunID])
+	}
 	if event.EventType == worlds.EventTypeHookCreated {
 		hook := m.hookPayloadLocked(cloneHook(m.hooks[worlds.HookID(event.CorrelationID)]), worlds.ResolveDataAll)
 		result.Hook = &hook
@@ -432,7 +435,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 			m.steps[event.RunID] = make(map[worlds.StepID]worlds.Step)
 		}
 		id := worlds.StepID(event.CorrelationID)
-		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}
+		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}
 	case worlds.EventTypeStepStarted:
 		if worlds.StartCreatesStep(event.Data) {
 			var value worlds.DataStepStarted
@@ -441,7 +444,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 				m.steps[event.RunID] = make(map[worlds.StepID]worlds.Step)
 			}
 			id := worlds.StepID(event.CorrelationID)
-			m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}
+			m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}
 		}
 		m.updateStepLocked(event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
@@ -454,7 +457,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)

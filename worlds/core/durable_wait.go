@@ -91,5 +91,7 @@ func (e *Execution) completeWait(wait pendingWait) {
 		}
 	}
 	e.armChainBefore(string(wait.waitID))
-	e.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(wait.waitID)}, nil)
+	resumeAt := wait.dueAt
+	data, _ := json.Marshal(worlds.DataWaitCompleted{ResumeAt: &resumeAt})
+	e.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(wait.waitID), Data: data}, nil)
 }

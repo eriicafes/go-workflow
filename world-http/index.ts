@@ -17,6 +17,7 @@ import type {
 	PaginatedResponse,
 	Step,
 	StepWithoutData,
+	Wait,
 	ListWorkflowRunStepsParams,
 	ListWorkflowRunsParams,
 	WaitForTerminalRunStatusParams,
@@ -256,6 +257,7 @@ export class HTTPWorld implements World {
 							eventType: event.eventType,
 							correlationId: event.correlationId ?? "",
 							data: jsonEncoded(event.eventData),
+							...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 							...(options?.inBand && options.occurredAt ? { occurredAt: options.occurredAt } : {}),
 						},
 						options: createOptions(options),
@@ -269,6 +271,7 @@ export class HTTPWorld implements World {
 						eventType: event.eventType,
 						correlationId: event.correlationId ?? "",
 						data: jsonEncoded(event.eventData),
+						...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 						...(occurredAt ? { occurredAt } : {}),
 					})),
 					...(options?.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
@@ -277,7 +280,7 @@ export class HTTPWorld implements World {
 				return {
 					results: result.results.map((item) =>
 						item.status === 200 && item.event
-							? { status: 200 as const, event: withEventData(item.event), run: item.run && toRun(item.run), step: item.step && toStep(item.step) }
+							? { status: 200 as const, event: withEventData(item.event), run: item.run && toRun(item.run), step: item.step && toStep(item.step), ...(item.wait ? { wait: toWait(item.wait) } : {}) }
 							: { status: item.status, error: item.error ?? "internal", message: item.message ?? "" },
 					),
 					allocated: result.allocated,
@@ -453,6 +456,7 @@ function toEventResult(result: RPC.EventResult): EventResult {
 		...(result.run ? { run: toRun(result.run) } : {}),
 		...(result.step ? { step: toStep(result.step) } : {}),
 		...(result.hook ? { hook: result.hook } : {}),
+		...(result.wait ? { wait: toWait(result.wait) } : {}),
 		...(result.stepCreated ? { stepCreated: true } : {}),
 		allocated: result.allocated,
 		...(result.events ? { events: result.events.map(withEventData), cursor: null, hasMore: result.hasMore ?? false } : {}),
@@ -483,7 +487,8 @@ const payloadFields = ["input", "output", "result", "error", "payload", "metadat
 // Workflow SDK reads: its payloads as bytes, and Go workflow and step names
 // in SDK form.
 function withEventData(event: RPC.Event): Event {
-	const { data, ...rest } = event;
+	const { data, occurredAt, ...fields } = event;
+	const rest = occurredAt ? { ...fields, occurredAt } : fields;
 	const eventData = decodeData(data);
 	if (eventData === undefined) {
 		return rest as Event;
@@ -537,6 +542,13 @@ function toRun(run: RPC.Run): WorkflowRun {
 		output: payload(output),
 		error: payload(error),
 	} as WorkflowRun;
+}
+
+// toWait exposes a wait as the Workflow SDK reads one, without the times it
+// does not have.
+function toWait(wait: RPC.Wait): Wait {
+	const { resumeAt, completedAt, ...rest } = wait;
+	return { ...rest, ...(resumeAt ? { resumeAt } : {}), ...(completedAt ? { completedAt } : {}) };
 }
 
 // toStep exposes a step as the Workflow SDK reads one.

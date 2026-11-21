@@ -231,13 +231,14 @@ func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string
 func stepItem(view stepView) map[string]ddb.AttributeValue {
 	step := view.Step
 	item := merge(stepKey(string(step.RunID), string(step.StepID)), map[string]ddb.AttributeValue{
-		"runId":     avs(string(step.RunID)),
-		"stepId":    avs(string(step.StepID)),
-		"stepName":  avs(step.StepName),
-		"status":    avs(string(step.Status)),
-		"attempt":   avn(int64(step.Attempt)),
-		"createdAt": avs(stamp(step.CreatedAt)),
-		"updatedAt": avs(stamp(step.UpdatedAt)),
+		"runId":       avs(string(step.RunID)),
+		"stepId":      avs(string(step.StepID)),
+		"stepName":    avs(step.StepName),
+		"status":      avs(string(step.Status)),
+		"attempt":     avn(int64(step.Attempt)),
+		"createdAt":   avs(stamp(step.CreatedAt)),
+		"updatedAt":   avs(stamp(step.UpdatedAt)),
+		"specVersion": avn(int64(step.SpecVersion)),
 	})
 	setTime(item, "startedAt", step.StartedAt)
 	setTime(item, "completedAt", step.CompletedAt)
@@ -260,6 +261,7 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 			StartedAt:   readTimePtr(item, "startedAt"),
 			CompletedAt: readTimePtr(item, "completedAt"),
 			RetryAfter:  readTimePtr(item, "retryAfter"),
+			SpecVersion: int(readInt(item, "specVersion")),
 		},
 		createdEventID: worlds.EventID(read(item, "createdEventId")),
 		resultEventID:  worlds.EventID(read(item, "resultEventId")),
@@ -270,17 +272,19 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 // hook_created event holds. The writer adds createdEventId naming that event.
 func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	item := merge(hookKey(string(hook.HookID)), map[string]ddb.AttributeValue{
-		"runId":         avs(string(hook.RunID)),
-		"hookId":        avs(string(hook.HookID)),
-		"token":         avs(hook.Token),
-		"workflowName":  avs(hook.ResumeContext.WorkflowName),
-		"deploymentId":  avs(hook.ResumeContext.DeploymentID),
-		"createdAt":     avs(stamp(hook.CreatedAt)),
-		"updatedAt":     avs(stamp(hook.UpdatedAt)),
-		"list_pk":       avs("HOOKS"),
-		"list_sk":       avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
-		"list_group_pk": avs("HOOKS#" + string(hook.RunID)),
-		"list_group_sk": avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
+		"runId":          avs(string(hook.RunID)),
+		"hookId":         avs(string(hook.HookID)),
+		"token":          avs(hook.Token),
+		"workflowName":   avs(hook.ResumeContext.WorkflowName),
+		"deploymentId":   avs(hook.ResumeContext.DeploymentID),
+		"createdAt":      avs(stamp(hook.CreatedAt)),
+		"updatedAt":      avs(stamp(hook.UpdatedAt)),
+		"specVersion":    avn(int64(hook.SpecVersion)),
+		"runSpecVersion": avn(int64(hook.ResumeContext.RunSpecVersion)),
+		"list_pk":        avs("HOOKS"),
+		"list_sk":        avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
+		"list_group_pk":  avs("HOOKS#" + string(hook.RunID)),
+		"list_group_sk":  avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
 	})
 	setString(item, "encryptionPublicKey", hook.ResumeContext.EncryptionPublicKey)
 	if hook.IsWebhook {
@@ -303,7 +307,8 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	hook := worlds.Hook{
 		RunID:               worlds.RunID(read(item, "runId")),
-		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName"), EncryptionPublicKey: read(item, "encryptionPublicKey")},
+		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName"), EncryptionPublicKey: read(item, "encryptionPublicKey"), RunSpecVersion: int(readInt(item, "runSpecVersion"))},
+		SpecVersion:         int(readInt(item, "specVersion")),
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),
 		CreatedAt:           readTime(item, "createdAt"),
@@ -357,10 +362,11 @@ func tokenCondition(seen *tokenView) (string, map[string]ddb.AttributeValue) {
 
 func eventItem(event worlds.Event, slot uint64) map[string]ddb.AttributeValue {
 	item := merge(eventKey(string(event.RunID), slot), map[string]ddb.AttributeValue{
-		"runId":     avs(string(event.RunID)),
-		"eventId":   avs(string(event.EventID)),
-		"eventType": avs(string(event.EventType)),
-		"createdAt": avs(stamp(event.CreatedAt)),
+		"runId":       avs(string(event.RunID)),
+		"eventId":     avs(string(event.EventID)),
+		"eventType":   avs(string(event.EventType)),
+		"createdAt":   avs(stamp(event.CreatedAt)),
+		"specVersion": avn(int64(event.SpecVersion)),
 	})
 	setString(item, "correlationId", event.CorrelationID)
 	setBytes(item, "data", event.Data)
@@ -375,6 +381,7 @@ func eventFromItem(item map[string]ddb.AttributeValue) worlds.Event {
 		CorrelationID: read(item, "correlationId"),
 		Data:          readBytes(item, "data"),
 		CreatedAt:     readTime(item, "createdAt"),
+		SpecVersion:   int(readInt(item, "specVersion")),
 	}
 }
 

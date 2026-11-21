@@ -480,7 +480,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		events, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 		return outcome{status: http.StatusOK, answer: map[string]any{"event": f.wireEvent(events.Data[0], true), "run": f.wireRun(run, nil), "allocated": 1}}
 	}
-	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
+	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred, SpecVersion: spec}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
 	if err != nil {
 		if errors.Is(err, worlds.ErrInBandSuperseded) {
 			seq, seqInBand := f.counters(ctx, runID)
@@ -508,6 +508,16 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		if len(result.Events) > 0 {
 			answer["cursor"] = "eid:" + string(result.Events[len(result.Events)-1].EventID)
 		}
+	}
+	if wait := result.Wait; wait != nil {
+		wire := map[string]any{"waitId": wait.WaitID, "runId": string(wait.RunID), "status": string(wait.Status), "createdAt": wait.CreatedAt, "updatedAt": wait.UpdatedAt, "specVersion": wait.SpecVersion}
+		if wait.ResumeAt != nil {
+			wire["resumeAt"] = *wait.ResumeAt
+		}
+		if wait.CompletedAt != nil {
+			wire["completedAt"] = *wait.CompletedAt
+		}
+		answer["wait"] = wire
 	}
 	if result.Step != nil {
 		answer["step"] = f.wireStep(ctx, *result.Step, nil)
@@ -660,17 +670,22 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 				stored[name] = value
 			}
 		}
+		if data, ok := meta["eventData"].(map[string]any); ok {
+			for key, value := range data {
+				stored[key] = value
+			}
+		}
 		if field, ok := payloadFields[event.EventType]; ok && len(payload) > 0 {
 			stored[field] = payload
 		}
 		if event.EventType == worlds.EventTypeHookCreated {
 			var created worlds.DataHookCreated
 			if json.Unmarshal(event.Data, &created) == nil && created.ForceClaimedFrom != nil {
-				stored["forceClaimedFrom"] = map[string]any{"runId": string(created.ForceClaimedFrom.RunID), "hookId": string(created.ForceClaimedFrom.HookID)}
+				stored["forceClaimedFrom"] = wireClaim(created.ForceClaimedFrom)
 			}
 		}
 	}
-	wire := map[string]any{"runId": string(event.RunID), "eventId": string(event.EventID), "eventType": string(event.EventType), "createdAt": event.CreatedAt, "specVersion": specVersion, "eventData": stored}
+	wire := map[string]any{"runId": string(event.RunID), "eventId": string(event.EventID), "eventType": string(event.EventType), "createdAt": event.CreatedAt, "specVersion": event.SpecVersion, "eventData": stored}
 	if event.CorrelationID != "" {
 		wire["correlationId"] = event.CorrelationID
 	}
@@ -713,7 +728,7 @@ func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[str
 }
 
 func (f *fakeBackend) wireStep(ctx context.Context, step worlds.Step, query map[string][]string) map[string]any {
-	wire := map[string]any{"runId": string(step.RunID), "stepId": string(step.StepID), "stepName": step.StepName, "status": string(step.Status), "attempt": step.Attempt, "createdAt": step.CreatedAt, "updatedAt": step.UpdatedAt}
+	wire := map[string]any{"runId": string(step.RunID), "stepId": string(step.StepID), "stepName": step.StepName, "status": string(step.Status), "attempt": step.Attempt, "createdAt": step.CreatedAt, "updatedAt": step.UpdatedAt, "specVersion": step.SpecVersion}
 	for key, value := range map[string]*time.Time{"startedAt": step.StartedAt, "completedAt": step.CompletedAt, "retryAfter": step.RetryAfter} {
 		if value != nil {
 			wire[key] = *value
@@ -743,12 +758,12 @@ func (f *fakeBackend) writeHook(ctx context.Context, writer http.ResponseWriter,
 }
 
 func (f *fakeBackend) wireHook(ctx context.Context, hook worlds.Hook) map[string]any {
-	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName, "encryptionPublicKey": hook.ResumeContext.EncryptionPublicKey}}
+	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "specVersion": hook.SpecVersion, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName, "encryptionPublicKey": hook.ResumeContext.EncryptionPublicKey, "runSpecVersion": hook.ResumeContext.RunSpecVersion}}
 	if hook.TokenRetentionUntil != nil {
 		wire["tokenRetentionUntil"] = *hook.TokenRetentionUntil
 	}
 	if hook.ClaimedFrom != nil {
-		wire["claimedFrom"] = map[string]any{"runId": string(hook.ClaimedFrom.RunID), "hookId": string(hook.ClaimedFrom.HookID)}
+		wire["claimedFrom"] = wireClaim(hook.ClaimedFrom)
 	}
 	if len(hook.Metadata) > 0 {
 		wire["metadata"] = hook.Metadata
@@ -867,4 +882,19 @@ func (f *fakeBackend) purge(ctx context.Context, writer http.ResponseWriter, req
 		"summary": map[string]any{"requested": summary.Requested, "purged": summary.Deleted, "alreadyPurged": summary.AlreadyDeleted, "skipped": summary.Skipped, "notCreated": summary.NotCreated, "notFound": summary.NotFound, "failed": summary.Failed},
 		"results": results,
 	})
+}
+
+// wireClaim returns a hook claim as the backend stores it.
+func wireClaim(claim *worlds.HookForceClaim) map[string]any {
+	wire := map[string]any{"runId": string(claim.RunID), "hookId": string(claim.HookID)}
+	if claim.WorkflowName != "" {
+		wire["workflowName"] = claim.WorkflowName
+	}
+	if claim.DeploymentID != "" {
+		wire["deploymentId"] = claim.DeploymentID
+	}
+	if claim.RunSpecVersion != 0 {
+		wire["runSpecVersion"] = claim.RunSpecVersion
+	}
+	return wire
 }
