@@ -71,6 +71,9 @@ var (
 	// ErrRunExpired is returned when reading the result of a run whose data
 	// was deleted.
 	ErrRunExpired = errors.New("workflow: run data expired")
+	// ErrThrottled is returned when a World refuses a request for its rate
+	// limit. A *ThrottleError carries how long it asked to wait.
+	ErrThrottled = errors.New("workflow: rate limited")
 	// ErrStartHookOptions is the error of a hook that opens its run's start
 	// hook (see Execution.OpenStartHook) with MinRetention or Force, which
 	// only the start can set.
@@ -430,3 +433,21 @@ func (e *HookConflictError) Error() string {
 }
 
 func (e *HookConflictError) Is(target error) bool { return target == ErrHookConflict }
+
+// ThrottleError is ErrThrottled with how long the World asked the caller to
+// wait, as a Retry-After header gives it. A zero After means it did not say.
+type ThrottleError struct {
+	Cause error
+	After time.Duration
+}
+
+func (e *ThrottleError) Error() string {
+	if e.Cause == nil {
+		return ErrThrottled.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrThrottled, e.Cause)
+}
+
+func (e *ThrottleError) Unwrap() error { return e.Cause }
+
+func (e *ThrottleError) Is(target error) bool { return target == ErrThrottled }

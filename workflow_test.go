@@ -314,6 +314,88 @@ func TestDeleteRuns(t *testing.T) {
 	}
 }
 
+type deleteStepInput struct{ Target worlds.RunID }
+
+func (deleteStepInput) Workflow(string) {}
+
+// flakyDeleteWorld fails its first deletion retryably, or every one with a
+// rate limit when throttle is set.
+type flakyDeleteWorld struct {
+	*testworld.World
+	calls    *int
+	throttle bool
+}
+
+func (w flakyDeleteWorld) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	*w.calls++
+	if w.throttle {
+		return worlds.RunsDeleteDataManyResult{}, &worlds.ThrottleError{After: 7 * time.Second}
+	}
+	if *w.calls == 1 {
+		results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+		for index, id := range input.RunIDs {
+			results[index] = worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "busy", Retryable: true}
+		}
+		return worlds.NewDeleteDataResult(results), nil
+	}
+	return w.World.RunsDeleteDataMany(ctx, input)
+}
+
+func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
+		return workflow.Step(ctx, func(ctx context.Context, target worlds.RunID) (string, error) {
+			result, err := workflow.DeleteRuns(ctx, string(target))
+			if err != nil {
+				return "", err
+			}
+			return string(result.Results[0].Outcome), nil
+		}, input.Target, workflow.StepOptions{MaxRetries: 1})
+	}))
+	for _, throttle := range []bool{false, true} {
+		inner := testworld.NewManual()
+		calls := 0
+		world := flakyDeleteWorld{World: inner, calls: &calls, throttle: throttle}
+		if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_target", WorkflowName: "target"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inner.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_target", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
+			t.Fatal(err)
+		}
+		clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
+		run, err := workflow.Start(clientCtx, deleteStepInput{Target: "wrun_target"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := worlds.NewRuntime(world, runners)
+		for delivered := 0; delivered < 3 && len(inner.QueuedMessages()) > 0; delivered++ {
+			message := inner.QueuedMessages()[0]
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			_ = inner.Acknowledge(ctx, message.ID)
+		}
+		if !throttle {
+			// The failed run was sent again once, within the step.
+			if value, err := run.Value(clientCtx); err != nil || value != string(worlds.DeleteDataDeleted) || calls != 2 {
+				t.Fatalf("flaky delete = %q, %v after %d calls", value, err, calls)
+			}
+			inner.Close()
+			continue
+		}
+		// A rate limit retries the step after the World's wait.
+		steps, err := inner.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+		if err != nil || len(steps.Data) != 1 || steps.Data[0].RetryAfter == nil {
+			t.Fatalf("throttled step = %+v, %v", steps.Data, err)
+		}
+		if wait := time.Until(*steps.Data[0].RetryAfter); wait < 5*time.Second || wait > 7*time.Second {
+			t.Fatalf("throttled step retries in %v, want the World's 7s", wait)
+		}
+		inner.Close()
+	}
+}
+
 // noDeleteWorld is a World that does not delete run data.
 type noDeleteWorld struct{ *testworld.World }
 

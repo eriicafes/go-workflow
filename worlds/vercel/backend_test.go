@@ -2,8 +2,10 @@ package vercelworld
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -114,5 +116,35 @@ func TestTimesSurviveTheWire(t *testing.T) {
 	}
 	if got, ok := asTime(int64(1700000000123)); !ok || !got.Equal(time.UnixMilli(1700000000123)) {
 		t.Fatalf("millisecond time = %v", got)
+	}
+}
+
+func TestBackendRateLimitIsAThrottleError(t *testing.T) {
+	for _, test := range []struct {
+		header   http.Header
+		throttle bool
+		after    time.Duration
+	}{
+		{http.Header{"Retry-After": {"7"}}, true, 7 * time.Second},
+		{http.Header{}, true, 0},
+		// A firewall challenge is a transport failure, not the rate limit.
+		{http.Header{"X-Vercel-Mitigated": {"challenge"}}, false, 0},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			for key, values := range test.header {
+				writer.Header()[key] = values
+			}
+			writer.WriteHeader(http.StatusTooManyRequests)
+		}))
+		api := &backend{baseURL: server.URL, http: server.Client(), oidc: func(context.Context) (string, error) { return "token", nil }}
+		_, err := api.request(context.Background(), http.MethodGet, "/v2/runs/wrun_1", nil, nil, nil)
+		server.Close()
+		var throttle *worlds.ThrottleError
+		if errors.As(err, &throttle) != test.throttle || (test.throttle && throttle.After != test.after) {
+			t.Errorf("429 with %v = %v", test.header, err)
+		}
+		if statusOf(err) != http.StatusTooManyRequests {
+			t.Errorf("429 with %v lost its status: %v", test.header, err)
+		}
 	}
 }

@@ -43,6 +43,7 @@
 package workflow
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -384,6 +385,35 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 	return newStreamWriter(ctx, r.client, r.id, writerOption(options).Name, frame)
 }
 
+// Use registers fn as the runner of workflow In. Pass the returned Runner to
+// worlds.Runners so the runtime can execute the workflow. The workflow name is
+// the package path and type name of In. fn replays on every delivery, so it
+// must be deterministic. It does side effects only through steps and reads
+// time only through Now.
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
+	name := worlds.WorkflowName[In]()
+	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
+		execution, ok := worlds.ExecutionFromContext(ctx)
+		if !ok {
+			return nil, ErrNoWorkflow
+		}
+		// The input is the workflow's argument list.
+		var args [1]In
+		if err := execution.DecodePayload(raw, &args); err != nil {
+			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
+		}
+		output, err := fn(ctx, args[0])
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := execution.EncodePayload(output)
+		if err != nil {
+			return nil, fmt.Errorf("workflow: encode %s output: %w", name, err)
+		}
+		return encoded, nil
+	})
+}
+
 // Get returns a handle to the run with runID, using the Client in ctx. It does
 // not check that the run exists (see Run.Exists). It returns ErrNoClient when
 // ctx carries no Client and does not belong to a run.
@@ -393,122 +423,6 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 		return nil, err
 	}
 	return &Run[Out]{id: worlds.RunID(runID), client: client}, nil
-}
-
-// DeleteRunsResult is the result of DeleteRuns: one result per run, in the
-// order of the run IDs, and a count of each outcome.
-type DeleteRunsResult = worlds.RunsDeleteDataManyResult
-
-// Delays DeleteRuns waits in a step before sending retryable failures again,
-// and before the step retries them.
-const (
-	deleteRunsResendDelay = time.Second
-	deleteRunsRetryDelay  = 10 * time.Second
-)
-
-// DeleteRuns deletes the data of one to 100 finished runs, using the Client
-// in ctx: their inputs, outputs, and errors, the payloads of their steps,
-// events, and hooks, and their streams' chunks. It cannot be undone. The
-// runs, steps, events, and hooks stay, with their IDs, names, statuses,
-// timestamps, and attributes, and a run's Run.Value then returns
-// ErrRunExpired.
-//
-// A run that has not finished is skipped and left running. Each run's
-// outcome is in the result. Called in a step, DeleteRuns sends retryable
-// failures again once, and returns a RetryableError for those that still
-// fail, so the step retries them; elsewhere they are returned for the caller
-// to retry. It returns an error wrapping errors.ErrUnsupported when the
-// World does not delete run data, and ErrNotInStep in workflow code.
-func DeleteRuns(ctx context.Context, runIDs ...string) (DeleteRunsResult, error) {
-	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return DeleteRunsResult{}, ErrNotInStep
-	}
-	_, inStep := stepExecutionFromContext(ctx)
-	// Inside a step, a request that cannot succeed fails the step rather
-	// than being retried.
-	fatal := func(err error) error {
-		if inStep {
-			return FatalError(err)
-		}
-		return err
-	}
-	client, err := clientFromContext(ctx)
-	if err != nil {
-		return DeleteRunsResult{}, err
-	}
-	ids := make([]worlds.RunID, len(runIDs))
-	for index, id := range runIDs {
-		ids[index] = worlds.RunID(id)
-	}
-	if err := worlds.CheckDeleteDataInput(worlds.RunsDeleteDataManyInput{RunIDs: ids}); err != nil {
-		return DeleteRunsResult{}, fatal(err)
-	}
-	spec, err := client.Spec(ctx)
-	if err != nil {
-		return DeleteRunsResult{}, err
-	}
-	if !spec.Capabilities.DeleteData {
-		return DeleteRunsResult{}, fatal(fmt.Errorf("workflow: the World does not delete run data: %w", errors.ErrUnsupported))
-	}
-	results, err := deleteRunData(ctx, client, ids)
-	if err != nil {
-		return DeleteRunsResult{}, err
-	}
-	if inStep {
-		if retry := retryableDeletions(results); len(retry) > 0 {
-			timer := time.NewTimer(deleteRunsResendDelay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return DeleteRunsResult{}, ctx.Err()
-			case <-timer.C:
-			}
-			retried, err := deleteRunData(ctx, client, retry)
-			if err != nil {
-				return DeleteRunsResult{}, err
-			}
-			for index, result := range results {
-				for _, again := range retried {
-					if again.RunID == result.RunID {
-						results[index] = again
-					}
-				}
-			}
-		}
-		if retry := retryableDeletions(results); len(retry) > 0 {
-			return worlds.NewDeleteDataResult(results), RetryableError(fmt.Errorf("workflow: deleting the data of %d runs failed and will be retried", len(retry)), deleteRunsRetryDelay)
-		}
-	}
-	return worlds.NewDeleteDataResult(results), nil
-}
-
-// deleteRunData deletes the data of ids and checks the World answered each
-// one, in order.
-func deleteRunData(ctx context.Context, client Client, ids []worlds.RunID) ([]worlds.DeleteDataResult, error) {
-	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: ids})
-	if err != nil {
-		return nil, err
-	}
-	if len(result.Results) != len(ids) {
-		return nil, fmt.Errorf("workflow: delete run data returned %d results for %d runs", len(result.Results), len(ids))
-	}
-	for index, id := range ids {
-		if result.Results[index].RunID != id {
-			return nil, fmt.Errorf("workflow: delete run data returned run %s where %s was expected", result.Results[index].RunID, id)
-		}
-	}
-	return result.Results, nil
-}
-
-// retryableDeletions returns the runs whose deletion failed retryably.
-func retryableDeletions(results []worlds.DeleteDataResult) []worlds.RunID {
-	var ids []worlds.RunID
-	for _, result := range results {
-		if result.Outcome == worlds.DeleteDataFailed && result.Retryable {
-			ids = append(ids, result.RunID)
-		}
-	}
-	return ids
 }
 
 // Retention is how long a finished run's data is kept, as the run's
@@ -873,31 +787,127 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	return id, nil
 }
 
-// Use registers fn as the runner of workflow In. Pass the returned Runner to
-// worlds.Runners so the runtime can execute the workflow. The workflow name is
-// the package path and type name of In. fn replays on every delivery, so it
-// must be deterministic. It does side effects only through steps and reads
-// time only through Now.
-func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
-	name := worlds.WorkflowName[In]()
-	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
-		execution, ok := worlds.ExecutionFromContext(ctx)
-		if !ok {
-			return nil, ErrNoWorkflow
+// DeleteRunsResult is the result of DeleteRuns: one result per run, in the
+// order of the run IDs, and a count of each outcome.
+type DeleteRunsResult = worlds.RunsDeleteDataManyResult
+
+// Delays DeleteRuns waits in a step before sending retryable failures again,
+// and before the step retries them.
+const (
+	deleteRunsResendDelay = time.Second
+	deleteRunsRetryDelay  = 10 * time.Second
+)
+
+// DeleteRuns deletes the data of one to 100 finished runs, using the Client
+// in ctx: their inputs, outputs, and errors, the payloads of their steps,
+// events, and hooks, and their streams' chunks. It cannot be undone. The
+// runs, steps, events, and hooks stay, with their IDs, names, statuses,
+// timestamps, and attributes, and a run's Run.Value then returns
+// ErrRunExpired.
+//
+// A run that has not finished is skipped and left running. Each run's
+// outcome is in the result. Called in a step, DeleteRuns sends retryable
+// failures again once, and returns a RetryableError for those that still
+// fail, so the step retries them; elsewhere they are returned for the caller
+// to retry. It returns an error wrapping errors.ErrUnsupported when the
+// World does not delete run data, and ErrNotInStep in workflow code.
+func DeleteRuns(ctx context.Context, runIDs ...string) (DeleteRunsResult, error) {
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		return DeleteRunsResult{}, ErrNotInStep
+	}
+	_, inStep := stepExecutionFromContext(ctx)
+	// Inside a step, a request that cannot succeed fails the step rather
+	// than being retried.
+	fatal := func(err error) error {
+		if inStep {
+			return FatalError(err)
 		}
-		// The input is the workflow's argument list.
-		var args [1]In
-		if err := execution.DecodePayload(raw, &args); err != nil {
-			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
+		return err
+	}
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return DeleteRunsResult{}, err
+	}
+	ids := make([]worlds.RunID, len(runIDs))
+	for index, id := range runIDs {
+		ids[index] = worlds.RunID(id)
+	}
+	if err := worlds.CheckDeleteDataInput(worlds.RunsDeleteDataManyInput{RunIDs: ids}); err != nil {
+		return DeleteRunsResult{}, fatal(err)
+	}
+	spec, err := client.Spec(ctx)
+	if err != nil {
+		return DeleteRunsResult{}, err
+	}
+	if !spec.Capabilities.DeleteData {
+		return DeleteRunsResult{}, fatal(fmt.Errorf("workflow: the World does not delete run data: %w", errors.ErrUnsupported))
+	}
+	results, err := deleteRunData(ctx, client, ids)
+	failed := 0
+	if err == nil && inStep {
+		retryable := func(result worlds.DeleteDataResult) bool {
+			return result.Outcome == worlds.DeleteDataFailed && result.Retryable
 		}
-		output, err := fn(ctx, args[0])
-		if err != nil {
-			return nil, err
+		var retry []int
+		for index, result := range results {
+			if retryable(result) {
+				retry = append(retry, index)
+			}
 		}
-		encoded, err := execution.EncodePayload(output)
-		if err != nil {
-			return nil, fmt.Errorf("workflow: encode %s output: %w", name, err)
+		if len(retry) > 0 {
+			// Send only the failed runs again, once, since a step retry
+			// sends the whole batch.
+			timer := time.NewTimer(deleteRunsResendDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return DeleteRunsResult{}, ctx.Err()
+			case <-timer.C:
+			}
+			again := make([]worlds.RunID, len(retry))
+			for position, index := range retry {
+				again[position] = results[index].RunID
+			}
+			var resent []worlds.DeleteDataResult
+			if resent, err = deleteRunData(ctx, client, again); err == nil {
+				for position, index := range retry {
+					// deleteRunData answers in the order it was asked.
+					if results[index] = resent[position]; retryable(results[index]) {
+						failed++
+					}
+				}
+			}
 		}
-		return encoded, nil
-	})
+	}
+	if err != nil {
+		// In a step, a World's rate limit retries the step after the wait
+		// the World asked for, or deleteRunsRetryDelay when it did not say.
+		var throttle *worlds.ThrottleError
+		if inStep && errors.As(err, &throttle) {
+			err = RetryableError(err, cmp.Or(throttle.After, deleteRunsRetryDelay))
+		}
+		return DeleteRunsResult{}, err
+	}
+	if failed > 0 {
+		return worlds.NewDeleteDataResult(results), RetryableError(fmt.Errorf("workflow: deleting the data of %d runs failed and will be retried", failed), deleteRunsRetryDelay)
+	}
+	return worlds.NewDeleteDataResult(results), nil
+}
+
+// deleteRunData deletes the data of ids and checks the World answered each
+// one, in order.
+func deleteRunData(ctx context.Context, client Client, ids []worlds.RunID) ([]worlds.DeleteDataResult, error) {
+	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: ids})
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Results) != len(ids) {
+		return nil, fmt.Errorf("workflow: delete run data returned %d results for %d runs", len(result.Results), len(ids))
+	}
+	for index, id := range ids {
+		if result.Results[index].RunID != id {
+			return nil, fmt.Errorf("workflow: delete run data returned run %s where %s was expected", result.Results[index].RunID, id)
+		}
+	}
+	return result.Results, nil
 }

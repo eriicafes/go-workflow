@@ -451,3 +451,19 @@ func TestRPCDeletesRunData(t *testing.T) {
 		t.Fatalf("unsupported delete error = %v", err)
 	}
 }
+
+// throttledWorld is a World that refuses deletions for its rate limit.
+type throttledWorld struct{ *testworld.World }
+
+func (throttledWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, &worlds.ThrottleError{Cause: errors.New("busy"), After: 3 * time.Second}
+}
+
+func TestRPCCarriesThrottling(t *testing.T) {
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(throttledWorld{testworld.NewManual()}, "")))
+	_, err := client.RunsDeleteDataMany(context.Background(), worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_1"}})
+	var throttle *worlds.ThrottleError
+	if !errors.Is(err, worlds.ErrThrottled) || !errors.As(err, &throttle) || throttle.After != 3*time.Second {
+		t.Fatalf("throttled error = %v", err)
+	}
+}

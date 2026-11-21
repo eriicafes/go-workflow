@@ -50,13 +50,18 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   method fails:
 
   ```
-  { output?: <cbor>, error?: { code: string, message: string, sentinel?: string } }
+  { output?: <cbor>, error?: { code: string, message: string, sentinel?: string,
+    conflictingRunId?: string, retryAfter?: int } }
   ```
 
   Error codes are `not_found`, `invalid_argument`, `conflict`, `cancelled`,
-  `deadline_exceeded`, and `internal`. `sentinel` names the `worlds` sentinel
-  error the failure matches, such as `run_not_found`, so `workflow.NewHTTPClient`
-  returns errors that match `errors.Is` as they would in process.
+  `deadline_exceeded`, `unimplemented`, `resource_exhausted`, and `internal`.
+  `sentinel` names the `worlds` sentinel error the failure matches, such as
+  `run_not_found`, so `workflow.NewHTTPClient` returns errors that match
+  `errors.Is` as they would in process. A `hook_conflict` failure names the run
+  holding the token in `conflictingRunId`, and a `throttled` failure, a World's
+  rate limit, the nanoseconds to wait in `retryAfter`, which the client returns
+  as `*worlds.HookConflictError` and `*worlds.ThrottleError`.
 
 - **Waits:** `runs.waitForTerminalStatus` and `streams.getChunks` wait at most
   30 seconds per request. Clients repeat the request to wait longer.
