@@ -297,7 +297,7 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `CreateWebhook` | W | Creates a webhook with a random token. |
+| `CreateWebhook` | W | Creates a webhook with a token drawn from the run's seed. |
 
 ```go
 type WebhookOption struct {

@@ -241,8 +241,17 @@ func (e *Execution) NextStepID() StepID { return StepID("step_" + e.seed.ulid())
 func (e *Execution) NextWaitID() WaitID { return WaitID("wait_" + e.seed.ulid()) }
 
 // NextHookID draws the ID of the next hook the runner declares: hook_ and the
-// run's next correlation ULID.
-func (e *Execution) NextHookID() HookID { return HookID("hook_" + e.seed.ulid()) }
+// run's next correlation ULID, drawing again on the ID of the run's start
+// hook, which no other hook may take.
+func (e *Execution) NextHookID() HookID {
+	id := HookID("hook_" + e.seed.ulid())
+	if e.StartHook() != nil {
+		for id == StartHookID(e.run.RunID) {
+			id = HookID("hook_" + e.seed.ulid())
+		}
+	}
+	return id
+}
 
 // NextHookToken draws the token of the next hook the runner declares without
 // one.

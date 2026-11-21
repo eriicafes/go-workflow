@@ -48,9 +48,10 @@ one, or dispose of the webhook when it is no longer needed.
 
 ## URLs and responses
 
-The URL is `<BaseURL>/webhooks/<random-token>`. Set the World's
+The URL is `<BaseURL>/webhooks/<token>`. Set the World's
 `Config.BaseURL` to the public location of its HTTP handler. A webhook always
-gets a random token. It accepts any HTTP method; check `request.Method` in a
+gets a generated token: 21 characters of Nano ID's alphabet drawn from the
+run's seed, so every replay draws the same one. It accepts any HTTP method; check `request.Method` in a
 step when only some should be accepted.
 
 | Configuration | Response |

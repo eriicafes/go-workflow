@@ -8,7 +8,7 @@ import (
 
 type (
 	// DurableHookOptions holds the arguments to DurableHook. An empty Token is
-	// generated on first execution and recorded. Force takes the token from a
+	// drawn from the run's seed after the hook's ID. Force takes the token from a
 	// hook that owns it instead of failing with ErrHookConflict.
 	DurableHookOptions struct {
 		Execution *Execution
@@ -20,7 +20,7 @@ type (
 		// WebhookMetadata.
 		Metadata []byte
 		// IsWebhook makes the hook a webhook, resumed by HTTP requests to its
-		// URL. A webhook's token is always generated.
+		// URL. A webhook's token is always drawn from the run's seed.
 		IsWebhook    bool
 		MinRetention time.Duration
 		Force        bool
@@ -62,11 +62,12 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if hookID == "" {
 		hookID = options.Execution.NextHookID()
 	}
+	if options.Token == "" {
+		// Every replay draws the token, so later draws stay aligned.
+		options.Token = options.Execution.NextHookToken()
+	}
 	creationIndex, exists := options.Execution.declared(string(hookID))
 	if !exists {
-		if options.Token == "" {
-			options.Token = NewHookToken()
-		}
 		created := DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
 		if options.MinRetention > 0 {
 			until := time.Now().UTC().Add(options.MinRetention)
@@ -87,7 +88,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableHookResult[T]{Err: fmt.Errorf("workflow: decode hook: %w", err)}
 	}
-	if !options.IsWebhook && options.Token != "" && created.Token != options.Token {
+	if created.Token != options.Token {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(hookID), Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
 	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
