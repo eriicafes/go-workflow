@@ -93,3 +93,21 @@ func testNearDueWaits(t *testing.T) {
 		t.Fatalf("a delivery in the same second armed %v again", again)
 	}
 }
+
+func TestHandoffArmsTheEarliestOpenWaitOfItsOwnChain(t *testing.T) {
+	waitEvent := func(id, creator string, resumeAt time.Time) worlds.Event {
+		data, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt, CreatorMessageID: creator})
+		return worlds.Event{EventType: worlds.EventTypeWaitCreated, CorrelationID: id, Data: data}
+	}
+	now := time.Now()
+	world := &queueRecorder{}
+	e := &Execution{ctx: context.Background(), world: world, delivery: worlds.QueueInput{MessageID: "msg", DeliveryCount: 1}, events: []worlds.Event{
+		waitEvent("wait_later", "msg", now.Add(2*time.Hour)),
+		waitEvent("wait_first", "msg", now.Add(time.Hour)),
+		waitEvent("wait_other", "other", now.Add(time.Minute)),
+	}}
+	e.armOwnChain()
+	if len(world.queued) != 1 || world.queued[0].WaitContinuation.CorrelationID != "wait_first" {
+		t.Fatalf("queued %+v, want the timer of wait_first", world.queued)
+	}
+}

@@ -252,6 +252,21 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 			err = nil
 		}
 		if err != nil {
+			// A handoff of a flow message close to its expiry, or to its
+			// handoff bound, continues on a new message instead, and this
+			// one is acknowledged.
+			if redelivery, ok := worlds.RedeliveryOf(err); ok && redelivery.After == 0 {
+				rotated, rotateErr := c.rotate(ctx, delivery, message)
+				if rotateErr != nil {
+					return http.StatusInternalServerError, rotateErr
+				}
+				if rotated {
+					if err := c.world.acknowledge(ctx, delivery, coalesced); err != nil && !errors.As(err, new(*errCoalescedPending)) {
+						return http.StatusInternalServerError, err
+					}
+					return http.StatusOK, nil
+				}
+			}
 			return c.redeliver(ctx, delivery, err)
 		}
 		err = c.world.acknowledge(ctx, delivery, coalesced)
@@ -265,7 +280,12 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		if rerun >= vqsMaxCoalescedReruns {
 			// Messages keep being coalesced into this delivery: a busy run,
 			// not a failing one. Its next delivery replays from the log what
-			// they were sent for.
+			// they were sent for. A message due for rotation continues on a
+			// new one first, and the handoff that keeps the old one until it
+			// expires is one extra wake.
+			if _, err := c.rotate(ctx, delivery, message); err != nil {
+				return http.StatusInternalServerError, err
+			}
 			if err := c.world.handOff(ctx, delivery); err != nil {
 				return http.StatusInternalServerError, err
 			}
@@ -334,4 +354,58 @@ func (c *consumer) renewLease(ctx context.Context, delivery vqsDelivery) func() 
 		close(done)
 		<-stopped
 	}
+}
+
+// rotation returns why a flow message asked to hand off continues on a new
+// message instead, or "" to hand it off: it expires within
+// vqsRotationExpiryMargin, by Vercel Queues' expiry or else its first send
+// and retention, or it is within vqsRotationHandoffMargin handoffs of
+// vqsMaxHandoffs.
+func rotation(delivery vqsDelivery, message queueMessage, now time.Time) string {
+	expiresAt := delivery.ExpiresAt
+	if expiresAt.IsZero() && !delivery.CreatedAt.IsZero() {
+		retention := vqsDefaultRetention
+		if message.RetentionMs > 0 {
+			retention = time.Duration(message.RetentionMs) * time.Millisecond
+		}
+		expiresAt = delivery.CreatedAt.Add(retention)
+	}
+	if !expiresAt.IsZero() && !now.Before(expiresAt.Add(-vqsRotationExpiryMargin)) {
+		return "expiry"
+	}
+	if delivery.HandoffCount >= vqsMaxHandoffs-vqsRotationHandoffMargin {
+		return "handoff bound"
+	}
+	return ""
+}
+
+// rotate continues the run of a flow message due for rotation on a new
+// message, due after this one is acknowledged, and reports whether it did.
+// The new message carries what the old one is a wake for, its wait's timer
+// and the waits it completes, and none of what marks a first or recovered
+// flow or counts the old one's retries. A step message keeps its own, since
+// its key would drop a copy.
+func (c *consumer) rotate(ctx context.Context, delivery vqsDelivery, message queueMessage) (bool, error) {
+	if message.StepID != nil {
+		return false, nil
+	}
+	why := rotation(delivery, message, time.Now())
+	if why == "" {
+		return false, nil
+	}
+	input := message.input()
+	due := time.Now().Add(vqsRotationDelay)
+	continuation := worlds.QueueInput{
+		QueueName: input.QueueName, RunID: input.RunID, WorkflowName: input.WorkflowName, DeploymentID: input.DeploymentID,
+		RunSpecVersion: input.RunSpecVersion, CompleteWaits: input.CompleteWaits, WaitContinuation: input.WaitContinuation,
+		NotBefore: &due,
+	}
+	if continuation.RunSpecVersion == 0 && input.RunInput != nil {
+		continuation.RunSpecVersion = input.RunInput.SpecVersion
+	}
+	if _, err := c.world.Queue(context.WithoutCancel(ctx), continuation); err != nil {
+		return false, err
+	}
+	log.Printf("workflow/vercel: continuing run %s on a new message instead of handing off queue message %s (%s; handoffs: %d)", input.RunID, delivery.MessageID, why, delivery.HandoffCount)
+	return true, nil
 }

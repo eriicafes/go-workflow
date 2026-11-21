@@ -224,6 +224,11 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 		// starts again from the log.
 		execution.superseded = true
 		execution.abandonAhead()
+		// The delivery may end in a handoff, which a World may continue on
+		// a new message that does not own this message's chain.
+		if armErr := r.armOwnChain(execution); armErr != nil {
+			return armErr
+		}
 		return err
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
@@ -255,6 +260,18 @@ func (r *Runtime) resend(execution *Execution) (err error) {
 	}()
 	execution.resendSteps()
 	execution.completeWaitsOnWake()
+	return nil
+}
+
+// armOwnChain arms the earliest timer of the chain of the delivery's own
+// message, before a handoff.
+func (r *Runtime) armOwnChain(execution *Execution) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = replayExit(recovered)
+		}
+	}()
+	execution.armOwnChain()
 	return nil
 }
 

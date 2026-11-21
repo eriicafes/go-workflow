@@ -243,6 +243,22 @@ func (e *Execution) armTimers() {
 	}
 }
 
+// armOwnChain queues the timer of the earliest open wait of the chain of
+// the delivery's own message, before a handoff that a World may continue on
+// a new message, whose deliveries do not own the chain.
+func (e *Execution) armOwnChain() {
+	open := e.openWaitsInLog()
+	earliest := ""
+	for id, wait := range open {
+		if wait.creator == e.delivery.MessageID && (earliest == "" || wait.resumeAt.Before(open[earliest].resumeAt)) {
+			earliest = id
+		}
+	}
+	if earliest != "" {
+		e.armWait(earliest, open[earliest].resumeAt, 0, false)
+	}
+}
+
 // completeWaitsOnWake completes the open waits the delivery names in
 // CompleteWaits, whether or not they are due.
 func (e *Execution) completeWaitsOnWake() {
