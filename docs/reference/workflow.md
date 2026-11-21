@@ -14,12 +14,12 @@ The **Context** column says where a function can be called:
 ## Registration
 
 ```go
-func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) core.Runner
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Use` | — | Registers `fn` as the runner of workflow `In`. Pass the result to `worlds.Runners`. |
+| `Use` | — | Registers `fn` as the runner of workflow `In`. Pass the result to `core.Runners`. |
 
 ## Steps
 

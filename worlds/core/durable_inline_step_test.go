@@ -1,4 +1,4 @@
-package worlds_test
+package core_test
 
 import (
 	"context"

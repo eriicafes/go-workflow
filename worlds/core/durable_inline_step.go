@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/eriicafes/go-workflow/worlds"
 	"go.opentelemetry.io/otel/codes"
 )
 
@@ -108,7 +109,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step input: %w", err)}
 		}
-		created := DataStepCreated{StepName: options.Name, Input: encoded}
+		created := worlds.DataStepCreated{StepName: options.Name, Input: encoded}
 		options.Execution.hold(pendingStep{
 			stepID:   stepID,
 			created:  &created,
@@ -121,10 +122,10 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 
 	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
-	if event.EventType != EventTypeStepCreated {
+	if event.EventType != worlds.EventTypeStepCreated {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
-	var createdData DataStepCreated
+	var createdData worlds.DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode inline step: %w", err)}
 	}
@@ -140,18 +141,18 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 	// passes.
 	attempts := 0
 	var retryAfter *time.Time
-	var running *Event
+	var running *worlds.Event
 	for _, event := range options.Execution.events[creationIndex+1:] {
 		if event.CorrelationID != string(stepID) {
 			continue
 		}
 		switch event.EventType {
-		case EventTypeStepStarted:
+		case worlds.EventTypeStepStarted:
 			attempts++
 			retryAfter, running = nil, &event
-		case EventTypeStepRetrying:
+		case worlds.EventTypeStepRetrying:
 			running = nil
-			var result DataStepResult
+			var result worlds.DataStepResult
 			if json.Unmarshal(event.Data, &result) == nil {
 				retryAfter = result.RetryAfter
 			}
@@ -169,7 +170,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 		// consumed by this replay, so it queues its replacement.
 		key := stepRetryKey(stepID, attempts)
 		if options.Execution.delivery.IdempotencyKey == key {
-			options.Execution.queue(QueueInput{NotBefore: retryAfter, IdempotencyKey: key})
+			options.Execution.queue(worlds.QueueInput{NotBefore: retryAfter, IdempotencyKey: key})
 		}
 		return DurableStepResult[Out]{StepID: stepID}
 	}
@@ -193,8 +194,8 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 // whether its lease still keeps this flow from taking it over. An attempt a
 // step delivery started has no owner. A start with no recorded time keeps its
 // lease, since its age is unknown.
-func attemptOwner(execution *Execution, started Event) (string, bool) {
-	var data DataStepStarted
+func attemptOwner(execution *Execution, started worlds.Event) (string, bool) {
+	var data worlds.DataStepStarted
 	_ = json.Unmarshal(started.Data, &data)
 	if data.OwnerMessageID == "" || data.OwnerMessageID == execution.delivery.MessageID {
 		return data.OwnerMessageID, false
@@ -207,10 +208,10 @@ func attemptOwner(execution *Execution, started Event) (string, bool) {
 // is explicit, recovered, or within its limit, and otherwise queued as a step
 // delivery.
 type pendingStep struct {
-	stepID StepID
+	stepID worlds.StepID
 	// created is the step's declaration, which is not yet recorded. It is
 	// nil for a step an earlier delivery recorded.
-	created *DataStepCreated
+	created *worlds.DataStepCreated
 	// explicit marks an inline step, which always runs inline and is
 	// retried by a flow.
 	explicit bool
@@ -226,23 +227,23 @@ type pendingStep struct {
 	attempt int
 	// run calls the step function as attempt, and returns its result to
 	// record, or a World error that stopped it.
-	run func(attempt int) (DataStepResult, error)
+	run func(attempt int) (worlds.DataStepResult, error)
 }
 
 type inlineOutcome struct {
 	step   pendingStep
-	result DataStepResult
+	result worlds.DataStepResult
 	err    error
 }
 
 // pendingRun returns the function that calls fn with input as an attempt of
 // the step stepID outside the replay, in step context.
-func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID StepID, name string, maxRetries int, refs []cancellationReference, fn func(context.Context, In) (Out, error), input In) func(int) (DataStepResult, error) {
-	return func(attempt int) (DataStepResult, error) {
+func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID worlds.StepID, name string, maxRetries int, refs []cancellationReference, fn func(context.Context, In) (Out, error), input In) func(int) (worlds.DataStepResult, error) {
+	return func(attempt int) (worlds.DataStepResult, error) {
 		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: time.Now(), Attempt: attempt})
 		stepCtx, stop, err := stepCancelContext(stepCtx, execution, refs)
 		if err != nil {
-			return DataStepResult{}, err
+			return worlds.DataStepResult{}, err
 		}
 		defer stop()
 		stepCtx, span := startStepSpan(stepCtx, execution, stepID, name, attempt)
@@ -250,17 +251,17 @@ func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID S
 		value, callErr := invoke(stepCtx, execution, false, fn, input)
 		var delivery deliveryError
 		if errors.As(callErr, &delivery) {
-			return DataStepResult{}, delivery.cause
+			return worlds.DataStepResult{}, delivery.cause
 		}
 		if callErr != nil {
 			span.RecordError(callErr)
 			span.SetStatus(codes.Error, callErr.Error())
-			return DataStepResult{Error: execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, maxRetries, attempt)}, nil
+			return worlds.DataStepResult{Error: execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, maxRetries, attempt)}, nil
 		}
 		output, err := execution.EncodePayload(value)
 		if err != nil {
-			return DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
+			return worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
 		}
-		return DataStepResult{Result: output}, nil
+		return worlds.DataStepResult{Result: output}, nil
 	}
 }

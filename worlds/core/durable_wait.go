@@ -1,10 +1,12 @@
-package worlds
+package core
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type (
@@ -18,7 +20,7 @@ type (
 	// DurableWaitResult is a declared timer: its ID and any error from
 	// declaring it.
 	DurableWaitResult struct {
-		WaitID WaitID
+		WaitID worlds.WaitID
 		Err    error
 	}
 )
@@ -36,8 +38,8 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	if !exists {
 		// On first execution, schedule the timer, then persist its
 		// declaration.
-		data := DataWaitCreated{ResumeAt: options.DueAt}
-		options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
+		data := worlds.DataWaitCreated{ResumeAt: options.DueAt}
+		options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		encoded, err := json.Marshal(data)
 		if err != nil {
 			return DurableWaitResult{WaitID: waitID, Err: err}
@@ -45,16 +47,16 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		// A write that fails or is refused leaves the queued delivery behind.
 		// Queues do not recall deliveries, and the orphan only replays the run
 		// once more.
-		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, nil)
+		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, nil)
 		return DurableWaitResult{WaitID: waitID}
 	}
 
 	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
-	if event.EventType != EventTypeWaitCreated {
+	if event.EventType != worlds.EventTypeWaitCreated {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(waitID), Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)}))
 	}
-	var data DataWaitCreated
+	var data worlds.DataWaitCreated
 	if err := json.Unmarshal(event.Data, &data); err != nil {
 		return DurableWaitResult{Err: fmt.Errorf("workflow: decode wait: %w", err)}
 	}
@@ -70,7 +72,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		// The timer's own delivery can arrive early when clocks disagree. It
 		// is consumed by this replay, so it queues its replacement.
 		if options.Execution.delivery.IdempotencyKey == string(waitID) {
-			options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
+			options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		}
 		return DurableWaitResult{WaitID: waitID}
 	}
@@ -87,6 +89,6 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 			return DurableWaitResult{WaitID: waitID}
 		}
 	}
-	options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
+	options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
 	return DurableWaitResult{WaitID: waitID}
 }

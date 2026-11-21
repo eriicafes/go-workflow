@@ -366,3 +366,12 @@ func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
 		t.Fatalf("queued = %#v, want the run's delivery", queued)
 	}
 }
+
+var errQueueUnavailable = errors.New("queue unavailable")
+
+// queueOutage fails every Queue call.
+type queueOutage struct{ *testworld.World }
+
+func (queueOutage) Queue(context.Context, worlds.QueueInput) (worlds.QueueResult, error) {
+	return worlds.QueueResult{}, errQueueUnavailable
+}

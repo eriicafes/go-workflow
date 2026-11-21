@@ -6,6 +6,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -51,7 +52,7 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 	world := testworld.NewManual(runner)
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 
 	run, err := workflow.Start(ctx, routedInput{})
 	if err != nil {

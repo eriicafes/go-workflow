@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"maps"
 	"sync"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 const (
@@ -41,7 +43,7 @@ const (
 // or when that deployment is unavailable, the run fails with a
 // deploymentMismatchError.
 type Runtime struct {
-	world   World
+	world   worlds.World
 	runners RunnerSet
 	// running holds the steps this process runs inline, so a duplicate
 	// delivery of the same flow message does not run them again.
@@ -50,7 +52,7 @@ type Runtime struct {
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
 // world using runners. It copies runners.
-func NewRuntime(world World, runners RunnerSet) *Runtime {
+func NewRuntime(world worlds.World, runners RunnerSet) *Runtime {
 	return &Runtime{world: world, runners: maps.Clone(runners)}
 }
 
@@ -66,10 +68,10 @@ func NewRuntime(world World, runners RunnerSet) *Runtime {
 //
 // Execute removes any Client NewClientContext put in ctx, so a run never uses a
 // Client it inherited from the context its delivery runs in.
-func (r *Runtime) Execute(ctx context.Context, input QueueInput) error {
+func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	ctx = context.WithValue(ctx, clientContextKey{}, nil)
+	ctx = worlds.NewClientContext(ctx, nil)
 	ctx = context.WithValue(ctx, cancelContextKey{}, nil)
 	if input.Attempt > MaxDeliveries {
 		return r.exceedDeliveries(ctx, input)
@@ -86,7 +88,7 @@ func (r *Runtime) Execute(ctx context.Context, input QueueInput) error {
 
 // executeFlow admits root execution, replays its complete event prefix, and
 // turns the runner's result into a terminal run event when it did not suspend.
-func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
+func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput) error {
 	// Load the materialized run and its complete replay prefix before any
 	// runner code is called.
 	run, events, err := r.loadRun(ctx, input.RunID)
@@ -103,21 +105,21 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// Atomically admit this root delivery. Duplicate deliveries receive the
 	// existing run_started event and replay from the same event history.
 	eventsCount := len(events)
-	startedEvent := EventsCreateEvent{
-		EventType: EventTypeRunStarted,
+	startedEvent := worlds.EventsCreateEvent{
+		EventType: worlds.EventTypeRunStarted,
 	}
-	started, err := r.world.EventsCreate(ctx, EventsCreateInput{
+	started, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID:   input.RunID,
 		Event:   startedEvent,
-		Options: EventsCreateOptions{EventCount: &eventsCount},
+		Options: worlds.EventsCreateOptions{EventCount: &eventsCount},
 	})
-	if errors.Is(err, ErrRunTerminal) {
+	if errors.Is(err, worlds.ErrRunTerminal) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	startedLatest := Event{
+	startedLatest := worlds.Event{
 		RunID:     input.RunID,
 		EventID:   started.EventID,
 		EventType: startedEvent.EventType,
@@ -131,7 +133,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 		return err
 	}
 	execution.delivery, execution.running = input, &r.running
-	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
+	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
 	execution.merge(started, startedLatest)
@@ -140,11 +142,11 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 	// has no compensations to run and no replay to check.
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
-		_, err := r.world.EventsCreate(ctx, EventsCreateInput{
+		_, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 			RunID: run.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: execution.runFailedData(fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))},
+			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName))},
 		})
-		if errors.Is(err, ErrRunTerminal) {
+		if errors.Is(err, worlds.ErrRunTerminal) {
 			return nil
 		}
 		return err
@@ -156,7 +158,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 // outcome when the runner returns. Steps the flow still runs inline record
 // their results before the delivery ends. A replay that diverges from the
 // event log is handed to recoverDivergence.
-func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution *Execution) (err error) {
+func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.Run, execution *Execution) (err error) {
 	ctx := execution.Context()
 	output, err := r.run(runner, ctx, run.Input)
 	// Steps the runner declared and no longer waits for are not started.
@@ -180,7 +182,7 @@ func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):
-		if errors.Is(deliveryErr.cause, ErrRunTerminal) {
+		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
 			return nil
 		}
 		return deliveryErr.cause
@@ -199,23 +201,23 @@ func (r *Runtime) replayFlow(input QueueInput, runner Runner, run Run, execution
 
 // loadRun reads the projection and one complete event prefix before user code
 // runs. Replaying primitives then use only this in-memory prefix.
-func (r *Runtime) loadRun(ctx context.Context, runID RunID) (Run, []Event, error) {
-	run, err := r.world.RunsGet(ctx, RunsGetInput{RunID: runID})
+func (r *Runtime) loadRun(ctx context.Context, runID worlds.RunID) (worlds.Run, []worlds.Event, error) {
+	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	if err != nil {
-		return Run{}, nil, err
+		return worlds.Run{}, nil, err
 	}
 	// Worlds must return the full current prefix when no page size is requested.
 	// A bounded event source can still page internally here, but the workflow
 	// receives one fully preloaded slice.
-	page, err := r.world.EventsList(ctx, EventsListInput{RunID: runID})
+	page, err := r.world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 	if err != nil {
-		return Run{}, nil, err
+		return worlds.Run{}, nil, err
 	}
 	events := page.Data
 	for page.HasMore {
-		page, err = r.world.EventsList(ctx, EventsListInput{RunID: runID, Pagination: Pagination{Cursor: page.Cursor}})
+		page, err = r.world.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Cursor: page.Cursor}})
 		if err != nil {
-			return Run{}, nil, err
+			return worlds.Run{}, nil, err
 		}
 		events = append(events, page.Data...)
 	}
@@ -225,24 +227,24 @@ func (r *Runtime) loadRun(ctx context.Context, runID RunID) (Run, []Event, error
 // completeRun records successful root output unless another delivery already
 // made the run terminal. A recorded operation the runner returned without
 // reaching is a divergence, handed to recoverDivergence instead.
-func (r *Runtime) completeRun(ctx context.Context, input QueueInput, execution *Execution, data []byte) error {
+func (r *Runtime) completeRun(ctx context.Context, input worlds.QueueInput, execution *Execution, data []byte) error {
 	if id, ok := execution.unreached(); ok {
 		return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "runner returned without reaching the recorded operation"})
 	}
-	completed, err := json.Marshal(DataRunCompleted{Output: data})
+	completed, err := json.Marshal(worlds.DataRunCompleted{Output: data})
 	if err != nil {
 		return r.failRun(ctx, input, execution, fmt.Errorf("workflow: encode run output: %w", err))
 	}
 	eventCount := len(execution.events)
-	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
+	_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: EventTypeRunCompleted, Data: completed},
-		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: execution.InBandCount()},
+		Event:   worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: completed},
+		Options: worlds.EventsCreateOptions{EventCount: &eventCount, InBandCount: execution.InBandCount()},
 	})
-	if errors.Is(err, ErrRunTerminal) {
+	if errors.Is(err, worlds.ErrRunTerminal) {
 		return nil
 	}
-	if errors.Is(err, ErrInBandSuperseded) {
+	if errors.Is(err, worlds.ErrInBandSuperseded) {
 		return errReplaySuperseded
 	}
 	return err
@@ -254,7 +256,7 @@ func (r *Runtime) completeRun(ctx context.Context, input QueueInput, execution *
 // the terminal root event from being appended. A compensation or a recorded
 // operation the runner did not reach that diverges from the event log is
 // handed to recoverDivergence.
-func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Execution, failure error) (err error) {
+func (r *Runtime) failRun(ctx context.Context, input worlds.QueueInput, execution *Execution, failure error) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			recoveredError, ok := recovered.(error)
@@ -268,7 +270,7 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 				err = r.recoverDivergence(ctx, input, divergenceErr)
 			case errors.As(recoveredError, &deliveryErr):
 				err = deliveryErr.cause
-				if errors.Is(err, ErrRunTerminal) {
+				if errors.Is(err, worlds.ErrRunTerminal) {
 					err = nil
 				}
 			default:
@@ -284,15 +286,15 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 	if id, ok := execution.unreached(); ok {
 		return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "runner returned without reaching the recorded operation"})
 	}
-	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
+	_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID:   execution.run.RunID,
-		Event:   EventsCreateEvent{EventType: EventTypeRunFailed, Data: execution.runFailedData(failure)},
-		Options: EventsCreateOptions{InBandCount: execution.InBandCount()},
+		Event:   worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: execution.runFailedData(failure)},
+		Options: worlds.EventsCreateOptions{InBandCount: execution.InBandCount()},
 	})
-	if errors.Is(err, ErrRunTerminal) {
+	if errors.Is(err, worlds.ErrRunTerminal) {
 		return nil
 	}
-	if errors.Is(err, ErrInBandSuperseded) {
+	if errors.Is(err, worlds.ErrInBandSuperseded) {
 		return errReplaySuperseded
 	}
 	return err
@@ -300,7 +302,7 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 
 // executeStep admits one targeted delivery, replays to its declaration, and
 // persists the result reported by DurableStep.
-func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
+func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) error {
 	if input.StepID == nil {
 		return nil
 	}
@@ -313,8 +315,8 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	if r.misrouted(run) {
 		return r.reroute(ctx, run, input)
 	}
-	step, err := r.world.StepsGet(ctx, StepsGetInput{RunID: input.RunID, StepID: *input.StepID})
-	if errors.Is(err, ErrStepNotFound) {
+	step, err := r.world.StepsGet(ctx, worlds.StepsGetInput{RunID: input.RunID, StepID: *input.StepID})
+	if errors.Is(err, worlds.ErrStepNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -323,10 +325,10 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	if step.Status.Terminal() {
 		// The delivery that recorded the result may have failed to queue the
 		// flow that consumes it, and its redelivery lands here.
-		_, err := r.world.Queue(ctx, QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
+		_, err := r.world.Queue(ctx, worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 		return err
 	}
-	if step.Status == StatusPending && step.RetryAfter != nil && time.Now().Before(*step.RetryAfter) {
+	if step.Status == worlds.StatusPending && step.RetryAfter != nil && time.Now().Before(*step.RetryAfter) {
 		// An early or duplicate delivery waits for the scheduled retry
 		// instead of starting it ahead of its backoff.
 		retry := input
@@ -340,22 +342,22 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 	// never executes user code again. Starting a running step records a new
 	// attempt, which is how a redelivery re-runs a step whose delivery died.
 	eventsCount := len(events)
-	startedEvent := EventsCreateEvent{
-		EventType:     EventTypeStepStarted,
+	startedEvent := worlds.EventsCreateEvent{
+		EventType:     worlds.EventTypeStepStarted,
 		CorrelationID: string(*input.StepID),
 	}
-	started, err := r.world.EventsCreate(ctx, EventsCreateInput{
+	started, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID:   input.RunID,
 		Event:   startedEvent,
-		Options: EventsCreateOptions{EventCount: &eventsCount},
+		Options: worlds.EventsCreateOptions{EventCount: &eventsCount},
 	})
-	if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrStepNotStartable) {
+	if errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrStepNotStartable) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	startedLatest := Event{
+	startedLatest := worlds.Event{
 		RunID:         input.RunID,
 		EventID:       started.EventID,
 		EventType:     startedEvent.EventType,
@@ -370,13 +372,13 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 		return err
 	}
 	execution.delivery = input
-	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
+	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
 	execution.merge(started, startedLatest)
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
-		return r.failStep(ctx, input, execution, *input.StepID, fmt.Errorf("%w: %s", ErrWorkflowNotFound, run.WorkflowName))
+		return r.failStep(ctx, input, execution, *input.StepID, fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName))
 	}
 	return r.replayStep(input, runner, run, execution, *input.StepID)
 }
@@ -384,7 +386,7 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 // replayStep replays the runner once up to the target step and records the
 // step's result. A replay that diverges from the event log is handed to
 // recoverDivergence.
-func (r *Runtime) replayStep(input QueueInput, runner Runner, run Run, execution *Execution, stepID StepID) error {
+func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.Run, execution *Execution, stepID worlds.StepID) error {
 	ctx := execution.Context()
 	_, err := r.run(runner, ctx, run.Input)
 
@@ -407,7 +409,7 @@ func (r *Runtime) replayStep(input QueueInput, runner Runner, run Run, execution
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):
-		if errors.Is(deliveryErr.cause, ErrRunTerminal) {
+		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
 			return nil
 		}
 		return deliveryErr.cause
@@ -420,13 +422,13 @@ func (r *Runtime) replayStep(input QueueInput, runner Runner, run Run, execution
 
 // completeStep records a targeted step result and queues either its retry or a
 // root replay that can consume the terminal result.
-func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID StepID, result DataStepResult) error {
+func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID worlds.StepID, result worlds.DataStepResult) error {
 	event, err := execution.recordStepResult(stepID, result)
 	if err != nil || event.EventID == "" {
 		return err
 	}
-	queue := QueueInput{RunID: execution.run.RunID, WorkflowName: execution.run.WorkflowName, IdempotencyKey: string(event.EventID), DeploymentID: execution.run.DeploymentID}
-	if event.EventType == EventTypeStepRetrying {
+	queue := worlds.QueueInput{RunID: execution.run.RunID, WorkflowName: execution.run.WorkflowName, IdempotencyKey: string(event.EventID), DeploymentID: execution.run.DeploymentID}
+	if event.EventType == worlds.EventTypeStepRetrying {
 		queue.StepID = &stepID
 		queue.NotBefore = result.RetryAfter
 		queue.IdempotencyKey = stepRetryKey(stepID, stepAttempt(execution, stepID))
@@ -438,7 +440,7 @@ func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID
 // failStep runs the registered compensations up to a targeted compensation
 // step, or records the target's failure. A compensation that diverges from the
 // event log is handed to recoverDivergence.
-func (r *Runtime) failStep(ctx context.Context, input QueueInput, execution *Execution, stepID StepID, failure error) (err error) {
+func (r *Runtime) failStep(ctx context.Context, input worlds.QueueInput, execution *Execution, stepID worlds.StepID, failure error) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			recoveredError, ok := recovered.(error)
@@ -461,14 +463,14 @@ func (r *Runtime) failStep(ctx context.Context, input QueueInput, execution *Exe
 				err = nil
 			case errors.As(recoveredError, &deliveryErr):
 				err = deliveryErr.cause
-				if errors.Is(err, ErrRunTerminal) {
+				if errors.Is(err, worlds.ErrRunTerminal) {
 					err = nil
 				}
 			default:
 				if execution.IsSuspended() {
 					err = recoveredError
 				} else {
-					err = r.completeStep(ctx, execution, stepID, DataStepResult{Error: execution.encodeError(recoveredError)})
+					err = r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(recoveredError)})
 				}
 			}
 		}
@@ -478,7 +480,7 @@ func (r *Runtime) failStep(ctx context.Context, input QueueInput, execution *Exe
 			return err
 		}
 	}
-	return r.completeStep(ctx, execution, stepID, DataStepResult{Error: execution.encodeError(failure)})
+	return r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(failure)})
 }
 
 // run preserves error panics, including replay control, and converts other
@@ -504,8 +506,8 @@ func (r *Runtime) run(runner Runner, ctx context.Context, input []byte) (output 
 // follow-up's idempotency key names the run's in-band count, so flows
 // superseded by the same write share one follow-up on a World that
 // deduplicates, instead of superseding each other again.
-func (r *Runtime) supersede(ctx context.Context, input QueueInput) error {
-	run, err := r.world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
+func (r *Runtime) supersede(ctx context.Context, input worlds.QueueInput) error {
+	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
 	if err != nil {
 		return err
 	}
@@ -528,18 +530,18 @@ func (r *Runtime) supersede(ctx context.Context, input QueueInput) error {
 // diverged too, it fails the run with a corruptedEventLogError, without
 // running compensations, since they would replay against the same diverging
 // log.
-func (r *Runtime) recoverDivergence(ctx context.Context, input QueueInput, divergenceErr replayDivergenceError) error {
+func (r *Runtime) recoverDivergence(ctx context.Context, input worlds.QueueInput, divergenceErr replayDivergenceError) error {
 	if input.ReplayDivergenceCount >= maxReplayDivergenceRetries {
 		corrupted := corruptedEventLogError{CorrelationID: divergenceErr.CorrelationID, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
 		data, err := r.runFailedData(ctx, input.RunID, input.DeploymentID, corrupted)
 		if err != nil {
 			return err
 		}
-		_, err = r.world.EventsCreate(ctx, EventsCreateInput{
+		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 			RunID: input.RunID,
-			Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data},
+			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data},
 		})
-		if errors.Is(err, ErrRunTerminal) {
+		if errors.Is(err, worlds.ErrRunTerminal) {
 			return nil
 		}
 		return err
@@ -552,7 +554,7 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input QueueInput, diver
 
 // misrouted reports whether run is pinned to a deployment other than the
 // World's own, in a World that enforces deployment affinity.
-func (r *Runtime) misrouted(run Run) bool {
+func (r *Runtime) misrouted(run worlds.Run) bool {
 	return run.DeploymentID != "" && r.world.Capabilities().DeploymentAffinity && run.DeploymentID != r.world.DeploymentID()
 }
 
@@ -560,7 +562,7 @@ func (r *Runtime) misrouted(run Run) bool {
 // with a growing delay, and acknowledges this delivery. Once input has been
 // re-routed maxDeploymentMismatchRetries times, or the World reports the
 // deployment unavailable, it fails the run with a deploymentMismatchError.
-func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error {
+func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.QueueInput) error {
 	attempts := input.DeploymentMismatchRetryCount
 	if attempts < maxDeploymentMismatchRetries {
 		notBefore := time.Now().Add(min(time.Second<<attempts, maxRerouteDelay))
@@ -569,7 +571,7 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 		input.DeploymentID = run.DeploymentID
 		input.DeploymentMismatchRetryCount = attempts + 1
 		_, err := r.world.Queue(ctx, input)
-		if !errors.Is(err, ErrDeploymentUnavailable) {
+		if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 			return err
 		}
 	}
@@ -578,11 +580,11 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 	if err != nil {
 		return err
 	}
-	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
+	_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{
 		RunID: run.RunID,
-		Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data},
+		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data},
 	})
-	if errors.Is(err, ErrRunTerminal) {
+	if errors.Is(err, worlds.ErrRunTerminal) {
 		return nil
 	}
 	return err
@@ -599,11 +601,11 @@ const MaxDeliveries = 48
 // whether the run fails. It returns nil once the failure is recorded or
 // another delivery has finished the run or step, so the delivery is
 // acknowledged.
-func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error {
-	cause := FatalError{Cause: fmt.Errorf("%w (%d attempts)", ErrMaxDeliveriesExceeded, input.Attempt-1)}
+func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput) error {
+	cause := worlds.FatalError{Cause: fmt.Errorf("%w (%d attempts)", worlds.ErrMaxDeliveriesExceeded, input.Attempt-1)}
 	log.Printf("workflow: delivery %s for run %s exceeded %d attempts", input.MessageID, input.RunID, MaxDeliveries)
-	run, err := r.world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
-	if errors.Is(err, ErrRunNotFound) {
+	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
+	if errors.Is(err, worlds.ErrRunNotFound) {
 		return nil
 	}
 	if err != nil || run.Status.Terminal() {
@@ -614,60 +616,60 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input QueueInput) error 
 		if err != nil {
 			return err
 		}
-		_, err = r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunFailed, Data: data}})
-		if errors.Is(err, ErrRunTerminal) {
+		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}})
+		if errors.Is(err, worlds.ErrRunTerminal) {
 			return nil
 		}
 		return err
 	}
-	step, err := r.world.StepsGet(ctx, StepsGetInput{RunID: input.RunID, StepID: *input.StepID, ResolveData: ResolveDataNone})
-	if errors.Is(err, ErrStepNotFound) {
+	step, err := r.world.StepsGet(ctx, worlds.StepsGetInput{RunID: input.RunID, StepID: *input.StepID, ResolveData: worlds.ResolveDataNone})
+	if errors.Is(err, worlds.ErrStepNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if !step.Status.Terminal() {
-		if step.Status != StatusRunning {
+		if step.Status != worlds.StatusRunning {
 			// A step result needs a running step.
-			_, err := r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeStepStarted, CorrelationID: string(step.StepID)}})
-			if errors.Is(err, ErrRunTerminal) {
+			_, err := r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.StepID)}})
+			if errors.Is(err, worlds.ErrRunTerminal) {
 				return nil
 			}
-			if err != nil && !errors.Is(err, ErrStepNotStartable) {
+			if err != nil && !errors.Is(err, worlds.ErrStepNotStartable) {
 				return err
 			}
 		}
-		keys, err := RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID)
+		keys, err := worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID)
 		if err != nil {
 			return err
 		}
-		payload, err := EncodeErrorPayload(cause, PayloadOptions{Keys: keys})
+		payload, err := worlds.EncodeErrorPayload(cause, worlds.PayloadOptions{Keys: keys})
 		if err != nil {
 			return err
 		}
-		data, err := json.Marshal(DataStepResult{Error: payload})
+		data, err := json.Marshal(worlds.DataStepResult{Error: payload})
 		if err != nil {
 			return err
 		}
-		_, err = r.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeStepFailed, CorrelationID: string(step.StepID), Data: data}})
-		if errors.Is(err, ErrRunTerminal) {
+		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepFailed, CorrelationID: string(step.StepID), Data: data}})
+		if errors.Is(err, worlds.ErrRunTerminal) {
 			return nil
 		}
-		if err != nil && !errors.Is(err, ErrStepNotStartable) {
+		if err != nil && !errors.Is(err, worlds.ErrStepNotStartable) {
 			return err
 		}
 	}
-	_, err = r.world.Queue(ctx, QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
+	_, err = r.world.Queue(ctx, worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, IdempotencyKey: "settled:" + string(step.StepID), DeploymentID: run.DeploymentID})
 	return err
 }
 
 // runFailedData returns the Data of a run_failed event for err, encrypted
 // with the run's keys.
-func (r *Runtime) runFailedData(ctx context.Context, runID RunID, deploymentID string, err error) ([]byte, error) {
-	keys, keysErr := RunKeysFor(ctx, r.world, runID, deploymentID)
+func (r *Runtime) runFailedData(ctx context.Context, runID worlds.RunID, deploymentID string, err error) ([]byte, error) {
+	keys, keysErr := worlds.RunKeysFor(ctx, r.world, runID, deploymentID)
 	if keysErr != nil {
 		return nil, keysErr
 	}
-	return EncodeRunFailed(err, PayloadOptions{Keys: keys})
+	return worlds.EncodeRunFailed(err, worlds.PayloadOptions{Keys: keys})
 }

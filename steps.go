@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // StepOptions holds the options for a step.
@@ -53,7 +54,7 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 		return &Result[Out]{err: ErrNoWorkflow}
 	}
 	option := stepOptions(options)
-	durable := worlds.DurableStep(ctx, worlds.DurableStepOptions{
+	durable := core.DurableStep(ctx, core.DurableStepOptions{
 		Execution:  execution,
 		Name:       functionIdentity(fn),
 		MaxRetries: option.MaxRetries,
@@ -63,13 +64,13 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 
 // stepResult returns the Result of the step durable declared, which settles
 // when the walk reaches its result.
-func stepResult[Out any](execution *worlds.Execution, durable worlds.DurableStepResult[Out]) *Result[Out] {
+func stepResult[Out any](execution *core.Execution, durable core.DurableStepResult[Out]) *Result[Out] {
 	return &Result[Out]{
 		err:     durable.Err,
 		id:      string(durable.StepID),
 		settled: func() bool { return execution.Settled(string(durable.StepID)) },
 		outcome: func() (Out, error) {
-			return worlds.StepOutcome[Out](execution, durable.StepID)
+			return core.StepOutcome[Out](execution, durable.StepID)
 		},
 	}
 }
@@ -99,7 +100,7 @@ func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context,
 		return &Result[Out]{err: ErrNoWorkflow}
 	}
 	option := stepOptions(options)
-	durable := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
+	durable := core.DurableInlineStep(ctx, core.DurableInlineStepOptions{
 		Execution:  execution,
 		Name:       functionIdentity(fn),
 		MaxRetries: option.MaxRetries,
@@ -116,7 +117,7 @@ func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context,
 // limit for that worker, or in a runner for the steps it declares with the
 // returned ctx.
 func SetMaxInlineSteps(ctx context.Context, n int) context.Context {
-	return worlds.WithMaxInlineSteps(ctx, n)
+	return core.WithMaxInlineSteps(ctx, n)
 }
 
 // SetMaxInlineStepsDuration returns a copy of ctx that sets how long after a
@@ -131,7 +132,7 @@ func SetMaxInlineSteps(ctx context.Context, n int) context.Context {
 // deliveries with, or in a runner for the steps it declares with the returned
 // ctx.
 func SetMaxInlineStepsDuration(ctx context.Context, d time.Duration) context.Context {
-	return worlds.WithMaxInlineStepsDuration(ctx, d)
+	return core.WithMaxInlineStepsDuration(ctx, d)
 }
 
 // Sleep suspends the run for duration. Use it instead of time.Sleep in a
@@ -148,7 +149,7 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}] {
 	if !ok {
 		return &Result[struct{}]{err: ErrNoWorkflow}
 	}
-	wait := worlds.DurableWait(ctx, worlds.DurableWaitOptions{
+	wait := core.DurableWait(ctx, core.DurableWaitOptions{
 		Execution: execution,
 		DueAt:     execution.Now().Add(duration),
 	})
@@ -174,8 +175,8 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 		panic(ErrNoWorkflow)
 	}
 	option := stepOptions(options)
-	execution.AddRollback(func(ctx context.Context, execution *worlds.Execution) error {
-		result := worlds.DurableStep(ctx, worlds.DurableStepOptions{
+	execution.AddRollback(func(ctx context.Context, execution *core.Execution) error {
+		result := core.DurableStep(ctx, core.DurableStepOptions{
 			Execution:  execution,
 			Name:       rollbackFunctionIdentity(fn),
 			MaxRetries: option.MaxRetries,

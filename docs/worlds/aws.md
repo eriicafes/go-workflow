@@ -41,7 +41,7 @@ Deploy two Lambda functions:
 
 ```go
 // Queue worker: SQS event source mapping, registers runners.
-runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+runners := core.Runners(workflow.Use(flows.GenerateReport))
 lambda.Start(awsworld.Queue(world, runners))
 ```
 

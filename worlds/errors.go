@@ -84,62 +84,7 @@ var (
 	// ErrDeleteDataInvalid is returned by RunsDeleteDataMany for a request
 	// without one to MaxDeleteDataRunIDs unique run IDs.
 	ErrDeleteDataInvalid = errors.New("workflow: invalid delete data request")
-
-	errReplayComplete  = errors.New("workflow: targeted replay complete")
-	errReplaySuspended = errors.New("workflow: replay suspended")
-	// errReplaySuperseded ends a flow whose in-band write was refused
-	// because another orchestrator wrote first. The Runtime replays again.
-	errReplaySuperseded = errors.New("workflow: replay superseded")
 )
-
-// deliveryError ends a replay because the World failed to record an event.
-// The Runtime returns its cause from Execute, so the queue retries the
-// delivery, instead of treating it as the runner's failure.
-type deliveryError struct{ cause error }
-
-// DeliveryError marks cause, a World error a step function hit while doing
-// the runtime's own work, so the delivery is retried instead of the step
-// recording a failed attempt.
-func DeliveryError(cause error) error { return deliveryError{cause: cause} }
-
-func (e deliveryError) Error() string { return e.cause.Error() }
-func (e deliveryError) Unwrap() error { return e.cause }
-
-// replayDivergenceError identifies a declaration that does not match the event log.
-type replayDivergenceError struct {
-	CorrelationID string
-	Reason        string
-}
-
-func (e replayDivergenceError) Error() string {
-	return fmt.Sprintf("workflow: replay diverged at %s: %s", e.CorrelationID, e.Reason)
-}
-
-// corruptedEventLogError records replay divergence after recovery attempts fail.
-type corruptedEventLogError struct {
-	CorrelationID   string
-	Reason          string
-	RecoveryReplays int
-}
-
-func (e corruptedEventLogError) Error() string {
-	return fmt.Sprintf("%s at %s after %d recovery replays: %s", ErrCorruptedEventLog, e.CorrelationID, e.RecoveryReplays, e.Reason)
-}
-
-func (e corruptedEventLogError) Unwrap() error { return ErrCorruptedEventLog }
-
-// deploymentMismatchError records a delivery that could not reach its deployment.
-type deploymentMismatchError struct {
-	RunDeploymentID  string
-	DeploymentID     string
-	RecoveryAttempts int
-}
-
-func (e deploymentMismatchError) Error() string {
-	return fmt.Sprintf("%s: run is pinned to deployment %q but was delivered to %q after %d re-routes", ErrDeploymentMismatch, e.RunDeploymentID, e.DeploymentID, e.RecoveryAttempts)
-}
-
-func (e deploymentMismatchError) Unwrap() error { return ErrDeploymentMismatch }
 
 // FatalError marks an intentional failure that must not be retried.
 type FatalError struct{ Cause error }

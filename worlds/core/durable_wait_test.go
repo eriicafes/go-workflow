@@ -1,4 +1,4 @@
-package worlds_test
+package core_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -129,7 +130,7 @@ func TestCancelledDeadlinesDoNotFireOnReplayAfterExpiry(t *testing.T) {
 					}
 					return durableWaitOutput{}, workflow.Sleep(ctx, 2*time.Hour)
 				})
-				runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+				runtime := core.NewRuntime(world, core.Runners(runner))
 				ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 				run, err := workflow.Start(ctx, durableWaitInput{})
 				if err != nil {

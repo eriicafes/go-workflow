@@ -14,6 +14,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -262,7 +263,7 @@ func TestWebhookDeclarationUsesPublicBaseURL(t *testing.T) {
 	if len(queued) != 1 {
 		t.Fatalf("queued messages = %#v", queued)
 	}
-	if err := worlds.NewRuntime(world, worlds.Runners(runner)).Execute(ctx, queued[0].Input); err != nil {
+	if err := core.NewRuntime(world, core.Runners(runner)).Execute(ctx, queued[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	output, err := run.Value(ctx)

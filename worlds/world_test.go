@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -299,8 +300,8 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 }
 
 func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
-	world := testworld.New(worlds.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
-		execution, ok := worlds.ExecutionFromContext(ctx)
+	world := testworld.New(core.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
+		execution, ok := core.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, nil
 		}

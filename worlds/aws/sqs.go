@@ -11,6 +11,7 @@ import (
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -126,7 +127,7 @@ func scheduled(queue target, delay time.Duration) bool {
 // When ctx has a deadline, records not started by halfway to it are made
 // visible again and reported as failures, so a slow batch leaves them to
 // another invocation instead of timing out with them.
-func (w *World) consume(ctx context.Context, runtime *worlds.Runtime, event events.SQSEvent) events.SQSEventResponse {
+func (w *World) consume(ctx context.Context, runtime *core.Runtime, event events.SQSEvent) events.SQSEventResponse {
 	response := events.SQSEventResponse{}
 	var cutoff time.Time
 	if deadline, ok := ctx.Deadline(); ok {
@@ -203,7 +204,7 @@ func retryBackoff(receiveCount string) time.Duration {
 	return min(backoff, maxRetryBackoff)
 }
 
-func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, body string, attempt int) error {
+func (w *World) deliver(ctx context.Context, runtime *core.Runtime, body string, attempt int) error {
 	var message queueMessage
 	if err := json.Unmarshal([]byte(body), &message); err != nil || message.ID == "" {
 		// Redelivering a body that is not a queue message cannot succeed.

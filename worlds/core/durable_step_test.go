@@ -1,4 +1,4 @@
-package worlds_test
+package core_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -167,7 +168,7 @@ func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	if err := runtime.Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +238,7 @@ func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 		t.Fatalf("got %d spans", len(spans))
 	}
 	for i, span := range spans {
-		if span.Name != "step worlds_test.tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
+		if span.Name != "step core_test.tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
 			t.Fatalf("span = %q with parent %v", span.Name, span.Parent)
 		}
 		if span.Status.Code != codes.Error {

@@ -1,16 +1,18 @@
-package worlds
+package core
 
 import (
 	"encoding/json"
 	"fmt"
 	"slices"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 // DurableSetAttributesOptions holds the arguments to DurableSetAttributes.
 type DurableSetAttributesOptions struct {
 	Execution *Execution
 	// Changes are the attribute changes in the order they are recorded.
-	Changes []RunsAttributeChange
+	Changes []worlds.RunsAttributeChange
 	// AllowReservedAttributes permits keys with the reserved prefix.
 	AllowReservedAttributes bool
 }
@@ -30,23 +32,23 @@ func DurableSetAttributes(options DurableSetAttributesOptions) error {
 		if execution.target != nil {
 			panic(execution.exit(errReplaySuspended))
 		}
-		data, err := json.Marshal(DataAttrSet{Changes: options.Changes, Writer: AttributeWriter{Type: AttributeWriterWorkflow}, AllowReservedAttributes: options.AllowReservedAttributes})
+		data, err := json.Marshal(worlds.DataAttrSet{Changes: options.Changes, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}, AllowReservedAttributes: options.AllowReservedAttributes})
 		if err != nil {
 			return err
 		}
-		execution.CreateEvent(EventsCreateEvent{EventType: EventTypeAttrSet, CorrelationID: id, Data: data}, nil)
+		execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, CorrelationID: id, Data: data}, nil)
 		index, _ = execution.declared(id)
 	}
 	event := execution.events[index]
-	if event.EventType != EventTypeAttrSet {
+	if event.EventType != worlds.EventTypeAttrSet {
 		panic(execution.exit(replayDivergenceError{CorrelationID: id, Reason: fmt.Sprintf("recorded %s, replay reached an attribute write", event.EventType)}))
 	}
-	var recorded DataAttrSet
+	var recorded worlds.DataAttrSet
 	if err := json.Unmarshal(event.Data, &recorded); err != nil {
 		return fmt.Errorf("workflow: decode attribute write: %w", err)
 	}
-	same := recorded.Writer.Type == AttributeWriterWorkflow && recorded.AllowReservedAttributes == options.AllowReservedAttributes &&
-		slices.EqualFunc(recorded.Changes, options.Changes, func(a, b RunsAttributeChange) bool {
+	same := recorded.Writer.Type == worlds.AttributeWriterWorkflow && recorded.AllowReservedAttributes == options.AllowReservedAttributes &&
+		slices.EqualFunc(recorded.Changes, options.Changes, func(a, b worlds.RunsAttributeChange) bool {
 			return a.Key == b.Key && (a.Value == nil) == (b.Value == nil) && (a.Value == nil || *a.Value == *b.Value)
 		})
 	if !same {

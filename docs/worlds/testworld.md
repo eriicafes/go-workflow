@@ -42,12 +42,12 @@ so tests cover encrypted runs. Set it before starting runs.
 ## Manual delivery
 
 `testworld.NewManual` records deliveries without executing them. The test
-executes them with a `worlds.Runtime` and acknowledges each with `Acknowledge`.
+executes them with a `core.Runtime` and acknowledges each with `Acknowledge`.
 
 ```go
-runners := []worlds.Runner{workflow.Use(flows.GenerateReport)}
+runners := []core.Runner{workflow.Use(flows.GenerateReport)}
 world := testworld.NewManual(runners...)
-runtime := worlds.NewRuntime(world, worlds.Runners(runners...))
+runtime := core.NewRuntime(world, core.Runners(runners...))
 
 for len(world.QueuedMessages()) > 0 {
 	message := world.QueuedMessages()[0]

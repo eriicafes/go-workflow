@@ -15,6 +15,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -345,7 +346,7 @@ func (w flakyDeleteWorld) RunsDeleteDataMany(ctx context.Context, input worlds.R
 func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
+	runners := core.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
 		return workflow.Step(ctx, func(ctx context.Context, target worlds.RunID) (string, error) {
 			result, err := workflow.DeleteRuns(ctx, string(target))
 			if err != nil {
@@ -369,7 +370,7 @@ func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime := worlds.NewRuntime(world, runners)
+		runtime := core.NewRuntime(world, runners)
 		for delivered := 0; delivered < 3 && len(inner.QueuedMessages()) > 0; delivered++ {
 			message := inner.QueuedMessages()[0]
 			if err := runtime.Execute(ctx, message.Input); err != nil {
@@ -523,7 +524,7 @@ type regionParentInput struct{}
 func (regionParentInput) Workflow(string) {}
 
 func TestStartRegion(t *testing.T) {
-	runners := worlds.Runners(
+	runners := core.Runners(
 		workflow.Use(func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }),
 		workflow.Use(func(ctx context.Context, _ regionParentInput) (string, error) {
 			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("syd1")})
@@ -562,7 +563,7 @@ func TestStartRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := worlds.NewRuntime(world, runners)
+	runtime := core.NewRuntime(world, runners)
 	for _, message := range inner.QueuedMessages() {
 		if message.Input.RunID != worlds.RunID(parent.ID()) {
 			continue
@@ -588,7 +589,7 @@ func (startHookInput) Workflow(string) {}
 func TestStartHook(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
-	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
+	runners := core.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
 		return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
 	}))
 	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
@@ -612,7 +613,7 @@ func TestStartHook(t *testing.T) {
 		if !errors.As(err, &conflict) || conflict.RunID != worlds.RunID(run.ID()) {
 			t.Fatalf("%s: duplicate start error = %v", name, err)
 		}
-		runtime := worlds.NewRuntime(world, runners)
+		runtime := core.NewRuntime(world, runners)
 		for len(world.QueuedMessages()) != 0 {
 			message := world.QueuedMessages()[0]
 			if err := runtime.Execute(ctx, message.Input); err != nil {
@@ -824,7 +825,7 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	for range 10 {
 		executed := false
 		for _, message := range world.QueuedMessages() {

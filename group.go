@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // Go starts a background step and adds its result to group.
@@ -71,7 +72,7 @@ func (g *ErrGroup) Wait(ctx context.Context) error {
 // groupState holds the shared settlement state of WaitGroup and ErrGroup.
 type groupState struct {
 	members    []promise
-	execution  *worlds.Execution
+	execution  *core.Execution
 	settled    bool
 	id         string
 	err        error

@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"context"

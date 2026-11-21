@@ -1,6 +1,6 @@
 // Package worlds defines the World contract that go-workflow records runs in,
-// the runtime that executes deliveries against it, and the HTTP server that
-// exposes a World to clients.
+// the Client, and the HTTP server that exposes a World to clients. Package
+// core executes deliveries against a World.
 //
 // Each run is an append-only event log, and the runs, steps, and hooks returned
 // by Storage are views derived from those events.
@@ -208,9 +208,9 @@ func NewStreamName() string { return "strm_" + ulid.Make().String() }
 // NewWriterID returns a new stream writer ID: wrtr_ and a ULID.
 func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
 
-// hookTokenAlphabet is Nano ID's URL alphabet, whose 64 characters each take
+// HookTokenAlphabet is Nano ID's URL alphabet, whose 64 characters each take
 // six bits of a random byte.
-const hookTokenAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
+const HookTokenAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
 
 // NewHookToken returns a new hook token: 21 random characters of Nano ID's
 // URL alphabet.
@@ -221,7 +221,7 @@ func NewHookToken() string {
 	}
 	token := make([]byte, len(random))
 	for index, value := range random {
-		token[index] = hookTokenAlphabet[value&63]
+		token[index] = HookTokenAlphabet[value&63]
 	}
 	return string(token)
 }

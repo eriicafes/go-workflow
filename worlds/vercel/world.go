@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // deploymentRouteSuffix is the route under the HTTP prefix that answers with
@@ -262,8 +263,8 @@ func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 // Deploy it only as a function with a queue/v2beta trigger for Config.Topic.
 // Vercel does not expose such functions publicly, so the handler does not
 // authenticate requests.
-func Queue(world *World, runners worlds.RunnerSet) http.Handler {
-	return &consumer{world: world, runtime: worlds.NewRuntime(world, runners)}
+func Queue(world *World, runners core.RunnerSet) http.Handler {
+	return &consumer{world: world, runtime: core.NewRuntime(world, runners)}
 }
 
 // Deployment returns a handler serving only the deployment route, which

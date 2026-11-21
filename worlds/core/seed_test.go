@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"encoding/hex"
@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 // TestRunSeedVectors checks the generator against values seedrandom, ulid's
@@ -17,12 +19,12 @@ func TestRunSeedVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cases []struct {
-		RunID        RunID    `json:"runId"`
-		WorkflowName string   `json:"workflowName"`
-		DeploymentID string   `json:"deploymentId"`
-		Ops          string   `json:"ops"`
-		CreatedAt    uint64   `json:"createdAt"`
-		Results      []string `json:"results"`
+		RunID        worlds.RunID `json:"runId"`
+		WorkflowName string       `json:"workflowName"`
+		DeploymentID string       `json:"deploymentId"`
+		Ops          string       `json:"ops"`
+		CreatedAt    uint64       `json:"createdAt"`
+		Results      []string     `json:"results"`
 	}
 	if err := json.Unmarshal(raw, &cases); err != nil {
 		t.Fatal(err)
@@ -32,7 +34,7 @@ func TestRunSeedVectors(t *testing.T) {
 		if err != nil || created != c.CreatedAt {
 			t.Fatalf("runCreatedAt(%s) = %d, %v, want %d", c.RunID, created, err, c.CreatedAt)
 		}
-		seed, err := newRunSeed(Run{RunID: c.RunID, WorkflowName: c.WorkflowName, DeploymentID: c.DeploymentID})
+		seed, err := newRunSeed(worlds.Run{RunID: c.RunID, WorkflowName: c.WorkflowName, DeploymentID: c.DeploymentID})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -65,7 +67,7 @@ func TestRunSeedVectors(t *testing.T) {
 }
 
 func TestRunCreatedAtRejectsOtherIDs(t *testing.T) {
-	for _, id := range []RunID{"wrun_test", "run_01JQ8Z5K3M4N5P6Q7R8S9T0VWX", ""} {
+	for _, id := range []worlds.RunID{"wrun_test", "run_01JQ8Z5K3M4N5P6Q7R8S9T0VWX", ""} {
 		if _, err := runCreatedAt(id); err == nil {
 			t.Errorf("runCreatedAt(%q) succeeded", id)
 		}
@@ -86,7 +88,7 @@ func TestIncrementBase32Overflow(t *testing.T) {
 // TestExecutionDrawsFromRunSeed checks that declarations draw the SDK's IDs
 // and tokens for the run, in declaration order.
 func TestExecutionDrawsFromRunSeed(t *testing.T) {
-	run := Run{RunID: "wrun_41JQ8Z5K3M50NP6Q7R8S9T0VWX", WorkflowName: "checkout"}
+	run := worlds.Run{RunID: "wrun_41JQ8Z5K3M50NP6Q7R8S9T0VWX", WorkflowName: "checkout"}
 	execution, err := newExecution(t.Context(), nil, run, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -97,8 +99,8 @@ func TestExecutionDrawsFromRunSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cases []struct {
-		RunID   RunID    `json:"runId"`
-		Results []string `json:"results"`
+		RunID   worlds.RunID `json:"runId"`
+		Results []string     `json:"results"`
 	}
 	if err := json.Unmarshal(raw, &cases); err != nil {
 		t.Fatal(err)
@@ -117,12 +119,12 @@ func TestExecutionDrawsFromRunSeed(t *testing.T) {
 // TestNextHookIDSkipsTheStartHookID checks that a hook never draws the ID of
 // the run's start hook, hook_ and the run ID's ULID.
 func TestNextHookIDSkipsTheStartHookID(t *testing.T) {
-	run := Run{RunID: "wrun_01JQ8Z5K3M4N5P6Q7R8S9T0VW1", WorkflowName: "w"}
-	created, err := json.Marshal(DataRunCreated{StartHook: &StartHook{Token: "start", HookID: StartHookID(run.RunID)}})
+	run := worlds.Run{RunID: "wrun_01JQ8Z5K3M4N5P6Q7R8S9T0VW1", WorkflowName: "w"}
+	created, err := json.Marshal(worlds.DataRunCreated{StartHook: &worlds.StartHook{Token: "start", HookID: worlds.StartHookID(run.RunID)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution, err := newExecution(t.Context(), nil, run, []Event{{EventType: EventTypeRunCreated, Data: created}}, nil)
+	execution, err := newExecution(t.Context(), nil, run, []worlds.Event{{EventType: worlds.EventTypeRunCreated, Data: created}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

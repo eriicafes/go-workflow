@@ -19,7 +19,7 @@ package symbol to confirm signatures against that version.
   not need to import runner implementations.
 - Implement a runner in a `flows` package inside it, `workflows/flows`, as a
   named `func(context.Context, Input) (Output, error)`, and register it with
-  `workflow.Use(runner)` in `worlds.Runners(...)`.
+  `workflow.Use(runner)` in `core.Runners(...)`.
 - Keep step inputs and outputs serializable. Pass business data explicitly
   instead of capturing it in closures. Prefer named step functions beside the
   runner that uses them.

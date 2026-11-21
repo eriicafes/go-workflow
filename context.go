@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // NewContext returns a copy of ctx that carries client. Start, Get, GetHook,
@@ -37,7 +38,7 @@ type WorkflowMetadata struct {
 // GetWorkflowMetadata returns metadata about the run ctx belongs to, or the
 // zero WorkflowMetadata when ctx does not belong to a run.
 func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata {
-	execution, ok := worlds.ExecutionFromContext(ctx)
+	execution, ok := core.ExecutionFromContext(ctx)
 	if !ok {
 		return WorkflowMetadata{}
 	}
@@ -65,7 +66,7 @@ type StepMetadata struct {
 // GetStepMetadata returns metadata about the step ctx belongs to, or the zero
 // StepMetadata when ctx does not belong to a step.
 func GetStepMetadata(ctx context.Context) StepMetadata {
-	metadata, ok := worlds.StepMetadataFromContext(ctx)
+	metadata, ok := core.StepMetadataFromContext(ctx)
 	if !ok {
 		return StepMetadata{}
 	}
@@ -87,7 +88,7 @@ func clientFromContext(ctx context.Context) (Client, error) {
 	if client, ok := worlds.ClientFromContext(ctx); ok {
 		return client, nil
 	}
-	if execution, ok := worlds.ExecutionFromContext(ctx); ok {
+	if execution, ok := core.ExecutionFromContext(ctx); ok {
 		return NewClient(execution.World()), nil
 	}
 	return nil, ErrNoClient
@@ -95,19 +96,19 @@ func clientFromContext(ctx context.Context) (Client, error) {
 
 // workflowExecutionFromContext returns the Execution ctx belongs to when ctx
 // is workflow context. Code that runs in workflow or step context uses
-// worlds.ExecutionFromContext instead.
-func workflowExecutionFromContext(ctx context.Context) (*worlds.Execution, bool) {
-	if _, inStep := worlds.StepMetadataFromContext(ctx); inStep {
+// core.ExecutionFromContext instead.
+func workflowExecutionFromContext(ctx context.Context) (*core.Execution, bool) {
+	if _, inStep := core.StepMetadataFromContext(ctx); inStep {
 		return nil, false
 	}
-	return worlds.ExecutionFromContext(ctx)
+	return core.ExecutionFromContext(ctx)
 }
 
 // stepExecutionFromContext returns the Execution ctx belongs to when ctx is
 // step context. It reports false in workflow context and outside a run.
-func stepExecutionFromContext(ctx context.Context) (*worlds.Execution, bool) {
-	if _, ok := worlds.StepMetadataFromContext(ctx); !ok {
+func stepExecutionFromContext(ctx context.Context) (*core.Execution, bool) {
+	if _, ok := core.StepMetadataFromContext(ctx); !ok {
 		return nil, false
 	}
-	return worlds.ExecutionFromContext(ctx)
+	return core.ExecutionFromContext(ctx)
 }

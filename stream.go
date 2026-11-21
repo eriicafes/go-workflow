@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // WriterOption holds the options to Writer and Run.Writer.
@@ -64,7 +65,7 @@ func Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) 
 	if err != nil {
 		return nil, err
 	}
-	worlds.OnStepReturn(ctx, writer.Close)
+	core.OnStepReturn(ctx, writer.Close)
 	return writer, nil
 }
 

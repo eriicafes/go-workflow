@@ -68,11 +68,11 @@ registered so far run first.
 ## Registering runners
 
 `workflow.Use` registers a runner for its workflow and returns a
-`worlds.Runner`. `worlds.Runners` collects runners into a `worlds.RunnerSet`,
+`core.Runner`. `core.Runners` collects runners into a `core.RunnerSet`,
 which you pass to the World or worker that executes deliveries.
 
 ```go
-runners := worlds.Runners(
+runners := core.Runners(
 	workflow.Use(flows.GenerateReport),
 	workflow.Use(flows.PublishReport),
 )

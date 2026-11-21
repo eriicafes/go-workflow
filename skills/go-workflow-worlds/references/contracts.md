@@ -89,7 +89,7 @@ IdempotencyKey deduplication is optional; runtime replay still needs to be safe
 without it. QueueBatch can report items published before an error. Queued
 deliveries are never cancelled. Set `QueueInput.Attempt` to the backend's
 1-based delivery count when it has one; the Runtime fails a run or step whose
-delivery passes `worlds.MaxDeliveries` attempts.
+delivery passes `core.MaxDeliveries` attempts.
 
 Persist every QueueInput field, including StepID, QueueName, DeploymentID,
 DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
