@@ -293,10 +293,10 @@ func TestSecondPrepareIsInUse(t *testing.T) {
 func TestRejectsIncompatibleStorage(t *testing.T) {
 	t.Parallel()
 	for name, files := range map[string]map[string]string{
-		"old version":     {"version.json": `{"version":1}`},
+		"other version":   {"version.json": `{"version":2}`},
 		"corrupt version": {"version.json": `{"version":`},
-		"unknown field":   {"version.json": `{"version":2,"completion":3}`},
-		"legacy snapshot": {"world.json": `{}`},
+		"unknown field":   {"version.json": `{"version":1,"completion":3}`},
+		"unversioned":     {"world.json": `{}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

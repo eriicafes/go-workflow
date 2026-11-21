@@ -118,11 +118,11 @@ func TestValidateVersion(t *testing.T) {
 	if err := validateVersion(root); err != nil {
 		t.Fatalf("current version: %v", err)
 	}
-	if err := writeJSON(root, versionName, versionRecord{Version: 1}); err != nil {
+	if err := writeJSON(root, versionName, versionRecord{Version: storeVersion + 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateVersion(root); err == nil || !strings.Contains(err.Error(), "incompatible storage version 1") {
-		t.Fatalf("old version: %v", err)
+	if err := validateVersion(root); err == nil || !strings.Contains(err.Error(), "incompatible storage version 2") {
+		t.Fatalf("other version: %v", err)
 	}
 	unversioned := openRoot(t)
 	if err := unversioned.Mkdir("runs", 0700); err != nil {

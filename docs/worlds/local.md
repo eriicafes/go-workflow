@@ -164,8 +164,8 @@ notification instead of polling.
 
 ## Storage versions
 
-The current format is version 2. `Prepare` rejects directories written by older
-versions and any non-empty directory without `version.json`. Remove the
-directory to start over.
+The current format is version 1. `Prepare` rejects directories written with
+any other version and any non-empty directory without `version.json`. Remove
+the directory to start over.
 
 Forced hook takeover across runs first records a `hook-handoff.json` write-ahead decision. Recovery completes both sides before serving reads, including a crash between their commit points. Same-run takeover uses one run commit.
