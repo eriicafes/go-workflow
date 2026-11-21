@@ -7,10 +7,9 @@ import (
 	"os"
 )
 
-// storeVersion 2 is the per-entity event layout. Version 1 was the
-// command/task store, and unversioned directories held a single world.json
-// snapshot.
-const storeVersion = 2
+// storeVersion is the version of the storage layout. A directory written
+// with another version is refused.
+const storeVersion = 1
 
 const versionName = "version.json"
 
