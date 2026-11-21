@@ -400,7 +400,7 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	ctx := context.Background()
 
 	// A message goes to the region its run ID carries, else VERCEL_REGION's.
-	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", worlds.RegionSYD1)
+	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", RegionSYD1)
 	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1"} {
 		if err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, "id", 0, ""); err != nil {
 			t.Fatal(err)
@@ -424,11 +424,11 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	// Without the proxy, an explicit QueueURL is one endpoint, and each
 	// region otherwise has its own host.
 	world.api.proxy = false
-	if queue, header := world.queueURL(worlds.RegionSYD1); queue != world.config.QueueURL || header != nil {
+	if queue, header := world.queueURL(RegionSYD1); queue != world.config.QueueURL || header != nil {
 		t.Fatalf("explicit queue = %q, %v", queue, header)
 	}
 	world.config.QueueURL = ""
-	if queue, header := world.queueURL(worlds.RegionSYD1); queue != "https://syd1.vercel-queue.com/api/v3" || header != nil {
+	if queue, header := world.queueURL(RegionSYD1); queue != "https://syd1.vercel-queue.com/api/v3" || header != nil {
 		t.Fatalf("syd1 queue = %q, %v", queue, header)
 	}
 }

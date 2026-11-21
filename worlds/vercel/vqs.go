@@ -47,12 +47,12 @@ const (
 func (w *World) queueURL(region worlds.Region) (string, http.Header) {
 	var header http.Header
 	if w.api.proxy {
-		header = http.Header{"X-Vercel-Queue-Region": {region.String()}}
+		header = http.Header{"X-Vercel-Queue-Region": {string(region)}}
 	}
 	if w.config.QueueURL != "" {
 		return w.config.QueueURL, header
 	}
-	return "https://" + region.String() + ".vercel-queue.com/api/v3", header
+	return "https://" + string(region) + ".vercel-queue.com/api/v3", header
 }
 
 // messageRegion returns the region a message of runID is sent to: the region
@@ -194,7 +194,7 @@ func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	// Leases live in the region whose queue delivered the message, which
 	// Vercel names in ce-vqsregion, as @vercel/queue routes its acks.
 	var ok bool
-	if delivery.Region, ok = worlds.ParseRegion(request.Header.Get("Ce-Vqsregion")); !ok {
+	if delivery.Region, ok = knownRegion(worlds.Region(request.Header.Get("Ce-Vqsregion"))); !ok {
 		delivery.Region = envRegion()
 	}
 	if delivery.ReceiptHandle == "" {

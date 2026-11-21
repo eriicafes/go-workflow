@@ -256,7 +256,7 @@ previous one starts it. This applies whether the run is started from a
 workflow, a step or a handler, and through an HTTP client too, since the
 server picks the deployment. Use it only for runs nothing waits on the output
 of, since a newer deployment may return a different output.
-`workflow.OnDeployment(id)` names a deployment instead.
+`workflow.DeploymentWithID(id)` names a deployment instead.
 
 The option needs a World with deployment affinity, and `LatestDeployment` one
 that implements `worlds.LatestDeployments`, such as

@@ -680,7 +680,7 @@ type (
 	// Client.RunsStartDeployment and the client.runs.startDeployment RPC
 	// method.
 	ClientRunsStartDeploymentInput struct {
-		// DeploymentID names the deployment, as OnDeployment does, and
+		// DeploymentID names the deployment, as DeploymentWithID does, and
 		// Latest asks for LatestDeployment.
 		DeploymentID string
 		Latest       bool
@@ -689,7 +689,7 @@ type (
 	// client.runs.newId RPC method. Region is a Region's code, or "" to
 	// leave it to the World.
 	ClientRunsNewIDInput struct {
-		Region string
+		Region Region
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
 	// method, which cancels the run.
@@ -899,13 +899,12 @@ func NewClientRunsStartDeploymentInput(deployment Deployment) ClientRunsStartDep
 
 func (input ClientRunsStartDeploymentInput) deployment() Deployment {
 	if input.DeploymentID != "" {
-		return OnDeployment(input.DeploymentID)
+		return DeploymentWithID(input.DeploymentID)
 	}
 	return Deployment{latest: input.Latest}
 }
 
 // newRunID returns the ID of a new run of world in input's region.
 func newRunID(world World, input ClientRunsNewIDInput) RunID {
-	region, _ := ParseRegion(input.Region)
-	return RegionRunID(world, NewRunID(), region)
+	return RegionRunID(world, NewRunID(), input.Region)
 }

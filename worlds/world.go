@@ -432,11 +432,11 @@ type Deployment struct {
 // LatestDeployment starts a run on the World's latest deployment.
 var LatestDeployment = Deployment{latest: true}
 
-// OnDeployment starts a run on the deployment id. An empty id is the zero
-// Deployment.
-func OnDeployment(id string) Deployment { return Deployment{id: id} }
+// DeploymentWithID starts a run on the deployment id. An empty id is the
+// zero Deployment.
+func DeploymentWithID(id string) Deployment { return Deployment{id: id} }
 
-// ID returns the deployment OnDeployment named, or "" for the current or
+// ID returns the deployment DeploymentWithID named, or "" for the current or
 // latest deployment.
 func (d Deployment) ID() string { return d.id }
 
@@ -444,61 +444,16 @@ func (d Deployment) ID() string { return d.id }
 func (d Deployment) Latest() bool { return d.latest }
 
 // Region is the region a run's data lives in and its deliveries are routed
-// to. Its zero value leaves it to the World. Only a World that implements
-// RegionalRunIDs, such as the Vercel World, uses it; the others ignore it.
-type Region struct{ code string }
-
-// The Workflow SDK's regions, the Vercel compute regions, including hel1 and
-// zrh1, which Vercel reserves for future rollout.
-var (
-	RegionIAD1 = Region{"iad1"}
-	RegionSFO1 = Region{"sfo1"}
-	RegionPDX1 = Region{"pdx1"}
-	RegionCLE1 = Region{"cle1"}
-	RegionYUL1 = Region{"yul1"}
-	RegionGRU1 = Region{"gru1"}
-	RegionDUB1 = Region{"dub1"}
-	RegionLHR1 = Region{"lhr1"}
-	RegionCDG1 = Region{"cdg1"}
-	RegionFRA1 = Region{"fra1"}
-	RegionBRU1 = Region{"bru1"}
-	RegionARN1 = Region{"arn1"}
-	RegionHEL1 = Region{"hel1"}
-	RegionZRH1 = Region{"zrh1"}
-	RegionCPT1 = Region{"cpt1"}
-	RegionDXB1 = Region{"dxb1"}
-	RegionBOM1 = Region{"bom1"}
-	RegionSIN1 = Region{"sin1"}
-	RegionHKG1 = Region{"hkg1"}
-	RegionHND1 = Region{"hnd1"}
-	RegionICN1 = Region{"icn1"}
-	RegionKIX1 = Region{"kix1"}
-	RegionSYD1 = Region{"syd1"}
-)
-
-// regions lists every Region, for ParseRegion.
-var regions = []Region{RegionIAD1, RegionSFO1, RegionPDX1, RegionCLE1, RegionYUL1, RegionGRU1, RegionDUB1, RegionLHR1, RegionCDG1, RegionFRA1, RegionBRU1, RegionARN1, RegionHEL1, RegionZRH1, RegionCPT1, RegionDXB1, RegionBOM1, RegionSIN1, RegionHKG1, RegionHND1, RegionICN1, RegionKIX1, RegionSYD1}
-
-// String returns the region's code, such as "iad1", or "" for the zero
-// Region.
-func (r Region) String() string { return r.code }
-
-// ParseRegion returns the Region of code, such as "iad1", and false when code
-// is not one of the Region values.
-func ParseRegion(code string) (Region, bool) {
-	for _, region := range regions {
-		if region.code == code {
-			return region, true
-		}
-	}
-	return Region{}, false
-}
+// to. Its values belong to the World that uses it, and the empty Region
+// leaves it to the World. Only a World that implements RegionalRunIDs uses
+// it; the others ignore it.
+type Region string
 
 // RegionalRunIDs is implemented by a World whose run IDs carry the region the
 // run's data lives in.
 type RegionalRunIDs interface {
 	// RegionRunID returns id tagged with region, or with the World's own
-	// region for the zero Region. It is deterministic, so a child run's ID
+	// region for the empty Region. It is deterministic, so a child run's ID
 	// derived from its start step stays the same across attempts.
 	RegionRunID(id RunID, region Region) RunID
 	// RegionForRunID returns the region a run's data lives in, from its ID
@@ -516,8 +471,8 @@ func RegionRunID(world World, id RunID, region Region) RunID {
 }
 
 // StartDeploymentID returns the deployment a new run is pinned to. On a World
-// with DeploymentAffinity, that is the deployment OnDeployment named, or for
-// LatestDeployment the World's latest one when it implements
+// with DeploymentAffinity, that is the deployment DeploymentWithID named, or
+// for LatestDeployment the World's latest one when it implements
 // LatestDeployments and knows one. Otherwise it is World.DeploymentID, so on
 // Worlds without deployments the option changes nothing.
 func StartDeploymentID(ctx context.Context, world World, deployment Deployment) (string, error) {
