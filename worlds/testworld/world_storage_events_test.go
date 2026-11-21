@@ -2,6 +2,7 @@ package testworld_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -48,5 +49,27 @@ func TestEventsByCorrelationIDHonourDescendingOrder(t *testing.T) {
 	next, err := world.EventsListByCorrelationID(ctx, input)
 	if err != nil || len(next.Data) != 1 || next.Data[0].EventType != worlds.EventTypeStepCreated || next.HasMore {
 		t.Fatalf("second page = %#v err=%v", next, err)
+	}
+}
+
+func TestRolledBackBatchKeepsAPurgedRunsStreams(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	runID := worlds.RunID("wrun_rollback")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf", Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "out", Chunk: []byte("chunk")}); err != nil {
+		t.Fatal(err)
+	}
+	// The batch finishes the run, which purges its data, then fails.
+	_, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeRunCancelled}, {EventType: worlds.EventTypeRunCreated}}})
+	if !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("batch error = %v", err)
+	}
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out"})
+	if err != nil || len(chunks.Data) != 1 || chunks.Done {
+		t.Fatalf("stream after a rolled-back batch = %+v, %v", chunks, err)
 	}
 }

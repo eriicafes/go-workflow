@@ -227,7 +227,12 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 	// A run created with $retention "0" loses its data as it finishes.
 	purged := conformRunID("retain_none")
 	attributes := map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String(), "tier": "gold"}
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes}); err != nil {
+	create := worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes}
+	if world.Capabilities().StartHook {
+		// A start hook's metadata is user data too.
+		create.StartHook = &worlds.StartHook{Token: fmt.Sprintf("conformance-delete-start-%s", purged), Metadata: []byte(`"start-metadata"`)}
+	}
+	if _, err := world.EventsCreateRun(ctx, create); err != nil {
 		t.Fatal(err)
 	}
 	token := fmt.Sprintf("conformance-delete-%s", purged)
@@ -248,6 +253,14 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 	conformExpectDataDeleted(t, world, purged)
 	if hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"}); err == nil && (hook.Metadata != nil || hook.Token != token) {
 		t.Fatalf("deleted run's hook = %+v", hook)
+	}
+	if create.StartHook != nil {
+		if hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: worlds.StartHookID(purged)}); err == nil && hook.Metadata != nil {
+			t.Fatalf("deleted run's start hook metadata = %s", hook.Metadata)
+		}
+		if start := worlds.RunStartHook(conformAllEvents(t, world, purged)[0].Data); start == nil || start.Metadata != nil || start.Token != create.StartHook.Token {
+			t.Fatalf("deleted run's run_created start hook = %+v", start)
+		}
 	}
 	err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "out", Chunk: []byte("more")})
 	conformExpect(t, err, worlds.ErrStreamClosed, "write to a deleted run's stream")

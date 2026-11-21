@@ -228,11 +228,14 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 }
 
 type memoryCheckpoint struct {
-	runs   map[worlds.RunID]worlds.Run
-	events map[worlds.RunID][]worlds.Event
-	steps  map[worlds.RunID]map[worlds.StepID]worlds.Step
-	hooks  map[worlds.HookID]worlds.Hook
-	tokens map[string]worlds.HookID
+	// streams holds each stream's state, which a purge of a run the batch
+	// finished changes.
+	streams map[*memoryStream]memoryStream
+	runs    map[worlds.RunID]worlds.Run
+	events  map[worlds.RunID][]worlds.Event
+	steps   map[worlds.RunID]map[worlds.StepID]worlds.Step
+	hooks   map[worlds.HookID]worlds.Hook
+	tokens  map[string]worlds.HookID
 }
 
 func (m *World) checkpointLocked() memoryCheckpoint {
@@ -255,11 +258,20 @@ func (m *World) checkpointLocked() memoryCheckpoint {
 	for token, id := range m.tokens {
 		checkpoint.tokens[token] = id
 	}
+	checkpoint.streams = map[*memoryStream]memoryStream{}
+	for _, streams := range m.streams {
+		for _, stream := range streams {
+			checkpoint.streams[stream] = *stream
+		}
+	}
 	return checkpoint
 }
 
 func (m *World) restoreLocked(checkpoint memoryCheckpoint) {
 	m.runs, m.events, m.steps, m.hooks, m.tokens = checkpoint.runs, checkpoint.events, checkpoint.steps, checkpoint.hooks, checkpoint.tokens
+	for stream, state := range checkpoint.streams {
+		*stream = state
+	}
 }
 
 // admitLocked implements the state-based queue fence. A duplicate start is

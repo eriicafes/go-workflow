@@ -998,6 +998,12 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", worlds.ErrEventInvalid, err)
 		}
 		set, remove := runUpdate(run.view)
+		if run.seenStatus.Terminal() {
+			// Only the commit finishing a run sets its expiredAt. A later
+			// append leaves it, so it cannot write back a deadline a purge
+			// has since moved to now.
+			delete(set, "expiredAt")
+		}
 		if run.view.Status == run.seenStatus {
 			// status is projected into the indexes, so leaving it out keeps
 			// ordinary appends from writing to them.
@@ -1132,6 +1138,10 @@ func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRun
 		return nil, err
 	}
 	if token.cur != nil {
+		if token.cur.runID == input.RunID {
+			// A retried create of a run that already holds its token.
+			return nil, worlds.ErrRunAlreadyExists
+		}
 		return nil, &worlds.HookConflictError{RunID: token.cur.runID}
 	}
 	id := worlds.StartHookID(input.RunID)
