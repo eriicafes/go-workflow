@@ -46,8 +46,8 @@ func (w *World) Close()                      { w.cancel() }
 func (*World) BaseURL() string               { return baseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
-func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true}
+func (w *World) Capabilities() worlds.Capabilities {
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: w.autoRun}
 }
 
 // New returns a World that executes deliveries for the workflows of runners

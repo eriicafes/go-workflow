@@ -107,8 +107,9 @@ type pendingStep struct {
 	// duration is how long after the delivery started the flow may create
 	// the step inline.
 	duration time.Duration
-	// attempt is the attempt that runs.
-	attempt int
+	// attempt is the attempt that runs, of at most maxRetries+1.
+	attempt    int
+	maxRetries int
 	// run calls the step function as attempt, and returns its result to
 	// record, or a World error that stopped it.
 	run func(attempt int) (worlds.DataStepResult, error)

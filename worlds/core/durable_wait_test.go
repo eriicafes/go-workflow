@@ -72,7 +72,9 @@ func TestWakeRunCompletesOnlySelectedWaits(t *testing.T) {
 	if status, err := run.Status(ctx); err != nil || status.Terminal() {
 		t.Fatalf("run status after one wake = %s, %v", status, err)
 	}
-	if count, err := worlds.WakeRun(ctx, world, worlds.RunID(run.ID()), nil); err != nil || count != 1 {
+	// The flow the first wake queued may not have completed its wait yet,
+	// and a wait that two wakes complete completes once.
+	if count, err := worlds.WakeRun(ctx, world, worlds.RunID(run.ID()), nil); err != nil || count < 1 {
 		t.Fatalf("remaining wake count = %d, %v", count, err)
 	}
 	if _, err := run.Value(ctx); err != nil {

@@ -216,9 +216,10 @@ type WakeOptions struct {
 	CorrelationIDs []string
 }
 
-// WakeUp settles the run's pending timers early. It queues a delivery so the
-// run resumes, and returns the number of timers it settled. Waking a deadline
-// timer triggers its cancellation continuation.
+// WakeUp settles the run's pending timers early. It queues a delivery of the
+// run that completes them before it resumes the run, and returns the number
+// of timers that delivery completes. Waking a deadline timer triggers its
+// cancellation continuation.
 func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, error) {
 	option := WakeOptions{}
 	if len(options) != 0 {
@@ -774,7 +775,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	} else if err != nil {
 		return "", err
 	}
-	if _, err := execution.World().Queue(ctx, worlds.QueueInput{RunID: id, WorkflowName: input.WorkflowName, IdempotencyKey: string(id), DeploymentID: deploymentID}); err != nil {
+	if _, err := execution.World().Queue(ctx, worlds.FirstFlow(id, input.WorkflowName, deploymentID)); err != nil {
 		return "", err
 	}
 	return id, nil

@@ -27,6 +27,15 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		return worlds.QueueResult{}, err
 	}
 	w.mu.Lock()
+	if input.IdempotencyKey != "" {
+		// A message with a key is stored once while it lives.
+		for _, message := range w.queued {
+			if message.input.IdempotencyKey == input.IdempotencyKey {
+				w.mu.Unlock()
+				return worlds.QueueResult{MessageID: message.id}, nil
+			}
+		}
+	}
 	id := ulid.Make().String()
 	w.queued = append(w.queued, queuedMessage{id: id, input: input})
 	w.mu.Unlock()

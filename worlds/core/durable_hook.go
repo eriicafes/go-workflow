@@ -103,7 +103,6 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
-		queue.IdempotencyKey = "hook-force:" + string(result.HookID)
 		_, err = options.Execution.World().Queue(options.Execution.ctx, queue)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))

@@ -151,6 +151,30 @@ CREATE INDEX go_workflow_runs_expired_idx ON go_workflow_runs (expired_at) WHERE
 `, `
 -- A run records the spec version it was created under.
 ALTER TABLE go_workflow_runs ADD COLUMN spec_version integer NOT NULL DEFAULT 0;
+`, `
+-- A message keeps its row across redeliveries. payload holds the whole
+-- delivery, deliveries counts every delivery and fences its lease, and
+-- handoffs counts the redeliveries that are not attempts. An IdempotencyKey
+-- deduplicates while its message lives, running marks the one serialized
+-- flow of a run that executes, and expires_at ends a message's life.
+ALTER TABLE go_workflow_queue ADD COLUMN payload bytea,
+	ADD COLUMN serialized boolean NOT NULL DEFAULT false;
+UPDATE go_workflow_queue SET payload = convert_to(json_build_object(
+	'RunID', run_id, 'QueueName', queue_name, 'StepID', step_id,
+	'ReplayDivergenceCount', replay_divergence_count, 'DeploymentID', deployment_id,
+	'DeploymentMismatchRetryCount', deployment_mismatch_retry_count)::text, 'UTF8'),
+	idempotency_key = '', serialized = step_id IS NULL;
+DROP INDEX go_workflow_queue_dedupe_idx;
+ALTER TABLE go_workflow_queue DROP COLUMN dedupe_key, DROP COLUMN replay_divergence_count,
+	DROP COLUMN deployment_id, DROP COLUMN deployment_mismatch_retry_count,
+	ALTER COLUMN payload SET NOT NULL,
+	ADD COLUMN handoffs integer NOT NULL DEFAULT 0,
+	ADD COLUMN running boolean NOT NULL DEFAULT false,
+	ADD COLUMN expires_at timestamptz;
+ALTER TABLE go_workflow_queue RENAME COLUMN attempts TO deliveries;
+CREATE UNIQUE INDEX go_workflow_queue_key_idx ON go_workflow_queue (run_id, idempotency_key) WHERE idempotency_key <> '';
+CREATE UNIQUE INDEX go_workflow_queue_running_flow_idx ON go_workflow_queue (run_id) WHERE running;
+CREATE INDEX go_workflow_queue_expires_idx ON go_workflow_queue (expires_at) WHERE expires_at IS NOT NULL;
 `}
 
 // migrate applies pending migrations in one transaction under a

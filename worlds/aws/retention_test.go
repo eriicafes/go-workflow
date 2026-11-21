@@ -70,7 +70,7 @@ func TestExpireRun(t *testing.T) {
 	if err := world.queueExpiry(ctx, "wrun_done", "retention", expired); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody), 1); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody)); err != nil {
 		t.Fatal(err)
 	}
 	if dynamo.has("expire-wrun_done") {
@@ -142,7 +142,7 @@ func TestRetentionDynamo(t *testing.T) {
 	if schedule == nil {
 		t.Fatal("finishing the run scheduled no expiry")
 	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input), 1); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input)); err != nil {
 		t.Fatal(err)
 	}
 	// The record is due in an hour, so the delivery is sent on, not run.

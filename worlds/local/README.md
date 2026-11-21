@@ -65,7 +65,7 @@ tokens/<token>.json                        {hookId, retainUntil}: token ownershi
 streams/<run>/<name>/meta.json             {name, closed, count}
 streams/<run>/<name>/<%010d>.json          one file per chunk
 queue/<messageID>.json                     durable delivery (ULID IDs)
-queue-keys/<run+key>.json                  idempotency key -> pending message ID
+queue-keys/<key>.json                      idempotency key -> live message ID
 ```
 
 Run, step, and hook IDs, tokens, stream names, and idempotency keys are
@@ -102,11 +102,29 @@ ignored and overwritten by the next write.
 
 `Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
 ordered by `NotBefore`; a single timer tracks the earliest delivery. Each due
-delivery runs `core.NewRuntime(world, runners).Execute` in its own
-goroutine, and its record is deleted on success. A failed delivery is retried
-with exponential backoff from 100ms up to 30s. `IdempotencyKey` deduplicates
-per run while the delivery is pending; the key is released when delivery
-starts, so work queued during a delivery is never dropped.
+delivery runs `core.NewRuntime(world, runners).Execute` in its own goroutine.
+The message is deleted when a delivery succeeds and lives until then, keeping
+its message ID across redeliveries.
+
+- Every delivery sets `DeliveryCount` (1-based, rising on every redelivery)
+  and `Attempt` (the same count without handoffs). Both are persisted when the
+  delivery starts, so a delivery interrupted by a crash counts too.
+- When `Execute` returns a `worlds.Redelivery`, the message is delivered again
+  after its delay, which counts as an attempt; a redelivery of zero is a
+  handoff, delivered at once without counting as an attempt. Any other error
+  is retried with exponential backoff from 100ms up to 30s. The next due time
+  is stored in the message, so a restart keeps it.
+- `IdempotencyKey` deduplicates across the directory: while a message with the
+  key lives, `Queue` with the same key stores nothing and returns that
+  message's ID. Messages without a key are never deduplicated.
+- One serialized flow of a run executes at a time (`QueueInput.SerializedFlow`):
+  a later flow of the run waits until the executing one is acknowledged, fails,
+  or asks for a redelivery. Step deliveries and intermediate hops of a wait's
+  timer are never held. Because only one process uses a directory, this gate
+  is in-process.
+- A message with a `Retention` is dropped instead of delivered once it is older
+  than that. Zero keeps it until it succeeds. `NotBefore` has no limit, so
+  `Capabilities().MaxQueueDelay` is zero.
 
 `RunsWaitForTerminalStatus` and `StreamsGetChunks` wait on an in-process
 change notification instead of polling.

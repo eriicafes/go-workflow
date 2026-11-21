@@ -77,7 +77,8 @@ func stepResult[Out any](execution *core.Execution, durable core.DurableStepResu
 
 // InlineStep calls the step fn with input as an inline step and waits for it.
 // It is InlineBackground followed by Value. It behaves like Step, except that
-// the flow always runs it, and its retries, itself, never as a step delivery.
+// the flow always runs its first attempt itself, whatever SetMaxInlineSteps
+// allows. A retry runs as a step delivery.
 // It returns the step's final error as an *Error, and ErrNoWorkflow when ctx
 // does not belong to a run.
 //
@@ -92,8 +93,8 @@ func InlineStep[In, Out any](ctx context.Context, fn func(context.Context, In) (
 // a promise for its result without waiting for it, like Background. When the
 // runner waits, the flow runs it, at the same time as the other steps it runs
 // inline, and the runner continues as each one finishes. It always runs inline,
-// whatever SetMaxInlineSteps allows, and a retry runs in a later flow once it
-// is due. Outside workflow context, the promise fails with ErrNoWorkflow.
+// whatever SetMaxInlineSteps allows, and a retry runs as a step delivery once
+// it is due. Outside workflow context, the promise fails with ErrNoWorkflow.
 func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, error), input In, options ...StepOptions) *Result[Out] {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {

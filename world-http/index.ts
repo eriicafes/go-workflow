@@ -138,6 +138,7 @@ export class HTTPWorld implements World {
 			hookRetention: { active: true },
 			hookForceClaim: true,
 			inBandFence: true,
+			...(capabilities.maxConcurrency ? { maxConcurrency: true } : {}),
 			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
 			...(capabilities.startHook ? { atomicStartHook: { active: true } } : {}),
 		};

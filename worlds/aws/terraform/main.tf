@@ -67,6 +67,13 @@ resource "aws_dynamodb_table" "workflows" {
     }
   }
 
+  # Removes idempotency-key claims and flow leases once they lapse. awsworld
+  # checks their expiry itself, so TTL only reclaims space.
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
+
   point_in_time_recovery {
     enabled = var.point_in_time_recovery
   }

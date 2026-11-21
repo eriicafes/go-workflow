@@ -38,7 +38,9 @@ type Config struct {
 	Routes map[string]string
 	// Scheduler, when set, delivers work due more than 15 minutes ahead, beyond
 	// the SQS delay limit, and every delayed delivery to a FIFO queue. Without
-	// it, queueing such a delivery returns an error.
+	// it, queueing such a delivery returns an error, and Capabilities report a
+	// MaxQueueDelay of 15 minutes, so the runtime reaches a later timer in
+	// hops.
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
 	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
@@ -163,7 +165,12 @@ func (w *World) BaseURL() string             { return w.config.BaseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true}
+	capabilities := worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true}
+	if w.scheduler == nil {
+		// Without Scheduler a delivery is due within SQS's delay limit.
+		capabilities.MaxQueueDelay = maxSQSDelay
+	}
+	return capabilities
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under

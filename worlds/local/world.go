@@ -71,6 +71,10 @@ type World struct {
 	queueMu   sync.Mutex
 	pending   deliveryHeap
 	queueWake chan struct{}
+	// flows lets one serialized flow of a run execute at a time.
+	flows flowGates
+	// execute executes a delivery: runtime.Execute, or a test's stand-in.
+	execute func(context.Context, worlds.QueueInput) error
 }
 
 // Open creates config.Dir with private permissions if needed and returns a
@@ -121,6 +125,7 @@ func New(root *os.Root, config Config, runners core.RunnerSet) (*World, error) {
 	}
 	world := &World{root: root, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), changes: make(chan struct{}), queueWake: make(chan struct{}, 1)}
 	world.runtime = core.NewRuntime(world, runners)
+	world.execute = world.runtime.Execute
 	return world, nil
 }
 
@@ -288,7 +293,7 @@ func (w *World) BaseURL() string             { return w.baseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true}
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under

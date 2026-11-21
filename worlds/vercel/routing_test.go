@@ -2,7 +2,6 @@ package vercelworld
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -31,11 +30,6 @@ func TestQueuePublishesRoutedWorkflowsToTheirTopic(t *testing.T) {
 	requests := server.all()
 	if len(requests) != 2 || requests[0].Path != "/api/v3/topic/workflow-backfill" || requests[1].Path != "/api/v3/topic/workflow" {
 		t.Fatalf("published to %+v, want the routed topic then the default topic", requests)
-	}
-	// The message keeps the topic, so a later hop is published onto it.
-	var message queueMessage
-	if err := json.Unmarshal([]byte(requests[0].Body), &message); err != nil || message.Topic != "workflow-backfill" {
-		t.Fatalf("message = %+v, %v, want the routed topic kept", message, err)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,49 +28,22 @@ func (e2eInput) Workflow(e2eOutput) {}
 
 func double(_ context.Context, n int) (int, error) { return 2 * n, nil }
 
-// publishes returns the deliveries published to Vercel Queues so far.
-func (f *fakeVQS) publishes() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var bodies []string
-	for index, request := range f.requests {
-		if request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/api/v3/topic/") && !strings.Contains(request.URL.Path, "/consumer/") {
-			bodies = append(bodies, string(f.bodies[index]))
-		}
-	}
-	return bodies
-}
-
-// deliverAll plays Vercel Queues: it pushes every published delivery to the
-// consumer once it is due, redelivering failed ones, until ctx is done.
+// deliverAll plays Vercel Queues' push: it pushes each message of queue to
+// the consumer once it is visible, until ctx is done.
 func deliverAll(ctx context.Context, t *testing.T, queue *fakeVQS, consumer http.Handler) {
-	delivered := 0
 	for ctx.Err() == nil {
-		published := queue.publishes()
-		if delivered == len(published) {
+		message, request := queue.next()
+		if message == nil {
 			time.Sleep(5 * time.Millisecond)
 			continue
 		}
-		body := published[delivered]
-		delivered++
-		go func(id int, body string) {
-			var message queueMessage
-			_ = json.Unmarshal([]byte(body), &message)
-			if message.NotBefore != nil {
-				time.Sleep(time.Until(*message.NotBefore))
-			}
-			for attempt := 0; ctx.Err() == nil && attempt < 20; attempt++ {
-				response := httptest.NewRecorder()
-				consumer.ServeHTTP(response, deliveryRequest("msg_"+string(rune('a'+id%26))+time.Now().Format("150405.000000"), body))
-				if response.Code == http.StatusOK {
-					return
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			if ctx.Err() == nil {
-				t.Errorf("delivery %s kept failing", body)
-			}
-		}(delivered, body)
+		if message.deliveries > 50 {
+			t.Errorf("message %s kept being redelivered: %s", message.id, message.body)
+		}
+		go func() {
+			defer queue.pushed(message)
+			consumer.ServeHTTP(httptest.NewRecorder(), request.WithContext(ctx))
+		}()
 	}
 }
 
@@ -219,6 +191,27 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 	chunk, err := reader.Next()
 	if err != nil || string(chunk.Data) != "hello" {
 		t.Fatalf("stream chunk = %+v err=%v", chunk, err)
+	}
+
+	// Flows of the run were serialized by their run ID, and step deliveries
+	// not at all.
+	queue.mu.Lock()
+	keyed := 0
+	for _, message := range queue.messages {
+		var body queueMessage
+		_ = json.Unmarshal(message.body, &body)
+		switch {
+		case body.StepID != nil && message.concurrencyKey != "":
+			t.Errorf("step delivery %s has concurrency key %q", message.body, message.concurrencyKey)
+		case body.StepID == nil && message.concurrencyKey != run.ID():
+			t.Errorf("flow %s has concurrency key %q", message.body, message.concurrencyKey)
+		case body.StepID == nil:
+			keyed++
+		}
+	}
+	queue.mu.Unlock()
+	if keyed == 0 {
+		t.Error("no flow was published")
 	}
 
 	// The backend kept the wait's resume time only.

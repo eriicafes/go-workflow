@@ -19,7 +19,7 @@ const resendMaxAge = 23 * time.Hour
 // name, keyed by the step's identity, so every send of one step's message is
 // one message to a World that deduplicates.
 func stepMessage(stepID worlds.StepID, name string, attempt int, resent bool) worlds.QueueInput {
-	input := worlds.QueueInput{StepID: &stepID, StepName: name, IdempotencyKey: StepMessageKey(stepID, name), StepResent: resent}
+	input := worlds.QueueInput{StepID: &stepID, StepName: name, IdempotencyKey: StepMessageKey(stepID, name), StepResent: resent, Retention: worlds.StepRetention}
 	if attempt > 1 {
 		input.StepAttempt = attempt
 	}

@@ -11,7 +11,6 @@ import (
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -44,6 +43,11 @@ type queueMessage struct {
 	ID      string            `json:"id"`
 	Input   worlds.QueueInput `json:"input"`
 	Publish string            `json:"publish,omitempty"`
+}
+
+// executor executes deliveries, as *core.Runtime does.
+type executor interface {
+	Execute(context.Context, worlds.QueueInput) error
 }
 
 // target is a queue deliveries are published to: the default queue, with an
@@ -80,8 +84,10 @@ func (w *World) sourceURL(eventSourceARN string) string {
 
 // publish sends the delivery id to queue: through SQS when it is due within
 // 15 minutes on a standard queue or due now on a FIFO queue, and otherwise
-// through a one-time schedule named schedule.
-func (w *World) publish(ctx context.Context, queue target, id string, input worlds.QueueInput, delay time.Duration, schedule string) error {
+// through a one-time schedule named schedule. first marks a delivery's first
+// send: a FIFO queue deduplicates a send again of the same delivery by its
+// ID, so a later one gets a distinct deduplication ID.
+func (w *World) publish(ctx context.Context, queue target, id string, input worlds.QueueInput, delay time.Duration, schedule string, first bool) error {
 	if !scheduled(queue, delay) {
 		body, err := json.Marshal(queueMessage{ID: id, Input: input})
 		if err != nil {
@@ -94,21 +100,36 @@ func (w *World) publish(ctx context.Context, queue target, id string, input worl
 		if queue.fifo {
 			send.MessageGroupId = awsv2.String(string(input.RunID))
 			send.MessageDeduplicationId = awsv2.String(id)
+			if !first {
+				send.MessageDeduplicationId = awsv2.String(id + "-" + ulid.Make().String())
+			}
 		} else {
 			send.DelaySeconds = delaySeconds(delay)
 		}
 		_, err = w.sqs.SendMessage(ctx, send)
 		return err
 	}
+	return w.createSchedule(ctx, schedule, time.Now().Add(delay), scheduleBody(id, input, queue.fifo), queue, input.RunID)
+}
+
+// maxScheduleInput is the longest target input a schedule takes.
+const maxScheduleInput = 8192
+
+// scheduleBody is the body a schedule sends: the delivery with its input, or
+// only its ID when the input does not fit a schedule, since the queue record
+// holds it either way. A FIFO body carries a unique publish field, so the
+// queue's content-based deduplication never drops it.
+func scheduleBody(id string, input worlds.QueueInput, fifo bool) string {
 	message := queueMessage{ID: id, Input: input}
-	if queue.fifo {
+	if fifo {
 		message.Publish = ulid.Make().String()
 	}
 	body, err := json.Marshal(message)
-	if err != nil {
-		return err
+	if err != nil || len(body) > maxScheduleInput {
+		message.Input = worlds.QueueInput{}
+		body, _ = json.Marshal(message)
 	}
-	return w.createSchedule(ctx, schedule, time.Now().Add(delay), string(body), queue, input.RunID)
+	return string(body)
 }
 
 // scheduled reports whether a delivery due after delay is published through
@@ -127,7 +148,7 @@ func scheduled(queue target, delay time.Duration) bool {
 // When ctx has a deadline, records not started by halfway to it are made
 // visible again and reported as failures, so a slow batch leaves them to
 // another invocation instead of timing out with them.
-func (w *World) consume(ctx context.Context, runtime *core.Runtime, event events.SQSEvent) events.SQSEventResponse {
+func (w *World) consume(ctx context.Context, runtime executor, event events.SQSEvent) events.SQSEventResponse {
 	response := events.SQSEventResponse{}
 	var cutoff time.Time
 	if deadline, ok := ctx.Deadline(); ok {
@@ -143,8 +164,7 @@ func (w *World) consume(ctx context.Context, runtime *core.Runtime, event events
 			continue
 		}
 		stop := w.holdVisibility(ctx, queueURL, record.ReceiptHandle)
-		attempt, _ := strconv.Atoi(record.Attributes["ApproximateReceiveCount"])
-		err := w.deliver(ctx, runtime, record.Body, attempt)
+		err := w.deliver(ctx, runtime, record.Body)
 		stop()
 		if err != nil {
 			log.Printf("workflow/aws: delivery %s failed: %v", record.MessageId, err)
@@ -204,7 +224,14 @@ func retryBackoff(receiveCount string) time.Duration {
 	return min(backoff, maxRetryBackoff)
 }
 
-func (w *World) deliver(ctx context.Context, runtime *core.Runtime, body string, attempt int) error {
+// deliver executes the delivery a message body names. The queue record keeps
+// the delivery's counts, since a redelivery is a new SQS message: its
+// deliveries rise on every delivery that executes, and its handoffs on every
+// handoff, which Attempt leaves out. A delivery that executes again, early,
+// or while its run's flow lease is taken is sent again as a new message and
+// its SQS message acknowledged, so waiting never counts toward the queue's
+// redrive policy.
+func (w *World) deliver(ctx context.Context, runtime executor, body string) error {
 	var message queueMessage
 	if err := json.Unmarshal([]byte(body), &message); err != nil || message.ID == "" {
 		// Redelivering a body that is not a queue message cannot succeed.
@@ -215,17 +242,13 @@ func (w *World) deliver(ctx context.Context, runtime *core.Runtime, body string,
 	if err != nil || !found {
 		return err
 	}
+	if record.expiresAt != nil && time.Now().After(*record.expiresAt) {
+		log.Printf("workflow/aws: dropping delivery %s past its retention", message.ID)
+		return w.deleteQueueRecord(ctx, message.ID)
+	}
 	if record.notBefore != nil {
 		if delay := time.Until(*record.notBefore); delay > 0 {
-			// Sent again to the queue it was routed to, at most 15 minutes
-			// ahead on a standard queue and through Scheduler on a FIFO
-			// queue. A new schedule name keeps it apart from a schedule
-			// that already fired.
-			queue := w.target(record.queue)
-			if !queue.fifo {
-				delay = min(delay, maxSQSDelay)
-			}
-			return w.publish(ctx, queue, message.ID, record.input, delay, scheduleName(ulid.Make().String()))
+			return w.resend(ctx, message.ID, record, delay)
 		}
 	}
 	if record.expire {
@@ -235,11 +258,49 @@ func (w *World) deliver(ctx context.Context, runtime *core.Runtime, body string,
 		return w.deleteQueueRecord(ctx, message.ID)
 	}
 	input := record.input
-	input.MessageID, input.Attempt = message.ID, attempt
-	if err := runtime.Execute(ctx, input); err != nil {
+	var lease *flowLease
+	if input.SerializedFlow() {
+		lease, err = w.acquireLease(ctx, input.RunID)
+		if err != nil {
+			return err
+		}
+		if lease == nil {
+			// Another flow of the run executes: wait for it without
+			// counting a delivery.
+			return w.resend(ctx, message.ID, record, leaseRetryDelay)
+		}
+		defer lease.release(ctx)
+	}
+	deliveryCount, attempt, found, err := w.countDelivery(ctx, message.ID)
+	if err != nil || !found {
+		return err
+	}
+	input.MessageID, input.DeliveryCount, input.Attempt = message.ID, deliveryCount, attempt
+	err = runtime.Execute(ctx, input)
+	lease.release(ctx)
+	if redelivery, ok := worlds.RedeliveryOf(err); ok {
+		if found, err := w.markRedelivery(ctx, message.ID, redelivery.After); err != nil || !found {
+			return err
+		}
+		return w.resend(ctx, message.ID, record, redelivery.After)
+	}
+	if err != nil {
 		return err
 	}
 	return w.deleteQueueRecord(ctx, message.ID)
+}
+
+// resend sends delivery id again to the queue it was routed to, due after
+// delay. A delay beyond 15 minutes goes through Scheduler when it is
+// configured, and otherwise waits 15 minutes and arrives early, to be sent
+// again for the rest. A new schedule name keeps it apart from a schedule that
+// already fired.
+func (w *World) resend(ctx context.Context, id string, record queueRecord, delay time.Duration) error {
+	queue := w.target(record.queue)
+	if !queue.fifo && w.scheduler == nil {
+		delay = min(delay, maxSQSDelay)
+	}
+	return w.publish(ctx, queue, id, record.input, max(delay, 0), scheduleName(ulid.Make().String()), false)
 }
 
 // delaySeconds rounds delay up to whole seconds within SQS's range.

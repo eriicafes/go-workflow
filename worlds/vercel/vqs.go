@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
@@ -24,20 +25,35 @@ import (
 var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
 
 const (
-	// vqsMaxQueueDelay is the longest delay published to Vercel Queues: a
-	// message keeps Vercel's default retention of 24 hours, so it is still
-	// retained for an hour after it becomes visible.
-	// Longer delays are delivered in hops.
+	// vqsMaxQueueDelay is the longest delay of a message published without a
+	// retention: it keeps Vercel's default retention of 24 hours, so it is
+	// still retained for an hour after it becomes visible. It is the World's
+	// MaxQueueDelay, and the runtime reaches later timers in hops.
 	vqsMaxQueueDelay = 23 * time.Hour
+	// vqsDefaultRetention is the retention of a message published without
+	// Vqs-Retention-Seconds, and vqsMinRetention and vqsMaxRetention the
+	// bounds Vercel Queues accepts for it.
+	vqsDefaultRetention = 24 * time.Hour
+	vqsMinRetention     = time.Minute
+	vqsMaxRetention     = 7 * 24 * time.Hour
+	// vqsRetentionBuffer is kept between a message's delay and its expiry,
+	// so it is not delivered just as it expires.
+	vqsRetentionBuffer = time.Hour
 	// vqsMinRetry is the shortest visibility timeout Vercel Queues accepts.
 	vqsMinRetry = 5 * time.Second
 	// vqsMaxRetry is the longest backoff of a failed delivery.
 	vqsMaxRetry = 15 * time.Minute
+	// vqsMaxVisibility is the longest visibility timeout Vercel Queues
+	// honors for one redelivery. A longer Redelivery is cut to it, and the
+	// runtime asks again when the message arrives early.
+	vqsMaxVisibility = 15 * time.Minute
+	// vqsMaxCoalescedReruns is how often a delivery runs again because
+	// messages were coalesced into it before it hands its message off.
+	vqsMaxCoalescedReruns = 32
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
 	vqsLease          = 5 * time.Minute
 	vqsLeaseRenewal   = time.Minute
-	vqsMaxVisibility  = time.Hour
 	vqsPayloadMaxSize = 1 << 20
 )
 
@@ -96,14 +112,39 @@ func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, pa
 	return w.http.Do(request)
 }
 
-// publishVQS sends message to its topic, or to Config.Topic when it has none,
-// addressed to deploymentID when it is set. key is the idempotency key, the
-// message ID itself or, for a hop of a long timer, unique to that hop, so only
-// a retried publish of the same message is dropped. Runtime idempotency keys
-// are reused across distinct deliveries and Vercel would silently drop those
-// for up to 24 hours.
-func (w *World) publishVQS(ctx context.Context, message queueMessage, key string, delay time.Duration, deploymentID string) error {
-	topic := message.Topic
+// vqsSend is how one message is published: its topic, deployment, and the
+// Vercel Queues options of the delivery it carries.
+type vqsSend struct {
+	Topic        string
+	DeploymentID string
+	// IdempotencyKey is sent as Vqs-Idempotency-Key when it is set: Vercel
+	// Queues stores one message per key while it lives.
+	IdempotencyKey string
+	// ConcurrencyKey is sent as Vqs-Experimental-Concurrency-Key when it is
+	// set: Vercel Queues keeps one delivery per key active and coalesces the
+	// key's other messages into it.
+	ConcurrencyKey string
+	Delay          time.Duration
+	Retention      time.Duration
+}
+
+// messageLifetime returns the Vqs-Delay-Seconds and Vqs-Retention-Seconds of a
+// message, zero for a header not sent. A retention is clamped to what Vercel
+// Queues accepts, and a delay to the message's retention less an hour: 23
+// hours with the default retention.
+func messageLifetime(delay, retention time.Duration) (delaySecs, retentionSecs int64) {
+	maxDelay := vqsDefaultRetention - vqsRetentionBuffer
+	if retention > 0 {
+		retentionSecs = delaySeconds(min(max(retention, vqsMinRetention), vqsMaxRetention))
+		maxDelay = max(time.Duration(retentionSecs)*time.Second-vqsRetentionBuffer, 0)
+	}
+	return min(delaySeconds(delay), int64(maxDelay/time.Second)), retentionSecs
+}
+
+// publishVQS sends message to send.Topic, or to Config.Topic when it is
+// empty, addressed to send.DeploymentID when it is set.
+func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) error {
+	topic := send.Topic
 	if topic == "" {
 		topic = w.config.Topic
 	}
@@ -112,12 +153,21 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, key string
 		return err
 	}
 	header := http.Header{}
-	header.Set("Vqs-Idempotency-Key", key)
-	if seconds := delaySeconds(delay); seconds > 0 {
-		header.Set("Vqs-Delay-Seconds", strconv.FormatInt(seconds, 10))
+	if send.IdempotencyKey != "" {
+		header.Set("Vqs-Idempotency-Key", send.IdempotencyKey)
 	}
-	if deploymentID != "" {
-		header.Set("Vqs-Deployment-Id", deploymentID)
+	if send.ConcurrencyKey != "" {
+		header.Set("Vqs-Experimental-Concurrency-Key", send.ConcurrencyKey)
+	}
+	delay, retention := messageLifetime(send.Delay, send.Retention)
+	if delay > 0 {
+		header.Set("Vqs-Delay-Seconds", strconv.FormatInt(delay, 10))
+	}
+	if retention > 0 {
+		header.Set("Vqs-Retention-Seconds", strconv.FormatInt(retention, 10))
+	}
+	if send.DeploymentID != "" {
+		header.Set("Vqs-Deployment-Id", send.DeploymentID)
 	}
 	response, err := w.vqsRequest(ctx, messageRegion(message.RunID), http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
 	if err != nil {
@@ -125,7 +175,7 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, key string
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusBadGateway && response.Header.Get("Vqs-Error-Code") == "consumer_discovery_failed" {
-		return fmt.Errorf("workflow/vercel: publish queue message to deployment %q: %w", deploymentID, worlds.ErrDeploymentUnavailable)
+		return fmt.Errorf("workflow/vercel: publish queue message to deployment %q: %w", send.DeploymentID, worlds.ErrDeploymentUnavailable)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return responseError("publish queue message", response)
@@ -139,7 +189,10 @@ type vqsDelivery struct {
 	ConsumerGroup string
 	MessageID     string
 	ReceiptHandle string
+	// DeliveryCount counts the message's deliveries, handoffs included, and
+	// HandoffCount its handoffs. Zero DeliveryCount is unknown.
 	DeliveryCount int
+	HandoffCount  int
 	// VisibilityDeadline is when the current lease expires, when known.
 	VisibilityDeadline time.Time
 	Body               []byte
@@ -170,6 +223,7 @@ func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 			ReceiptHandle: request.Header.Get("Ce-Vqsreceipthandle"),
 		}
 		delivery.DeliveryCount, _ = strconv.Atoi(request.Header.Get("Ce-Vqsdeliverycount"))
+		delivery.HandoffCount, _ = strconv.Atoi(request.Header.Get("Ce-Vqsexperimentalhandoffcount"))
 		delivery.VisibilityDeadline, _ = time.Parse(time.RFC3339Nano, request.Header.Get("Ce-Vqsvisibilitydeadline"))
 		if delivery.ReceiptHandle != "" {
 			delivery.Body = body
@@ -239,13 +293,37 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 		return vqsDelivery{}, fmt.Errorf("workflow/vercel: decode queue message: %w", err)
 	}
 	delivery.ReceiptHandle, delivery.DeliveryCount = message.ReceiptHandle, message.DeliveryCount
+	// The counts may come as headers, as on a multipart receive.
+	if count, err := strconv.Atoi(response.Header.Get("Vqs-Delivery-Count")); err == nil && delivery.DeliveryCount == 0 {
+		delivery.DeliveryCount = count
+	}
+	delivery.HandoffCount, _ = strconv.Atoi(response.Header.Get("Vqs-Experimental-Handoff-Count"))
 	delivery.VisibilityDeadline = time.Now().Add(vqsLease)
 	return delivery, nil
 }
 
-// acknowledge removes the delivery from its consumer group.
-func (w *World) acknowledge(ctx context.Context, delivery vqsDelivery) error {
-	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, nil)
+// errCoalescedPending is the refusal of an acknowledgment that does not cover
+// every message Vercel Queues coalesced into the delivery.
+type errCoalescedPending struct {
+	// Count is how many messages were coalesced into the delivery.
+	Count int
+}
+
+func (e *errCoalescedPending) Error() string {
+	return fmt.Sprintf("workflow/vercel: %d queue messages were coalesced into the delivery", e.Count)
+}
+
+// acknowledge removes the delivery from its consumer group. coalesced is how
+// many coalesced messages the delivery's last execution covers, sent as
+// Vqs-Experimental-If-Coalesced when it is above zero. When more were
+// coalesced into it, Vercel Queues refuses, and acknowledge returns an
+// *errCoalescedPending.
+func (w *World) acknowledge(ctx context.Context, delivery vqsDelivery, coalesced int) error {
+	var header http.Header
+	if coalesced > 0 {
+		header = http.Header{"Vqs-Experimental-If-Coalesced": {strconv.Itoa(coalesced)}}
+	}
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, header)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: acknowledge queue message: %w", err)
 	}
@@ -253,23 +331,56 @@ func (w *World) acknowledge(ctx context.Context, delivery vqsDelivery) error {
 	if (response.StatusCode >= 200 && response.StatusCode < 300) || response.StatusCode == http.StatusNotFound {
 		return nil
 	}
+	if response.StatusCode == http.StatusConflict && response.Header.Get("Vqs-Error-Code") == "concurrency_coalesced_pending" {
+		count, err := strconv.Atoi(response.Header.Get("Vqs-Experimental-Coalesced"))
+		if err != nil || count <= 0 {
+			var body struct {
+				CoalescedCount int `json:"coalescedCount"`
+			}
+			_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&body)
+			count = body.CoalescedCount
+		}
+		if count > 0 {
+			return &errCoalescedPending{Count: count}
+		}
+	}
 	return responseError("acknowledge queue message", response)
 }
 
-// setVisibility hides the delivery for timeout, which renews the lease or,
-// after a failure, schedules the next attempt.
+// setVisibility hides the delivery for timeout, up to vqsMaxVisibility, which
+// renews the lease or schedules the next delivery.
 func (w *World) setVisibility(ctx context.Context, delivery vqsDelivery, timeout time.Duration) error {
-	body, err := json.Marshal(map[string]int64{"visibilityTimeoutSeconds": min(delaySeconds(timeout), int64(vqsMaxVisibility/time.Second))})
+	return w.changeVisibility(ctx, delivery, min(delaySeconds(timeout), int64(vqsMaxVisibility/time.Second)), false)
+}
+
+// handOff releases the delivery for its next delivery at once, which Vercel
+// Queues does not count toward its retries and reports in the next
+// delivery's handoff count.
+func (w *World) handOff(ctx context.Context, delivery vqsDelivery) error {
+	return w.changeVisibility(ctx, delivery, 0, true)
+}
+
+func (w *World) changeVisibility(ctx context.Context, delivery vqsDelivery, seconds int64, handoff bool) error {
+	body, err := json.Marshal(map[string]int64{"visibilityTimeoutSeconds": seconds})
 	if err != nil {
 		return err
 	}
-	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, nil)
+	var header http.Header
+	if handoff {
+		header = http.Header{"Vqs-Experimental-Handoff": {"1"}}
+	}
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, header)
 	if err != nil {
-		return fmt.Errorf("workflow/vercel: extend queue lease: %w", err)
+		return fmt.Errorf("workflow/vercel: change queue message visibility: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseError("extend queue lease", response)
+		return responseError("change queue message visibility", response)
+	}
+	if outcome := response.Header.Get("Vqs-Experimental-Handoff"); handoff && outcome != "" && outcome != "accepted" {
+		// not_immediate or limit_reached: Vercel Queues redelivers it as an
+		// ordinary retry, which counts as an attempt.
+		log.Printf("workflow/vercel: handoff of queue message %s: %s", delivery.MessageID, outcome)
 	}
 	return nil
 }

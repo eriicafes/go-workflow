@@ -69,13 +69,14 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 			panic(execution.exit(errReplaySuspended))
 		}
 		step := pendingStep{
-			stepID:   stepID,
-			name:     options.Name,
-			explicit: explicit,
-			limit:    MaxInlineSteps(ctx),
-			duration: MaxInlineStepsDuration(ctx),
-			attempt:  1,
-			run:      pendingRun(ctx, execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
+			stepID:     stepID,
+			name:       options.Name,
+			explicit:   explicit,
+			limit:      MaxInlineSteps(ctx),
+			duration:   MaxInlineStepsDuration(ctx),
+			attempt:    1,
+			maxRetries: options.MaxRetries,
+			run:        pendingRun(ctx, execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
 		}
 		encoded, err := execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {

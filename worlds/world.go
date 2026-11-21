@@ -65,6 +65,17 @@ type Capabilities struct {
 	// RegionalRunIDs reports that the World implements RegionalRunIDs, so
 	// clients ask it for new run IDs (Client.RunsNewID).
 	RegionalRunIDs bool `cbor:"regionalRunIds"`
+	// InBandFence reports that the World fences in-band writes (see
+	// EventsCreateOptions.InBandCount). Every World does.
+	InBandFence bool `cbor:"inBandFence"`
+	// MaxConcurrency reports that the World's queue delivers one
+	// serialized flow of a run at a time (see QueueInput.SerializedFlow).
+	// The fence keeps overlapping flows safe, and this makes them rare.
+	MaxConcurrency bool `cbor:"maxConcurrency"`
+	// MaxQueueDelay is the furthest NotBefore the World's queue accepts
+	// from now. The runtime reaches a later timer in hops. Zero means no
+	// limit.
+	MaxQueueDelay time.Duration `cbor:"maxQueueDelay"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that
@@ -249,45 +260,45 @@ type (
 	}
 )
 
-// WakeRun completes the selected pending waits of a run and queues a
-// delivery that replays it. correlationIDs holds wait IDs, and an empty list
-// selects every pending wait. It returns the number of waits it completed.
-// It queues the delivery even when that number is zero while the run is not
-// terminal, so retrying a call whose queueing failed still wakes the run.
+// WakeRun queues a flow of a run that completes the selected pending waits
+// before it replays the run. correlationIDs holds wait IDs, and an empty list
+// selects every pending wait. It returns the number of waits the flow
+// completes. It queues the flow even when that number is zero while the run
+// is not terminal, so retrying a call whose queueing failed still wakes the
+// run.
 func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []string) (int, error) {
 	pending, err := PendingWaits(ctx, world, runID)
 	if err != nil {
 		return 0, err
 	}
-	count := 0
+	var selected []string
 	for _, waitID := range pending {
-		if len(correlationIDs) != 0 && !slices.Contains(correlationIDs, waitID) {
-			continue
+		if len(correlationIDs) == 0 || slices.Contains(correlationIDs, waitID) {
+			selected = append(selected, waitID)
 		}
-		if _, err := world.EventsCreate(ctx, EventsCreateInput{
-			RunID: runID,
-			Event: EventsCreateEvent{
-				EventType:     EventTypeWaitCompleted,
-				CorrelationID: waitID,
-			},
-		}); err != nil {
-			return count, err
-		}
-		count++
 	}
-	if count == 0 {
+	queue, err := RunDelivery(ctx, world, runID)
+	if err != nil {
+		return 0, err
+	}
+	if len(selected) == 0 {
 		run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone})
 		if err != nil || run.Status.Terminal() {
 			return 0, err
 		}
 	}
-	queue, err := RunDelivery(ctx, world, runID)
-	if err != nil {
-		return count, err
-	}
-	queue.IdempotencyKey = "wake:" + string(runID)
+	queue.CompleteWaits = selected
 	_, err = world.Queue(ctx, queue)
-	return count, err
+	if err != nil {
+		return 0, err
+	}
+	return len(selected), nil
+}
+
+// FirstFlow returns the delivery that starts run runID of workflowName,
+// pinned to deploymentID, keyed by the run so a retried start queues it once.
+func FirstFlow(runID RunID, workflowName, deploymentID string) QueueInput {
+	return QueueInput{RunID: runID, WorkflowName: workflowName, IdempotencyKey: string(runID), DeploymentID: deploymentID, RunSpecVersion: SpecVersion, RunInput: &RunInput{WorkflowName: workflowName, DeploymentID: deploymentID, SpecVersion: SpecVersion}}
 }
 
 // PendingWaits returns the IDs of run runID's waits that have not completed,
@@ -343,15 +354,13 @@ func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (Ev
 		RunID: hook.RunID,
 		Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: data},
 	})
-	key := string(result.EventID)
-	switch {
-	case errors.Is(err, ErrHookNotActive):
-		key = "resume:" + string(hook.HookID)
-	case err != nil:
+	if err != nil && !errors.Is(err, ErrHookNotActive) {
 		return result, err
 	}
-	// the hook carries the context of its run, so resuming it reads no run
-	queue := QueueInput{RunID: hook.RunID, WorkflowName: hook.ResumeContext.WorkflowName, IdempotencyKey: key}
+	// The hook carries the context of its run, so resuming it reads no run.
+	// A wake carries no key, so it is never absorbed by a flow that is
+	// already ending.
+	queue := QueueInput{RunID: hook.RunID, WorkflowName: hook.ResumeContext.WorkflowName, RunSpecVersion: SpecVersion}
 	if world.Capabilities().DeploymentAffinity {
 		queue.DeploymentID = hook.ResumeContext.DeploymentID
 	}

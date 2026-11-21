@@ -212,7 +212,7 @@ func (w *World) BaseURL() string           { return w.config.BaseURL }
 func (w *World) DeploymentID() string      { return w.config.DeploymentID }
 func (*World) Analytics() worlds.Analytics { return nil }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true}
+	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true, InBandFence: true, MaxConcurrency: true, MaxQueueDelay: vqsMaxQueueDelay}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the
@@ -257,14 +257,15 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
 // Queue returns the Vercel Queues push consumer, which executes deliveries for
-// the workflows of runners. It acknowledges a delivery that succeeds and
-// answers 500 to one that fails, so Vercel redelivers it.
+// the workflows of runners. It acknowledges a delivery that succeeds, leaves
+// the message for its next delivery when the runtime asks for a redelivery,
+// and answers 500 to one that fails, so Vercel redelivers it.
 //
 // Deploy it only as a function with a queue/v2beta trigger for Config.Topic.
 // Vercel does not expose such functions publicly, so the handler does not
 // authenticate requests.
 func Queue(world *World, runners core.RunnerSet) http.Handler {
-	return &consumer{world: world, runtime: core.NewRuntime(world, runners)}
+	return &consumer{world: world, execute: core.NewRuntime(world, runners).Execute}
 }
 
 // Deployment returns a handler serving only the deployment route, which

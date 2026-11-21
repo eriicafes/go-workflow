@@ -12,9 +12,16 @@ import (
 type Queue interface {
 	// Queue stores the delivery described by QueueInput and returns its message
 	// ID. It does not deliver an item before NotBefore. QueueName lets an
-	// implementation select a queue. IdempotencyKey identifies a retry for
-	// implementations that support deduplicated publishing. Delivery is at least
-	// once and Queue does not promise to deduplicate calls.
+	// implementation select a queue. Delivery is at least once.
+	//
+	// A message with an IdempotencyKey is stored once: a Queue with the key
+	// of a message that lives, sent within MinDeduplicationWindow of its
+	// first, stores nothing more and may return either message's ID.
+	//
+	// A delivery whose Runtime.Execute returns a *Redelivery is delivered
+	// again, with the same MessageID and the next DeliveryCount. A World
+	// whose Capabilities report MaxConcurrency delivers one serialized flow
+	// of a run at a time (see QueueInput.SerializedFlow).
 	Queue(context.Context, QueueInput) (QueueResult, error)
 	// QueueBatch stores the supplied deliveries and returns their message IDs. It
 	// may return results for items stored before an error.
@@ -80,6 +87,43 @@ type (
 		// not tell whether the step's first message was sent. Its delivery
 		// reads the log before it runs the step.
 		StepResent bool
+		// StepInput is the step's input payload, carried by a step delivery
+		// when it is at most MaxStepMessageInput bytes.
+		StepInput []byte
+		// RunSpecVersion is the spec version of the run the delivery
+		// belongs to, SpecVersion.
+		RunSpecVersion int
+		// RunInput is set on a run's first flow, which starts it.
+		RunInput *RunInput
+		// CompleteWaits holds the waits a flow that wakes the run completes
+		// first, whether or not they are due. See WakeRun.
+		CompleteWaits []string
+		// WaitContinuation marks a timer of a wait. See WaitContinuation.
+		WaitContinuation *WaitContinuation
+		// Retention is how long the message may live, redeliveries
+		// included. A World caps it at what its queue supports, and zero
+		// uses its default.
+		Retention time.Duration
+	}
+	// RunInput is what a run's first flow carries about the run it starts.
+	RunInput struct {
+		WorkflowName string
+		DeploymentID string
+		SpecVersion  int
+	}
+	// WaitContinuation marks a timer of the wait CorrelationID. A wait
+	// further away than the World's MaxQueueDelay is reached in hops,
+	// anchored on its deadline: the last hop is due at ResumeAt, and each
+	// earlier one MaxQueueDelay before the next. An intermediate hop has
+	// ResumeAt and HopAt set, and its delivery only queues the next hop: it
+	// is never held back for another flow of the run. The last hop, without
+	// them, is an ordinary flow, which completes the wait. Attempt counts the
+	// timers that came before the wait was due.
+	WaitContinuation struct {
+		CorrelationID string
+		Attempt       int
+		ResumeAt      *time.Time
+		HopAt         *time.Time
 	}
 	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {
@@ -89,6 +133,33 @@ type (
 	QueueResult struct {
 		MessageID string
 	}
+)
+
+// Intermediate reports whether input is an intermediate hop of a wait's
+// timer, which a World delivers without waiting for another flow of the run.
+func (input QueueInput) Intermediate() bool {
+	return input.WaitContinuation != nil && input.WaitContinuation.ResumeAt != nil
+}
+
+// SerializedFlow reports whether a World with one flow of a run at a time
+// holds input back while another flow of its run executes: every flow, but
+// not a step delivery or an intermediate hop of a wait's timer.
+func (input QueueInput) SerializedFlow() bool {
+	return input.StepID == nil && !input.Intermediate()
+}
+
+const (
+	// MaxStepMessageInput is the largest step input a step delivery
+	// carries.
+	MaxStepMessageInput = 128 << 10
+	// StepRetention is how long the message of a step that may retry
+	// lives, and StepRetentionOnce how long one of a step that does not.
+	StepRetention     = 7 * 24 * time.Hour
+	StepRetentionOnce = 24 * time.Hour
+	// MinDeduplicationWindow is the shortest time a World deduplicates a
+	// message's IdempotencyKey for, from the message's first send, while
+	// the message lives.
+	MinDeduplicationWindow = 24 * time.Hour
 )
 
 // Redelivery is the result of a delivery that asks its World to deliver the

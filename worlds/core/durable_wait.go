@@ -65,12 +65,8 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		return DurableWaitResult{WaitID: waitID}
 	}
 	if time.Now().Before(data.ResumeAt) {
-		// The timer's own delivery can arrive early when clocks disagree. It
-		// is consumed by this replay, so it queues its replacement. A flow
-		// that waits for an inline step completes the timer when it is due.
-		if options.Execution.delivery.IdempotencyKey == string(waitID) {
-			options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
-		}
+		// A flow that waits for an inline step completes the timer when it
+		// is due. A timer that came early is armed again as the flow ends.
 		options.Execution.openWaits[waitID] = pendingWait{waitID: waitID, dueAt: data.ResumeAt, refs: CancellationReferences(ctx)}
 		return DurableWaitResult{WaitID: waitID}
 	}
@@ -94,5 +90,6 @@ func (e *Execution) completeWait(wait pendingWait) {
 			return
 		}
 	}
+	e.armChainBefore(string(wait.waitID))
 	e.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(wait.waitID)}, nil)
 }
