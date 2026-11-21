@@ -179,10 +179,20 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Now` | — | The replay clock in workflow context, and `time.Now()` elsewhere. |
+| `Now` | W, S, O | The replay clock in workflow context, and `time.Now()` elsewhere. |
 | `RandReader` | W | Reader of random bytes drawn from the run's seed. Its `Read` returns `ErrNoWorkflow` outside workflow context. |
 | `Sleep` | W | Suspends the run for `duration`. |
 | `Timer` | W | Promise that settles after `duration`. |
+
+## Attributes
+
+```go
+func SetAttributes(ctx context.Context, attributes map[string]*string, options ...SetAttributesOptions) error
+```
+
+| Function | Context | Description |
+| --- | --- | --- |
+| `SetAttributes` | W, S | Changes the run's attributes as one `attr_set` event, in key order. A nil value deletes its key. In workflow context the write draws an `attr_` ID from the run's seed. |
 
 ## Runs
 
