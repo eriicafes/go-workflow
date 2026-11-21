@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"runtime"
 	"slices"
@@ -207,6 +208,25 @@ func Now(ctx context.Context) (time.Time, error) {
 	}, struct{}{})
 	return stepResult(execution, durable).Value(ctx)
 }
+
+// RandReader returns a reader of random bytes for workflow code. Each byte is
+// drawn from the run's seed, which also draws its step, timer, and hook IDs,
+// so every replay reads the same bytes in the same order. In workflow
+// context, a runner reads randomness only through RandReader, never
+// crypto/rand or math/rand. Outside workflow context, including step context,
+// where crypto/rand is safe to use, its Read returns ErrNoWorkflow.
+func RandReader(ctx context.Context) io.Reader {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return errorReader{ErrNoWorkflow}
+	}
+	return execution.RandReader()
+}
+
+// errorReader is a reader whose Read returns err.
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
 
 // Map starts one background step per input, returning results in input order.
 func Map[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) []*Result[Out] {

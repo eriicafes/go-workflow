@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -256,6 +257,10 @@ func (e *Execution) NextHookID() HookID {
 // NextHookToken draws the token of the next hook the runner declares without
 // one.
 func (e *Execution) NextHookToken() string { return e.seed.hookToken() }
+
+// RandReader returns a reader of bytes drawn from the run's seed, each the
+// floor of a drawn value times 256.
+func (e *Execution) RandReader() io.Reader { return e.seed }
 
 // declared marks the operation with id as reached and returns the index of
 // its recorded declaration, matched by ULID so an operation of another kind

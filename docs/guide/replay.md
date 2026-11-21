@@ -164,8 +164,11 @@ context must make the same decisions every time.
   I/O, and anything that sends a message belong in a step function.
 - **Read time only through `workflow.Now`.** It records the time the first time
   it runs, so replay returns the same value. `time.Now` is fine inside steps.
-- **Don't use randomness directly.** Generate IDs and random choices in a step,
-  or with [`workflow.InlineStep`](/guide/inline-steps).
+- **Read randomness only through `workflow.RandReader`.** Its bytes are drawn
+  from the run's seed, the generator that draws step, timer, and hook IDs, so
+  every replay reads the same bytes in the same order. Wrap it for other
+  shapes, such as `uuid.NewRandomFromReader(workflow.RandReader(ctx))`.
+  `crypto/rand` is fine inside steps.
 - **Don't start goroutines or `select` on channels.** Use
   [`workflow.Background`](/guide/concurrency) and the `Select` functions.
 - **Don't range over maps** in a way that changes the order of operations. Go
