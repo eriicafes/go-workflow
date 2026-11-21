@@ -2,16 +2,16 @@ package localworld_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/workflowtest"
@@ -23,17 +23,17 @@ import (
 func TestConformance(t *testing.T) {
 	t.Parallel()
 	workflowtest.Conformance(t, func(t *testing.T) worlds.World {
-		return startWorld(t, t.TempDir(), nil)
+		return startWorld(t, localworld.Config{Dir: t.TempDir()}, nil)
 	})
 }
 
-// TestConformanceShared runs the concurrency contract against one World, the
-// only configuration a directory supports.
+// TestConformanceShared runs the concurrency contract against two Worlds on
+// one data directory, as two processes would share it.
 func TestConformanceShared(t *testing.T) {
 	t.Parallel()
 	workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {
-		world := startWorld(t, t.TempDir(), nil)
-		return world, world
+		dir := t.TempDir()
+		return startWorld(t, localworld.Config{Dir: dir}, nil), startWorld(t, localworld.Config{Dir: dir}, nil)
 	})
 }
 
@@ -84,11 +84,23 @@ func TestRequiresPrepare(t *testing.T) {
 	}
 }
 
+func TestDataDirDefaultsToTheEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("WORKFLOW_LOCAL_DATA_DIR", dir)
+	world := startWorld(t, localworld.Config{}, nil)
+	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: "wrun_env", WorkflowName: "env"}); err != nil {
+		t.Fatal(err)
+	}
+	if count := queryInt(t, dir, "SELECT count(*) FROM runs"); count != 1 {
+		t.Fatalf("runs in %s = %d", dir, count)
+	}
+}
+
 func TestPersistsAcrossReopen(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
+	world := startWorld(t, localworld.Config{Dir: dir}, nil)
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_persist", WorkflowName: "persist", Input: []byte(`"in"`), Attributes: map[string]string{"k": "v"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +125,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened := startWorld(t, dir, nil)
+	reopened := startWorld(t, localworld.Config{Dir: dir, SkipRecovery: true}, nil)
 	run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_persist"})
 	if err != nil || run.Status != worlds.StatusRunning || string(run.Input) != `"in"` || run.Attributes["k"] != "v" {
 		t.Fatalf("run = %#v err=%v", run, err)
@@ -132,7 +144,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("tokens differing only by case collided: %v", err)
 	}
 	chunks, err := reopened.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_persist", Name: "out/1"})
-	if err != nil || len(chunks.Data) != 2 || string(chunks.Data[1].Data) != "y" {
+	if err != nil || len(chunks.Data) != 2 || string(chunks.Data[1].Data) != "y" || chunks.Data[1].Index != 1 {
 		t.Fatalf("chunks = %#v err=%v", chunks, err)
 	}
 	names, err := reopened.StreamsList(ctx, worlds.StreamsListInput{RunID: "wrun_persist"})
@@ -150,11 +162,11 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestViewsHoldNoPayloads(t *testing.T) {
+func TestViewsHoldNoPayloadsAndEventsHoldCBOR(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
+	world := startWorld(t, localworld.Config{Dir: dir}, nil)
 	runID := worlds.RunID("wrun_payloads")
 	// Payloads are bytes, base64 in event JSON.
 	b64 := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
@@ -176,57 +188,51 @@ func TestViewsHoldNoPayloads(t *testing.T) {
 			t.Fatalf("%s: %v", event.EventType, err)
 		}
 	}
-	if err := world.Close(); err != nil {
-		t.Fatal(err)
-	}
-	payloads := []string{b64(`"run-input-bytes"`), b64(`"run-output-bytes"`), b64(`"step-input-bytes"`), b64(`"step-error-bytes"`), b64(`"step-output-bytes"`), metadata}
-	assertNoPayloads := func() {
-		t.Helper()
-		for _, name := range []string{"runs/" + key(string(runID)) + ".json", "steps/" + key(string(runID)) + "/" + key("step_a") + ".json", "hooks/" + key("hook_a") + ".json"} {
-			raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
-			if err != nil {
-				t.Fatal(err)
-			}
+	payloads := []string{"run-input-bytes", "run-output-bytes", "step-input-bytes", "step-error-bytes", "step-output-bytes", "hook-metadata-bytes"}
+	for _, query := range []string{"SELECT doc FROM runs", "SELECT doc FROM steps", "SELECT doc FROM hooks"} {
+		for _, doc := range queryStrings(t, dir, query) {
 			for _, payload := range payloads {
-				if strings.Contains(string(raw), payload) {
-					t.Fatalf("%s holds payload %s: %s", name, payload, raw)
+				if strings.Contains(doc, payload) || strings.Contains(doc, b64(`"`+payload+`"`)) {
+					t.Fatalf("%s holds payload %s: %s", query, payload, doc)
 				}
 			}
 		}
 	}
-	assertNoPayloads()
-
-	// An uncommitted event file makes the next Prepare rebuild the run's views
-	// from its committed events.
-	writeRecord(t, dir, "events/"+key(string(runID))+"/"+string(worlds.EventIDForSlot(10))+".json", worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(10), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", CreatedAt: time.Now().UTC()})
-	reopened := startWorld(t, dir, nil)
-	assertNoPayloads()
-	run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	// Events hold their payloads as raw bytes, not base64.
+	docs := strings.Join(queryStrings(t, dir, "SELECT doc FROM events"), "")
+	for _, payload := range payloads {
+		if !strings.Contains(docs, payload) || strings.Contains(docs, b64(`"`+payload+`"`)) {
+			t.Fatalf("events do not hold %s as raw bytes", payload)
+		}
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	if err != nil || string(run.Input) != `"run-input-bytes"` || string(run.Output) != `"run-output-bytes"` || run.Error != nil {
 		t.Fatalf("run = %#v err=%v", run, err)
 	}
-	step, err := reopened.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || string(step.Input) != `"step-input-bytes"` || string(step.Output) != `"step-output-bytes"` || step.Error != nil || step.Attempt != 2 {
 		t.Fatalf("step = %#v err=%v", step, err)
 	}
-	hook, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
+	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
 	if err != nil || string(hook.Metadata) != `"hook-metadata-bytes"` {
 		t.Fatalf("hook = %#v err=%v", hook, err)
 	}
-	stripped, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone})
+	stripped, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone})
 	if err != nil || stripped.Metadata != nil {
 		t.Fatalf("ResolveDataNone hook = %#v err=%v", stripped, err)
 	}
 }
 
-func TestPrepareFinishesAnInterruptedPurge(t *testing.T) {
+func TestZeroRetentionPurgesWithTheRunsEnd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
-	runID := worlds.RunID("wrun_interrupted")
-	input := base64.StdEncoding.EncodeToString([]byte(`"run-input-bytes"`))
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "purge", Input: []byte(`"run-input-bytes"`)}); err != nil {
+	world := startWorld(t, localworld.Config{Dir: dir}, nil)
+	runID := worlds.RunID("wrun_purge")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "purge", Input: []byte(`"run-input-bytes"`), Attributes: map[string]string{"$retention": "0"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "out", Chunk: []byte("chunk-bytes")}); err != nil {
 		t.Fatal(err)
 	}
 	for _, eventType := range []worlds.EventType{worlds.EventTypeRunStarted, worlds.EventTypeRunCancelled} {
@@ -234,257 +240,110 @@ func TestPrepareFinishesAnInterruptedPurge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "out", Chunk: []byte("chunk")}); err != nil {
-		t.Fatal(err)
+	docs := strings.Join(queryStrings(t, dir, "SELECT doc FROM events"), "")
+	if strings.Contains(docs, "run-input-bytes") {
+		t.Fatal("run_created kept its input")
 	}
-	if err := world.Close(); err != nil {
-		t.Fatal(err)
+	if count := queryInt(t, dir, "SELECT count(*) FROM stream_chunks WHERE eof = 0"); count != 0 {
+		t.Fatalf("chunks left: %d", count)
 	}
-	// A crash after the run's ExpiredAt committed left its files unpurged.
-	runFile := filepath.Join(dir, "runs", key(string(runID))+".json")
-	raw, err := os.ReadFile(runFile)
-	if err != nil {
-		t.Fatal(err)
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.ExpiredAt == nil {
+		t.Fatalf("run = %#v err=%v", run, err)
 	}
-	var record map[string]any
-	if err := json.Unmarshal(raw, &record); err != nil {
-		t.Fatal(err)
-	}
-	record["ExpiredAt"] = time.Now().UTC().Add(-time.Second)
-	writeRecord(t, dir, "runs/"+key(string(runID))+".json", record)
-
-	reopened := startWorld(t, dir, nil)
-	event, err := os.ReadFile(filepath.Join(dir, "events", key(string(runID)), string(worlds.EventIDForSlot(1))+".json"))
-	if err != nil || strings.Contains(string(event), input) {
-		t.Fatalf("run_created file after recovery = %s, err=%v", event, err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "streams", key(string(runID)), key("out"), "0000000000.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("chunk file after recovery: %v", err)
-	}
-	if raw, err := os.ReadFile(runFile); err != nil || !strings.Contains(string(raw), `"dataPurged":true`) {
-		t.Fatalf("run file after recovery = %s, err=%v", raw, err)
-	}
-	chunks, err := reopened.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out"})
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out"})
 	if err != nil || len(chunks.Data) != 0 || !chunks.Done {
-		t.Fatalf("chunks after recovery = %+v, err=%v", chunks, err)
+		t.Fatalf("chunks = %+v, err=%v", chunks, err)
+	}
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "new", Chunk: []byte("x")}); !errors.Is(err, worlds.ErrStreamClosed) {
+		t.Fatalf("write to a purged run = %v", err)
 	}
 }
 
-func TestSecondPrepareIsInUse(t *testing.T) {
+func TestRefusesANewerSchema(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	first := startWorld(t, dir, nil)
-	second, err := localworld.Open(localworld.Config{Dir: dir}, nil)
+	world := startWorld(t, localworld.Config{Dir: dir}, nil)
+	if err := world.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "world.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
-	if err := second.Prepare(context.Background()); !errors.Is(err, localworld.ErrInUse) {
-		t.Fatalf("second Prepare = %v, want ErrInUse", err)
-	}
-	if err := first.Close(); err != nil {
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Prepare(context.Background()); err != nil {
-		t.Fatalf("Prepare after release: %v", err)
+	_ = db.Close()
+	newer, err := localworld.Open(localworld.Config{Dir: dir}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newer.Close()
+	if err := newer.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "newer release") {
+		t.Fatalf("Prepare = %v, want the newer schema refused", err)
 	}
 }
 
-func TestRejectsIncompatibleStorage(t *testing.T) {
+func TestTagIsolation(t *testing.T) {
 	t.Parallel()
-	for name, files := range map[string]map[string]string{
-		"other version":   {"version.json": `{"version":2}`},
-		"corrupt version": {"version.json": `{"version":`},
-		"unknown field":   {"version.json": `{"version":1,"completion":3}`},
-		"unversioned":     {"world.json": `{}`},
+	ctx := context.Background()
+	dir := t.TempDir()
+	untagged := startWorld(t, localworld.Config{Dir: dir}, nil)
+	a := startWorld(t, localworld.Config{Dir: dir, Tag: "a"}, nil)
+	b := startWorld(t, localworld.Config{Dir: dir, Tag: "b"}, nil)
+	for world, id := range map[*localworld.World]worlds.RunID{untagged: "wrun_shared", a: "wrun_a", b: "wrun_b"} {
+		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "tags"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: id, Name: "out", Chunk: []byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A tagged World sees its tag and untagged rows; an untagged World only
+	// untagged ones.
+	for _, check := range []struct {
+		world   *localworld.World
+		visible []worlds.RunID
+		hidden  []worlds.RunID
+	}{
+		{untagged, []worlds.RunID{"wrun_shared"}, []worlds.RunID{"wrun_a", "wrun_b"}},
+		{a, []worlds.RunID{"wrun_shared", "wrun_a"}, []worlds.RunID{"wrun_b"}},
+		{b, []worlds.RunID{"wrun_shared", "wrun_b"}, []worlds.RunID{"wrun_a"}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			for file, content := range files {
-				if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0600); err != nil {
-					t.Fatal(err)
-				}
+		for _, id := range check.visible {
+			if _, err := check.world.RunsGet(ctx, worlds.RunsGetInput{RunID: id}); err != nil {
+				t.Fatalf("visible run %s: %v", id, err)
 			}
-			world, err := localworld.Open(localworld.Config{Dir: dir}, nil)
-			if err != nil {
-				t.Fatal(err)
+		}
+		for _, id := range check.hidden {
+			if _, err := check.world.RunsGet(ctx, worlds.RunsGetInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
+				t.Fatalf("hidden run %s = %v", id, err)
 			}
-			defer world.Close()
-			if err := world.Prepare(context.Background()); err == nil || !strings.Contains(err.Error(), "workflow/local") {
-				t.Fatalf("Prepare = %v, want storage error", err)
+			if _, err := check.world.EventsList(ctx, worlds.EventsListInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
+				t.Fatalf("hidden run %s events = %v", id, err)
 			}
-			// A rejected Prepare releases the lock.
-			again, err := localworld.Open(localworld.Config{Dir: dir}, nil)
-			if err != nil {
-				t.Fatal(err)
+			if names, err := check.world.StreamsList(ctx, worlds.StreamsListInput{RunID: id}); err != nil || len(names) != 0 {
+				t.Fatalf("hidden run %s streams = %q err=%v", id, names, err)
 			}
-			defer again.Close()
-			if err := again.Prepare(context.Background()); errors.Is(err, localworld.ErrInUse) {
-				t.Fatal("rejected Prepare kept the lock")
-			}
-		})
-	}
-}
-
-func TestRecoveryDiscardsPartialBatch(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
-	runID := worlds.RunID("wrun_partial")
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "partial"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_kept", Data: []byte(`{"stepName":"kept"}`)}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := world.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate a crash during a batch: its event files and some views were
-	// written, but the run record was not.
-	now := time.Now().UTC()
-	runDir := key(string(runID))
-	writeRecord(t, dir, "events/"+runDir+"/"+string(worlds.EventIDForSlot(3))+".json", worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(3), EventType: worlds.EventTypeStepStarted, CorrelationID: "step_kept", CreatedAt: now})
-	writeRecord(t, dir, "events/"+runDir+"/"+string(worlds.EventIDForSlot(4))+".json", worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeStepCreated, CorrelationID: "step_lost", Data: []byte(`{"stepName":"lost"}`), CreatedAt: now})
-	writeRecord(t, dir, "events/"+runDir+"/"+string(worlds.EventIDForSlot(5))+".json", worlds.Event{RunID: runID, EventID: worlds.EventIDForSlot(5), EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_lost", Data: []byte(`{"token":"lost-token"}`), CreatedAt: now})
-	writeRecord(t, dir, "steps/"+runDir+"/"+key("step_kept")+".json", worlds.Step{RunID: runID, StepID: "step_kept", StepName: "kept", Status: worlds.StatusRunning, Attempt: 1, CreatedAt: now, UpdatedAt: now})
-	writeRecord(t, dir, "steps/"+runDir+"/"+key("step_lost")+".json", worlds.Step{RunID: runID, StepID: "step_lost", StepName: "lost", Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now})
-	writeRecord(t, dir, "hooks/"+key("hook_lost")+".json", worlds.Hook{RunID: runID, HookID: "hook_lost", Token: "lost-token", CreatedAt: now, UpdatedAt: now})
-	writeRecord(t, dir, "tokens/"+key("lost-token")+".json", map[string]any{"hookId": "hook_lost"})
-	// And a run whose creation never committed.
-	writeRecord(t, dir, "events/"+key("wrun_orphan")+"/"+string(worlds.EventIDForSlot(1))+".json", worlds.Event{RunID: "wrun_orphan", EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now})
-
-	reopened := startWorld(t, dir, nil)
-	events, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: runID})
-	if err != nil || len(events.Data) != 2 {
-		t.Fatalf("events after recovery = %#v err=%v", events, err)
-	}
-	step, err := reopened.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_kept"})
-	if err != nil || step.Status != worlds.StatusPending || step.Attempt != 0 {
-		t.Fatalf("kept step = %#v err=%v", step, err)
-	}
-	if _, err := reopened.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_lost"}); !errors.Is(err, worlds.ErrStepNotFound) {
-		t.Fatalf("uncommitted step survived: %v", err)
-	}
-	if _, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_lost"}); !errors.Is(err, worlds.ErrHookNotFound) {
-		t.Fatalf("uncommitted hook survived: %v", err)
-	}
-	if _, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "lost-token"}); !errors.Is(err, worlds.ErrHookNotFound) {
-		t.Fatalf("uncommitted token claim survived: %v", err)
-	}
-	for _, slot := range []uint64{3, 4, 5} {
-		if _, err := os.Stat(filepath.Join(dir, "events", runDir, string(worlds.EventIDForSlot(slot))+".json")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("event file %d survived: %v", slot, err)
+		}
+		page, err := check.world.RunsList(ctx, worlds.RunsListInput{})
+		if err != nil || len(page.Data) != len(check.visible) {
+			t.Fatalf("listed %d runs, want %d: %v", len(page.Data), len(check.visible), err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "events", key("wrun_orphan"))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("orphan run events survived: %v", err)
-	}
-	started, err := reopened.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_kept"}})
-	if err != nil || started.EventID != worlds.EventIDForSlot(3) || started.AllocatedEventCount != 1 {
-		t.Fatalf("append after recovery = %#v err=%v", started, err)
-	}
-	if _, err := reopened.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_orphan", WorkflowName: "partial"}); err != nil {
-		t.Fatalf("create after discarded create: %v", err)
-	}
-}
-
-func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
-	for _, runID := range []worlds.RunID{"wrun_old", "wrun_new"} {
-		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "tokens"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	claim := func(runID worlds.RunID, hookID worlds.HookID, force bool) {
-		t.Helper()
-		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: []byte(fmt.Sprintf(`{"token":"shared","force":%t}`, force))}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	claim("wrun_old", "hook_oldrun", false)
-	claim("wrun_new", "hook_newrun", true)
-	if err := world.Close(); err != nil {
+	// Clearing a tag removes only its data.
+	if err := a.Clear(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// An uncommitted event in the old run forces it to be rebuilt.
-	writeRecord(t, dir, "events/"+key("wrun_old")+"/"+string(worlds.EventIDForSlot(4))+".json", worlds.Event{RunID: "wrun_old", EventID: worlds.EventIDForSlot(4), EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", CreatedAt: time.Now().UTC()})
-
-	reopened := startWorld(t, dir, nil)
-	hook, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "shared"})
-	if err != nil || hook.HookID != "hook_newrun" {
-		t.Fatalf("token owner after recovery = %#v err=%v", hook, err)
+	if count := queryInt(t, dir, "SELECT count(*) FROM runs"); count != 2 {
+		t.Fatalf("runs after clearing a tag = %d", count)
 	}
-	events, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_old"})
-	if err != nil || len(events.Data) != 3 || events.Data[2].EventType != worlds.EventTypeHookDisposed {
-		t.Fatalf("old run events = %#v err=%v", events, err)
+	if count := queryInt(t, dir, "SELECT count(*) FROM stream_chunks WHERE tag = 'a'"); count != 0 {
+		t.Fatalf("chunks of the cleared tag = %d", count)
 	}
-}
-
-func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
-	for phase := range 3 {
-		t.Run([]string{"decision", "victim disposed", "claim committed"}[phase], func(t *testing.T) {
-			ctx := context.Background()
-			dir := t.TempDir()
-			world := startWorld(t, dir, nil)
-			for _, id := range []worlds.RunID{"wrun_victim", "wrun_claimant"} {
-				if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "handoff"}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_oldrun", Data: []byte(`{"token":"handoff"}`)}}); err != nil {
-				t.Fatal(err)
-			}
-			previous := worlds.HookForceClaim{RunID: "wrun_victim", HookID: "hook_oldrun"}
-			data, _ := json.Marshal(worlds.DataHookCreated{Token: "handoff", Force: true, ForceClaimedFrom: &previous})
-			event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_newrun", Data: data}
-			if phase >= 1 {
-				disposed, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: "wrun_claimant", HookID: "hook_newrun"}})
-				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_oldrun", Data: disposed}}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// run_created holds the first in-band position.
-			one := 1
-			if phase == 2 {
-				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_claimant", Event: event, Options: worlds.EventsCreateOptions{InBandCount: &one}}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := world.Close(); err != nil {
-				t.Fatal(err)
-			}
-			writeRecord(t, dir, "hook-handoff.json", map[string]any{"RunID": "wrun_claimant", "Event": event, "InBandCount": 1, "Previous": previous, "At": time.Now().UTC()})
-			for range 2 {
-				reopened := startWorld(t, dir, nil)
-				owner, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "handoff"})
-				if err != nil || owner.HookID != "hook_newrun" || owner.ClaimedFrom == nil || *owner.ClaimedFrom != previous {
-					t.Fatalf("owner=%#v err=%v", owner, err)
-				}
-				victim, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_oldrun"})
-				if err != nil || victim.DisposedAt == nil || victim.ForceClaimedBy == nil || victim.ForceClaimedBy.HookID != "hook_newrun" {
-					t.Fatalf("victim=%#v err=%v", victim, err)
-				}
-				for id, count := range map[worlds.RunID]int{"wrun_victim": 3, "wrun_claimant": 2} {
-					page, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: id})
-					if err != nil || len(page.Data) != count {
-						t.Fatalf("run=%s events=%d err=%v", id, len(page.Data), err)
-					}
-				}
-				run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_claimant"})
-				if err != nil || run.InBandCount != 2 {
-					t.Fatalf("in-band count=%d err=%v", run.InBandCount, err)
-				}
-				if err := reopened.Close(); err != nil {
-					t.Fatal(err)
-				}
-			}
-		})
+	if _, err := b.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_b"}); err != nil {
+		t.Fatalf("other tag's run after clear: %v", err)
 	}
 }
 
@@ -495,7 +354,7 @@ func (doubleInput) Workflow(doubleOutput) {}
 
 func TestRunsWorkflows(t *testing.T) {
 	t.Parallel()
-	world := startWorld(t, t.TempDir(), core.Runners(workflow.Use(double)))
+	world := startWorld(t, localworld.Config{Dir: t.TempDir()}, core.Runners(workflow.Use(double)))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, doubleInput{Value: 21})
@@ -511,56 +370,43 @@ func TestRunsWorkflows(t *testing.T) {
 	}
 }
 
-func TestQueuedWorkSurvivesRestart(t *testing.T) {
+func TestRecoveryQueuesActiveRunsAgain(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	runners := core.Runners(workflow.Use(double))
-	world := startWorld(t, dir, runners)
+	world := startWorld(t, localworld.Config{Dir: dir, Tag: "mine"}, runners)
 	input, err := worlds.EncodePayload([1]doubleInput{{Value: 4}}, worlds.PayloadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	restartID := worlds.NewRunID()
-	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: restartID, WorkflowName: workflow.Use(double).Name(), Input: input})
-	if err != nil {
+	// A run whose flow was queued in memory when the process stopped, and
+	// one of another tag, which this World leaves alone.
+	runID := worlds.NewRunID()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: workflow.Use(double).Name(), Input: input}); err != nil {
 		t.Fatal(err)
 	}
-	_ = created
-	notBefore := time.Now().Add(300 * time.Millisecond)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: restartID, NotBefore: &notBefore}); err != nil {
+	later := time.Now().Add(time.Hour)
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runID, NotBefore: &later}); err != nil {
+		t.Fatal(err)
+	}
+	other := startWorld(t, localworld.Config{Dir: dir, Tag: "theirs", SkipRecovery: true}, nil)
+	otherID := worlds.NewRunID()
+	if _, err := other.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: otherID, WorkflowName: workflow.Use(double).Name(), Input: input}); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
-	queued, err := os.ReadDir(filepath.Join(dir, "queue"))
-	if err != nil || len(queued) != 1 {
-		t.Fatalf("queue files after close = %v err=%v", queued, err)
-	}
 
-	reopened := startWorld(t, dir, runners)
-	run, err := reopened.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: restartID, Timeout: 10 * time.Second})
+	reopened := startWorld(t, localworld.Config{Dir: dir, Tag: "mine"}, runners)
+	run, err := reopened.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 10 * time.Second})
 	var output doubleInput
 	if err != nil || run.Status != worlds.StatusCompleted || worlds.DecodePayload(run.Output, nil, &output) != nil || output.Value != 8 {
 		t.Fatalf("run after restart = %#v err=%v", run, err)
 	}
-	if !time.Now().After(notBefore) {
-		t.Fatal("delivered before NotBefore")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		entries, err := os.ReadDir(filepath.Join(dir, "queue"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) == 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("queue records left after delivery: %d", len(entries))
-		}
-		time.Sleep(10 * time.Millisecond)
+	if run, err := other.RunsGet(ctx, worlds.RunsGetInput{RunID: otherID}); err != nil || run.Status != worlds.StatusPending {
+		t.Fatalf("other tag's run = %#v err=%v", run, err)
 	}
 }
 
@@ -568,7 +414,7 @@ func TestClear(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	world := startWorld(t, dir, nil)
+	world := startWorld(t, localworld.Config{Dir: dir}, nil)
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_clear", WorkflowName: "clear"}); err != nil {
 		t.Fatal(err)
 	}
@@ -585,16 +431,10 @@ func TestClear(t *testing.T) {
 	if err := world.Clear(ctx); !errors.Is(err, localworld.ErrNotPrepared) {
 		t.Fatalf("second Clear = %v", err)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
+	if count := queryInt(t, dir, "SELECT count(*) FROM runs") + queryInt(t, dir, "SELECT count(*) FROM events"); count != 0 {
+		t.Fatalf("Clear left %d rows", count)
 	}
-	for _, entry := range entries {
-		if entry.Name() != "version.json" && entry.Name() != "locks" {
-			t.Fatalf("Clear left %s", entry.Name())
-		}
-	}
-	reopened := startWorld(t, dir, nil)
+	reopened := startWorld(t, localworld.Config{Dir: dir}, nil)
 	if _, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_clear"}); !errors.Is(err, worlds.ErrRunNotFound) {
 		t.Fatalf("run after Clear = %v", err)
 	}
@@ -609,31 +449,26 @@ func TestClear(t *testing.T) {
 	}
 }
 
-func TestNewBorrowsRoot(t *testing.T) {
+func TestHookRetentionIsCapped(t *testing.T) {
 	t.Parallel()
-	root, err := os.OpenRoot(t.TempDir())
-	if err != nil {
+	ctx := context.Background()
+	world := startWorld(t, localworld.Config{Dir: t.TempDir(), HookRetentionLimit: time.Hour}, nil)
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_retain", WorkflowName: "retain"}); err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
-	world, err := localworld.New(root, localworld.Config{}, nil)
-	if err != nil {
-		t.Fatal(err)
+	until := time.Now().Add(2 * time.Hour)
+	data, _ := json.Marshal(worlds.DataHookCreated{Token: "retained", TokenRetentionUntil: &until})
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_retain", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_retained", Data: data}}); !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("hook past the retention limit = %v", err)
 	}
-	if err := world.Prepare(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := world.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := root.Stat("version.json"); err != nil {
-		t.Fatalf("borrowed root closed or unused: %v", err)
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: worlds.NewRunID(), WorkflowName: "retain", StartHook: &worlds.StartHook{Token: "start", TokenRetentionUntil: &until}}); !errors.Is(err, worlds.ErrStartHookRejected) {
+		t.Fatalf("start hook past the retention limit = %v", err)
 	}
 }
 
-func startWorld(t *testing.T, dir string, runners core.RunnerSet) *localworld.World {
+func startWorld(t *testing.T, config localworld.Config, runners core.RunnerSet) *localworld.World {
 	t.Helper()
-	world, err := localworld.Open(localworld.Config{Dir: dir}, runners)
+	world, err := localworld.Open(config, runners)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,21 +480,42 @@ func startWorld(t *testing.T, dir string, runners core.RunnerSet) *localworld.Wo
 	return world
 }
 
-func key(value string) string { return hex.EncodeToString([]byte(value)) }
-
-func writeRecord(t *testing.T, dir string, name string, value any) {
+// queryStrings returns the single column of query's rows in dir's database.
+func queryStrings(t *testing.T, dir, query string) []string {
 	t.Helper()
-	raw, err := json.Marshal(value)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "world.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, filepath.FromSlash(name))
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	defer db.Close()
+	rows, err := db.Query(query)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var value []byte
+		if err := rows.Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, string(value))
+	}
+	return values
+}
+
+func queryInt(t *testing.T, dir, query string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "world.db"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
+	var value int
+	if err := db.QueryRow(query).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	return value
 }
 
 func double(ctx context.Context, input doubleInput) (doubleOutput, error) {
@@ -670,7 +526,7 @@ func double(ctx context.Context, input doubleInput) (doubleOutput, error) {
 func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	world := startWorld(t, t.TempDir(), nil)
+	world := startWorld(t, localworld.Config{Dir: t.TempDir()}, nil)
 	later := time.Now().Add(time.Hour)
 	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later, IdempotencyKey: "k"})
 	if err != nil {
@@ -680,9 +536,8 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	if err != nil || again.MessageID != first.MessageID {
 		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
 	}
-	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || other.MessageID != first.MessageID {
-		t.Fatalf("same key on another run = %#v err=%v, want %s", other, err, first.MessageID)
+	if !strings.HasPrefix(first.MessageID, "msg_") {
+		t.Fatalf("message ID %q", first.MessageID)
 	}
 	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
 	if err != nil || unkeyed.MessageID == first.MessageID {

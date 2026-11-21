@@ -1,10 +1,8 @@
 package localworld
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"slices"
 	"time"
 
@@ -12,63 +10,52 @@ import (
 )
 
 func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.Run{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.Run{}, err
-	}
-	defer unlock()
-	run, err := w.readRun(input.RunID)
-	if err != nil {
-		return worlds.Run{}, err
-	}
-	return runView(run, w.committed(run.RunID), input.ResolveData)
+	var run worlds.Run
+	err := w.read(ctx, func(s *store) error {
+		record, err := s.getRun(input.RunID)
+		if err != nil {
+			return err
+		}
+		run, err = runView(record, s.committed(record.RunID), input.ResolveData)
+		return err
+	})
+	return run, err
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.Page[worlds.Run]{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.Page[worlds.Run]{}, err
-	}
-	defer unlock()
-	records, err := w.readRuns()
-	if err != nil {
-		return worlds.Page[worlds.Run]{}, err
-	}
-	runs := make([]worlds.Run, 0, len(records))
-	for _, record := range records {
-		if !matchesRun(record.Run, input.WorkflowName, input.Status) {
-			continue
-		}
-		run, err := runView(record, w.committed(record.RunID), input.ResolveData)
+	var page worlds.Page[worlds.Run]
+	err := w.read(ctx, func(s *store) error {
+		records, err := s.listRuns(runFilter{workflowName: input.WorkflowName, statuses: input.Status})
 		if err != nil {
-			return worlds.Page[worlds.Run]{}, err
+			return err
 		}
-		runs = append(runs, run)
-	}
-	return keyPage(runs, input.Pagination, func(run worlds.Run) string { return sortKey(run.CreatedAt, string(run.RunID)) })
+		runs := make([]worlds.Run, 0, len(records))
+		for _, record := range records {
+			run, err := runView(record, s.committed(record.RunID), input.ResolveData)
+			if err != nil {
+				return err
+			}
+			runs = append(runs, run)
+		}
+		page, err = keyPage(runs, input.Pagination, func(run worlds.Run) string { return sortKey(run.CreatedAt, string(run.RunID)) })
+		return err
+	})
+	return page, err
 }
 
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
-	// Sleep on the change channel between reads.
+	// Sleep on this process's commits, polling for other processes'.
 	deadline := time.Now().Add(input.Timeout)
 	timer := time.NewTimer(input.Timeout)
+	defer timer.Stop()
 	for {
 		changed := w.changed()
 		run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: input.ResolveData})
 		if err != nil || run.Status.Terminal() || !time.Now().Before(deadline) {
 			return run, err
 		}
-		select {
-		case <-ctx.Done():
-			return worlds.Run{}, ctx.Err()
-		case <-timer.C:
-		case <-changed:
+		if err := waitChange(ctx, changed, timer.C); err != nil {
+			return worlds.Run{}, err
 		}
 	}
 }
@@ -90,111 +77,49 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 	if err := worlds.CheckDeleteDataInput(input); err != nil {
 		return worlds.RunsDeleteDataManyResult{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if _, err := w.usable(); err != nil {
 		return worlds.RunsDeleteDataManyResult{}, err
 	}
-	unlock, err := w.writeLock()
-	if err != nil {
-		return worlds.RunsDeleteDataManyResult{}, err
-	}
-	defer unlock()
-	defer w.signal()
-	now := time.Now().UTC()
 	results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+	deleted := false
 	for index, id := range input.RunIDs {
-		results[index] = worlds.DeleteDataResult{RunID: id}
-		run, err := w.readRun(id)
-		switch {
-		case errors.Is(err, worlds.ErrRunNotFound):
-			results[index].Outcome = worlds.DeleteDataNotFound
-			continue
-		case err != nil:
-			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
-			continue
-		case !run.Status.Terminal():
-			results[index].Outcome = worlds.DeleteDataSkipped
-			results[index].Reason, results[index].Status = worlds.DeleteDataRunNotTerminal, run.Status
-			continue
-		}
-		results[index].Outcome = worlds.DeleteDataAlreadyDeleted
-		if !worlds.RunDataExpired(run.Run, now) {
-			// The run's ExpiredAt commits first, so its data is unreadable
-			// before its files are scrubbed.
-			results[index].Outcome = worlds.DeleteDataDeleted
-			run.ExpiredAt, run.DataPurged = &now, false
-			if err := writeJSON(w.root, runPath(id), run); err != nil {
-				results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
-				continue
+		result := worlds.DeleteDataResult{RunID: id}
+		err := w.write(ctx, func(s *store) error {
+			run, err := s.getRun(id)
+			switch {
+			case errors.Is(err, worlds.ErrRunNotFound):
+				result.Outcome = worlds.DeleteDataNotFound
+				return nil
+			case err != nil:
+				return err
+			case !run.Status.Terminal():
+				result.Outcome = worlds.DeleteDataSkipped
+				result.Reason, result.Status = worlds.DeleteDataRunNotTerminal, run.Status
+				return nil
 			}
-		}
-		if err := w.purgeData(run); err != nil {
-			w.markUnpurged(id)
-			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
-		}
-	}
-	return worlds.NewDeleteDataResult(results), nil
-}
-
-// purge deletes a run's data after its ExpiredAt has committed. A failure
-// leaves its reads scrubbed and the purge to recovery.
-func (w *World) purge(run runRecord) {
-	if err := w.purgeData(run); err != nil {
-		log.Printf("workflow/local: delete data of run %s: %v", run.RunID, err)
-		w.markUnpurged(run.RunID)
-	}
-}
-
-func (w *World) markUnpurged(runID worlds.RunID) {
-	if w.unpurged == nil {
-		w.unpurged = map[worlds.RunID]bool{}
-	}
-	w.unpurged[runID] = true
-}
-
-// purgeData deletes the data of a run whose ExpiredAt has committed: the
-// payloads in its event files, which are also its run, step, and hook
-// payloads, and its stream chunks, leaving each stream empty and closed. It
-// then records that the run's files are purged.
-func (w *World) purgeData(run runRecord) error {
-	for slot := 1; slot <= run.EventCount; slot++ {
-		var event worlds.Event
-		if err := readJSON(w.root, eventPath(run.RunID, slot), &event); err != nil {
-			return err
-		}
-		scrubbed := worlds.ScrubEventData(event.EventType, event.Data)
-		if bytes.Equal(scrubbed, event.Data) {
-			continue
-		}
-		event.Data = scrubbed
-		if err := writeJSON(w.root, eventPath(run.RunID, slot), event); err != nil {
-			return err
-		}
-	}
-	names, err := w.streamNames(run.RunID)
-	if err != nil {
-		return err
-	}
-	for _, name := range names {
-		meta, _, err := w.readStream(run.RunID, name)
-		if err != nil {
-			return err
-		}
-		count := meta.Count
-		meta.Count, meta.Closed = 0, true
-		// The stream is empty before its chunk files go.
-		if err := w.writeStream(run.RunID, meta); err != nil {
-			return err
-		}
-		for index := range count {
-			if err := remove(w.root, chunkPath(run.RunID, name, index)); err != nil {
+			now := time.Now().UTC()
+			if worlds.RunDataExpired(run.Run, now) {
+				result.Outcome = worlds.DeleteDataAlreadyDeleted
+				return nil
+			}
+			result.Outcome = worlds.DeleteDataDeleted
+			run.ExpiredAt = &now
+			if err := s.putRun(run); err != nil {
 				return err
 			}
+			return s.purgeRun(run)
+		})
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return worlds.RunsDeleteDataManyResult{}, ctxErr
+			}
+			result = worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "storage_error", Retryable: true}
 		}
+		deleted = deleted || result.Outcome == worlds.DeleteDataDeleted
+		results[index] = result
 	}
-	run.DataPurged = true
-	if err := writeJSON(w.root, runPath(run.RunID), run); err != nil {
-		return err
+	if deleted {
+		w.maintain(ctx)
 	}
-	delete(w.unpurged, run.RunID)
-	return nil
+	return worlds.NewDeleteDataResult(results), nil
 }

@@ -128,19 +128,19 @@ func ResolveEvents(events []Event, resolve EventsResolveData) []Event {
 
 // DataRunCreated is the Data of a run_created event.
 type DataRunCreated struct {
-	WorkflowName string `json:"workflowName"`
+	WorkflowName string `json:"workflowName" cbor:"workflowName"`
 	// Input is the run's argument list, [input], as a payload.
-	Input        []byte            `json:"input"`
-	Attributes   map[string]string `json:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty"`
+	Input        []byte            `json:"input" cbor:"input"`
+	Attributes   map[string]string `json:"attributes" cbor:"attributes"`
+	DeploymentID string            `json:"deploymentId,omitempty" cbor:"deploymentId,omitempty"`
 	// EncryptionPublicKey is the run's X25519 public key in base64, which
 	// writers outside the run seal payloads to. It is set when the run's
 	// payloads are encrypted.
-	EncryptionPublicKey string `json:"encryptionPublicKey,omitempty"`
+	EncryptionPublicKey string `json:"encryptionPublicKey,omitempty" cbor:"encryptionPublicKey,omitempty"`
 	// ExecutionContext is the run's executionContext.
-	ExecutionContext map[string]any `json:"executionContext,omitempty"`
+	ExecutionContext map[string]any `json:"executionContext,omitempty" cbor:"executionContext,omitempty"`
 	// StartHook is the hook created with the run. See StartHook.
-	StartHook *StartHook `json:"startHook,omitempty"`
+	StartHook *StartHook `json:"startHook,omitempty" cbor:"startHook,omitempty"`
 }
 
 // StartHook is a hook a World creates in the same write as its run, so a
@@ -149,14 +149,14 @@ type DataRunCreated struct {
 // run_created stands for it. From then on it is an ordinary hook of the run,
 // which the workflow opens with a hook of the same token.
 type StartHook struct {
-	Token string `json:"token"`
+	Token string `json:"token" cbor:"token"`
 	// HookID is the hook's ID, which the World sets on what it records.
-	HookID HookID `json:"hookId,omitempty"`
+	HookID HookID `json:"hookId,omitempty" cbor:"hookId,omitempty"`
 	// TokenRetentionUntil keeps the token after the run ends until then.
-	TokenRetentionUntil *time.Time `json:"tokenRetentionUntil,omitempty"`
+	TokenRetentionUntil *time.Time `json:"tokenRetentionUntil,omitempty" cbor:"tokenRetentionUntil,omitempty"`
 	// Metadata is the hook's metadata payload, as a hook_created records
 	// it.
-	Metadata []byte `json:"metadata,omitempty"`
+	Metadata []byte `json:"metadata,omitempty" cbor:"metadata,omitempty"`
 }
 
 // StartHookID returns the ID of the start hook of runID: hook_ and the run
@@ -175,9 +175,9 @@ const StartHookCandidateMaxAge = 24 * time.Hour
 // held the token. Every later attempt for the candidate, by run_created or by
 // a first flow's run_started, gets the same decision.
 type StartHookDecision struct {
-	Token            string `json:"token"`
-	Accepted         bool   `json:"accepted"`
-	ConflictingRunID RunID  `json:"conflictingRunId,omitempty"`
+	Token            string `json:"token" cbor:"token"`
+	Accepted         bool   `json:"accepted" cbor:"accepted"`
+	ConflictingRunID RunID  `json:"conflictingRunId,omitempty" cbor:"conflictingRunId,omitempty"`
 }
 
 // Err returns the error a later attempt for a rejected candidate returns.
@@ -257,7 +257,7 @@ func startHookOf(input EventsCreateRunInput) *StartHook {
 // DataRunCompleted is the Data of a run_completed event.
 type DataRunCompleted struct {
 	// Output is the run's output as a payload.
-	Output []byte `json:"output,omitempty"`
+	Output []byte `json:"output,omitempty" cbor:"output,omitempty"`
 }
 
 // DecodeRunCompleted returns the Output of run_completed event Data, or nil
@@ -273,11 +273,11 @@ func DecodeRunCompleted(data []byte) []byte {
 // DataRunFailed is the Data of a run_failed event.
 type DataRunFailed struct {
 	// Error is the run's error as a payload.
-	Error []byte `json:"error,omitempty"`
+	Error []byte `json:"error,omitempty" cbor:"error,omitempty"`
 	// ErrorCode is the category of the error, such as USER_ERROR or
 	// MAX_DELIVERIES_EXCEEDED, kept in plain text so tools can sort failures
 	// without opening the payload.
-	ErrorCode string `json:"errorCode,omitempty"`
+	ErrorCode string `json:"errorCode,omitempty" cbor:"errorCode,omitempty"`
 }
 
 // DecodeRunFailed returns the Error of run_failed event Data, or nil when data
@@ -328,30 +328,30 @@ func runErrorCode(err error) string {
 // DataStepCreated is the Data of a step_created event. The step's options
 // and cancellation contexts come from the replay that declares it.
 type DataStepCreated struct {
-	StepName     string `json:"stepName"`
-	WorkflowName string `json:"workflowName,omitempty"`
+	StepName     string `json:"stepName" cbor:"stepName"`
+	WorkflowName string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
 	// Input is the step's arguments, {args: [input]}, as a payload.
-	Input []byte `json:"input"`
+	Input []byte `json:"input" cbor:"input"`
 	// Inline reports that the flow runs the step itself. A step_created
 	// records a step queued as a step delivery, or one that failed before
 	// it started, and an inline step is created by its first step_started.
-	Inline bool `json:"inline,omitempty"`
+	Inline bool `json:"inline,omitempty" cbor:"inline,omitempty"`
 	// CreatorMessageID is the queued message of the flow that created the
 	// step.
-	CreatorMessageID string `json:"creatorMessageId,omitempty"`
+	CreatorMessageID string `json:"creatorMessageId,omitempty" cbor:"creatorMessageId,omitempty"`
 }
 
 // DataStepStarted is the Data of a step_started event.
 type DataStepStarted struct {
-	StepName string `json:"stepName,omitempty"`
+	StepName string `json:"stepName,omitempty" cbor:"stepName,omitempty"`
 	// Attempt is the attempt the event starts, counting from 1.
-	Attempt int `json:"attempt,omitempty"`
+	Attempt int `json:"attempt,omitempty" cbor:"attempt,omitempty"`
 	// WorkflowName, Input, and Inline are set on the step_started that
 	// creates an inline step, which no step_created precedes. Input is the
 	// step's arguments, {args: [input]}, as a payload.
-	WorkflowName string `json:"workflowName,omitempty"`
-	Input        []byte `json:"input,omitempty"`
-	Inline       bool   `json:"inline,omitempty"`
+	WorkflowName string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
+	Input        []byte `json:"input,omitempty" cbor:"input,omitempty"`
+	Inline       bool   `json:"inline,omitempty" cbor:"inline,omitempty"`
 }
 
 // StartCreatesStep reports whether a step_started event's data creates the
@@ -365,56 +365,56 @@ func StartCreatesStep(data []byte) bool {
 // DataStepResult is the Data of a step_completed, step_retrying, or
 // step_failed event.
 type DataStepResult struct {
-	StepName string `json:"stepName,omitempty"`
+	StepName string `json:"stepName,omitempty" cbor:"stepName,omitempty"`
 	// WorkflowName is set on step_completed.
-	WorkflowName string `json:"workflowName,omitempty"`
+	WorkflowName string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
 	// Attempt is the attempt that failed, on step_failed and step_retrying.
-	Attempt    int        `json:"attempt,omitempty"`
-	Result     []byte     `json:"result,omitempty"`
-	Error      []byte     `json:"error,omitempty"`
-	RetryAfter *time.Time `json:"retryAfter,omitempty"`
+	Attempt    int        `json:"attempt,omitempty" cbor:"attempt,omitempty"`
+	Result     []byte     `json:"result,omitempty" cbor:"result,omitempty"`
+	Error      []byte     `json:"error,omitempty" cbor:"error,omitempty"`
+	RetryAfter *time.Time `json:"retryAfter,omitempty" cbor:"retryAfter,omitempty"`
 	// CreatorMessageID is set on the step_retrying of an inline step whose
 	// next attempt runs as a step delivery: the queued message of the flow
 	// that hands it over.
-	CreatorMessageID string `json:"creatorMessageId,omitempty"`
+	CreatorMessageID string `json:"creatorMessageId,omitempty" cbor:"creatorMessageId,omitempty"`
 }
 
 // DataWaitCreated is the Data of a wait_created event. The wait's
 // cancellation contexts come from the replay.
 type DataWaitCreated struct {
-	ResumeAt time.Time `json:"resumeAt"`
+	ResumeAt time.Time `json:"resumeAt" cbor:"resumeAt"`
 	// CreatorMessageID is the queued message of the flow that created the
 	// wait, whose chain of timer messages arms it.
-	CreatorMessageID string `json:"creatorMessageId,omitempty"`
+	CreatorMessageID string `json:"creatorMessageId,omitempty" cbor:"creatorMessageId,omitempty"`
 }
 
 // DataWaitCompleted is the Data of a wait_completed event.
 type DataWaitCompleted struct {
 	// ResumeAt is when the wait was due, as its wait_created records it.
-	ResumeAt *time.Time `json:"resumeAt,omitempty"`
+	ResumeAt *time.Time `json:"resumeAt,omitempty" cbor:"resumeAt,omitempty"`
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.
 type DataHookCreated struct {
-	Token     string `json:"token"`
-	Metadata  []byte `json:"metadata,omitempty"`
-	IsWebhook bool   `json:"isWebhook,omitempty"`
-	IsSystem  bool   `json:"isSystem,omitempty"`
+	Token     string `json:"token" cbor:"token"`
+	Metadata  []byte `json:"metadata,omitempty" cbor:"metadata,omitempty"`
+	IsWebhook bool   `json:"isWebhook,omitempty" cbor:"isWebhook,omitempty"`
+	IsSystem  bool   `json:"isSystem,omitempty" cbor:"isSystem,omitempty"`
 	// TokenRetentionUntil reserves the token until this time, including
 	// after the run ends.
-	TokenRetentionUntil *time.Time      `json:"tokenRetentionUntil,omitempty"`
-	Force               bool            `json:"force,omitempty"`
-	ForceClaimedFrom    *HookForceClaim `json:"forceClaimedFrom,omitempty"`
-	ConflictingRunID    RunID           `json:"conflictingRunId,omitempty"`
+	TokenRetentionUntil *time.Time      `json:"tokenRetentionUntil,omitempty" cbor:"tokenRetentionUntil,omitempty"`
+	Force               bool            `json:"force,omitempty" cbor:"force,omitempty"`
+	ForceClaimedFrom    *HookForceClaim `json:"forceClaimedFrom,omitempty" cbor:"forceClaimedFrom,omitempty"`
+	ConflictingRunID    RunID           `json:"conflictingRunId,omitempty" cbor:"conflictingRunId,omitempty"`
 }
 
 // DataHookReceived is the Data of a hook_received event.
 type DataHookReceived struct {
 	// Payload is the value sent to the hook as a payload. A webhook
 	// receives a WebhookRequest.
-	Payload []byte `json:"payload,omitempty"`
+	Payload []byte `json:"payload,omitempty" cbor:"payload,omitempty"`
 	// WorkflowName is the workflow of the hook's run.
-	WorkflowName string `json:"workflowName,omitempty"`
+	WorkflowName string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
 }
 
 // EncodeHookReceived returns the Data of a hook_received event carrying
@@ -437,15 +437,15 @@ func DecodeHookReceived(data []byte) []byte {
 // when the hook disposed of itself. ForceClaimedBy is set when another
 // hook took the token with a forced claim.
 type HookDisposedEventData struct {
-	ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty"`
+	ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty" cbor:"forceClaimedBy,omitempty"`
 }
 
 // DataAttrSet is the Data of an attr_set event. AllowReservedAttributes
 // records that the writer permitted keys with the reserved prefix.
 type DataAttrSet struct {
-	Changes                 []RunsAttributeChange `json:"changes"`
-	Writer                  AttributeWriter       `json:"writer"`
-	AllowReservedAttributes bool                  `json:"allowReservedAttributes,omitempty"`
+	Changes                 []RunsAttributeChange `json:"changes" cbor:"changes"`
+	Writer                  AttributeWriter       `json:"writer" cbor:"writer"`
+	AllowReservedAttributes bool                  `json:"allowReservedAttributes,omitempty" cbor:"allowReservedAttributes,omitempty"`
 }
 
 // EncodeAttrSet returns the Data of the attr_set event that applies input.
@@ -498,9 +498,9 @@ func CheckAttributes(attributes map[string]string, allowReserved bool) error {
 // attempt of a step.
 type AttributeWriter struct {
 	// Type is AttributeWriterWorkflow or AttributeWriterStep.
-	Type    string `json:"type"`
-	StepID  StepID `json:"stepId,omitempty"`
-	Attempt int    `json:"attempt,omitempty"`
+	Type    string `json:"type" cbor:"type"`
+	StepID  StepID `json:"stepId,omitempty" cbor:"stepId,omitempty"`
+	Attempt int    `json:"attempt,omitempty" cbor:"attempt,omitempty"`
 }
 
 // AttributeWriter types.

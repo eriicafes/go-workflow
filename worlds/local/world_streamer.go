@@ -2,9 +2,7 @@ package localworld
 
 import (
 	"context"
-	"fmt"
-	"path"
-	"slices"
+	"errors"
 	"strconv"
 	"time"
 
@@ -13,57 +11,17 @@ import (
 
 const streamRetryAfter = 50 * time.Millisecond
 
-// streamMeta is the commit point for a stream. Chunk files at or past Count
-// are ignored and overwritten by the next write.
-type streamMeta struct {
-	Name   string `json:"name"`
-	Closed bool   `json:"closed"`
-	Count  int    `json:"count"`
-}
+// A stream's chunks are rows numbered from 1, chunk index 0 being row 1. An
+// end marker row follows the last chunk once the stream is closed, and
+// nothing is appended after it. A run whose data was deleted keeps only its
+// streams' end markers.
 
-func (w *World) readStream(runID worlds.RunID, name string) (streamMeta, bool, error) {
-	meta := streamMeta{Name: name}
-	ok, err := w.readOptional(path.Join(streamDir(runID, name), "meta.json"), &meta)
-	return meta, ok, err
-}
-
-func (w *World) writeStream(runID worlds.RunID, meta streamMeta) error {
-	if err := writeJSON(w.root, path.Join(streamDir(runID, meta.Name), "meta.json"), meta); err != nil {
-		return err
-	}
-	w.signal()
-	return nil
-}
-
-// appendChunks writes chunk files then advances Count in meta.
-func (w *World) appendChunks(runID worlds.RunID, meta *streamMeta, chunks [][]byte) error {
-	for index, chunk := range chunks {
-		if err := writeJSON(w.root, chunkPath(runID, meta.Name, meta.Count+index), chunk); err != nil {
-			return err
-		}
-	}
-	meta.Count += len(chunks)
-	return nil
-}
-
-// updateStream applies change to the stream meta under the write lock.
-func (w *World) updateStream(ctx context.Context, runID worlds.RunID, name string, change func(*streamMeta) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	unlock, err := w.writeLock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	meta, _, err := w.readStream(runID, name)
-	if err != nil {
-		return err
-	}
-	if err := change(&meta); err != nil {
-		return err
-	}
-	return w.writeStream(runID, meta)
+// streamState returns how many chunks a stream has and whether it is closed.
+func (s *store) streamState(runID worlds.RunID, name string) (int, bool, error) {
+	condition, args := s.tagged("tag")
+	var count, closed int
+	err := s.q.QueryRowContext(s.ctx, "SELECT coalesce(sum(1 - eof), 0), coalesce(max(eof), 0) FROM stream_chunks WHERE run_id = ? AND name = ? AND "+condition, append([]any{string(runID), name}, args...)...).Scan(&count, &closed)
+	return count, closed == 1, err
 }
 
 func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
@@ -71,38 +29,50 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 }
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
-	return w.updateStream(ctx, input.RunID, input.Name, func(meta *streamMeta) error {
-		if meta.Closed {
+	return w.write(ctx, func(s *store) error {
+		count, closed, err := s.streamState(input.RunID, input.Name)
+		if err != nil {
+			return err
+		}
+		if closed {
 			return worlds.ErrStreamClosed
 		}
-		// A deleted run's streams take no more data. Its purge closed the
-		// streams it had, unless it failed partway, so only a new stream
-		// reads the run.
-		if w.unpurged[input.RunID] {
-			return worlds.ErrStreamClosed
-		}
-		if meta.Count == 0 {
-			var run runRecord
-			if ok, err := w.readOptional(runPath(input.RunID), &run); err != nil {
+		if count == 0 {
+			// A deleted run's streams take no more data: its purge closed the
+			// streams it had, so only a new stream reads the run.
+			run, err := s.getRunAnyTag(input.RunID)
+			if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
 				return err
-			} else if ok && worlds.RunDataExpired(run.Run, time.Now()) {
+			}
+			if err == nil && worlds.RunDataExpired(run.Run, time.Now()) {
 				return worlds.ErrStreamClosed
 			}
 		}
-		return w.appendChunks(input.RunID, meta, input.Chunks)
-	})
-}
-
-func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
-	return w.updateStream(ctx, input.RunID, input.Name, func(meta *streamMeta) error {
-		meta.Closed = true
+		for index, chunk := range input.Chunks {
+			if chunk == nil {
+				chunk = []byte{}
+			}
+			if err := s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, ?, ?, ?, 0)", string(input.RunID), input.Name, count+index+1, s.tagValue(), chunk); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
 
+func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
+	return w.write(ctx, func(s *store) error {
+		count, closed, err := s.streamState(input.RunID, input.Name)
+		if err != nil || closed {
+			return err
+		}
+		return s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, ?, ?, NULL, 1)", string(input.RunID), input.Name, count+1, s.tagValue())
+	})
+}
+
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
-	// Sleep on the change channel until a chunk past the cursor exists, the
-	// stream is done, or Wait elapses.
+	// Sleep on this process's commits, polling for other processes', until a
+	// chunk past the cursor exists, the stream is done, or Wait elapses.
 	start := chunkCursor(input.Cursor)
 	if input.Cursor == "" {
 		var err error
@@ -116,105 +86,84 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	}
 	deadline := time.Now().Add(input.Wait)
 	timer := time.NewTimer(input.Wait)
+	defer timer.Stop()
 	for {
-		if err := ctx.Err(); err != nil {
-			return worlds.StreamChunksResult{}, err
-		}
 		changed := w.changed()
-		result, ready, err := w.readChunks(input.RunID, input.Name, start, limit)
+		var result worlds.StreamChunksResult
+		ready := false
+		err := w.read(ctx, func(s *store) error {
+			var err error
+			result, ready, err = s.readChunks(input.RunID, input.Name, start, limit)
+			return err
+		})
 		if err != nil || ready || !time.Now().Before(deadline) {
 			return result, err
 		}
-		select {
-		case <-ctx.Done():
-			return worlds.StreamChunksResult{}, ctx.Err()
-		case <-timer.C:
-		case <-changed:
+		if err := waitChange(ctx, changed, timer.C); err != nil {
+			return worlds.StreamChunksResult{}, err
 		}
 	}
 }
 
-func (w *World) readChunks(runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
-	unlock, err := w.readLock()
+func (s *store) readChunks(runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
+	count, closed, err := s.streamState(runID, name)
 	if err != nil {
 		return worlds.StreamChunksResult{}, false, err
 	}
-	defer unlock()
-	meta, _, err := w.readStream(runID, name)
-	if err != nil {
-		return worlds.StreamChunksResult{}, false, err
-	}
-	if w.unpurged[runID] {
-		meta.Count, meta.Closed = 0, true
-	}
-	end := max(start, min(start+limit, meta.Count))
-	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: strconv.Itoa(end), HasMore: end < meta.Count, Done: meta.Closed, RetryAfter: streamRetryAfter}
-	for index := start; index < end; index++ {
-		var data []byte
-		if err := readJSON(w.root, chunkPath(runID, name, index), &data); err != nil {
+	end := max(start, min(start+limit, count))
+	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: strconv.Itoa(end), HasMore: end < count, Done: closed, RetryAfter: streamRetryAfter}
+	if end > start {
+		condition, args := s.tagged("tag")
+		rows, err := s.q.QueryContext(s.ctx, "SELECT idx, data FROM stream_chunks WHERE run_id = ? AND name = ? AND eof = 0 AND idx > ? AND idx <= ? AND "+condition+" ORDER BY idx", append([]any{string(runID), name, start, end}, args...)...)
+		if err != nil {
 			return worlds.StreamChunksResult{}, false, err
 		}
-		result.Data = append(result.Data, worlds.StreamChunk{Index: index, Data: data})
+		defer rows.Close()
+		for rows.Next() {
+			var idx int
+			var data []byte
+			if err := rows.Scan(&idx, &data); err != nil {
+				return worlds.StreamChunksResult{}, false, err
+			}
+			if data == nil {
+				data = []byte{}
+			}
+			result.Data = append(result.Data, worlds.StreamChunk{Index: idx - 1, Data: data})
+		}
+		if err := rows.Err(); err != nil {
+			return worlds.StreamChunksResult{}, false, err
+		}
 	}
-	return result, len(result.Data) > 0 || meta.Closed, nil
+	return result, len(result.Data) > 0 || closed, nil
 }
 
 func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.StreamInfo{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.StreamInfo{}, err
-	}
-	defer unlock()
-	meta, _, err := w.readStream(input.RunID, input.Name)
-	if err != nil {
-		return worlds.StreamInfo{}, err
-	}
-	return worlds.StreamInfo{TailIndex: meta.Count - 1, Done: meta.Closed}, nil
+	var info worlds.StreamInfo
+	err := w.read(ctx, func(s *store) error {
+		count, closed, err := s.streamState(input.RunID, input.Name)
+		info = worlds.StreamInfo{TailIndex: count - 1, Done: closed}
+		return err
+	})
+	return info, err
 }
 
 func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	return w.streamNames(input.RunID)
-}
-
-// streamNames returns the names of a run's streams, sorted.
-func (w *World) streamNames(runID worlds.RunID) ([]string, error) {
-	dir := path.Join("streams", fileKey(string(runID)))
-	keys, err := listDirs(w.root, dir)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(keys)+1)
-	// The default stream's key is empty, so its meta.json is in the run's
-	// directory itself.
-	for _, key := range append(keys, "") {
-		var meta streamMeta
-		ok, err := w.readOptional(path.Join(dir, key, "meta.json"), &meta)
+	names := []string{}
+	err := w.read(ctx, func(s *store) error {
+		condition, args := s.tagged("tag")
+		rows, err := s.q.QueryContext(s.ctx, "SELECT DISTINCT name FROM stream_chunks WHERE run_id = ? AND "+condition+" ORDER BY name", append([]any{string(input.RunID)}, args...)...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if ok {
-			names = append(names, meta.Name)
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return err
+			}
+			names = append(names, name)
 		}
-	}
-	slices.Sort(names)
-	return names, nil
-}
-
-func streamDir(runID worlds.RunID, name string) string {
-	return path.Join("streams", fileKey(string(runID)), fileKey(name))
-}
-
-func chunkPath(runID worlds.RunID, name string, index int) string {
-	return path.Join(streamDir(runID, name), fmt.Sprintf("%010d.json", index))
+		return rows.Err()
+	})
+	return names, err
 }

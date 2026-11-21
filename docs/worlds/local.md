@@ -4,10 +4,12 @@
 import localworld "github.com/eriicafes/go-workflow/worlds/local"
 ```
 
-The local World is a durable, single-process World for development and small
-deployments. It stores every run, event, step, hook, stream chunk, and queued
-delivery as its own JSON file, and delivers queued work in-process. It needs no
-worker, queue service, or database, and survives a restart.
+The local World is a port of the Workflow SDK's `@workflow/world-local` for
+development and single-machine deployments. It stores runs, events, steps,
+waits, hooks, and stream chunks in a SQLite database, `world.db` in its data
+directory, and delivers queued work in-process from an in-memory queue. It
+needs no worker, queue service, or database server, and keeps every run
+across restarts. The SQLite driver is `modernc.org/sqlite`, which needs no cgo.
 
 ## Usage
 
@@ -31,32 +33,34 @@ client := workflow.NewClient(world)
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `Dir` | required by `Open` | Storage directory. Created with `0700` permissions. |
+| `Dir` | `WORKFLOW_LOCAL_DATA_DIR`, or `.workflow-data` | Data directory, created with `0700` permissions. It holds `world.db`. |
+| `Tag` | untagged | Scopes the runs, hooks, and streams this World writes, such as a test's. See [Tags](#tags). |
 | `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
 | `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `Concurrency` | `WORKFLOW_LOCAL_QUEUE_CONCURRENCY`, or 1000 | How many deliveries execute at once. |
+| `HookRetentionLimit` | `WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |
+| `SkipRecovery` | false | Leaves the active runs alone when the World is prepared. See [Restart recovery](#restart-recovery). |
 
 ## Lifecycle
 
-- **`Open(config, runners)`** creates `Dir` and owns the directory handle.
-  **`New(root, config, runners)`** borrows a caller-owned `*os.Root`, which the
-  caller closes after `Close`. Neither reads any state.
-- **`Prepare(ctx)`** takes an exclusive `flock` on `locks/world.lock`, validates
-  `version.json`, recovers interrupted writes, and begins delivering every persisted queue
-  item. It returns `ErrInUse` when another World, in this or another process,
-  holds the directory. Cancelling `ctx` stops delivery.
+- **`Open(config, runners)`** returns a World. It reads no state.
+- **`Prepare(ctx)`** opens the database, creating its schema in a new
+  directory, begins delivering queued work, and queues the active runs of the
+  World's tag again. Cancelling `ctx` stops delivery.
 - **Methods that read or write data require a prepared World.**
   They return `ErrNotPrepared` before `Prepare` and `ErrClosed` after `Close`.
-- **`Close()`** stops delivery, waits for in-flight deliveries, releases the
-  lock, and closes a directory opened by `Open`. Interrupted deliveries stay
-  queued and run again after the next `Prepare`.
-- **`Clear(ctx)`** requires a prepared World. It stops delivery, removes all persisted state while holding the
-  lock, writes a fresh `version.json`, and closes the World. Open a new World to
-  continue.
+- **`Close()`** stops delivery, waits for in-flight deliveries, and closes the
+  database. Queued messages are lost, and the next `Prepare` queues the
+  active runs again.
+- **`Clear(ctx)`** requires a prepared World. It stops delivery, deletes the
+  World's data, and closes the World: a tagged World's runs, everything they
+  own, and its hooks and streams; an untagged World's whole database. Open a
+  new World to continue.
 
-::: warning One process per directory
-The local World supports exactly one process per directory. Use Postgres, AWS,
-or Vercel for shared or production execution.
-:::
+Several processes may share a data directory, such as an application and a
+script that starts runs. The database serializes their writes. Restart
+recovery assumes that no other live process runs workflows on the same
+directory and tag.
 
 ## HTTP
 
@@ -65,107 +69,116 @@ or Vercel for shared or production execution.
 `RPC` and `Webhook` return each endpoint on its own. Serve
 `HTTP` to use the [web UI](/tooling/web-ui) or a separate application process.
 
-## Layout
+## Database
 
-```
-version.json                               storage format version
-locks/world.lock                           exclusive flock
-runs/<run>.json                            run view + eventCount (commit point)
-events/<run>/<eventID>.json                one file per event; IDs are slot-padded
-steps/<run>/<step>.json                    step views
-hooks/<hook>.json                          hook views
-tokens/<token>.json                        {hookId, tokenRetentionUntil}: token ownership
-streams/<run>/<name>/meta.json             {name, closed, count}
-streams/<run>/<name>/<%010d>.json          one file per chunk
-queue/<messageID>.json                     durable delivery (ULID IDs)
-queue-keys/<key>.json                      idempotency key -> live message ID
-```
+The schema is world-local's:
 
-Run, step, and hook IDs, tokens, stream names, and idempotency keys are
-user-controlled, so their file names are hex-encoded (names longer than 64
-bytes use a SHA-256 digest). Each record stores the original value. Hex also
-keeps names distinct on case-insensitive file systems.
+| Table | Holds |
+| --- | --- |
+| `runs` | One row per run: its tag, workflow, status, creation time, event count (`seq`), in-band fence (`seq_in_band`), and the run as JSON. |
+| `events` | One row per event, keyed by run and slot, with its type and correlation ID. |
+| `steps`, `waits`, `hooks` | The views the events build. A run's waits are deleted when it ends. |
+| `hook_tokens` | Each token's owner, unique across runs, kept past its run's end while the hook's retention lasts. |
+| `hook_disposals` | Hooks whose disposal committed, and the hook that took the token from a force-claimed one. |
+| `hook_resumes` | Deduplicated hook resumes, by run and resume ID. |
+| `start_hook_rejections` | Start hook candidates refused for good. |
+| `stream_chunks` | Stream chunks, numbered from 1, and each closed stream's end marker. |
 
-Development tools should use the client or RPC API rather than reading these
-files.
+It differs from world-local's in these ways:
+- It has no `snapshots` table, since Go has no dynamic workflow code.
+- An event's `doc` holds its data as CBOR (`worlds.EncodeEventData`), with
+  payloads as raw bytes. The encoding is Go's own, not cbor-x.
+- The run, step, and hook views hold no payloads. Each records the slot of the
+  event that holds its payload, and reads load it from there.
+- Stream chunks are keyed by run as well as name, since a stream name is
+  unique only within its run.
 
-## Durability
+The database runs in WAL mode with `synchronous=NORMAL`, `secure_delete`, and
+incremental vacuum. Every write is one `BEGIN IMMEDIATE` transaction, which
+waits up to 30 seconds for another writer. An append, a batch, a run's
+creation with its start hook, and a forced hook claim with the disposal it
+records in the previous owner's run each commit at once, so there is nothing
+to repair after a crash.
 
-Every record is written to a temporary sibling, fsynced, renamed into place,
-and its directory is synced where the file system supports it. Reads reject malformed records and unknown fields.
+`PRAGMA user_version` holds the schema version, 1. `Prepare` refuses a
+database written by a newer release. Development tools should use the client
+or RPC API rather than reading the database.
 
-Each append writes its event files first, then the step, hook, and token files
-it changes, and finally `runs/<run>.json` with the new `eventCount`. That run
-file is the **commit point**: readers only read slots up to `eventCount`, so
-they never observe a mutation in progress.
+## Tags
 
-When `Prepare` finds an event file past a run's `eventCount`, it rebuilds that
-run's steps, hooks, and token claims by replaying the committed events, then
-deletes the uncommitted event files. Batches are therefore all-or-nothing even
-across crashes. If a write fails while the process is running, the same repair
-runs immediately. If that repair also fails, the World refuses further calls
-until it is restarted.
-
-Streams commit through `meta.json`: chunk files at or past `count` are ignored
-and overwritten by the next write.
+A tagged World writes its tag on the runs, hooks, start hook rejections, and
+stream chunks it creates. It sees its own tag's rows and untagged ones. An
+untagged World sees only untagged rows. A run's steps, waits, and events belong
+to its tag. Tests can share one directory with a tag each, and `Clear` deletes
+only that tag's data.
 
 ## Start hooks
 
-`EventsCreateRun` with a `StartHook` writes the hook `hook_<run ULID>` and its
-token file before the run file, which commits them with the run, and refuses
-with a `*worlds.HookConflictError` when another run holds the token. `Prepare`
-removes a start hook and token whose run file was never written.
+`EventsCreateRun` with a `StartHook` creates the hook `hook_<run ULID>` and
+claims its token in the same transaction as the run. It refuses with a
+`*worlds.HookConflictError` when another run holds the token, and records the
+refusal, so the candidate stays refused. A candidate older than a day is
+refused with `ErrStartHookRejected`.
 
 ## Deleting run data
 
 A run created with `$retention: "0"` loses its data when it finishes, and
-`RunsDeleteDataMany` deletes a finished run's data on demand, as the Workflow
-SDK's local World does. The run, step, event and hook records stay; the
-payloads in the run's event files go, and its streams are left empty and
-closed.
-
-The append that finishes the run commits its `ExpiredAt` with it, so the data
-is unreadable from that commit on. The event and chunk files are scrubbed next,
-and the run file records `dataPurged`. If that is interrupted, reads keep
-scrubbing what is left, and `Prepare` finishes the purge. A step that settles
-after its run's data was deleted has its result scrubbed as it lands, and a
-deleted run's streams refuse writes.
+`RunsDeleteDataMany` deletes a finished run's data on demand, as world-local
+does. The run, step, event, and hook rows stay. The payloads in the run's
+events go, and its streams are cut to their end markers, in the same
+transaction that finishes the run or sets its `ExpiredAt`. A step that
+settles after its run's data was deleted has its result scrubbed as it lands,
+and a deleted run's streams refuse writes. After a deletion the World
+checkpoints the WAL and returns the freed pages to the file system.
 
 ## Queue
 
-`Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
-ordered by `NotBefore`. Each due delivery runs in its own goroutine. The
-message is deleted when a delivery succeeds and lives until then, keeping its
-message ID across redeliveries.
+The queue is a port of world-local's, kept in memory as world-local's is.
 
-- Every delivery sets `DeliveryCount` (1-based, rising on every redelivery)
-  and `Attempt` (the same count without handoffs). Both are persisted when the
-  delivery starts, so a delivery interrupted by a crash counts too.
-- When the runtime returns a `worlds.Redelivery`, the message is delivered
-  again after its delay, which counts as an attempt. A redelivery of zero is a
-  handoff, delivered at once without counting as an attempt. Any other error
-  is retried with exponential backoff from 100 ms up to 30 s, or after the
-  wait a `*worlds.ThrottleError` asks for when that is longer. The next due
-  time is stored in the message, so a restart keeps it.
-- `IdempotencyKey` deduplicates across the directory: while a message with the
-  key lives, `Queue` with the same key stores nothing and returns that
-  message's ID. Messages without a key are never deduplicated.
-- One serialized flow of a run executes at a time (`QueueInput.SerializedFlow`):
-  a later flow of the run waits until the executing one is acknowledged, fails,
-  or asks for a redelivery. Step deliveries and intermediate hops of a wait's
-  timer are never held. Because only one process uses a directory, this gate
-  is in-process.
-- A message with a `Retention` is dropped instead of delivered once it is older
-  than that. Zero keeps it until it succeeds. `NotBefore` has no limit, so
-  `Capabilities().MaxQueueDelay` is zero.
+- **Messages.** IDs are `msg_<ULID>`, kept across redeliveries.
+  `IdempotencyKey` deduplicates while the message with the key is in flight.
+- **Delays.** A message's `NotBefore` is slept before it takes a delivery
+  slot, so a delayed message holds no slot.
+- **One flow per run.** One serialized flow of a run
+  (`QueueInput.SerializedFlow`) executes at a time, in the order they were
+  queued. Step deliveries and intermediate hops of a wait's timer are never
+  held.
+- **Coalescing.** A flow waiting behind its run's executing flow is coalesced
+  into it: when the executing delivery succeeds, it runs again, up to 32
+  times, to cover the flows it took, which reads the run's log. A run's first
+  flow, a wake that completes waits, and a recovery flow are never coalesced.
+- **Handoffs.** A redelivery of zero keeps the run's gate and is delivered at
+  once. It does not count as an attempt, up to 10,000 times.
+- **Retries.** A positive redelivery releases the gate and is delivered after
+  its delay. A failed delivery is retried after 5 seconds for its first 32
+  failures, then after a delay that doubles up to a minute, or after the wait
+  a `*worlds.ThrottleError` asks for. A message is dropped after 256
+  deliveries, handoffs and re-runs aside, or once it is older than its
+  `Retention`.
+- **Counts.** `DeliveryCount` counts every delivery, and `Attempt` the same
+  without handoffs and re-runs.
 
-`RunsWaitForTerminalStatus` and `StreamsGetChunks` wait on an in-process change
-notification instead of polling.
+`NotBefore` has no limit, so `Capabilities().MaxQueueDelay` is zero.
 
-## Storage versions
+## Restart recovery
 
-The current format is version 1. `Prepare` rejects directories written with
-any other version and any non-empty directory without `version.json`. Remove
-the directory to start over.
+The queue is in memory, so a restart loses every message a run had queued.
+`Prepare` queues every active run of the World's own tag again:
 
-Forced hook takeover across runs first records a `hook-handoff.json` write-ahead decision. Recovery completes both sides before serving reads, including a crash between their commit points. Same-run takeover uses one run commit.
+1. Steps that a previous process was running inline are released with
+   `step_retrying`, as world-local's `orphaned-steps.js` does. A released
+   step is sent as a step delivery.
+2. The run gets a flow with `QueueInput.Recovery`, which sends again the
+   messages of its steps and the timers of its waits.
+3. Each of its open waits due within about 24.8 days gets a backstop wake,
+   keyed `recovery-wait:<run>:<wait>:<resumeAt ms>`.
+
+Set `SkipRecovery` for a process, such as a script, that should not take over
+runs.
+
+## Waiting
+
+The local World does not push events, as world-local does not: a flow polls
+the run's log, and does not linger. `RunsWaitForTerminalStatus` and
+`StreamsGetChunks` wake on this process's commits, and poll every 100 ms for
+other processes'.
