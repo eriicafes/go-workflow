@@ -243,8 +243,6 @@ type Hook struct {
 	Metadata            []byte // payload; a webhook's is its WebhookMetadata
 	IsWebhook           bool
 	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	ReceivedAt          *time.Time
 	TokenRetentionUntil *time.Time
 	ClaimedFrom         *HookForceClaim // with the previous owner run's workflow, deployment, and spec version
 	SpecVersion         int // of the event that created it
@@ -410,10 +408,21 @@ protocol, as Vercel's does.
 
 ## Analytics
 
-`Analytics` is `AnalyticsRuns` (`RunsGet`, `RunsList` of run summaries),
-`AnalyticsAttributes` (`AttributesList`, one aggregate per attribute key), and
-`AnalyticsWaits` (`WaitsGet`, `WaitsList`). A World returns it only when
-`Capabilities().Analytics` is true.
+`Analytics` is the Workflow SDK's analytics, which report runs and what they
+own without their payloads:
+
+| Part | Methods | Reports |
+| --- | --- | --- |
+| `AnalyticsRuns` | `RunsGet`, `RunsList` | Run summaries, filtered by workflow, status, creation time, and attributes. |
+| `AnalyticsAttributes` | `AttributesList` | One aggregate per attribute key. |
+| `AnalyticsSteps` | `StepsGet`, `StepsList` | A run's steps. |
+| `AnalyticsEvents` | `EventsGet`, `EventsGetMany`, `EventsList`, `EventsListByCorrelationID` | A run's events, with the run's workflow and deployment, filtered by type or correlation ID. |
+| `AnalyticsHooks` | `HooksGet`, `HooksList` | A run's hooks, read from their events, so a disposed hook is still reported, with its status and when it was received and disposed. |
+| `AnalyticsWaits` | `WaitsGet`, `WaitsList` | A run's waits. |
+
+A World returns it only when `Capabilities().Analytics` is true.
+`worlds.LogAnalytics` implements the steps, events, and hooks from a World's
+storage reads, for a World to embed.
 
 ## Client
 

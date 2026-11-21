@@ -12,7 +12,12 @@ import (
 
 // analytics adapts World to worlds.Analytics, whose RunsGet and RunsList
 // collide with the storage methods of the same names.
-type analytics struct{ world *World }
+// Steps, events, and hooks are read from the event log, by
+// worlds.LogAnalytics.
+type analytics struct {
+	worlds.LogAnalytics
+	world *World
+}
 
 const analyticsRunColumns = "id, name, status::text, attributes, created_at, updated_at, started_at, completed_at"
 

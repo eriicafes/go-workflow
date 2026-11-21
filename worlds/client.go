@@ -541,6 +541,54 @@ func (a httpAnalytics) AttributesList(ctx context.Context, input AnalyticsAttrib
 	return output, err
 }
 
+func (a httpAnalytics) StepsGet(ctx context.Context, input AnalyticsStepsGetInput) (AnalyticsStep, error) {
+	var output AnalyticsStep
+	err := a.client.call(ctx, "analytics.steps.get", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) StepsList(ctx context.Context, input AnalyticsStepsListInput) (Page[AnalyticsStep], error) {
+	var output Page[AnalyticsStep]
+	err := a.client.call(ctx, "analytics.steps.list", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) EventsGet(ctx context.Context, input AnalyticsEventsGetInput) (AnalyticsEvent, error) {
+	var output AnalyticsEvent
+	err := a.client.call(ctx, "analytics.events.get", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) EventsGetMany(ctx context.Context, input AnalyticsEventsGetManyInput) ([]AnalyticsEvent, error) {
+	var output []AnalyticsEvent
+	err := a.client.call(ctx, "analytics.events.getMany", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) EventsList(ctx context.Context, input AnalyticsEventsListInput) (Page[AnalyticsEvent], error) {
+	var output Page[AnalyticsEvent]
+	err := a.client.call(ctx, "analytics.events.list", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) EventsListByCorrelationID(ctx context.Context, input AnalyticsEventsListByCorrelationIDInput) (Page[AnalyticsEvent], error) {
+	var output Page[AnalyticsEvent]
+	err := a.client.call(ctx, "analytics.events.listByCorrelationId", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) HooksGet(ctx context.Context, input AnalyticsHooksGetInput) (AnalyticsHook, error) {
+	var output AnalyticsHook
+	err := a.client.call(ctx, "analytics.hooks.get", input, &output)
+	return output, err
+}
+
+func (a httpAnalytics) HooksList(ctx context.Context, input AnalyticsHooksListInput) (Page[AnalyticsHook], error) {
+	var output Page[AnalyticsHook]
+	err := a.client.call(ctx, "analytics.hooks.list", input, &output)
+	return output, err
+}
+
 func (a httpAnalytics) WaitsGet(ctx context.Context, input AnalyticsWaitsGetInput) (AnalyticsWait, error) {
 	var output AnalyticsWait
 	err := a.client.call(ctx, "analytics.waits.get", input, &output)

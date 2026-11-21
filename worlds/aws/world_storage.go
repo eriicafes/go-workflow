@@ -287,7 +287,6 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		"workflowName":   avs(hook.ResumeContext.WorkflowName),
 		"deploymentId":   avs(hook.ResumeContext.DeploymentID),
 		"createdAt":      avs(stamp(hook.CreatedAt)),
-		"updatedAt":      avs(stamp(hook.UpdatedAt)),
 		"specVersion":    avn(int64(hook.SpecVersion)),
 		"runSpecVersion": avn(int64(hook.ResumeContext.RunSpecVersion)),
 		"list_pk":        avs("HOOKS"),
@@ -299,7 +298,6 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	if hook.IsWebhook {
 		item["isWebhook"] = &ddb.AttributeValueMemberBOOL{Value: true}
 	}
-	setTime(item, "receivedAt", hook.ReceivedAt)
 	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
 	if hook.ClaimedFrom != nil {
 		data, _ := json.Marshal(hook.ClaimedFrom)
@@ -343,8 +341,6 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),
 		CreatedAt:           readTime(item, "createdAt"),
-		UpdatedAt:           readTime(item, "updatedAt"),
-		ReceivedAt:          readTimePtr(item, "receivedAt"),
 		TokenRetentionUntil: readTimePtr(item, "tokenRetentionUntil"),
 	}
 	if data := read(item, "claimedFrom"); data != "" {

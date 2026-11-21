@@ -160,10 +160,12 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 
 // Close does nothing, because the World holds no resources beyond the
 // supplied clients, which the caller keeps owning.
-func (*World) Close()                        {}
-func (w *World) BaseURL() string             { return w.config.BaseURL }
-func (*World) DeploymentID() string          { return "" }
-func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
+func (*World) Close()               {}
+func (w *World) BaseURL() string    { return w.config.BaseURL }
+func (*World) DeploymentID() string { return "" }
+func (w *World) Analytics() worlds.Analytics {
+	return analytics{LogAnalytics: worlds.LogAnalytics{World: w}, world: w}
+}
 func (w *World) Capabilities() worlds.Capabilities {
 	capabilities := worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, HookResumeDedup: true}
 	if w.scheduler == nil {

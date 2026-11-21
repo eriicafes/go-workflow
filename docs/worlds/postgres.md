@@ -93,9 +93,10 @@ They differ from world-postgres's where Go needs it:
   run, and stream chunks by run as well as stream.
 - `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
   `Config.Retention`.
-- Hooks keep the run's workflow, deployment, public key, and spec version,
-  which wake the run, and when they were last updated and received, which
-  the analytics hook reads return.
+- Hooks fill in `resume_context`, which world-postgres leaves empty, with the
+  run's workflow, deployment, public key, and spec version, so a resume
+  queues its delivery without reading the run. There are no `owner_id`,
+  `project_id`, or `environment` columns.
 - The queue is Go's own. There are no graphile-worker, snapshot, or
   invocation tables.
 

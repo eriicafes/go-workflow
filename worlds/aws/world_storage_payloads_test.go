@@ -27,7 +27,7 @@ func TestPayloadsAreReadFromEvents(t *testing.T) {
 	event(5, worlds.EventTypeRunFailed, "", worlds.DataRunFailed{Error: json.RawMessage(`"boom"`)})
 	store(runItem(runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusFailed, CreatedAt: now, UpdatedAt: now}, eventCount: 5, resultEventID: worlds.EventIDForSlot(5)}))
 	store(stepItem(stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, createdEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(3)}))
-	hook, err := hookItem(worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", CreatedAt: now, UpdatedAt: now})
+	hook, err := hookItem(worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", CreatedAt: now})
 	if err != nil {
 		t.Fatal(err)
 	}

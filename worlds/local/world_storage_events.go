@@ -374,7 +374,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			// A previous owner whose claim lapsed is deleted with its token.
@@ -387,14 +387,6 @@ func (t *txn) materialize(event worlds.Event) error {
 			}
 			t.setToken(value.Token, &tokenRecord{HookID: id, RunID: run.RunID})
 		}
-	case worlds.EventTypeHookReceived:
-		current, err := t.hook(worlds.HookID(event.CorrelationID))
-		if err != nil || current == nil {
-			return err
-		}
-		hook := *current
-		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		t.setHook(&hook)
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)
 		var disposed worlds.HookDisposedEventData
@@ -734,7 +726,7 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 			}
 			return worlds.EventResult{}, &refused{decision.Err()}
 		}
-		hook := &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now}}
 		if owner != nil {
 			// The previous owner's claim lapsed: it goes with its token.
 			if err := s.deleteHook(owner.HookID); err != nil {

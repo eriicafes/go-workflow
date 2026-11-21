@@ -11,7 +11,12 @@ import (
 
 // analytics exists because worlds.Analytics.RunsGet and RunsList share names
 // with the storage methods but take different inputs.
-type analytics struct{ world *World }
+// Steps, events, and hooks are read from the event log, by
+// worlds.LogAnalytics.
+type analytics struct {
+	worlds.LogAnalytics
+	world *World
+}
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	// Analytics runs carry no payloads, so the run record alone answers.

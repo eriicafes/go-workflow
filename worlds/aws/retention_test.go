@@ -169,7 +169,7 @@ func TestRetentionDynamo(t *testing.T) {
 func seedRun(t *testing.T, dynamo *fakeDynamo, runID, hookID, token string, expiredAt *time.Time) []string {
 	t.Helper()
 	now := time.Now()
-	hook, err := hookItem(worlds.Hook{HookID: worlds.HookID(hookID), RunID: worlds.RunID(runID), Token: token, CreatedAt: now, UpdatedAt: now})
+	hook, err := hookItem(worlds.Hook{HookID: worlds.HookID(hookID), RunID: worlds.RunID(runID), Token: token, CreatedAt: now})
 	if err != nil {
 		t.Fatal(err)
 	}

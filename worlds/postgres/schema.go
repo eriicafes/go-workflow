@@ -140,12 +140,7 @@ CREATE TABLE workflow.workflow_hooks (
 	is_system boolean DEFAULT false,
 	claimed_from jsonb,
 	claims_token boolean NOT NULL DEFAULT false,
-	workflow_name varchar NOT NULL,
-	deployment_id varchar NOT NULL DEFAULT '',
-	encryption_public_key varchar NOT NULL DEFAULT '',
-	run_spec_version integer NOT NULL,
-	updated_at timestamptz NOT NULL DEFAULT now(),
-	received_at timestamptz
+	resume_context bytea NOT NULL
 );
 CREATE INDEX workflow_hooks_run_id_idx ON workflow.workflow_hooks (run_id, created_at, hook_id);
 CREATE INDEX workflow_hooks_token_idx ON workflow.workflow_hooks (token);

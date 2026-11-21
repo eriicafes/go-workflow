@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -200,7 +201,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::varchar, NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", coalesce(h.is_webhook, false), h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, coalesce(h.spec_version, 0), h.run_spec_version"
+	return "h.hook_id, h.run_id, h.resume_context, h.token, " + metadata + ", coalesce(h.is_webhook, false), h.created_at, h.token_retention_until, h.claimed_from, coalesce(h.spec_version, 0)"
 }
 
 // hookJoin joins the event holding the hook's metadata, its hook_created or
@@ -216,10 +217,15 @@ func hookJoin(resolve worlds.ResolveData) string {
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
 	var metadataType *worlds.EventType
-	var metadata, claimed []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &hook.SpecVersion, &hook.ResumeContext.RunSpecVersion); err != nil {
+	var resume, metadata, claimed []byte
+	if err := row.Scan(&hook.HookID, &hook.RunID, &resume, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.TokenRetentionUntil, &claimed, &hook.SpecVersion); err != nil {
 		return worlds.Hook{}, err
 	}
+	var decoded resumeContext
+	if err := cbor.Unmarshal(resume, &decoded); err != nil {
+		return worlds.Hook{}, fmt.Errorf("workflow/postgres: hook %s resume_context: %w", hook.HookID, err)
+	}
+	hook.ResumeContext = worlds.HookResumeContext(decoded)
 	if metadataType != nil && metadata != nil {
 		data, err := eventData(*metadataType, metadata)
 		if err != nil {
@@ -239,8 +245,7 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 			return worlds.Hook{}, err
 		}
 	}
-	hook.CreatedAt, hook.UpdatedAt = hook.CreatedAt.UTC(), hook.UpdatedAt.UTC()
-	hook.ReceivedAt, hook.TokenRetentionUntil = utc(hook.ReceivedAt), utc(hook.TokenRetentionUntil)
+	hook.CreatedAt, hook.TokenRetentionUntil = hook.CreatedAt.UTC(), utc(hook.TokenRetentionUntil)
 	return hook, nil
 }
 
@@ -287,4 +292,24 @@ func (w *World) lockToken(ctx context.Context, tx pgx.Tx, token string, at time.
 	// deletes it.
 	_, err = tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), holder.hookID)
 	return tokenHolder{}, err
+}
+
+// resumeContext is a hook's resume_context: the part of its run that
+// addresses the deliveries its payloads queue, in the SDK's
+// HookResumeContext shape, as CBOR. world-postgres declares the column but
+// never writes it, so the SDK's runtime reads the run on every resume.
+type resumeContext struct {
+	DeploymentID        string `cbor:"deploymentId"`
+	WorkflowName        string `cbor:"workflowName"`
+	EncryptionPublicKey string `cbor:"encryptionPublicKey,omitempty"`
+	RunSpecVersion      int    `cbor:"runSpecVersion,omitempty"`
+}
+
+// encodeResumeContext returns a hook's resume_context.
+func encodeResumeContext(resume worlds.HookResumeContext) []byte {
+	encoded, err := cbor.Marshal(resumeContext(resume))
+	if err != nil {
+		panic(err) // A struct of strings and an int always encodes.
+	}
+	return encoded
 }

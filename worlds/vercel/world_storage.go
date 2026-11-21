@@ -158,7 +158,6 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 		ClaimedFrom:         hookClaim(values["claimedFrom"]),
 		CreatedAt:           requiredTime(values, "createdAt"),
 	}
-	hook.UpdatedAt = hook.CreatedAt
 	if resume, ok := values["resumeContext"].(map[string]any); ok {
 		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName"), EncryptionPublicKey: str(resume, "encryptionPublicKey")}
 		hook.ResumeContext.RunSpecVersion, _ = asInt(resume["runSpecVersion"])
@@ -480,14 +479,6 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 					hook.ClaimedFrom = created.ForceClaimedFrom
 				}
 			}
-		case worlds.EventTypeHookReceived:
-			if hook.ReceivedAt == nil {
-				at := event.CreatedAt
-				hook.ReceivedAt = &at
-			}
-		}
-		if event.CreatedAt.After(hook.UpdatedAt) {
-			hook.UpdatedAt = event.CreatedAt
 		}
 	}
 	if resolve == worlds.ResolveDataNone {

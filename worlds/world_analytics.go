@@ -10,6 +10,9 @@ import (
 type Analytics interface {
 	AnalyticsRuns
 	AnalyticsAttributes
+	AnalyticsSteps
+	AnalyticsEvents
+	AnalyticsHooks
 	AnalyticsWaits
 }
 
