@@ -125,7 +125,10 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 
 	// Build the replay context and merge the admission append without a
 	// follow-up storage read.
-	execution := newExecution(ctx, r.world, run, events, nil)
+	execution, err := newExecution(ctx, r.world, run, events, nil)
+	if err != nil {
+		return err
+	}
 	execution.delivery, execution.running = input, &r.running
 	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
@@ -222,8 +225,8 @@ func (r *Runtime) loadRun(ctx context.Context, runID RunID) (Run, []Event, error
 // made the run terminal. A recorded operation the runner returned without
 // reaching is a divergence, handed to recoverDivergence instead.
 func (r *Runtime) completeRun(ctx context.Context, input QueueInput, execution *Execution, data []byte) error {
-	if position, ok := execution.unreachedPosition(); ok {
-		return r.recoverDivergence(ctx, input, replayDivergenceError{Position: position, Reason: "runner returned without reaching the recorded operation"})
+	if id, ok := execution.unreached(); ok {
+		return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "runner returned without reaching the recorded operation"})
 	}
 	completed, err := json.Marshal(DataRunCompleted{Output: data})
 	if err != nil {
@@ -277,8 +280,8 @@ func (r *Runtime) failRun(ctx context.Context, input QueueInput, execution *Exec
 			return err
 		}
 	}
-	if position, ok := execution.unreachedPosition(); ok {
-		return r.recoverDivergence(ctx, input, replayDivergenceError{Position: position, Reason: "runner returned without reaching the recorded operation"})
+	if id, ok := execution.unreached(); ok {
+		return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "runner returned without reaching the recorded operation"})
 	}
 	_, err = r.world.EventsCreate(ctx, EventsCreateInput{
 		RunID:   execution.run.RunID,
@@ -360,7 +363,10 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 
 	// Replay the root workflow with the target selected. DurableStep runs
 	// only when replay reaches the matching step declaration.
-	execution := newExecution(ctx, r.world, run, events, input.StepID)
+	execution, err := newExecution(ctx, r.world, run, events, input.StepID)
+	if err != nil {
+		return err
+	}
 	execution.delivery = input
 	if execution.keys, err = RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
@@ -522,7 +528,7 @@ func (r *Runtime) supersede(ctx context.Context, input QueueInput) error {
 // log.
 func (r *Runtime) recoverDivergence(ctx context.Context, input QueueInput, divergenceErr replayDivergenceError) error {
 	if input.ReplayDivergenceCount >= maxReplayDivergenceRetries {
-		corrupted := corruptedEventLogError{Position: divergenceErr.Position, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
+		corrupted := corruptedEventLogError{CorrelationID: divergenceErr.CorrelationID, Reason: divergenceErr.Reason, RecoveryReplays: input.ReplayDivergenceCount}
 		data, err := r.runFailedData(ctx, input.RunID, input.DeploymentID, corrupted)
 		if err != nil {
 			return err

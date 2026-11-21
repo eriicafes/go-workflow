@@ -294,10 +294,11 @@ func TestRetryDelay(t *testing.T) {
 func TestQueueConsumerExecutes(t *testing.T) {
 	world, queue, _ := newWorlds(t, 1)
 	ctx := context.Background()
-	if _, err := world[0].EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_consumer", WorkflowName: "missing"}); err != nil {
+	consumerID := worlds.NewRunID()
+	if _, err := world[0].EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: consumerID, WorkflowName: "missing"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world[0].Queue(ctx, worlds.QueueInput{RunID: "wrun_consumer"}); err != nil {
+	if _, err := world[0].Queue(ctx, worlds.QueueInput{RunID: consumerID}); err != nil {
 		t.Fatal(err)
 	}
 	published := queue.published()
@@ -309,7 +310,7 @@ func TestQueueConsumerExecutes(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d %s", response.Code, response.Body)
 	}
-	run, err := world[0].RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_consumer"})
+	run, err := world[0].RunsGet(ctx, worlds.RunsGetInput{RunID: consumerID})
 	if err != nil || run.Status != worlds.StatusFailed {
 		t.Fatalf("run = %+v err=%v", run, err)
 	}

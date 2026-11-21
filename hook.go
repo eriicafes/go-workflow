@@ -56,10 +56,10 @@ func (d HookDefinition[T]) Create(ctx context.Context) *Hook[T] {
 		minRetention:   d.minRetention,
 		force:          d.force,
 		executionState: execution,
-		position:       execution.NextPosition(),
+		declared:       execution.NextHookID(),
 	}
 	if hook.token == "" {
-		hook.token = worlds.NewRunHookToken(execution.Run(), hook.position)
+		hook.token = execution.NextHookToken()
 	}
 	if id, ok := execution.OpenStartHook(hook.token); ok {
 		// The run's start hook was created with the run, so nothing is
@@ -84,8 +84,10 @@ type Hook[T any] struct {
 	token      string
 	id         worlds.HookID
 	registered bool
-	position   int
-	disposed   bool
+	// declared is the ID drawn for the hook when it was created, which
+	// registration records.
+	declared worlds.HookID
+	disposed bool
 	// isWebhook and metadata make the hook a webhook with its settings.
 	isWebhook      bool
 	metadata       []byte
@@ -99,11 +101,11 @@ type Hook[T any] struct {
 	ClaimedFrom *worlds.HookForceClaim
 }
 
-func (h *Hook[T]) create(execution *worlds.Execution, position int, token string) {
+func (h *Hook[T]) create(execution *worlds.Execution, token string) {
 	h.registered, h.executionState = true, execution
 	result := worlds.DurableHook[T](worlds.DurableHookOptions{
 		Execution:    execution,
-		Position:     &position,
+		ID:           h.declared,
 		Token:        token,
 		IsWebhook:    h.isWebhook,
 		Metadata:     h.metadata,
@@ -149,7 +151,7 @@ func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
 		return true, ErrHookNotActive, nil
 	}
 	if !h.registered {
-		h.create(execution, h.position, h.token)
+		h.create(execution, h.token)
 	}
 	if h.err != nil {
 		// Wait until replay reaches the conflict event so Select cannot choose
@@ -217,7 +219,7 @@ func (h *Hook[T]) GetConflict(ctx context.Context) (*Run[any], error) {
 		return nil, ErrHookNotActive
 	}
 	if !h.registered {
-		h.create(execution, h.position, h.token)
+		h.create(execution, h.token)
 	}
 	if h.conflict == "" {
 		return nil, h.err

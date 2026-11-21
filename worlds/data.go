@@ -29,7 +29,7 @@ var eventPayloadFields = map[EventType]string{
 
 // ResolveEventData returns the Data an event of eventType carries under
 // resolve. EventsResolveDataNone removes the type's payload field and keeps
-// its metadata, such as a step's name and position.
+// its metadata, such as a step's name.
 // Data that is not a JSON object, or has no field left, is removed. Other
 // resolve values return data unchanged.
 func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveData) []byte {
@@ -265,9 +265,8 @@ func runErrorCode(err error) string {
 	return "USER_ERROR"
 }
 
-// DataStepCreated is the Data of a step_created event. The step's position
-// is in its ID, and its options and cancellation contexts come from the
-// replay that declares it.
+// DataStepCreated is the Data of a step_created event. The step's options
+// and cancellation contexts come from the replay that declares it.
 type DataStepCreated struct {
 	StepName string `json:"stepName"`
 	// Input is the step's arguments, {args: [input]}, as a payload.
@@ -290,8 +289,8 @@ type DataStepResult struct {
 	RetryAfter *time.Time `json:"retryAfter,omitempty"`
 }
 
-// DataWaitCreated is the Data of a wait_created event. The wait's position
-// is in its ID, and its cancellation contexts come from the replay.
+// DataWaitCreated is the Data of a wait_created event. The wait's
+// cancellation contexts come from the replay.
 type DataWaitCreated struct {
 	ResumeAt time.Time `json:"resumeAt"`
 }

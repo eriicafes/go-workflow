@@ -15,8 +15,8 @@ func TestEncodeRunFailedSetsTheSDKErrorCode(t *testing.T) {
 	}{
 		{errors.New("boom"), "USER_ERROR"},
 		{FatalError{Cause: fmt.Errorf("%w (48 attempts)", ErrMaxDeliveriesExceeded)}, "MAX_DELIVERIES_EXCEEDED"},
-		{corruptedEventLogError{Position: 2}, "CORRUPTED_EVENT_LOG"},
-		{replayDivergenceError{Position: 2}, "REPLAY_DIVERGENCE"},
+		{corruptedEventLogError{CorrelationID: "step_x"}, "CORRUPTED_EVENT_LOG"},
+		{replayDivergenceError{CorrelationID: "step_x"}, "REPLAY_DIVERGENCE"},
 		{deploymentMismatchError{}, "DEPLOYMENT_MISMATCH"},
 		{fmt.Errorf("%w: wf", ErrWorkflowNotFound), "WORKFLOW_NOT_REGISTERED"},
 		{DeliveryError(errors.New("backend 503")), "WORLD_CONTRACT_ERROR"},

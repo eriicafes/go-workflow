@@ -40,7 +40,9 @@ func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, e
 // promise for its result without waiting for it. Outside workflow context, the
 // promise fails with ErrNoWorkflow.
 //
-// The step is identified by fn's function name and its position in the runner.
+// The step is identified by fn's function name and the ID it draws from the
+// run's seed, so the runner must declare its steps in the same order on every
+// replay.
 // It is retried on error according to options, where the last option applies
 // and the default allows 3 retries. fn is executed at least once and should be
 // idempotent.

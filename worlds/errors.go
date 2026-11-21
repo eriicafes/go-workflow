@@ -107,23 +107,23 @@ func (e deliveryError) Unwrap() error { return e.cause }
 
 // replayDivergenceError identifies a declaration that does not match the event log.
 type replayDivergenceError struct {
-	Position int
-	Reason   string
+	CorrelationID string
+	Reason        string
 }
 
 func (e replayDivergenceError) Error() string {
-	return fmt.Sprintf("workflow: replay diverged at position %d: %s", e.Position, e.Reason)
+	return fmt.Sprintf("workflow: replay diverged at %s: %s", e.CorrelationID, e.Reason)
 }
 
 // corruptedEventLogError records replay divergence after recovery attempts fail.
 type corruptedEventLogError struct {
-	Position        int
+	CorrelationID   string
 	Reason          string
 	RecoveryReplays int
 }
 
 func (e corruptedEventLogError) Error() string {
-	return fmt.Sprintf("%s at position %d after %d recovery replays: %s", ErrCorruptedEventLog, e.Position, e.RecoveryReplays, e.Reason)
+	return fmt.Sprintf("%s at %s after %d recovery replays: %s", ErrCorruptedEventLog, e.CorrelationID, e.RecoveryReplays, e.Reason)
 }
 
 func (e corruptedEventLogError) Unwrap() error { return ErrCorruptedEventLog }

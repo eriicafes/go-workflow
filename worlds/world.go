@@ -7,12 +7,8 @@
 package worlds
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/url"
@@ -212,46 +208,6 @@ func NewStreamName() string { return "strm_" + ulid.Make().String() }
 // NewWriterID returns a new stream writer ID: wrtr_ and a ULID.
 func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
 
-// NewStepID returns a new step ID for the step declared at position: step_
-// and a ULID carrying position, which OperationPosition recovers.
-func NewStepID(position int) StepID { return StepID(positionedID("step_", position)) }
-
-// NewHookID returns a new hook ID for the hook declared at position: hook_
-// and a ULID carrying position, which OperationPosition recovers.
-func NewHookID(position int) HookID { return HookID(positionedID("hook_", position)) }
-
-// NewWaitID returns a new wait ID for the wait declared at position: wait_
-// and a ULID carrying position, which OperationPosition recovers.
-func NewWaitID(position int) WaitID { return WaitID(positionedID("wait_", position)) }
-
-// positionedID returns prefix and a ULID whose first four bytes of entropy
-// hold position, so the ID of a declaration carries its replay position even
-// where a World cannot store the declaration's data. The other six bytes of
-// entropy are random.
-func positionedID(prefix string, position int) string {
-	var entropy [10]byte
-	binary.BigEndian.PutUint32(entropy[:4], uint32(position))
-	_, _ = rand.Read(entropy[4:])
-	id := ulid.MustNew(ulid.Now(), bytes.NewReader(entropy[:]))
-	return prefix + id.String()
-}
-
-// OperationPosition returns the replay position carried by a step, hook, or
-// wait ID minted by NewStepID, NewHookID, or NewWaitID, which the runtime
-// uses for every declaration. It reports false for an ID that is not a
-// prefixed ULID. For other ULIDs the result is meaningless.
-func OperationPosition(id string) (int, bool) {
-	_, body, ok := strings.Cut(id, "_")
-	if !ok {
-		return 0, false
-	}
-	parsed, err := ulid.ParseStrict(body)
-	if err != nil {
-		return 0, false
-	}
-	return int(binary.BigEndian.Uint32(parsed.Entropy()[:4])), true
-}
-
 // hookTokenAlphabet is Nano ID's URL alphabet, whose 64 characters each take
 // six bits of a random byte.
 const hookTokenAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
@@ -268,15 +224,6 @@ func NewHookToken() string {
 		token[index] = hookTokenAlphabet[value&63]
 	}
 	return string(token)
-}
-
-// NewRunHookToken returns the hook token of the hook run declares at
-// position: 21 characters of Nano ID's URL alphabet derived from the run's ID,
-// workflow name, and deployment and the position, so every replay derives the
-// same token, including retries before the hook is registered.
-func NewRunHookToken(run Run, position int) string {
-	seed := sha256.Sum256(fmt.Appendf(nil, "%s:%s:%s:hook:%d", run.RunID, run.WorkflowName, run.DeploymentID, position))
-	return base64.RawURLEncoding.EncodeToString(seed[:])[:21]
 }
 
 type (

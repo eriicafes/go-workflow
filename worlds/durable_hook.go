@@ -12,10 +12,10 @@ type (
 	// hook that owns it instead of failing with ErrHookConflict.
 	DurableHookOptions struct {
 		Execution *Execution
-		// Position is a declaration position reserved by NextPosition. When nil,
-		// DurableHook declares and registers at the next position immediately.
-		Position *int
-		Token    string
+		// ID is a hook ID drawn earlier by Execution.NextHookID. When empty,
+		// DurableHook draws the next one.
+		ID    HookID
+		Token string
 		// Metadata is the hook's metadata payload. A webhook's is its
 		// WebhookMetadata.
 		Metadata []byte
@@ -49,27 +49,24 @@ type (
 	}
 )
 
-// DurableHook creates the hook declared at the next position, claiming its
+// DurableHook creates the next hook declared, claiming its
 // token, or on replay matches its recorded declaration. It does not block: the
 // hook settles when the walk reaches its payload, and HookOutcome reads it.
 // Registration and takeover delivery use the Execution's delivery context;
 // a hook does not inherit the caller's cancellation context.
-// When the operation recorded at the
-// position is not a hook with the same token, it ends the replay with a panic
+// When the operation recorded with its ID
+// is not a hook with the same token, it ends the replay with a panic
 // carrying a replayDivergenceError.
 func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
-	var position int
-	if options.Position != nil {
-		position = *options.Position
-	} else {
-		position = options.Execution.NextPosition()
+	hookID := options.ID
+	if hookID == "" {
+		hookID = options.Execution.NextHookID()
 	}
-	creationIndex, exists := options.Execution.index[position]
+	creationIndex, exists := options.Execution.declared(string(hookID))
 	if !exists {
 		if options.Token == "" {
 			options.Token = NewHookToken()
 		}
-		hookID := NewHookID(position)
 		created := DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
 		if options.MinRetention > 0 {
 			until := time.Now().UTC().Add(options.MinRetention)
@@ -80,18 +77,18 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 			return DurableHookResult[T]{Err: err}
 		}
 		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeHookCreated, CorrelationID: string(hookID), Data: data}, nil)
-		creationIndex = options.Execution.index[position]
+		creationIndex, _ = options.Execution.declared(string(hookID))
 	}
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(hookID), Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
 	}
 	var created DataHookCreated
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableHookResult[T]{Err: fmt.Errorf("workflow: decode hook: %w", err)}
 	}
 	if !options.IsWebhook && options.Token != "" && created.Token != options.Token {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(hookID), Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
 	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
 	if event.EventType == EventTypeHookConflict {

@@ -86,9 +86,15 @@ whose result is already recorded refuses a second one.
 
 ## Identifying operations
 
-Operations are identified by **position**: the order in which the runner
-reaches them. Each recorded operation stores its position, and replay checks
-that the runner reaches a matching operation there.
+Operations are identified by **ID**, and every ID comes from a generator
+seeded with the run: `<run ID>:<workflow name>:<deployment ID>` seeds
+seedrandom's ARC4, and steps, timers, and hooks take the run's next
+correlation ULID, `step_`, `wait_`, or `hook_` and a ULID at the run's
+creation time, each one the previous plus one. A hook created without a
+token draws a 21-character Nano ID token from the same generator. Each replay
+draws the same IDs in the same order, and replay checks that the operation
+the runner reaches matches the one recorded with its ID. This is why a runner
+must declare its operations in the same order on every replay.
 
 ## Delivering results in order
 
@@ -117,8 +123,8 @@ resolves when the walk reaches its result.
 A replay **diverges** when the runner doesn't reach the operations its log
 records. The runtime detects:
 
-- an operation of another kind at a recorded position, such as a step where a
-  timer was recorded.
+- an operation of another kind recorded with the drawn ID, such as a step
+  where a timer was recorded.
 - a step that calls a different step function than the one recorded.
 - a hook with a different token than the one recorded.
 - a runner that returns without reaching a recorded operation, for example
@@ -131,8 +137,8 @@ delivery** of the same flow or step right away, which replays the run from a
 fresh read of its log, possibly on another worker. Each recovery delivery
 carries a count in `QueueInput.ReplayDivergenceCount`. After three recovery
 deliveries diverge too, the runtime fails the run with an error matching
-`worlds.ErrCorruptedEventLog`, whose message names the position and the
-mismatch. A step that diverges records a new attempt on each recovery
+`worlds.ErrCorruptedEventLog`, whose message names the operation's ID and
+the mismatch. A step that diverges records a new attempt on each recovery
 delivery. Compensations registered with `Rollback` do **not** run,
 because they would replay against the same log.
 

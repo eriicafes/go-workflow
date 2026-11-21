@@ -38,7 +38,7 @@ type (
 	}
 )
 
-// DurableStep declares the step at the next position. On first execution in a
+// DurableStep declares the next step. On first execution in a
 // flow it holds the step back until the runner waits, when Execution.Wait
 // runs it inline or records step_created with input and queues a step
 // delivery, which a step delivery or compensation does at once. On replay it
@@ -47,15 +47,14 @@ type (
 // this step it
 // calls fn with the recorded input, records the result in the Execution, and
 // ends the replay with a panic the Runtime recovers, so it does not return.
-// fn is executed at least once. When the operation recorded at the position is
+// fn is executed at least once. When the operation recorded with its ID is
 // not a step with options.Name, it ends the replay with a panic carrying a
 // replayDivergenceError.
 func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
-	position := options.Execution.NextPosition()
-	creationIndex, exists := options.Execution.index[position]
+	stepID := options.Execution.NextStepID()
+	creationIndex, exists := options.Execution.declared(string(stepID))
 	if !exists {
 		// First execution persists the declaration and dispatches its target work.
-		stepID := NewStepID(position)
 		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}
@@ -82,19 +81,18 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		return DurableStepResult[Out]{StepID: stepID}
 	}
 
-	// Replay the declaration at this logical workflow position.
+	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
 	var createdData DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode step: %w", err)}
 	}
 	if createdData.StepName != options.Name {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
 	}
-	stepID := StepID(event.CorrelationID)
 
 	// Root replays only declare steps, and the targeted delivery of a step
 	// that has not settled invokes fn.

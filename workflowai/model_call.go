@@ -92,8 +92,8 @@ type modelCallResult struct {
 }
 
 // modelCall calls a language model in a step. Its methods are the step
-// functions, so a model call is identified by the method and its position in
-// the run.
+// functions, so a model call is identified by the method and the step ID it
+// draws.
 type modelCall struct {
 	model      provider.LanguageModel
 	telemetry  *telemetry.Options
