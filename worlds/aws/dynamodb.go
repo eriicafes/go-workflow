@@ -205,6 +205,17 @@ func waitKey(runID, correlationID string) map[string]ddb.AttributeValue {
 	return key(runPartitionKey(runID), "WAIT#"+correlationID)
 }
 
+// startHookDecisionKey is the item holding a start hook candidate's
+// permanent decision.
+func startHookDecisionKey(runID string) map[string]ddb.AttributeValue {
+	return key(runPartitionKey(runID), "STARTHOOK")
+}
+
+// resumeKey is the RESUME# item of a deduplicated resume of a run's hook.
+func resumeKey(runID, resumeID string) map[string]ddb.AttributeValue {
+	return key(runPartitionKey(runID), "RESUME#"+resumeID)
+}
+
 // Stream names are encoded so a name containing '#' cannot fall inside the
 // chunk key range of another stream.
 func streamName(name string) string { return base64.RawURLEncoding.EncodeToString([]byte(name)) }

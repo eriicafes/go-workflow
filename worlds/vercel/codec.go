@@ -40,6 +40,7 @@ type wireEvent struct {
 	CreatedAt     time.Time
 	OccurredAt    *time.Time
 	SpecVersion   int
+	ResumeID      string
 }
 
 // decodeWireEvent reads an event frame: meta is the event and body is the
@@ -76,6 +77,7 @@ func wireEventFromMap(value map[string]any) wireEvent {
 		event.OccurredAt = &occurred
 	}
 	event.SpecVersion, _ = asInt(value["specVersion"])
+	event.ResumeID = str(value, "resumeId")
 	return event
 }
 
@@ -263,6 +265,7 @@ func toEvent(runID worlds.RunID, wire wireEvent, resolve worlds.EventsResolveDat
 		CreatedAt:     wire.CreatedAt,
 		OccurredAt:    wire.OccurredAt,
 		SpecVersion:   wire.SpecVersion,
+		ResumeID:      wire.ResumeID,
 	}, nil
 }
 

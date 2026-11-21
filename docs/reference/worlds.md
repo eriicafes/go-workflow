@@ -116,6 +116,10 @@ type Capabilities struct {
 	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
 	// with the run, or returns a *HookConflictError and creates nothing.
 	StartHook bool
+	// HookResumeDedup: a hook_received with EventsCreateOptions.ResumeID is
+	// appended once per run and resume ID. Hook.ResumeDedup attests it for
+	// one hook.
+	HookResumeDedup bool
 	// RegionalRunIDs: the World implements RegionalRunIDs, and clients ask
 	// it for new run IDs.
 	RegionalRunIDs bool
@@ -159,7 +163,7 @@ runID)` returns a delivery addressed that way.
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
 | `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
-| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. `ErrRunAlreadyExists` if it exists. |
+| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. `ErrRunAlreadyExists` if it exists, except a repeat of a start whose start hook was accepted, which returns its `run_created`. A start hook's decision is permanent for the run ID: a refused candidate keeps returning the same `*HookConflictError`, and one older than `StartHookCandidateMaxAge` gets `ErrStartHookRejected`. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
 | `EventsCreateBatch` | Appends events in order, fenced as one block. An invalid event, a missing run, or a stale fence appends none of them. Otherwise each event has its own outcome in `Results`, and a refused event refuses the later events of its correlation ID. |
 | `EventsList` | Reads the event log. Every page carries the run's counters in `Snapshot`, read before the page. |
@@ -176,6 +180,14 @@ are out-of-band: never refused, and they leave the count alone. An in-band
 write with `EventCount` returns the events between that count and its own
 position in `Events`, and is stored with its `OccurredAt` as `CreatedAt`. See
 [Concurrent flows](/guide/replay#concurrent-flows).
+
+`ResumeHook(ctx, world, hook, payload, resumeID)` appends a hook's payload
+with `EventsCreateOptions.ResumeID` and `ResumePayloadDigest`
+(`ResumeDigest(payload)`) when the World deduplicates resumes
+(`Capabilities().HookResumeDedup` or `Hook.ResumeDedup`), so a retried resume
+records the payload once. `workflow.ResumeHook` sends a new ULID from
+`NewResumeID` per call, and `ResumeHookWithRetries` one ID for all its
+attempts. A repeat with a different payload is refused with `ErrEventInvalid`.
 
 Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
@@ -201,6 +213,7 @@ type Run struct {
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time
+	StartHook    *StartHook // the run's start hook, with its HookID and without its metadata
 }
 
 type Step struct {
@@ -235,6 +248,7 @@ type Hook struct {
 	ForceClaimedBy      *HookForceClaim
 	SpecVersion         int // of the event that created it
 	DisposedAt          *time.Time
+	ResumeDedup         bool // the World deduplicates this hook's resumes by ResumeID
 }
 
 type HookResumeContext struct {
@@ -540,6 +554,7 @@ checking ownership.
 | `ErrHookNotActive` | The hook was resolved, disposed, or lost its token. |
 | `ErrHookConflict` | Another active hook owns the token. |
 | `ErrHookForceClaimed` | Another hook took the token with `Force`. |
+| `ErrStartHookRejected` | A start hook candidate the World will never admit, such as one whose run ID is older than `StartHookCandidateMaxAge`. |
 | `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
 | `ErrStreamClosed` | Writing to a closed stream. |
 | `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |

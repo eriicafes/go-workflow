@@ -119,6 +119,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 	}
 	setRequestID(ctx, meta)
+	if input.Options.ResumeID != "" && input.Event.EventType == worlds.EventTypeHookReceived {
+		meta["resumeId"], meta["resumePayloadDigest"] = input.Options.ResumeID, input.Options.ResumePayloadDigest
+	}
 	meta["occurredAt"] = occurredAt(input.Event)
 	meta["remoteRefBehavior"] = "resolve"
 	if input.Event.EventType == worlds.EventTypeRunStarted {
@@ -135,7 +138,8 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	response, err := w.postEvent(ctx, input.RunID, input.Event.EventType, meta, payload)
 	if err != nil {
 		err = classify(err, input.Event.EventType)
-		if repeatable[input.Event.EventType] && !errors.Is(err, worlds.ErrInBandSuperseded) && !errors.Is(err, worlds.ErrRunNotFound) {
+		var conflict *worlds.HookConflictError
+		if repeatable[input.Event.EventType] && !errors.Is(err, worlds.ErrInBandSuperseded) && !errors.Is(err, worlds.ErrRunNotFound) && !errors.As(err, &conflict) && !errors.Is(err, worlds.ErrStartHookRejected) {
 			if result, found, findErr := w.findAdmitted(ctx, input, held, hasHeld); findErr != nil || found {
 				return result, findErr
 			}

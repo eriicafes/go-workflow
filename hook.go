@@ -290,6 +290,11 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 // ErrHookNotFound when no active hook has the token.
 // It is for steps and external callers; workflow context returns ErrNotInStep.
 func ResumeHook[T any](ctx context.Context, token string, value T) error {
+	return resumeHook(ctx, token, value, worlds.NewResumeID())
+}
+
+// resumeHook resumes the hook with token as one logical resume, resumeID.
+func resumeHook[T any](ctx context.Context, token string, value T, resumeID string) error {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
 		return ErrNotInStep
 	}
@@ -309,7 +314,7 @@ func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	if err != nil {
 		return fmt.Errorf("workflow: encode hook payload: %w", err)
 	}
-	return client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: token, Data: payload})
+	return client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: token, Data: payload, ResumeID: resumeID})
 }
 
 // ResumeHookWithRetries attempts ResumeHook up to attempts times, waiting
@@ -324,8 +329,11 @@ func ResumeHookWithRetries[T any](ctx context.Context, token string, value T, at
 	if attempts <= 0 {
 		return ErrHookNotFound
 	}
+	// Every attempt is the same resume, so one that recorded its payload
+	// without answering records nothing more.
+	resumeID := worlds.NewResumeID()
 	for attempt := range attempts {
-		err := ResumeHook(ctx, token, value)
+		err := resumeHook(ctx, token, value, resumeID)
 		if !errors.Is(err, ErrHookNotFound) {
 			return err
 		}

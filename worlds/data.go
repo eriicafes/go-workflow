@@ -165,6 +165,58 @@ func StartHookID(runID RunID) HookID {
 	return HookID("hook_" + strings.TrimPrefix(string(runID), "wrun_"))
 }
 
+// StartHookCandidateMaxAge is the age, by its run ID, past which a start hook
+// candidate is refused with ErrStartHookRejected: it can never be created,
+// and its token is free (@workflow/world START_HOOK_CANDIDATE_MAX_AGE_MS).
+const StartHookCandidateMaxAge = 24 * time.Hour
+
+// StartHookDecision is a World's permanent decision on a start hook
+// candidate, by its run ID: accepted, or rejected because ConflictingRunID
+// held the token. Every later attempt for the candidate, by run_created or by
+// a first flow's run_started, gets the same decision.
+type StartHookDecision struct {
+	Token            string `json:"token"`
+	Accepted         bool   `json:"accepted"`
+	ConflictingRunID RunID  `json:"conflictingRunId,omitempty"`
+}
+
+// Err returns the error a later attempt for a rejected candidate returns.
+func (d StartHookDecision) Err() error {
+	if d.Accepted {
+		return nil
+	}
+	return &HookConflictError{RunID: d.ConflictingRunID}
+}
+
+// StartHookCandidateExpired reports whether a start hook candidate's run ID
+// is older than StartHookCandidateMaxAge. A run ID that is not a ULID is
+// never expired.
+func StartHookCandidateExpired(runID RunID, now time.Time) bool {
+	created, ok := RunIDTime(runID)
+	return ok && now.Sub(created) > StartHookCandidateMaxAge
+}
+
+// RepeatsAcceptedStart reports whether input repeats the start of an accepted
+// candidate whose run_created recorded runCreated: both carry a start hook
+// with the same token. A World returns that run_created for it, never
+// ErrRunAlreadyExists.
+func RepeatsAcceptedStart(runCreated []byte, input EventsCreateRunInput) bool {
+	start := RunStartHook(runCreated)
+	return input.StartHook != nil && start != nil && start.Token == input.StartHook.Token
+}
+
+// RunEchoStartHook returns the start hook a run echoes: the one its
+// run_created records, without its metadata.
+func RunEchoStartHook(runCreated []byte) *StartHook {
+	start := RunStartHook(runCreated)
+	if start == nil {
+		return nil
+	}
+	echo := *start
+	echo.Metadata = nil
+	return &echo
+}
+
 // RunStartHook returns the start hook a run_created event records, or nil.
 func RunStartHook(data []byte) *StartHook {
 	var created DataRunCreated

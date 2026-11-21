@@ -39,6 +39,24 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
+	resumeKey := ""
+	if input.Event.EventType == worlds.EventTypeHookReceived && input.Options.ResumeID != "" {
+		// A repeat of a resume returns the event it committed.
+		resumeKey = string(input.RunID) + "/" + input.Options.ResumeID
+		if claim, ok := m.resumes[resumeKey]; ok {
+			if claim.digest != input.Options.ResumePayloadDigest {
+				return worlds.EventResult{}, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, input.Options.ResumeID)
+			}
+			for _, event := range m.events[input.RunID] {
+				if event.EventID == claim.eventID {
+					result := m.eventResultLocked(event, nil, false)
+					result.Events = worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
+					result.InBandCount = m.runs[input.RunID].InBandCount
+					return result, nil
+				}
+			}
+		}
+	}
 	if result, duplicate, err := m.admitLocked(input.RunID, input.Event); err != nil || duplicate {
 		if duplicate {
 			result.Events = worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
@@ -47,6 +65,10 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return result, err
 	}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: createdAt(input.Event, input.Options.InBandCount), SpecVersion: worlds.EventSpecVersion(input.Event.SpecVersion)}
+	if resumeKey != "" {
+		event.ResumeID = input.Options.ResumeID
+		m.resumes[resumeKey] = resumeClaim{digest: input.Options.ResumePayloadDigest, eventID: event.EventID}
+	}
 	before := worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
@@ -99,6 +121,9 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	if _, exists := m.runs[input.RunID]; exists {
+		if created := m.events[input.RunID][0]; worlds.RepeatsAcceptedStart(created.Data, input) {
+			return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: m.runs[input.RunID].InBandCount}, nil
+		}
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
@@ -106,11 +131,19 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		if input.StartHook.Token == "" {
 			return worlds.EventResult{}, worlds.ErrEventInvalid
 		}
+		if decision, ok := m.startDecisions[input.RunID]; ok {
+			return worlds.EventResult{}, decision.Err()
+		}
+		if worlds.StartHookCandidateExpired(input.RunID, now) {
+			return worlds.EventResult{}, worlds.ErrStartHookRejected
+		}
 		// The start hook claims its token with the run, or no run is
-		// created.
+		// created, and the candidate's refusal is permanent.
 		m.expireTokenLocked(input.StartHook.Token, now)
 		if owner := m.tokens[input.StartHook.Token]; owner != "" {
-			return worlds.EventResult{}, &worlds.HookConflictError{RunID: m.hooks[owner].RunID}
+			decision := worlds.StartHookDecision{Token: input.StartHook.Token, ConflictingRunID: m.hooks[owner].RunID}
+			m.startDecisions[input.RunID] = decision
+			return worlds.EventResult{}, decision.Err()
 		}
 	}
 	payload, err := worlds.RunCreatedData(input)
@@ -118,7 +151,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, err
 	}
 	// run_created takes the first position, which counts as in-band.
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now, StartHook: worlds.RunEchoStartHook(payload)}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
@@ -210,7 +243,8 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	var created worlds.DataHookCreated
-	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
+	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" || input.Event.CorrelationID == string(worlds.StartHookID(input.RunID)) {
+		// The start hook's ID is the start hook's alone.
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	defer m.notify()

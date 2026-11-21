@@ -2,9 +2,11 @@ package workflowtest
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/oklog/ulid/v2"
 	"testing"
 	"time"
 
@@ -297,4 +299,100 @@ func conformStartHook(t *testing.T, world worlds.World) {
 	conformAppend(t, world, retained, worlds.EventTypeRunCancelled, "", nil)
 	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: conformRunID("start_hook_after_retention"), WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
 	conformExpect(t, err, worlds.ErrHookConflict, "start during the token's retention")
+}
+
+// conformResumeDedup checks a World that deduplicates resumes: a repeat of a
+// resume returns the event it committed and appends nothing, a repeat with
+// another payload is refused, and the event records its resume.
+func conformResumeDedup(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "resume")
+	conformAppend(t, world, runID, worlds.EventTypeHookCreated, "hook_resume", conformHookData("resume:"+string(runID), false, 0))
+	if hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "resume:" + string(runID)}); err != nil {
+		t.Fatal(err)
+	} else if !world.Capabilities().HookResumeDedup && !hook.ResumeDedup {
+		t.Skip("the World does not deduplicate resumes")
+	}
+	resume := func(resumeID, payload string) (worlds.EventResult, error) {
+		data, _ := worlds.EncodeHookReceived([]byte(payload), "conformance")
+		return world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_resume", Data: data},
+			Options: worlds.EventsCreateOptions{ResumeID: resumeID, ResumePayloadDigest: worlds.ResumeDigest([]byte(payload))}})
+	}
+	first, err := resume("resume_a", `"one"`)
+	if err != nil || first.AllocatedEventCount != 1 {
+		t.Fatalf("resume = %+v err = %v", first, err)
+	}
+	repeat, err := resume("resume_a", `"one"`)
+	if err != nil || repeat.AllocatedEventCount != 0 || repeat.EventID != first.EventID {
+		t.Fatalf("repeated resume = %+v err = %v, want the first resume's event", repeat, err)
+	}
+	_, err = resume("resume_a", `"two"`)
+	conformExpect(t, err, worlds.ErrEventInvalid, "a resume repeated with another payload")
+	if _, err := resume("resume_b", `"one"`); err != nil {
+		t.Fatalf("another resume: %v", err)
+	}
+	received := 0
+	for _, event := range conformAllEvents(t, world, runID) {
+		if event.EventType != worlds.EventTypeHookReceived {
+			continue
+		}
+		received++
+		if event.EventID == first.EventID && event.ResumeID != "resume_a" {
+			t.Fatalf("event %s resume = %q, want resume_a", event.EventID, event.ResumeID)
+		}
+	}
+	if received != 2 {
+		t.Fatalf("hook_received events = %d, want 2", received)
+	}
+}
+
+// conformStartHookDecisions checks that a World's decision on a start hook
+// candidate is permanent: a repeat of an accepted candidate returns its run,
+// which echoes its start hook, and a rejected one is refused again, naming
+// the same run, even once the token is free. A candidate too old to create is
+// refused, and the start hook's ID is the start hook's alone.
+func conformStartHookDecisions(t *testing.T, world worlds.World) {
+	if !world.Capabilities().StartHook {
+		return
+	}
+	ctx := context.Background()
+	token := fmt.Sprintf("conformance-decision-%d", time.Now().UnixNano())
+	owner := worlds.NewRunID()
+	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: owner, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token, Metadata: []byte(`"metadata"`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: owner, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
+	if err != nil || again.EventID != created.EventID {
+		t.Fatalf("repeated accepted start = %+v err = %v, want its run_created", again, err)
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: owner})
+	if err != nil || run.StartHook == nil || run.StartHook.Token != token || run.StartHook.HookID != worlds.StartHookID(owner) || run.StartHook.Metadata != nil {
+		t.Fatalf("run start hook = %+v err = %v, want the echo without metadata", run.StartHook, err)
+	}
+	// The start hook's ID is not another hook's.
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: owner, Event: conformEvent(t, worlds.EventTypeHookCreated, string(worlds.StartHookID(owner)), conformHookData("other:"+token, false, 0))})
+	conformExpect(t, err, worlds.ErrEventInvalid, "a hook_created under the start hook's ID")
+
+	refused := worlds.NewRunID()
+	var conflict *worlds.HookConflictError
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: refused, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}}); !errors.As(err, &conflict) || conflict.RunID != owner {
+		t.Fatalf("conflicting start = %v", err)
+	}
+	// The owner frees the token, and the refused candidate stays refused.
+	conformAppend(t, world, owner, worlds.EventTypeHookDisposed, string(worlds.StartHookID(owner)), nil)
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: refused, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}}); !errors.As(err, &conflict) || conflict.RunID != owner {
+		t.Fatalf("repeated refused start = %v, want the same conflict", err)
+	}
+	data, _ := worlds.RunCreatedData(worlds.EventsCreateRunInput{RunID: refused, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: refused, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data}}); !errors.As(err, &conflict) || conflict.RunID != owner {
+		t.Fatalf("refused candidate's run_started = %v, want the same conflict", err)
+	}
+	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: refused}); !errors.Is(err, worlds.ErrRunNotFound) {
+		t.Fatalf("refused candidate has a run: %v", err)
+	}
+	// A candidate older than any start can be is refused.
+	old := worlds.RunID("wrun_" + ulid.MustNew(ulid.Timestamp(time.Now().Add(-worlds.StartHookCandidateMaxAge-time.Hour)), rand.Reader).String())
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: old, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-old"}})
+	conformExpect(t, err, worlds.ErrStartHookRejected, "a start hook candidate past its age")
 }

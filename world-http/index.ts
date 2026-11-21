@@ -25,6 +25,7 @@ import type {
 	WorkflowRunWithoutData,
 	World,
 } from "@workflow/world";
+import { START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
 import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
@@ -142,6 +143,7 @@ export class HTTPWorld implements World {
 			...(capabilities.maxConcurrency ? { maxConcurrency: true } : {}),
 			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
 			...(capabilities.startHook ? { atomicStartHook: { active: true } } : {}),
+			...(capabilities.hookResumeDedup ? { hookResumeDedup: true } : {}),
 		};
 	}
 
@@ -242,7 +244,7 @@ export class HTTPWorld implements World {
 							const created = toEventResult(result);
 							// The run echoes its start hook, as world-vercel's does,
 							// which is how start() knows the World created it.
-							if (startHook && created.run && runId) {
+							if (startHook && created.run && !created.run.startHook && runId) {
 								created.run = { ...created.run, startHook: { ...startHook, hookId: `hook_${runId.slice("wrun_".length)}` } } as typeof created.run;
 							}
 							return created;
@@ -262,7 +264,12 @@ export class HTTPWorld implements World {
 						},
 						options: createOptions(options),
 					})
-					.then(toEventResult);
+					.then(toEventResult, (error: unknown) => {
+						// A first flow's run_started that creates its run is
+						// refused like the run_created it stands for.
+						const startHook = event.eventType === "run_started" ? (event.eventData as { startHook?: { token: string } } | undefined)?.startHook : undefined;
+						throw startHook ? startHookConflict(error, startHook.token) : error;
+					});
 			},
 			createBatch: async (runId, events, options) => {
 				const result = await client.call<RPC.EventBatchResult>("events.createBatch", {
@@ -446,6 +453,8 @@ function createOptions(options: CreateEventParams | undefined): Record<string, u
 		...(options.sinceCursor ? { sinceCursor: options.sinceCursor } : {}),
 		...(options.resolveData ? { resolveData: options.resolveData } : {}),
 		...(options.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
+		...(options.resumeId ? { resumeId: options.resumeId } : {}),
+		...(options.resumePayloadDigest ? { resumePayloadDigest: options.resumePayloadDigest } : {}),
 	};
 }
 
@@ -487,8 +496,8 @@ const payloadFields = ["input", "output", "result", "error", "payload", "metadat
 // Workflow SDK reads: its payloads as bytes, and Go workflow and step names
 // in SDK form.
 function withEventData(event: RPC.Event): Event {
-	const { data, occurredAt, ...fields } = event;
-	const rest = occurredAt ? { ...fields, occurredAt } : fields;
+	const { data, occurredAt, resumeId, ...fields } = event;
+	const rest = { ...fields, ...(occurredAt ? { occurredAt } : {}), ...(resumeId ? { resumeId } : {}) };
 	const eventData = decodeData(data);
 	if (eventData === undefined) {
 		return rest as Event;
@@ -532,11 +541,12 @@ function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
 // toRun exposes a run as the Workflow SDK reads one. Its payloads are in the
 // SDK's format, so it reports the spec version that reads them.
 function toRun(run: RPC.Run): WorkflowRun {
-	const { input, output, error, expiredAt, executionContext, ...rest } = run;
+	const { input, output, error, expiredAt, executionContext, startHook, ...rest } = run;
 	return {
 		...rest,
 		...(expiredAt ? { expiredAt } : {}),
 		...(executionContext ? { executionContext } : {}),
+		...(startHook ? { startHook } : {}),
 		specVersion: SPEC_VERSION_CURRENT,
 		input: payload(input),
 		output: payload(output),
@@ -594,8 +604,14 @@ function durationMilliseconds(nanoseconds: number | undefined): number {
 
 // startHookConflict returns a refused start hook as the Workflow SDK's
 // HookConflictError, which start() recognizes by its name, naming the run that
-// holds the token. Other errors are returned as they are.
+// holds the token, and a rejected candidate as its WorkflowWorldError with
+// code START_HOOK_ADMISSION_REJECTED. Other errors are returned as they are.
 function startHookConflict(error: unknown, token: string): unknown {
+	if (error instanceof HTTPWorldError && error.sentinel === "start_hook_rejected") {
+		// A candidate the World will never admit is the SDK's
+		// WorkflowWorldError with code START_HOOK_ADMISSION_REJECTED.
+		return Object.assign(new Error(error.message), { name: "WorkflowWorldError", code: START_HOOK_ADMISSION_REJECTED_CODE, cause: error });
+	}
 	if (!(error instanceof HTTPWorldError) || error.sentinel !== "hook_conflict" || !error.conflictingRunId) {
 		return error;
 	}

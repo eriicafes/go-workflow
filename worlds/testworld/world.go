@@ -32,6 +32,11 @@ type World struct {
 	// handedOff counts the handoffs of each message, which do not count as
 	// attempts.
 	handedOff map[string]int
+	// resumes holds each deduplicated resume's digest and event, by run
+	// and resume ID.
+	resumes map[string]resumeClaim
+	// startDecisions holds the refused start hook candidates.
+	startDecisions map[worlds.RunID]worlds.StartHookDecision
 	// flowGates lets one flow of each run execute at a time.
 	flowGates map[worlds.RunID]chan struct{}
 	autoRun   bool
@@ -47,7 +52,7 @@ func (*World) BaseURL() string               { return baseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: w.autoRun}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: w.autoRun, HookResumeDedup: true}
 }
 
 // New returns a World that executes deliveries for the workflows of runners
@@ -65,7 +70,7 @@ func NewManual(runners ...core.Runner) *World {
 
 func newWorld(autoRun bool, runners ...core.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
+	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), resumes: make(map[string]resumeClaim), startDecisions: make(map[worlds.RunID]worlds.StartHookDecision), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
 	w.runtime = core.NewRuntime(w, core.Runners(runners...))
 	return w
 }
@@ -108,4 +113,11 @@ func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ str
 	key := w.encryptionKey
 	w.mu.RUnlock()
 	return worlds.ConfiguredRunKey(key, runID)
+}
+
+// resumeClaim is a deduplicated resume: its payload digest and the event it
+// committed.
+type resumeClaim struct {
+	digest  string
+	eventID worlds.EventID
 }

@@ -94,6 +94,9 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 	}
 	run.ExecutionContext, _ = values["executionContext"].(map[string]any)
 	run.SpecVersion, _ = asInt(values["specVersion"])
+	if hook, ok := values["startHook"].(map[string]any); ok {
+		run.StartHook = &worlds.StartHook{Token: str(hook, "token"), HookID: worlds.HookID(str(hook, "hookId")), TokenRetentionUntil: timeField(hook, "tokenRetentionUntil")}
+	}
 	if resolve != worlds.ResolveDataNone {
 		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
 	}
@@ -140,6 +143,11 @@ func toWait(values map[string]any) *worlds.Wait {
 	return wait
 }
 
+// hookResumeDedupVersion is the version of the backend's resume
+// deduplication this World sends resume IDs for (@workflow/world
+// HOOK_RESUME_DEDUP_VERSION).
+const hookResumeDedupVersion = 1
+
 // toHook returns the go-workflow view of a backend hook.
 func toHook(values map[string]any) (worlds.Hook, error) {
 	hook := worlds.Hook{
@@ -156,6 +164,10 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 		hook.ResumeContext.RunSpecVersion, _ = asInt(resume["runSpecVersion"])
 	}
 	hook.SpecVersion, _ = asInt(values["specVersion"])
+	if capabilities, ok := values["resumeCapabilities"].(map[string]any); ok {
+		version, _ := asInt(capabilities["hookResumeDedupVersion"])
+		hook.ResumeDedup = version >= hookResumeDedupVersion
+	}
 	hook.Metadata = payloadBytes(values["metadata"])
 	return hook, nil
 }

@@ -407,8 +407,8 @@ func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claim("wrun_old", "hook_old", false)
-	claim("wrun_new", "hook_new", true)
+	claim("wrun_old", "hook_oldrun", false)
+	claim("wrun_new", "hook_newrun", true)
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +417,7 @@ func TestRecoveryKeepsTokenClaimedByAnotherRun(t *testing.T) {
 
 	reopened := startWorld(t, dir, nil)
 	hook, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "shared"})
-	if err != nil || hook.HookID != "hook_new" {
+	if err != nil || hook.HookID != "hook_newrun" {
 		t.Fatalf("token owner after recovery = %#v err=%v", hook, err)
 	}
 	events, err := reopened.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_old"})
@@ -437,15 +437,15 @@ func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_old", Data: []byte(`{"token":"handoff"}`)}}); err != nil {
+			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_oldrun", Data: []byte(`{"token":"handoff"}`)}}); err != nil {
 				t.Fatal(err)
 			}
-			previous := worlds.HookForceClaim{RunID: "wrun_victim", HookID: "hook_old"}
+			previous := worlds.HookForceClaim{RunID: "wrun_victim", HookID: "hook_oldrun"}
 			data, _ := json.Marshal(worlds.DataHookCreated{Token: "handoff", Force: true, ForceClaimedFrom: &previous})
-			event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_new", Data: data}
+			event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_newrun", Data: data}
 			if phase >= 1 {
-				disposed, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: "wrun_claimant", HookID: "hook_new"}})
-				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_old", Data: disposed}}); err != nil {
+				disposed, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: "wrun_claimant", HookID: "hook_newrun"}})
+				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_victim", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_oldrun", Data: disposed}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -463,11 +463,11 @@ func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
 			for range 2 {
 				reopened := startWorld(t, dir, nil)
 				owner, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "handoff"})
-				if err != nil || owner.HookID != "hook_new" || owner.ClaimedFrom == nil || *owner.ClaimedFrom != previous {
+				if err != nil || owner.HookID != "hook_newrun" || owner.ClaimedFrom == nil || *owner.ClaimedFrom != previous {
 					t.Fatalf("owner=%#v err=%v", owner, err)
 				}
-				victim, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_old"})
-				if err != nil || victim.DisposedAt == nil || victim.ForceClaimedBy == nil || victim.ForceClaimedBy.HookID != "hook_new" {
+				victim, err := reopened.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_oldrun"})
+				if err != nil || victim.DisposedAt == nil || victim.ForceClaimedBy == nil || victim.ForceClaimedBy.HookID != "hook_newrun" {
 					t.Fatalf("victim=%#v err=%v", victim, err)
 				}
 				for id, count := range map[worlds.RunID]int{"wrun_victim": 3, "wrun_claimant": 2} {

@@ -39,6 +39,10 @@ var (
 	// ErrHookConflict is returned when a hook token is already owned by
 	// another active hook and the claim is not forced.
 	ErrHookConflict = errors.New("workflow: hook token is already claimed")
+	// ErrStartHookRejected is returned by EventsCreateRun for a start hook
+	// candidate the World will never admit: one whose run ID is older than
+	// StartHookCandidateMaxAge.
+	ErrStartHookRejected = errors.New("workflow: start hook admission rejected")
 	// ErrHookForceClaimed reports that another hook took over this hook's token.
 	ErrHookForceClaimed = errors.New("workflow: hook token was force claimed")
 	// ErrMaxDeliveriesExceeded is the error of a run or step whose delivery

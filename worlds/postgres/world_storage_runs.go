@@ -85,17 +85,22 @@ func runSelect(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""
 	}
-	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context" +
+	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
 		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot" + live
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
 	var run worlds.Run
-	var attributes, input, result, executionContext []byte
+	var attributes, input, result, executionContext, startHook []byte
 	var resultType *worlds.EventType
 	var inBandCount int64
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.SpecVersion, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt, &executionContext); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.SpecVersion, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt, &executionContext, &startHook); err != nil {
 		return worlds.Run{}, err
+	}
+	if len(startHook) > 0 {
+		if err := json.Unmarshal(startHook, &run.StartHook); err != nil {
+			return worlds.Run{}, err
+		}
 	}
 	if input != nil {
 		run.Input = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeRunCreated, Data: input})

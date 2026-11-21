@@ -174,6 +174,10 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	setString(item, "resultEventId", string(view.resultEventID))
+	if run.StartHook != nil {
+		encoded, _ := json.Marshal(run.StartHook)
+		item["startHook"] = avs(string(encoded))
+	}
 	return item
 }
 
@@ -188,8 +192,13 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 	if encoded := read(item, "executionContext"); encoded != "" {
 		_ = json.Unmarshal([]byte(encoded), &executionContext)
 	}
+	var startHook *worlds.StartHook
+	if encoded := read(item, "startHook"); encoded != "" {
+		_ = json.Unmarshal([]byte(encoded), &startHook)
+	}
 	return runView{
 		Run: worlds.Run{
+			StartHook:           startHook,
 			ExecutionContext:    executionContext,
 			RunID:               worlds.RunID(read(item, "runId")),
 			WorkflowName:        read(item, "workflowName"),
@@ -369,6 +378,7 @@ func eventItem(event worlds.Event, slot uint64) map[string]ddb.AttributeValue {
 		"specVersion": avn(int64(event.SpecVersion)),
 	})
 	setString(item, "correlationId", event.CorrelationID)
+	setString(item, "resumeId", event.ResumeID)
 	setBytes(item, "data", event.Data)
 	return item
 }
@@ -382,6 +392,7 @@ func eventFromItem(item map[string]ddb.AttributeValue) worlds.Event {
 		Data:          readBytes(item, "data"),
 		CreatedAt:     readTime(item, "createdAt"),
 		SpecVersion:   int(readInt(item, "specVersion")),
+		ResumeID:      read(item, "resumeId"),
 	}
 }
 

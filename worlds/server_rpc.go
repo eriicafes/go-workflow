@@ -78,6 +78,7 @@ var rpcSentinels = []struct {
 	{"step_not_startable", "conflict", ErrStepNotStartable},
 	{"stream_closed", "conflict", ErrStreamClosed},
 	{"hook_conflict", "conflict", ErrHookConflict},
+	{"start_hook_rejected", "invalid_argument", ErrStartHookRejected},
 	{"hook_not_active", "conflict", ErrHookNotActive},
 	{"hook_force_claimed", "conflict", ErrHookForceClaimed},
 	{"in_band_superseded", "conflict", ErrInBandSuperseded},
@@ -650,7 +651,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		if _, err := ResumeHook(ctx, world, hook, input.Data); err != nil {
+		if _, err := ResumeHook(ctx, world, hook, input.Data, input.ResumeID); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
@@ -710,6 +711,9 @@ type (
 	ClientHooksResumeInput struct {
 		Token string
 		Data  []byte
+		// ResumeID names the logical resume, so a retried request records
+		// its payload once. Empty starts a new one.
+		ResumeID string `cbor:",omitempty"`
 	}
 )
 

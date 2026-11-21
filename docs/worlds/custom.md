@@ -60,6 +60,24 @@ type World interface {
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run. `hook_disposed` needs a hook
   of the same run (`ErrHookNotActive`).
+- **Start hooks.** With `Capabilities().StartHook`, `EventsCreateRun`
+  creates `EventsCreateRunInput.StartHook` with the run, as hook
+  `worlds.StartHookID(runID)`, or creates nothing and returns a
+  `*HookConflictError` naming the run that owns the token. Record the
+  decision for the run ID and keep it: a repeat of an accepted start returns
+  the run's `run_created`, and a refused candidate stays refused, with the
+  same conflicting run, even after the token is freed. Refuse a candidate
+  whose run ID is older than `worlds.StartHookCandidateMaxAge` with
+  `ErrStartHookRejected`, refuse a `hook_created` under the start hook's ID
+  with `ErrEventInvalid`, and echo the hook on `Run.StartHook` without its
+  metadata.
+- **Resume deduplication.** With `Capabilities().HookResumeDedup`, a
+  `hook_received` carrying `EventsCreateOptions.ResumeID` is appended once
+  per run and resume ID. A repeat with the same `ResumePayloadDigest`
+  returns the first event with `AllocatedEventCount` zero, and one with a
+  different digest is refused with `ErrEventInvalid`. Store the resume ID on
+  the event (`Event.ResumeID`). A World can attest it per hook instead, with
+  `Hook.ResumeDedup`.
 - **One webhook response.** Refuse a `hook_received` carrying a response with
   `ErrHookNotActive` once the webhook has completed, including while
   `TokenRetentionUntil` keeps its token, in the same atomic step as the

@@ -343,6 +343,9 @@ func classify(err error, eventType worlds.EventType) error {
 			conflict.RunID = worlds.RunID(id)
 		}
 		return conflict
+	case api.Status == http.StatusBadRequest && api.Code == "start-hook-admission-rejected":
+		// The candidate run is too old to admit a start hook.
+		return fmt.Errorf("%w: %v", worlds.ErrStartHookRejected, err)
 	case api.Status == http.StatusConflict && api.Code == "hook-force-claimed":
 		return fmt.Errorf("%w: %v", worlds.ErrHookForceClaimed, err)
 	case api.Status == http.StatusConflict, api.Status == http.StatusGone:
