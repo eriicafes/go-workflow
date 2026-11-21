@@ -533,6 +533,8 @@ type startSettings struct {
 	HookMetadata  []byte            `json:"hookMetadata,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
+	// AllowReservedAttributes is StartOptions.AllowReservedAttributes.
+	AllowReservedAttributes bool `json:"allowReservedAttributes,omitempty"`
 }
 
 // settings checks options and returns them as a start step records them.
@@ -563,16 +565,17 @@ func (options StartOptions) settings() (startSettings, error) {
 		}
 	}
 	return startSettings{
-		DeploymentID:  options.Deployment.ID(),
-		Latest:        options.Deployment.Latest(),
-		Retention:     options.Retention.String(),
-		ReplayedFrom:  options.ReplayedFromRunID,
-		Region:        options.Region,
-		HookToken:     hookToken,
-		HookRetention: hookRetention,
-		HookMetadata:  hookMetadata,
-		Attributes:    options.Attributes,
-		NoCompression: options.NoArgumentCompression,
+		DeploymentID:            options.Deployment.ID(),
+		Latest:                  options.Deployment.Latest(),
+		Retention:               options.Retention.String(),
+		ReplayedFrom:            options.ReplayedFromRunID,
+		Region:                  options.Region,
+		HookToken:               hookToken,
+		HookRetention:           hookRetention,
+		HookMetadata:            hookMetadata,
+		Attributes:              options.Attributes,
+		NoCompression:           options.NoArgumentCompression,
+		AllowReservedAttributes: options.AllowReservedAttributes,
 	}, nil
 }
 
@@ -694,6 +697,8 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 		return nil, err
 	}
 	create.Attributes = settings.attributes(nil)
+	// The retention is a reserved attribute the framework sets.
+	create.AllowReservedAttributes = settings.AllowReservedAttributes || settings.Retention != ""
 	create.ExecutionContext = settings.runExecutionContext()
 	if create.StartHook, err = settings.startHook(keys); err != nil {
 		return nil, err
@@ -761,6 +766,8 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		worlds.ParentRunIDAttribute: string(parent.RunID),
 		worlds.RootRunIDAttribute:   root,
 	})
+	// The lineage is reserved attributes the framework sets.
+	create.AllowReservedAttributes = true
 	create.ExecutionContext = input.Settings.runExecutionContext()
 	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
 		return "", err

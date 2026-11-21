@@ -341,6 +341,11 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 	}
 	_, err = resume("resume_a", `"two"`)
 	conformExpect(t, err, worlds.ErrEventInvalid, "a resume repeated with another payload")
+	// A resume's digest is its payload's, as world-postgres checks it.
+	mismatched, _ := worlds.EncodeHookReceived([]byte(`"three"`), "conformance")
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_resume", Data: mismatched},
+		Options: worlds.EventsCreateOptions{ResumeID: "resume_c", ResumePayloadDigest: worlds.ResumeDigest([]byte(`"four"`))}})
+	conformExpect(t, err, worlds.ErrEventInvalid, "a resume whose digest is another payload's")
 	if _, err := resume("resume_b", `"one"`); err != nil {
 		t.Fatalf("another resume: %v", err)
 	}

@@ -22,6 +22,10 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	// A resume's digest must be its payload's, as world-postgres checks it.
+	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
 		// A first flow's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
@@ -119,6 +123,11 @@ func (m *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
+	}
+	// The run ID and attributes are checked as the Workflow SDK's Worlds
+	// check them.
+	if err := worlds.CheckRunCreation(input, time.Now()); err != nil {
+		return worlds.EventResult{}, err
 	}
 	if _, exists := m.runs[input.RunID]; exists {
 		if created := m.events[input.RunID][0]; worlds.RepeatsAcceptedStart(created.Data, input) {
@@ -314,26 +323,19 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		// the answer holds no event.
 		return worlds.EventResult{}, true, nil
 	}
-	if requested.EventType == worlds.EventTypeStepStarted {
-		creates := worlds.StartCreatesStep(requested.Data)
-		switch {
-		case creates && stepExists:
-			// An inline step is created once.
-			return worlds.EventResult{}, false, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, requested.CorrelationID)
-		case !stepExists && !creates:
-			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
-		case stepExists && step.Status.Terminal():
-			// A started step may be started again, and each start records a
-			// new attempt.
-			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
+	// A step is created once, and its other events need it unfinished, as
+	// in the Workflow SDK's Worlds. A started step may be started again: each
+	// start records a new attempt.
+	if err := worlds.CheckStepEvent(requested, stepExists, step.Status, step.RetryAfter, time.Now()); err != nil {
+		return worlds.EventResult{}, false, err
+	}
+	if requested.EventType == worlds.EventTypeAttrSet {
+		if err := worlds.CheckAttrSet(run.Attributes, requested.Data); err != nil {
+			return worlds.EventResult{}, false, err
 		}
 	}
 
 	switch requested.EventType {
-	case worlds.EventTypeStepCreated:
-		if stepExists {
-			return worlds.EventResult{}, false, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, requested.CorrelationID)
-		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
 		// A wait completes once it was created.
 		if requested.EventType == worlds.EventTypeWaitCompleted && !m.hasEventLocked(runID, worlds.EventTypeWaitCreated, requested.CorrelationID) {
@@ -344,11 +346,6 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		once := requested.EventType != worlds.EventTypeAttrSet || worlds.WorkflowAttrSet(requested.Data)
 		if once && requested.CorrelationID != "" && m.hasEventLocked(runID, requested.EventType, requested.CorrelationID) {
 			return worlds.EventResult{}, false, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
-		}
-	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		// A step's result is recorded while the step is not finished.
-		if !stepExists || step.Status.Terminal() {
-			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeHookDisposed:
 		// A disposed hook is gone, so disposing it again finds no hook, as

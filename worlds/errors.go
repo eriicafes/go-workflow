@@ -408,6 +408,23 @@ func (e *ThrottleError) Unwrap() error { return e.Cause }
 
 func (e *ThrottleError) Is(target error) bool { return target == ErrThrottled }
 
+// ErrTooEarly reports a step_started before the step's retry is due, as the
+// Workflow SDK's TooEarlyError does. A *TooEarlyError says how long to wait.
+var ErrTooEarly = errors.New("workflow: step retry is not due yet")
+
+// TooEarlyError is a step_started refused before the step's retry is due.
+// It matches ErrTooEarly.
+type TooEarlyError struct {
+	// RetryAfter is how long until the retry is due.
+	RetryAfter time.Duration
+}
+
+func (e *TooEarlyError) Error() string {
+	return fmt.Sprintf("%s: due in %s", ErrTooEarly, e.RetryAfter.Round(time.Millisecond))
+}
+
+func (e *TooEarlyError) Is(target error) bool { return target == ErrTooEarly }
+
 // DeliveryRetryDelay returns how long a World waits before retrying a
 // delivery that failed with err: backoff, or longer when err is a
 // *ThrottleError asking for more, so a retry does not run into the same rate

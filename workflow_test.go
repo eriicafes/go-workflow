@@ -367,14 +367,14 @@ func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 		inner := testworld.NewManual()
 		calls := 0
 		world := flakyDeleteWorld{World: inner, calls: &calls, throttle: throttle}
-		if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_target", WorkflowName: "target"}); err != nil {
+		if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTarget, WorkflowName: "target"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := inner.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_target", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
+		if _, err := inner.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runTarget, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
 			t.Fatal(err)
 		}
 		clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
-		run, err := workflow.Start(clientCtx, deleteStepInput{Target: "wrun_target"})
+		run, err := workflow.Start(clientCtx, deleteStepInput{Target: runTarget})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1127,3 +1127,7 @@ func TestRunCanCancelItselfThroughAnInlineStep(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// runTarget is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runTarget = worlds.NewRunID()

@@ -356,7 +356,7 @@ func CreateRunForStart(ctx context.Context, world World, runID RunID, data []byt
 	if _, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone}); !errors.Is(err, ErrRunNotFound) {
 		return nil
 	}
-	_, err := world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook})
+	_, err := world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook, AllowReservedAttributes: created.AllowReservedAttributes, FromRunStarted: true})
 	if errors.Is(err, ErrRunAlreadyExists) {
 		return nil
 	}

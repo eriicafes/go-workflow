@@ -13,7 +13,7 @@ func TestSinceCursorPastTheLogDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	runID := worlds.RunID("wrun_cursors")
+	runID := runCursors
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestEventsByCorrelationIDHonourDescendingOrder(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	runID := worlds.RunID("wrun_correlation")
+	runID := runCorrelation
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
@@ -56,8 +56,8 @@ func TestRolledBackBatchKeepsAPurgedRunsStreams(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	runID := worlds.RunID("wrun_rollback")
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf", Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}}); err != nil {
+	runID := runRollback
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf", Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}, AllowReservedAttributes: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "out", Chunk: []byte("chunk")}); err != nil {
@@ -73,3 +73,15 @@ func TestRolledBackBatchKeepsAPurgedRunsStreams(t *testing.T) {
 		t.Fatalf("stream after a rolled-back batch = %+v, %v", chunks, err)
 	}
 }
+
+// runCorrelation is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runCorrelation = worlds.NewRunID()
+
+// runCursors is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runCursors = worlds.NewRunID()
+
+// runRollback is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRollback = worlds.NewRunID()

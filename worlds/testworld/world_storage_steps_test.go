@@ -15,7 +15,8 @@ func TestListsPageStablyWithEqualTimestamps(t *testing.T) {
 		ctx := context.Background()
 		world := testworld.NewManual()
 		defer world.Close()
-		runID := worlds.RunID("wrun_pages")
+		// Minted in the bubble, whose clock the World checks it against.
+		runID := worlds.NewRunID()
 		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
 			t.Fatal(err)
 		}

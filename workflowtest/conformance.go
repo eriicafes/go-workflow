@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +25,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 	}{
 		{"Identity", conformIdentity},
 		{"RunCreate", conformRunCreate},
+		{"Validation", conformValidation},
 		{"ResilientStart", conformResilientStart},
 		{"EventDeltas", conformEventDeltas},
 		{"RunDeployment", conformRunDeployment},
@@ -97,16 +96,10 @@ func ConformanceShared(t *testing.T, newPair func(t *testing.T) (worlds.World, w
 	})
 }
 
-var conformanceRunSequence struct {
-	mu    sync.Mutex
-	value int
-}
-
-func conformRunID(prefix string) worlds.RunID {
-	conformanceRunSequence.mu.Lock()
-	defer conformanceRunSequence.mu.Unlock()
-	conformanceRunSequence.value++
-	return worlds.RunID(fmt.Sprintf("wrun_%s_%d_%d", prefix, time.Now().UnixNano(), conformanceRunSequence.value))
+// conformRunID returns a new run ID, a ULID minted now, as a World requires
+// of a new run. Its argument names what the run is for.
+func conformRunID(string) worlds.RunID {
+	return worlds.NewRunID()
 }
 
 func conformCreateRun(t *testing.T, world worlds.World, prefix string) worlds.RunID {

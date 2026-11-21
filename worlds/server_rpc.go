@@ -49,8 +49,9 @@ type RPCError struct {
 	// ConflictingRunID names the run holding a hook token, for a
 	// hook_conflict failure of a *HookConflictError.
 	ConflictingRunID RunID `cbor:"conflictingRunId,omitempty"`
-	// RetryAfter is how long a throttled failure of a *ThrottleError asks
-	// the caller to wait, or zero when the World did not say.
+	// RetryAfter is how long a throttled failure of a *ThrottleError, or a
+	// too_early failure of a *TooEarlyError, asks the caller to wait, or
+	// zero when the World did not say.
 	RetryAfter time.Duration `cbor:"retryAfter,omitempty"`
 }
 
@@ -74,6 +75,8 @@ var rpcSentinels = []struct {
 	{"hook_not_found", "not_found", ErrHookNotFound},
 	{"event_invalid", "invalid_argument", ErrEventInvalid},
 	{"event_conflict", "conflict", ErrEventConflict},
+	{"attribute_invalid", "invalid_argument", ErrAttributeInvalid},
+	{"too_early", "too_early", ErrTooEarly},
 	{"run_already_exists", "conflict", ErrRunAlreadyExists},
 	{"run_terminal", "conflict", ErrRunTerminal},
 	{"step_not_startable", "conflict", ErrStepNotStartable},
@@ -787,6 +790,8 @@ func rpcErrorStatus(code string) int {
 		return http.StatusNotImplemented
 	case "resource_exhausted":
 		return http.StatusTooManyRequests
+	case "too_early":
+		return http.StatusTooEarly
 	}
 	return http.StatusInternalServerError
 }
@@ -802,6 +807,10 @@ func newRPCError(err error) *RPCError {
 			var throttle *ThrottleError
 			if errors.As(err, &throttle) {
 				failure.RetryAfter = throttle.After
+			}
+			var early *TooEarlyError
+			if errors.As(err, &early) {
+				failure.RetryAfter = early.RetryAfter
 			}
 			return failure
 		}

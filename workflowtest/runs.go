@@ -2,6 +2,7 @@ package workflowtest
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/oklog/ulid/v2"
 )
 
 func conformRunCreate(t *testing.T, world worlds.World) {
@@ -226,7 +228,7 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 	// it finishes.
 	purged := conformRunID("retain_none")
 	attributes := map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String(), "tier": "gold"}
-	create := worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes}
+	create := worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes, AllowReservedAttributes: true}
 	if world.Capabilities().StartHook {
 		// A start hook's metadata is user data too.
 		create.StartHook = &worlds.StartHook{Token: fmt.Sprintf("conformance-delete-start-%s", purged), Metadata: []byte(`"start-metadata"`)}
@@ -276,7 +278,7 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 	// A retention other than RetainNone keeps the data, until
 	// RunsDeleteDataMany deletes it.
 	kept := conformRunID("retain_kept")
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: kept, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{worlds.RetentionAttribute: "86400"}}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: kept, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{worlds.RetentionAttribute: "86400"}, AllowReservedAttributes: true}); err != nil {
 		t.Fatal(err)
 	}
 	conformAppend(t, world, kept, worlds.EventTypeRunStarted, "", nil)
@@ -408,5 +410,54 @@ func conformStartedAgain(t *testing.T, result worlds.EventResult, err error) {
 	}
 	if err != nil || result.EventID != "" || result.AllocatedEventCount != 0 {
 		t.Fatalf("repeated run_started = %#v err = %v, want no event or ErrEventConflict", result, err)
+	}
+}
+
+// conformValidation checks what a World validates as the Workflow SDK's
+// Worlds do: a new run's ID and attributes, an attr_set's changes, and the
+// step a step event names.
+func conformValidation(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	minted := func(at time.Time) worlds.RunID {
+		return worlds.RunID("wrun_" + ulid.MustNew(ulid.Timestamp(at), rand.Reader).String())
+	}
+	for label, runID := range map[string]worlds.RunID{
+		"a run ID that is not a ULID": "wrun_not_a_ulid",
+		"a run ID minted a day ago":   minted(time.Now().Add(-worlds.RunIDMaxAge - time.Minute)),
+		"a run ID minted ahead":       minted(time.Now().Add(worlds.RunIDMaxLead + time.Minute)),
+	} {
+		_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance"})
+		conformExpect(t, err, worlds.ErrEventInvalid, label)
+	}
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: conformRunID("reserved"), WorkflowName: "conformance", Attributes: map[string]string{"$owner": "x"}})
+	conformExpect(t, err, worlds.ErrAttributeInvalid, "a reserved attribute without AllowReservedAttributes")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: conformRunID("reserved"), WorkflowName: "conformance", Attributes: map[string]string{"$owner": "x"}, AllowReservedAttributes: true}); err != nil {
+		t.Fatalf("a reserved attribute with AllowReservedAttributes: %v", err)
+	}
+
+	runID := conformCreateRun(t, world, "validation")
+	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
+	long := string(make([]byte, worlds.MaxAttributeValueBytes+1))
+	gold := "gold"
+	for label, changes := range map[string][]worlds.RunsAttributeChange{
+		"an attribute value over the limit": {{Key: "tier", Value: &long}},
+		"a key changed twice":               {{Key: "tier", Value: &gold}, {Key: "tier", Value: nil}},
+		"a reserved key":                    {{Key: "$tier", Value: &gold}},
+	} {
+		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeAttrSet, "", worlds.DataAttrSet{Changes: changes, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}})})
+		conformExpect(t, err, worlds.ErrAttributeInvalid, label)
+	}
+
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_missing", worlds.DataStepStarted{StepName: "missing", Attempt: 1})})
+	conformExpect(t, err, worlds.ErrStepNotFound, "step_started of a missing step")
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_done", worlds.DataStepCreated{StepName: "done"})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_done", worlds.DataStepStarted{StepName: "done", Attempt: 1})
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_done", worlds.DataStepResult{StepName: "done"})
+	for _, event := range []worlds.EventsCreateEvent{
+		conformEvent(t, worlds.EventTypeStepStarted, "step_done", worlds.DataStepStarted{StepName: "done", Attempt: 2}),
+		conformEvent(t, worlds.EventTypeStepFailed, "step_done", worlds.DataStepResult{StepName: "done", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
+	} {
+		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event})
+		conformExpect(t, err, worlds.ErrEventConflict, string(event.EventType)+" of a finished step")
 	}
 }

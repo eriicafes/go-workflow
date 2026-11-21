@@ -525,10 +525,10 @@ func dynamoWorld(t *testing.T, client dynamoAPI, table string) *World {
 
 func testLimits(t *testing.T, world *World) {
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_limits", WorkflowName: "limits"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runLimits, WorkflowName: "limits"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_limits", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: make([]byte, maxItemBytes)}})
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runLimits, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w", Data: make([]byte, maxItemBytes)}})
 	if !errors.Is(err, worlds.ErrEventInvalid) {
 		t.Fatalf("oversized event error = %v", err)
 	}
@@ -536,14 +536,18 @@ func testLimits(t *testing.T, world *World) {
 	for index := range batch {
 		batch[index] = worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: fmt.Sprint(index)}
 	}
-	if _, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: "wrun_limits", Events: batch}); !errors.Is(err, worlds.ErrEventInvalid) {
+	if _, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runLimits, Events: batch}); !errors.Is(err, worlds.ErrEventInvalid) {
 		t.Fatalf("oversized batch error = %v", err)
 	}
-	if events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_limits"}); err != nil || len(events.Data) != 1 {
+	if events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runLimits}); err != nil || len(events.Data) != 1 {
 		t.Fatalf("events after rejected writes = %#v err=%v", events, err)
 	}
 	chunks := make([][]byte, maxChunksPerWrite+1)
-	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_limits", Name: "s", Chunks: chunks}); err == nil {
+	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: runLimits, Name: "s", Chunks: chunks}); err == nil {
 		t.Fatal("oversized stream write succeeded")
 	}
 }
+
+// runLimits is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runLimits = worlds.NewRunID()

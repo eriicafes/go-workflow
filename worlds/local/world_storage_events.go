@@ -161,45 +161,28 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			// A run that started before is not started again.
 			return noEvent, nil
 		}
-	case worlds.EventTypeStepStarted:
+	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		// A step is created once, and its other events need it unfinished,
+		// as in world-local. A started step can be started again, as a new
+		// attempt, after its worker dies.
 		step, err := t.step(worlds.StepID(event.CorrelationID))
 		if err != nil {
 			return "", err
 		}
-		creates := worlds.StartCreatesStep(event.Data)
-		if creates && step != nil {
-			// An inline step is created once.
-			return "", fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
-		}
-		if step == nil {
-			if !creates {
-				return "", worlds.ErrStepNotStartable
-			}
-			return "", nil
-		}
-		// A started step can be started again, as a new attempt, after its
-		// worker dies.
-		if step.Status.Terminal() {
-			return "", worlds.ErrStepNotStartable
-		}
-	case worlds.EventTypeStepCreated:
-		step, err := t.step(worlds.StepID(event.CorrelationID))
-		if err != nil {
-			return "", err
-		}
+		var status worlds.Status
+		var retryAfter *time.Time
 		if step != nil {
-			return "", fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
+			status, retryAfter = step.Status, step.RetryAfter
 		}
-	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		step, err := t.step(worlds.StepID(event.CorrelationID))
-		if err != nil {
+		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, now); err != nil {
 			return "", err
-		}
-		// A step's result is recorded while the step is not finished.
-		if step == nil || step.Status.Terminal() {
-			return "", worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		if event.EventType == worlds.EventTypeAttrSet {
+			if err := worlds.CheckAttrSet(t.run.Attributes, event.Data); err != nil {
+				return "", err
+			}
+		}
 		// A wait is created and completed once, and an attribute write of
 		// the workflow is recorded once.
 		if event.CorrelationID == "" || event.EventType == worlds.EventTypeAttrSet && !worlds.WorkflowAttrSet(event.Data) {
@@ -700,6 +683,10 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 // start hook candidate the World refuses returns a *refused, which commits
 // the refusal.
 func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.Time) (worlds.EventResult, error) {
+	// The run ID and attributes are checked as world-local checks them.
+	if err := worlds.CheckRunCreation(input, now); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if existing, err := s.getRunAnyTag(input.RunID); err == nil {
 		// A repeat of an accepted start returns its run_created.
 		created, found, err := s.readEvent(existing.RunID, 1)
@@ -783,6 +770,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !validAppend(input.Event.EventType) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	// A resume's digest must be its payload's, as world-postgres checks it.
+	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
+		return worlds.EventResult{}, err
+	}
 	var result worlds.EventResult
 	purged := false
 	err := w.commitRefusal(ctx, func(s *store) error {
@@ -805,7 +796,7 @@ func (w *World) appendEvent(s *store, input worlds.EventsCreateInput) (worlds.Ev
 		var created worlds.DataRunCreated
 		if json.Unmarshal(input.Event.Data, &created) == nil && created.WorkflowName != "" {
 			if _, err := s.getRunAnyTag(input.RunID); errors.Is(err, worlds.ErrRunNotFound) {
-				creation := worlds.EventsCreateRunInput{RunID: input.RunID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}
+				creation := worlds.EventsCreateRunInput{RunID: input.RunID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook, AllowReservedAttributes: created.AllowReservedAttributes, FromRunStarted: true}
 				if _, err := w.createRun(s, creation, now); err != nil && !errors.Is(err, worlds.ErrRunAlreadyExists) {
 					return worlds.EventResult{}, false, err
 				}
@@ -1049,7 +1040,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 // refusal reports whether err is an event's refusal rather than a storage
 // failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}

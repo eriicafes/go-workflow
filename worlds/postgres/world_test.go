@@ -175,7 +175,7 @@ func TestQueueKeepsReplayDivergenceCount(t *testing.T) {
 	world := newTestWorld(t)
 	ctx := context.Background()
 	stepID := worlds.StepID("step_a")
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID, ReplayDivergenceCount: 2}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, StepID: &stepID, ReplayDivergenceCount: 2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,7 +189,7 @@ func TestQueueKeepsDeploymentFields(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3}); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := world.claim(ctx, 10, nil)

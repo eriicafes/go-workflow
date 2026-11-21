@@ -141,6 +141,9 @@ type DataRunCreated struct {
 	ExecutionContext map[string]any `json:"executionContext,omitempty" cbor:"executionContext,omitempty"`
 	// StartHook is the hook created with the run. See StartHook.
 	StartHook *StartHook `json:"startHook,omitempty" cbor:"startHook,omitempty"`
+	// AllowReservedAttributes permits Attributes keys that start with
+	// ReservedAttributePrefix.
+	AllowReservedAttributes bool `json:"allowReservedAttributes,omitempty" cbor:"allowReservedAttributes,omitempty"`
 }
 
 // StartHook is a hook a World creates in the same write as its run, so a
@@ -233,13 +236,14 @@ const ExecutionContextReplayedFromRunID = "replayedFromRunId"
 // RunCreatedData returns the Data of the run_created event of input.
 func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
 	return json.Marshal(DataRunCreated{
-		WorkflowName:        input.WorkflowName,
-		Input:               input.Input,
-		Attributes:          input.Attributes,
-		DeploymentID:        input.DeploymentID,
-		EncryptionPublicKey: input.EncryptionPublicKey,
-		ExecutionContext:    input.ExecutionContext,
-		StartHook:           startHookOf(input),
+		WorkflowName:            input.WorkflowName,
+		Input:                   input.Input,
+		Attributes:              input.Attributes,
+		DeploymentID:            input.DeploymentID,
+		EncryptionPublicKey:     input.EncryptionPublicKey,
+		ExecutionContext:        input.ExecutionContext,
+		StartHook:               startHookOf(input),
+		AllowReservedAttributes: input.AllowReservedAttributes,
 	})
 }
 
@@ -569,4 +573,148 @@ func FinishedRunRefusal(status Status, event EventsCreateEvent, stepStatus Statu
 		return nil
 	}
 	return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+}
+
+// Run ID time limits of a run's creation, as the Workflow SDK's
+// validateUlidTimestamp checks them.
+const (
+	// RunIDMaxAge is how far in the past a new run's ID may have been minted.
+	RunIDMaxAge = 24 * time.Hour
+	// RunIDMaxLead is how far in the future a new run's ID may be minted.
+	RunIDMaxLead = 5 * time.Minute
+)
+
+// CheckRunCreation returns the error a World refuses the creation input
+// describes with, as the Workflow SDK's Worlds check it, or nil. The run ID
+// must be wrun_ and a ULID minted within RunIDMaxAge before now and
+// RunIDMaxLead after it, unless the run is created FromRunStarted: otherwise
+// ErrEventInvalid, or ErrStartHookRejected for a run with a start hook. Its
+// attributes must be within the limits of CheckAttributes
+// (ErrAttributeInvalid).
+func CheckRunCreation(input EventsCreateRunInput, now time.Time) error {
+	if !input.FromRunStarted {
+		refused := ErrEventInvalid
+		if input.StartHook != nil {
+			refused = ErrStartHookRejected
+		}
+		minted, ok := RunIDTime(input.RunID)
+		switch {
+		case !ok:
+			return fmt.Errorf("%w: run ID %q is not wrun_ and a ULID", refused, input.RunID)
+		case now.Sub(minted) > RunIDMaxAge:
+			return fmt.Errorf("%w: run ID %s was minted %s ago, over %s", refused, input.RunID, now.Sub(minted).Round(time.Second), RunIDMaxAge)
+		case minted.Sub(now) > RunIDMaxLead:
+			return fmt.Errorf("%w: run ID %s is minted %s ahead, over %s", refused, input.RunID, minted.Sub(now).Round(time.Second), RunIDMaxLead)
+		}
+	}
+	return CheckAttributes(input.Attributes, input.AllowReservedAttributes)
+}
+
+// CheckAttributeChanges returns ErrAttributeInvalid unless an attr_set's
+// changes may apply to a run's attributes, as the Workflow SDK's
+// validateAttributeChanges checks them: each key within the limits of
+// CheckAttributes and set once, each value within MaxAttributeValueBytes,
+// and at most MaxAttributesPerRun attributes after the changes.
+func CheckAttributeChanges(attributes map[string]string, changes []RunsAttributeChange, allowReserved bool) error {
+	seen := make(map[string]bool, len(changes))
+	count := len(attributes)
+	for _, change := range changes {
+		value := ""
+		if change.Value != nil {
+			value = *change.Value
+		}
+		if err := CheckAttributes(map[string]string{change.Key: value}, allowReserved); err != nil {
+			return err
+		}
+		if seen[change.Key] {
+			return fmt.Errorf("%w: key %q is changed more than once", ErrAttributeInvalid, change.Key)
+		}
+		seen[change.Key] = true
+		_, exists := attributes[change.Key]
+		switch {
+		case change.Value == nil && exists:
+			count--
+		case change.Value != nil && !exists:
+			count++
+		}
+	}
+	if count > MaxAttributesPerRun {
+		return fmt.Errorf("%w: %d attributes after the changes, over the limit of %d", ErrAttributeInvalid, count, MaxAttributesPerRun)
+	}
+	return nil
+}
+
+// MaxAttrSetDataBytes is the most JSON bytes an attr_set's Data may take, as
+// the Workflow SDK's ATTRIBUTE_EVENT_DATA_MAX_BYTES.
+const MaxAttrSetDataBytes = 8192
+
+// CheckAttrSet returns ErrAttributeInvalid unless the attr_set Data may apply
+// to a run's attributes (CheckAttributeChanges).
+func CheckAttrSet(attributes map[string]string, data []byte) error {
+	var set DataAttrSet
+	if err := json.Unmarshal(data, &set); err != nil {
+		return fmt.Errorf("%w: attr_set data: %v", ErrEventInvalid, err)
+	}
+	return CheckAttributeChanges(attributes, set.Changes, set.AllowReservedAttributes)
+}
+
+// CheckStepStart returns a *TooEarlyError for a step_started of a step whose
+// retry is due at retryAfter, while now is before it, as the Workflow SDK's
+// Worlds refuse it, or nil.
+func CheckStepStart(retryAfter *time.Time, now time.Time) error {
+	if retryAfter == nil || !now.Before(*retryAfter) {
+		return nil
+	}
+	return &TooEarlyError{RetryAfter: retryAfter.Sub(now)}
+}
+
+// CheckResumeDigest returns ErrEventInvalid unless a hook_received's
+// ResumePayloadDigest is the digest of its payload, as world-postgres
+// checks it. An empty digest is not checked.
+func CheckResumeDigest(event EventsCreateEvent, digest string) error {
+	if digest == "" || event.EventType != EventTypeHookReceived {
+		return nil
+	}
+	if ResumeDigest(DecodeHookReceived(event.Data)) != digest {
+		return fmt.Errorf("%w: resume digest does not match its payload", ErrEventInvalid)
+	}
+	return nil
+}
+
+// CheckStepEvent returns the error a World refuses a step event of a running
+// run with, as the Workflow SDK's Worlds refuse it, or nil. exists, status,
+// and retryAfter describe the event's step.
+//
+//   - A step_created of a step that exists, and an inline step's creating
+//     step_started (StartCreatesStep) of one, are refused with
+//     ErrEventConflict.
+//   - Any other step event needs its step (ErrStepNotFound), which must not
+//     have finished (ErrEventConflict).
+//   - A step_started before the step's retry is due is refused with a
+//     *TooEarlyError (CheckStepStart).
+func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAfter *time.Time, now time.Time) error {
+	switch event.EventType {
+	case EventTypeStepCreated:
+		if exists {
+			return fmt.Errorf("%w: step %s already created", ErrEventConflict, event.CorrelationID)
+		}
+		return nil
+	case EventTypeStepStarted, EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying:
+	default:
+		return nil
+	}
+	creates := event.EventType == EventTypeStepStarted && StartCreatesStep(event.Data)
+	switch {
+	case creates && exists:
+		return fmt.Errorf("%w: step %s already created", ErrEventConflict, event.CorrelationID)
+	case creates:
+		return nil
+	case !exists:
+		return fmt.Errorf("%w: step %s", ErrStepNotFound, event.CorrelationID)
+	case status.Terminal():
+		return fmt.Errorf("%w: step %s is %s", ErrEventConflict, event.CorrelationID, status)
+	case event.EventType == EventTypeStepStarted:
+		return CheckStepStart(retryAfter, now)
+	}
+	return nil
 }

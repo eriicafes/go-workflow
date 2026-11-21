@@ -54,20 +54,20 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 		}
 		meta["startHook"] = hook
 	}
-	attributes := input.Attributes
+	attributes, allowReserved := input.Attributes, input.AllowReservedAttributes
 	if retention := w.config.retentionFor(input.WorkflowName); retention != worlds.RetainDefault {
 		if _, set := attributes[worlds.RetentionAttribute]; !set {
+			// The World sets the run's retention, a reserved attribute.
 			attributes = make(map[string]string, len(input.Attributes)+1)
 			maps.Copy(attributes, input.Attributes)
 			attributes[worlds.RetentionAttribute] = retention.String()
+			allowReserved = true
 		}
 	}
 	if len(attributes) > 0 {
 		meta["attributes"] = attributes
-		for key := range attributes {
-			if len(key) > 0 && key[0] == '$' {
-				meta["allowReservedAttributes"] = true
-			}
+		if allowReserved {
+			meta["allowReservedAttributes"] = true
 		}
 	}
 	return meta
@@ -91,6 +91,11 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !input.Event.EventType.Valid() || input.Event.EventType == worlds.EventTypeRunCreated || input.Event.EventType == worlds.EventTypeHookConflict {
 		return worlds.EventResult{}, fmt.Errorf("%w: %s cannot be appended", worlds.ErrEventInvalid, input.Event.EventType)
 	}
+	// world-vercel refuses an attr_set whose data is over the backend's
+	// limit before sending it.
+	if input.Event.EventType == worlds.EventTypeAttrSet && len(input.Event.Data) > worlds.MaxAttrSetDataBytes {
+		return worlds.EventResult{}, fmt.Errorf("%w: %w: attr_set data is %d bytes, over %d", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, len(input.Event.Data), worlds.MaxAttrSetDataBytes)
+	}
 	meta, payload, err := encodeEvent(input.Event)
 	if err != nil {
 		return worlds.EventResult{}, err
@@ -100,7 +105,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		// backend creates the run from when run_created never landed.
 		var created worlds.DataRunCreated
 		if json.Unmarshal(input.Event.Data, &created) == nil && created.WorkflowName != "" {
-			meta = w.runCreationMeta(worlds.EventsCreateRunInput{RunID: input.RunID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}, worlds.EventTypeRunStarted)
+			meta = w.runCreationMeta(worlds.EventsCreateRunInput{RunID: input.RunID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook, AllowReservedAttributes: created.AllowReservedAttributes}, worlds.EventTypeRunStarted)
 			meta["specVersion"], meta["executorSpecVersion"] = worlds.EventSpecVersion(input.Event.SpecVersion), specVersion
 			payload = created.Input
 		}

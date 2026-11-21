@@ -310,11 +310,11 @@ func TestRetention(t *testing.T) {
 		attributes      map[string]string
 		want            string
 	}{
-		{"wrun_01KDELETED0000000000000000", "deleted", nil, worlds.RetainNone.String()},
-		{"wrun_01KKEPT000000000000000000", "kept", nil, ""},
-		{"wrun_01KOVERRIDDEN0000000000000", "deleted", map[string]string{worlds.RetentionAttribute: "default"}, "default"},
+		{string(worlds.NewRunID()), "deleted", nil, worlds.RetainNone.String()},
+		{string(worlds.NewRunID()), "kept", nil, ""},
+		{string(worlds.NewRunID()), "deleted", map[string]string{worlds.RetentionAttribute: "default"}, "default"},
 	} {
-		_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: worlds.RunID(test.runID), WorkflowName: test.workflow, Attributes: test.attributes})
+		_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: worlds.RunID(test.runID), WorkflowName: test.workflow, Attributes: test.attributes, AllowReservedAttributes: true})
 		if err != nil {
 			t.Fatal(err)
 		}

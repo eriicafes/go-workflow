@@ -75,7 +75,7 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 		}
 		return nil
 	})
-	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a"})
+	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 		}
 		return nil
 	})
-	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a"}); err != nil {
+	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA}); err != nil {
 		t.Fatal(err)
 	}
 	receive(t, deliveries)
@@ -125,7 +125,7 @@ func TestQueueLosesMessagesOnClose(t *testing.T) {
 		return nil
 	})
 	later := time.Now().Add(200 * time.Millisecond)
-	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a", NotBefore: &later}); err != nil {
+	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA, NotBefore: &later}); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.Close(); err != nil {
@@ -149,19 +149,19 @@ func TestQueueDeduplicatesOnlyWhileTheMessageLives(t *testing.T) {
 		return nil
 	})
 	ctx := context.Background()
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "k"})
+	first, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "k"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	receive(t, deliveries)
 	// The message is executing but lives until it is acknowledged.
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", IdempotencyKey: "k"})
+	again, err := world.Queue(ctx, worlds.QueueInput{RunID: runB, IdempotencyKey: "k"})
 	if err != nil || again.MessageID != first.MessageID {
 		t.Fatalf("queue while executing = %v err=%v, want %s", again, err, first.MessageID)
 	}
 	close(release)
 	waitQueueEmpty(t, world)
-	after, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "k"})
+	after, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "k"})
 	if err != nil || after.MessageID == first.MessageID {
 		t.Fatalf("queue after acknowledgement = %v err=%v", after, err)
 	}
@@ -196,12 +196,12 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	})
 	stepA, stepB := worlds.StepID("step_a"), worlds.StepID("step_b")
 	items := []worlds.QueueInput{
-		{RunID: "wrun_a"},
-		{RunID: "wrun_a"},
-		{RunID: "wrun_a", CompleteWaits: []string{"w"}}, // hands off once
-		{RunID: "wrun_a"},
-		{RunID: "wrun_a", StepID: &stepA},
-		{RunID: "wrun_a", StepID: &stepB},
+		{RunID: runA},
+		{RunID: runA},
+		{RunID: runA, CompleteWaits: []string{"w"}}, // hands off once
+		{RunID: runA},
+		{RunID: runA, StepID: &stepA},
+		{RunID: runA, StepID: &stepB},
 	}
 	if _, err := world.QueueBatch(context.Background(), worlds.QueueBatchInput{Items: items}); err != nil {
 		t.Fatal(err)
@@ -227,24 +227,24 @@ func TestQueueCoalescesFlowsWaitingBehindADelivery(t *testing.T) {
 		return nil
 	})
 	ctx := context.Background()
-	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
+	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: runA})
 	if err != nil {
 		t.Fatal(err)
 	}
 	receive(t, deliveries)
 	var coalesced []string
 	for range 3 {
-		result, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
+		result, err := world.Queue(ctx, worlds.QueueInput{RunID: runA})
 		if err != nil {
 			t.Fatal(err)
 		}
 		coalesced = append(coalesced, result.MessageID)
 	}
-	wake, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", CompleteWaits: []string{"w"}})
+	wake, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, CompleteWaits: []string{"w"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitWaiters(t, world, "wrun_a", 4)
+	waitWaiters(t, world, runA, 4)
 	close(release)
 	// The holder re-runs once for the three flows it took, then the wake,
 	// which names waits the log does not, is delivered on its own.
@@ -273,15 +273,15 @@ func TestQueueHandoffKeepsTheGateAndCoversWaitingFlows(t *testing.T) {
 		return nil
 	})
 	ctx := context.Background()
-	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", CompleteWaits: []string{"w"}})
+	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, CompleteWaits: []string{"w"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	receive(t, deliveries)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA}); err != nil {
 		t.Fatal(err)
 	}
-	waitWaiters(t, world, "wrun_a", 1)
+	waitWaiters(t, world, runA, 1)
 	close(release)
 	handoff := receive(t, deliveries)
 	if handoff.MessageID != holder.MessageID || handoff.DeliveryCount != 2 || handoff.Attempt != 1 {
@@ -300,13 +300,13 @@ func TestQueueSleepsDelaysWithoutASlot(t *testing.T) {
 	})
 	ctx := context.Background()
 	later := time.Now().Add(time.Hour)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b"}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runB}); err != nil {
 		t.Fatal(err)
 	}
-	if got := receive(t, deliveries); got.RunID != "wrun_b" {
+	if got := receive(t, deliveries); got.RunID != runB {
 		t.Fatalf("delivered %s, want wrun_b", got.RunID)
 	}
 }
@@ -324,12 +324,12 @@ func TestQueueIntermediateHopIsNotHeld(t *testing.T) {
 	})
 	defer close(release)
 	ctx := context.Background()
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA}); err != nil {
 		t.Fatal(err)
 	}
 	receive(t, deliveries)
 	resumeAt, hopAt := time.Now().Add(time.Hour), time.Now()
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", WaitContinuation: &worlds.WaitContinuation{CorrelationID: "w", ResumeAt: &resumeAt, HopAt: &hopAt}}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "w", ResumeAt: &resumeAt, HopAt: &hopAt}}); err != nil {
 		t.Fatal(err)
 	}
 	if hop := receive(t, deliveries); hop.WaitContinuation == nil {
@@ -349,7 +349,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	resumeAt := notBefore.Add(time.Hour)
 	hopAt := notBefore.Add(time.Minute)
 	input := worlds.QueueInput{
-		RunID: "wrun_a", QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &notBefore,
+		RunID: runA, QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &notBefore,
 		IdempotencyKey: "key", DeploymentID: "dpl", DeploymentMismatchRetryCount: 2, ReplayDivergenceCount: 3,
 		StepName: "step", StepAttempt: 4, StepResent: true, RunSpecVersion: 9,
 		CompleteWaits:    []string{"w1", "w2"},
@@ -405,3 +405,11 @@ func waitQueueEmpty(t *testing.T, world *World) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// runA is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runA = worlds.NewRunID()
+
+// runB is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runB = worlds.NewRunID()

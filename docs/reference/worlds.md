@@ -163,7 +163,7 @@ runID)` returns a delivery addressed that way.
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
 | `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
-| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. `ErrRunAlreadyExists` if it exists, except a repeat of a start whose start hook was accepted, which returns its `run_created`. A start hook's decision is permanent for the run ID: a refused candidate keeps returning the same `*HookConflictError`, and one older than `StartHookCandidateMaxAge` gets `ErrStartHookRejected`. |
+| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. The run ID and attributes are checked as `CheckRunCreation` says. `ErrRunAlreadyExists` if it exists, except a repeat of a start whose start hook was accepted, which returns its `run_created`. A start hook's decision is permanent for the run ID: a refused candidate keeps returning the same `*HookConflictError`, and one older than `StartHookCandidateMaxAge` gets `ErrStartHookRejected`. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
 | `EventsCreateBatch` | Appends events in order, fenced as one block. An invalid event, a missing run, or a stale fence appends none of them. Otherwise each event has its own outcome in `Results`, and a refused event refuses the later events of its correlation ID. |
 | `EventsList` | Reads the event log. Every page carries the run's counters in `Snapshot`, read before the page. |
@@ -558,10 +558,12 @@ checking ownership.
 | `ErrRunTerminal` | Appending to or writing a stream of a finished run. |
 | `ErrRunCancelled` | The run was cancelled. |
 | `ErrStepNotFound` | No step has the ID. |
-| `ErrStepNotStartable` | Step transition not allowed. |
+| `ErrStepNotStartable` | A batch event of a step whose earlier event in the batch was refused. |
+| `ErrTooEarly` | A `step_started` before the step's retry is due. A `*TooEarlyError` says how long to wait. |
 | `ErrEventNotFound` | No event (or wait) has the ID. |
 | `ErrEventConflict` | The event repeats a creation the run's log holds, such as a second `step_created`. |
-| `ErrEventInvalid` | Malformed event, ID, or cursor, or an item over a backend limit. |
+| `ErrEventInvalid` | Malformed event, ID, or cursor, a new run's ID that is not a recent ULID, a resume digest that is not its payload's, or an item over a backend limit. |
+| `ErrAttributeInvalid` | Run attributes or an `attr_set`'s changes outside the attribute limits, or a `$` key without `AllowReservedAttributes`. |
 | `ErrHookNotFound` | No hook has the ID, no hook owns the token, or a `hook_received` or `hook_disposed` names a hook its run doesn't have. |
 | `ErrHookNotActive` | The hook can no longer receive payloads, or a backend refused a hook event as a conflict. |
 | `ErrHookConflict` | Another active hook owns the token. |

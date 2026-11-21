@@ -28,11 +28,11 @@ type hookTakeoverWorld struct {
 }
 
 func (w *hookTakeoverWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
-	if input.Event.EventType == worlds.EventTypeHookReceived && input.RunID == "wrun_old" && w.takeover.CompareAndSwap(true, false) {
-		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_new", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_newrun", Data: []byte(`{"token":"racing-token","force":true}`)}}); err != nil {
+	if input.Event.EventType == worlds.EventTypeHookReceived && input.RunID == runOld && w.takeover.CompareAndSwap(true, false) {
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runNew, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_newrun", Data: []byte(`{"token":"racing-token","force":true}`)}}); err != nil {
 			return worlds.EventResult{}, err
 		}
-		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_old", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted}}); err != nil {
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runOld, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted}}); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
@@ -46,7 +46,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 			base := testworld.NewManual()
 			defer base.Close()
 			world := &hookTakeoverWorld{World: base}
-			for _, id := range []worlds.RunID{"wrun_old", "wrun_new"} {
+			for _, id := range []worlds.RunID{runOld, runNew} {
 				if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "takeover"}); err != nil {
 					t.Fatal(err)
 				}
@@ -55,7 +55,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 			if mode == "webhook" {
 				data = []byte(`{"token":"racing-token","isWebhook":true}`)
 			}
-			if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_old", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_oldrun", Data: data}}); err != nil {
+			if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runOld, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_oldrun", Data: data}}); err != nil {
 				t.Fatal(err)
 			}
 			world.takeover.Store(true)
@@ -74,7 +74,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 					t.Fatalf("resume race error=%v", err)
 				}
 			}
-			for _, id := range []worlds.RunID{"wrun_old", "wrun_new"} {
+			for _, id := range []worlds.RunID{runOld, runNew} {
 				page, err := base.EventsList(ctx, worlds.EventsListInput{RunID: id})
 				if err != nil {
 					t.Fatal(err)
@@ -281,10 +281,10 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_resume", WorkflowName: "test"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runResume, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resumed", Data: []byte(`{"token":"resume-token"}`)}}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runResume, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_resumed", Data: []byte(`{"token":"resume-token"}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	hook, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "resume-token"})
@@ -298,13 +298,13 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 
 	// A resume of a disposed hook is refused, as when an earlier resume
 	// recorded its payload but stopped before queueing, and queues anyway.
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_resume", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_resumed"}}); err != nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runResume, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_resumed"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := worlds.ResumeHook(ctx, world, hook, payload, ""); !errors.Is(err, worlds.ErrHookNotFound) {
 		t.Fatalf("error = %v, want ErrHookNotFound", err)
 	}
-	if queued := world.QueuedMessages(); len(queued) != 2 || queued[1].Input.RunID != "wrun_resume" || queued[1].Input.StepID != nil {
+	if queued := world.QueuedMessages(); len(queued) != 2 || queued[1].Input.RunID != runResume || queued[1].Input.StepID != nil {
 		t.Fatalf("queued = %#v, want a flow of the run for each resume", queued)
 	}
 }
@@ -312,14 +312,14 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream", WorkflowName: "stream"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStream, WorkflowName: "stream"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_stream", Name: "s", Chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c")}}); err != nil {
+	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: runStream, Name: "s", Chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c")}}); err != nil {
 		t.Fatal(err)
 	}
 	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
-	chunks, err := client.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Name: "s", StartIndex: -2})
+	chunks, err := client.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runStream, Name: "s", StartIndex: -2})
 	if err != nil || len(chunks.Data) != 2 || chunks.Data[0].Index != 1 || string(chunks.Data[1].Data) != "c" {
 		t.Fatalf("last two chunks over HTTP = %#v err=%v", chunks, err)
 	}
@@ -354,7 +354,7 @@ func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	input := worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: "wrun_retried", WorkflowName: "flow"}}
+	input := worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runRetried, WorkflowName: "flow"}}
 	if _, err := worlds.CreateRun(ctx, queueOutage{world}, input); !errors.Is(err, errQueueUnavailable) {
 		t.Fatalf("first create error = %v, want the queue error", err)
 	}
@@ -377,3 +377,23 @@ type queueOutage struct{ *testworld.World }
 func (queueOutage) Queue(context.Context, worlds.QueueInput) (worlds.QueueResult, error) {
 	return worlds.QueueResult{}, errQueueUnavailable
 }
+
+// runOld is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runOld = worlds.NewRunID()
+
+// runResume is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runResume = worlds.NewRunID()
+
+// runRetried is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRetried = worlds.NewRunID()
+
+// runStream is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runStream = worlds.NewRunID()
+
+// runNew is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runNew = worlds.NewRunID()
