@@ -115,6 +115,19 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 // hook's disposal is its last event: anything recorded for it after is
 // ignored.
 func HookEvent(execution *Execution, id worlds.HookID, cursor worlds.EventID) (worlds.Event, bool) {
+	// A runner that waits on a hook's next payload may decide differently
+	// when one arrives, and one that took the payload it looked for waits no
+	// more.
+	event, found := hookEvent(execution, id, cursor)
+	if found {
+		delete(execution.observedHooks, id)
+	} else {
+		execution.observedHooks[id] = true
+	}
+	return event, found
+}
+
+func hookEvent(execution *Execution, id worlds.HookID, cursor worlds.EventID) (worlds.Event, bool) {
 	for _, event := range execution.events[:execution.horizon] {
 		if event.CorrelationID != string(id) || event.EventType != worlds.EventTypeHookDisposed && event.EventType != worlds.EventTypeHookReceived {
 			continue

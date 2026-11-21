@@ -105,6 +105,15 @@ type Execution struct {
 	// completedChains holds the chains of the waits this delivery
 	// completed, whose timers it arms.
 	completedChains map[string]bool
+	// aheadDepth is how many inline steps' results the flow may hand to the
+	// runner ahead of their writes, ahead holds those writes in order, and
+	// writer sends them. See runahead.go.
+	aheadDepth int
+	ahead      []*aheadWrite
+	writer     *aheadWriter
+	// observedHooks holds the hooks the runner has looked for a payload of,
+	// which may change its decisions when one arrives.
+	observedHooks map[worlds.HookID]bool
 	// outcomes receives the result of each step the flow runs inline.
 	outcomes chan inlineOutcome
 	// inline counts the steps the flow runs inline that have not recorded
@@ -144,6 +153,7 @@ func newExecution(ctx context.Context, world worlds.World, run worlds.Run, event
 		openWaits: make(map[worlds.WaitID]pendingWait),
 
 		completedChains: make(map[string]bool),
+		observedHooks:   make(map[worlds.HookID]bool),
 		inBand:          run.InBandCount,
 		startedAt:       time.Now(),
 	}
@@ -464,10 +474,11 @@ func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(er
 	if e.superseded {
 		panic(e.exit(errReplaySuperseded))
 	}
+	e.drainAhead()
 	eventCount := len(e.events)
 	inBand := e.InBandCount()
 	if inBand != nil {
-		event.OccurredAt = time.Now().UTC()
+		event.OccurredAt = time.Now().UTC().Truncate(time.Millisecond)
 	}
 	result, err := e.world.EventsCreate(e.ctx, worlds.EventsCreateInput{
 		RunID:   e.run.RunID,
@@ -519,6 +530,11 @@ func (e *Execution) advance() bool {
 	}
 	for e.horizon == len(e.events) {
 		if e.inline == 0 {
+			// A flow suspends from a prefix of the run's log.
+			e.drainAhead()
+			if e.horizon < len(e.events) {
+				break
+			}
 			return false
 		}
 		if err := e.awaitInline(); err != nil {
@@ -620,7 +636,14 @@ func (e *Execution) createDeclared() {
 	if len(events) == 0 {
 		return
 	}
-	committed := e.writeBatch(events)
+	var committed map[string]bool
+	if len(e.ahead) > 0 && len(created)+len(failed)+len(timers) == 0 && e.canRunAhead() {
+		// Behind writes ahead, a boundary that only starts inline steps
+		// runs ahead too.
+		committed = e.writeBatchAhead(events)
+	} else {
+		committed = e.writeBatch(events)
+	}
 	for _, step := range background {
 		if committed[string(step.stepID)] {
 			message := stepMessage(step.stepID, step.name, 1, false)
@@ -672,7 +695,8 @@ func (e *Execution) stepEvent(eventType worlds.EventType, id worlds.StepID, data
 // message again, and anything else so the queue retries it. A finished run's
 // refusal of an event ends it too.
 func (e *Execution) writeBatch(events []worlds.EventsCreateEvent) map[string]bool {
-	now := time.Now().UTC()
+	e.drainAhead()
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	for index := range events {
 		events[index].OccurredAt = now
 	}
@@ -742,10 +766,21 @@ func (e *Execution) awaitInline() error {
 				delete(e.ranInline, outcome.step.stepID)
 				return outcome.err
 			}
+			e.confirmAhead(false)
+			if outcome.result.RetryAfter == nil && e.canRunAhead() {
+				// The runner reads the result now, and the write lands
+				// behind the flow's other writes ahead.
+				e.writeAhead(outcome.step, outcome.result)
+				return nil
+			}
 			return e.completeInlineStep(outcome.step, outcome.result)
 		case <-timer.C:
 		}
 		if e.superseded {
+			continue
+		}
+		e.drainAhead()
+		if len(e.events) != held {
 			continue
 		}
 		if due != nil {
@@ -835,9 +870,12 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, attempt int, result w
 		Options: worlds.EventsCreateOptions{EventCount: &eventCount},
 	}
 	if inBand {
+		e.drainAhead()
+		eventCount = len(e.events)
+		input.Options.EventCount = &eventCount
 		count := e.inBand
 		input.Options.InBandCount = &count
-		input.Event.OccurredAt = time.Now().UTC()
+		input.Event.OccurredAt = time.Now().UTC().Truncate(time.Millisecond)
 	}
 	created, err := e.world.EventsCreate(e.ctx, input)
 	if errors.Is(err, worlds.ErrRunTerminal) && eventType == worlds.EventTypeStepRetrying {
@@ -927,12 +965,22 @@ func stepCreation(events []worlds.Event, stepID worlds.StepID) (stepCreationEven
 // finishSteps waits for every step the flow runs inline to finish and records
 // their results, once the runner has returned or stopped. A superseded flow
 // records none.
-func (e *Execution) finishSteps() error {
+func (e *Execution) finishSteps() (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = replayExit(recovered)
+		}
+	}()
 	var errs []error
 	for e.inline > 0 {
 		if err := e.recordNext(); err != nil && !errors.Is(err, errReplaySuperseded) {
 			errs = append(errs, err)
 		}
+	}
+	if !e.superseded {
+		e.drainAhead()
+	} else {
+		e.abandonAhead()
 	}
 	return errors.Join(errs...)
 }
