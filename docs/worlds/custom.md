@@ -34,41 +34,69 @@ type World interface {
 
 ## Key requirements
 
-- **Atomic admission.** `EventsCreate` and `EventsCreateBatch` must check the
-  transition rules and append in one atomic operation. A batch is
-  all-or-nothing. This is what makes duplicate deliveries safe.
+- **Atomic admission.** `EventsCreate` must check the transition rules and
+  append in one atomic operation. A finished run refuses `step_created`,
+  `step_started`, `step_retrying`, `wait_created`, and other new work with
+  `ErrRunTerminal`, and still records a step's `step_completed` or
+  `step_failed` and a `wait_completed`. Other checks of a step or wait are
+  optional: the runtime decides from the log alone, so a World that appends
+  every such event is correct. A World that checks steps accepts a step's
+  result while the step is not finished, and a `step_started` that creates
+  the step it starts (`worlds.StartCreatesStep`): an inline step's first
+  attempt, which no `step_created` precedes.
+- **Batches.** `EventsCreateBatch` refuses the whole batch only for an
+  invalid event, a missing run, or a stale fence. Otherwise each event gets
+  its own outcome in `Results`, and once one is refused, every later event
+  of the batch with the same correlation ID is refused too.
 - **Idempotent repeats.** An event that repeats an admitted transition, such as
   a second `run_started`, `step_created`, or `hook_disposed`, returns the
   earlier event with `AllocatedEventCount` zero instead of appending. A
-  `step_started` for a running step is not a repeat: it appends a new attempt.
+  `step_started` for a started step is not a repeat: it appends a new attempt.
 - **One copy of each payload.** The built-in Worlds keep run, step, and hook
   payloads only in their events. Their views store the slot of the event that
   holds each one, and reads decode it with `worlds.EventPayload`. A payload
   then only has to fit in one event, and results are written once.
-- **Step results need a running step.** Refuse `step_completed`, `step_failed`,
-  and `step_retrying` with `ErrStepNotStartable` unless the step is running,
-  and `hook_disposed` with `ErrHookNotActive` unless the hook belongs to the run.
 - **Exclusive hook tokens.** `EventsCreate(hook_created)` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
-  `ForceClaimedBy` to the previous owner's run.
+  `ForceClaimedBy` to the previous owner's run. `hook_disposed` needs a hook
+  of the same run (`ErrHookNotActive`).
 - **One webhook response.** Refuse a `hook_received` carrying a response with
   `ErrHookNotActive` once the webhook has completed, including while
   `TokenRetentionUntil` keeps its token, in the same atomic step as the
   append.
-- **The in-band fence.** Keep a per-run `InBandCount`. An append that carries
-  `InBandCount` (in `EventsCreateOptions`, or on `EventsCreateBatchInput`) is
-  accepted only when it equals the run's count, in the same atomic step as the
-  append, and advances it by the events appended. A mismatch returns
-  `ErrInBandSuperseded` and appends nothing. This is what keeps two flow
-  deliveries of one run from both declaring the same operation.
-- **At-least-once delivery.** `Queue` must not deliver before `NotBefore`, and
-  must redeliver failed deliveries. Deduplicating by `IdempotencyKey` is
-  optional. Store every `QueueInput` field and hand it back unchanged,
-  including `ReplayDivergenceCount` and `DeploymentMismatchRetryCount`: the
-  runtime counts its recovery deliveries in them.
+- **The in-band fence.** Keep a per-run `InBandCount` of the positions
+  in-band writes take, starting at 1 for `run_created`. An append that
+  carries `InBandCount` (in `EventsCreateOptions`, or on
+  `EventsCreateBatchInput` for the whole block) is accepted only when it
+  equals the run's count, in the same atomic step as the append, and advances
+  it by the positions it allocates. A mismatch returns `ErrInBandSuperseded`
+  and appends nothing. Out-of-band writes never move it. Report
+  `Capabilities().InBandFence`.
+- **Snapshots and skipped slots.** Every `EventsList` page carries the run's
+  counters in `Snapshot`, read before the page. An in-band write with
+  `EventCount` returns in `Events` every event between that count and its own
+  position (`MoreEvents` when the list is incomplete), and is stored with its
+  `OccurredAt` as `CreatedAt`.
+- **Specification version.** Record `worlds.SpecVersion` on every run you
+  create (`Run.SpecVersion`).
+- **Deliveries.** `Queue` must not deliver before `NotBefore`, and must
+  redeliver failed deliveries. Store every `QueueInput` field and hand it back
+  unchanged, including `ReplayDivergenceCount` and
+  `DeploymentMismatchRetryCount`: the runtime counts its recovery deliveries
+  in them. Deduplicate by `IdempotencyKey` while the first message with the
+  key lives, for at least `worlds.MinDeduplicationWindow`. Set `MessageID`,
+  `DeliveryCount`, and `Attempt` on each delivery. Report the furthest
+  `NotBefore` your queue accepts in `Capabilities().MaxQueueDelay`, and the
+  runtime reaches later timers in hops.
 - **Executing deliveries.** Whatever consumes your queue calls
-  `core.NewRuntime(world, runners).Execute(ctx, input)` for each delivery,
-  acknowledges it when `Execute` returns nil, and retries it otherwise.
+  `core.NewRuntime(world, runners).Execute(ctx, input)` for each delivery and
+  acknowledges it when `Execute` returns nil. A `*worlds.Redelivery` asks for
+  the same message again after its `After`, with the next `DeliveryCount`,
+  counting an `Attempt` unless `After` is zero. Any other error retries it.
+- **One flow at a time.** Where your queue can, deliver one flow of a run at a
+  time (`QueueInput.SerializedFlow`), and report
+  `Capabilities().MaxConcurrency`. The fence keeps overlapping flows safe,
+  and this makes them rare.
 
 Supporting [retention](/worlds/#retention) is optional. A World that supports
 it takes `Retention` and `Retentions` in its configuration, resolves each run's

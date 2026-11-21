@@ -38,9 +38,11 @@ schedule durable operations.
 waiting; read it with `Value(ctx)` or `Unwrap(ctx)`. A flow delivery runs up
 to three new steps inline at once when the runner waits and queues the rest;
 `SetMaxInlineSteps(ctx, n)` changes the limit and 0 turns it off. Use
-`InlineStep` for short recorded operations that always run in the flow
-delivery, and `InlineBackground` to start one without waiting. Inline steps
-follow the same retry and idempotency requirements as other steps.
+`InlineStep` for short recorded operations whose first attempt always runs in
+the flow delivery, and `InlineBackground` to start one without waiting. A
+step's mode is fixed when it is recorded, and a failed inline attempt that may
+retry runs its retry as a step delivery. Inline steps follow the same retry
+and idempotency requirements as other steps.
 
 Step attempts are delivered at least once. Use `workflow.StepID(ctx)` as a
 stable external idempotency key where supported. Omitted `StepOptions` allows

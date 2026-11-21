@@ -98,15 +98,16 @@ also triggers its cancellation.
 
 ## Delivery limits
 
-Each World has a limit on how far ahead its queue can schedule a delivery
-natively, and handles longer timers differently:
+Each World reports how far ahead its queue can schedule a delivery
+(`Capabilities().MaxQueueDelay`). A timer further away is reached in hops
+anchored on its deadline: the last hop is due with the timer, each earlier one
+the World's limit before the next, and a hop's delivery only queues the next
+one. A step retry that is further away than the limit asks for its message
+again when it is delivered early.
 
-| World | Native delay limit | Longer timers |
-| --- | --- | --- |
-| Local | none | in-process timer heap |
-| Postgres | none | rows with `not_before` |
-| Vercel | 23 hours | Vercel Queues hops of up to 23 hours |
-| AWS | 15 minutes | set `Config.Scheduler` (EventBridge Scheduler) |
-
-Without the optional component, queueing a delivery beyond the limit returns an
-error, except on Vercel, which delivers it in hops. This applies to sleeps, timers, timeouts, and step retry delays.
+| World | Delay limit |
+| --- | --- |
+| Local | none |
+| Postgres | none |
+| Vercel | 23 hours |
+| AWS | 15 minutes, none with `Config.Scheduler` (EventBridge Scheduler) |

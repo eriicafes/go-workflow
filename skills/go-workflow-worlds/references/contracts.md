@@ -4,17 +4,21 @@
 
 Admission checks, event append, and updates to derived run, step, and hook
 views form one atomic operation. `EventsCreateBatch` appends none of its events
-when one is invalid, and none of a refused in-band write. When an event is
-refused, the events of other steps, hooks, and waits may stay appended, as in
-the Workflow SDK; the runtime replays whatever the log holds.
+when one is invalid, the run is missing, or the fence refuses the block.
+Otherwise each event gets its own `EventBatchItem` outcome: refused events
+leave the others appended, and once an event is refused, every later event of
+the batch with the same correlation ID is refused too.
 
 Repeated admitted lifecycle transitions return the existing event with
-`AllocatedEventCount == 0`. A `step_started` event for an already running step
-is a new attempt, not an idempotent repeat: another delivery may be taking over
-after a worker died. A repeated `step_created` or `hook_disposed` is a repeat.
-Step results need a running step (`ErrStepNotStartable`), and `hook_disposed`
-needs a hook of the same run (`ErrHookNotActive`). Apply the admission rules
-for each event type.
+`AllocatedEventCount == 0`. A `step_started` for a started step is a new
+attempt, not a repeat. A repeated `step_created` or `hook_disposed`, or an
+inline step's creating `step_started` (`worlds.StartCreatesStep`), is a repeat.
+A finished run refuses `step_created`, `step_started`, `step_retrying`, and
+`wait_created` (`ErrRunTerminal`) and accepts `step_completed`, `step_failed`,
+and `wait_completed`. Other step and wait checks are optional, and a World
+that checks accepts a step's result while the step is not finished and a
+`step_started` that creates its step. `hook_disposed` needs a hook of the same
+run (`ErrHookNotActive`).
 
 Preserve event order, correlation IDs, timestamps, pagination, ResolveData,
 and catch-up results. `EventsCreateOptions.EventCount` takes precedence over
@@ -43,11 +47,16 @@ fields and keeps metadata.
 
 ## In-band fencing
 
-Each run has an InBandCount. A supplied expected count fences an orchestrator
-append or batch. Compare and append atomically, advance by the number of events
-actually appended, and return `ErrInBandSuperseded` without writing on mismatch.
-An out-of-band write has no expected count and leaves the in-band count
-unchanged. It still must pass lifecycle admission checks.
+Each run has an InBandCount, 1 once `run_created` is written. A supplied
+expected count fences an orchestrator append or batch. Compare and append
+atomically, advance by the positions actually allocated, and return
+`ErrInBandSuperseded` without writing on mismatch. An out-of-band write has no
+expected count and leaves the in-band count unchanged. It still must pass
+lifecycle admission checks. Every `EventsList` page carries the counters in
+`Snapshot`, read before the page. An in-band write with `EventCount` reports
+the events between that count and its own position (`MoreEvents` when
+incomplete) and is stored with its `OccurredAt` as `CreatedAt`. Every run
+records `worlds.SpecVersion`.
 
 ## Hook ownership and webhooks
 
@@ -84,12 +93,18 @@ failure.
 
 ## Queue delivery
 
-Deliver at least once, respect NotBefore, and redeliver failures. Queue
-IdempotencyKey deduplication is optional; runtime replay still needs to be safe
-without it. QueueBatch can report items published before an error. Queued
-deliveries are never cancelled. Set `QueueInput.Attempt` to the backend's
-1-based delivery count when it has one; the Runtime fails a run or step whose
-delivery passes `core.MaxDeliveries` attempts.
+Deliver at least once, respect NotBefore, and redeliver failures. Deduplicate
+by IdempotencyKey while the first message with the key lives, for at least
+`worlds.MinDeduplicationWindow`. QueueBatch can report items published before
+an error. Queued deliveries are never cancelled. Set `QueueInput.MessageID`
+(stable across redeliveries), `DeliveryCount` (every redelivery), and
+`Attempt` (every redelivery but a handoff); the Runtime fails a run or step
+whose delivery passes `core.MaxDeliveries` attempts. A `*worlds.Redelivery`
+from `Runtime.Execute` asks for the same message again after `After`, a
+handoff when zero. Deliver one serialized flow of a run at a time
+(`QueueInput.SerializedFlow`) where the queue can, and report
+`MaxConcurrency`; report the furthest NotBefore the queue accepts as
+`MaxQueueDelay`, and the runtime reaches later timers in hops.
 
 Persist every QueueInput field, including StepID, QueueName, DeploymentID,
 DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these

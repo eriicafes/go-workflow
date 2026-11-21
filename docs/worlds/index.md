@@ -101,8 +101,8 @@ attempts, as the Workflow SDK does, failing its run or step.
 | World | Native max delay | Failed delivery backoff |
 | --- | --- | --- |
 | Local | unlimited | 100 ms up to 30 s |
-| Vercel | 23 hours (longer in hops) | 5 s up to 15 min |
-| AWS | 15 min (longer with Scheduler) | 1 s up to 15 min |
+| Vercel | 23 hours (the runtime hops further) | 5 s up to 15 min |
+| AWS | 15 min (the runtime hops further), unlimited with Scheduler | 1 s up to 15 min |
 | Postgres | unlimited | 1 s up to 5 min |
 
 ## Security

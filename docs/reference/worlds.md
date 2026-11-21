@@ -154,19 +154,22 @@ runID)` returns a delivery addressed that way.
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
 | `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
-| `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
+| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. `ErrRunAlreadyExists` if it exists. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
-| `EventsCreateBatch` | Appends events in order. An invalid event appends none of them; a refused event may leave others appended, as in the Workflow SDK. |
-| `EventsGet`, `EventsList`, `EventsListByCorrelationID` | Read the event log. |
+| `EventsCreateBatch` | Appends events in order, fenced as one block. An invalid event, a missing run, or a stale fence appends none of them. Otherwise each event has its own outcome in `Results`, and a refused event refuses the later events of its correlation ID. |
+| `EventsList` | Reads the event log. Every page carries the run's counters in `Snapshot`, read before the page. |
+| `EventsGet`, `EventsListByCorrelationID` | Read the event log. |
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
 
 **In-band fence.** An append whose `EventsCreateOptions.InBandCount` (or
 `EventsCreateBatchInput.InBandCount`) is set is an in-band write by the run's
-orchestrator. The World appends it only when `Run.InBandCount` still equals that
-count, advances the count by the events appended, and returns it as
-`EventResult.InBandCount`. Otherwise it appends nothing and returns
-`ErrInBandSuperseded`. Appends without a count are out-of-band: never refused,
-and they leave the count alone. See
+orchestrator. The World appends it only when `Run.InBandCount`, which counts
+`run_created` too, still equals that count, advances the count by the
+positions it allocates, and returns it as `EventResult.InBandCount`. Otherwise
+it appends nothing and returns `ErrInBandSuperseded`. Appends without a count
+are out-of-band: never refused, and they leave the count alone. An in-band
+write with `EventCount` returns the events between that count and its own
+position in `Events`, and is stored with its `OccurredAt` as `CreatedAt`. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
 Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
@@ -259,13 +262,28 @@ type QueueInput struct {
 
 	DeploymentMismatchRetryCount int    // re-routes so far, set by the Runtime
 	ReplayDivergenceCount        int    // recovery deliveries after divergence, set by the Runtime
-	MessageID                    string // the delivered message's ID, set by the World before Execute; Queue ignores it
-	Attempt                      int    // 1-based delivery attempt, set by the World before Execute; 0 is not counted
+	MessageID                    string // the delivered message's ID, stable across redeliveries; Queue ignores it
+	Attempt                      int    // 1-based attempt, excluding handoffs, set by the World before Execute
+	DeliveryCount                int    // 1-based delivery count, set by the World before Execute
+
+	StepName, StepAttempt, StepResent, StepInput // a step delivery's step
+	RunSpecVersion                               // SpecVersion
+	RunInput                                     // set on a run's first flow
+	CompleteWaits                                // waits a WakeUp's flow completes first
+	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt
+	Retention                                    // how long the message may live
 }
 ```
 
 Delivery is at least once, and a queued delivery cannot be cancelled: one that
-is no longer needed only replays its run. A World sets `Attempt` from its
+is no longer needed only replays its run. A message with an `IdempotencyKey`
+is stored once while it lives, for at least `MinDeduplicationWindow`.
+`Runtime.Execute` returns a `*Redelivery` to ask for the same message again
+after `After`: zero is a handoff, which does not count as an attempt. A World
+whose `Capabilities().MaxConcurrency` is set delivers one flow of a run at a
+time (`QueueInput.SerializedFlow`), and `Capabilities().MaxQueueDelay` is the
+furthest `NotBefore` its queue accepts: the runtime reaches a later timer in
+hops anchored on its deadline, keyed `wait:<id>:<resumeAtMs>:<hopAtMs>`. A World sets `Attempt` from its
 backend's delivery count, and the Runtime gives up on a delivery past
 `MaxDeliveries` (48) attempts, as the Workflow SDK does: a flow delivery fails
 its run, and a step delivery fails its step, both with
@@ -460,17 +478,18 @@ checking ownership.
 
 | Function | Description |
 | --- | --- |
-| `DurableStep` | Declares the next step, or executes it in its step delivery. |
-| `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
+| `DurableStep` | Declares the next step, created inline or as a step delivery when the runner waits, or starts and executes its attempt in its step delivery. |
+| `DurableInlineStep` | Declares the next step, created inline whatever the flow's limit. |
 | `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
+| `DurableDisposeHook` | Records a hook's disposal as a write of the flow. |
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
 | `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
 | `Execution.Advance` | Deliver the next recorded event and run continuations. Returns false at the end of the loaded log. |
 | `Execution.IsSuspended` | Whether the runtime stopped replay before the workflow body finished. Deferred cleanup skips work in this case. |
-| `Execution.CreateEvent` | Append one of this replay's writes, fenced for flows, and add it with any events appended since. A superseded write ends the replay with a follow-up queued. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
+| `Execution.CreateEvent` | Append one of this replay's writes, in-band and fenced for flows, and add it with the events before it. A superseded write ends the replay, and the delivery asks for its message again a second later. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
 | `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
 | `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |
-| `WakeRun` | Completes pending waits in log order and queues a delivery. |
+| `WakeRun` | Queues a flow that completes the selected pending waits first. |
 | `PendingWaits` | The IDs of a run's pending waits, in creation order. |
 | `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
 | `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |

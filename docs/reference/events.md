@@ -26,6 +26,7 @@ JSON object, and each type keeps its payload in one named field:
 | --- | --- | --- |
 | `DataRunCreated` | `run_created` | `input` |
 | `DataStepCreated` | `step_created` | `input` |
+| `DataStepStarted` | `step_started` | `input`, on the one that creates an inline step |
 | `DataStepResult` | `step_completed` | `result` |
 | `DataStepResult` | `step_retrying`, `step_failed` | `error` |
 | `DataRunCompleted` | `run_completed` | `output` |
@@ -35,7 +36,14 @@ JSON object, and each type keeps its payload in one named field:
 | `DataWaitCreated` | `wait_created` | |
 | `DataAttrSet` | `attr_set` | |
 
-Metadata fields are the SDK's: a step records `stepName`, a wait `resumeAt`,
+Metadata fields are the SDK's: every step event records `stepName`, a
+`step_created` whether the step is `inline` and the `creatorMessageId` of the
+flow that created it, a `step_started` its `attempt`, `step_failed` and
+`step_retrying` the `attempt` that failed, a `step_retrying` that hands an
+inline step's retry to a step delivery that flow's `creatorMessageId`, and
+`step_created`, an inline step's creating `step_started`, `step_completed`, and
+`hook_received` the run's `workflowName`. A wait records `resumeAt` and its
+`creatorMessageId`,
 `attr_set` its `changes` as `key`/`value` pairs and the `writer` that set them,
 `run_created` the run's `encryptionPublicKey` when its payloads are encrypted,
 and a hook `token`, `isWebhook`, `isSystem` for hooks the runtime creates for
@@ -64,7 +72,7 @@ and keeps the rest, such as a step's name.
 
 | Type | Records |
 | --- | --- |
-| `run_created` | A new run with its workflow name, input, attributes, and the `deploymentId` it is pinned to. Always the first event. |
+| `run_created` | A new run with its workflow name, input, attributes, the `deploymentId` it is pinned to, and its `specVersion`, 9. Always the first event. |
 | `run_started` | A flow started replaying the runner. |
 | `run_completed` | The run's output. |
 | `run_failed` | The run's error. |
@@ -75,8 +83,8 @@ and keeps the rest, such as a step's name.
 
 | Type | Records |
 | --- | --- |
-| `step_created` | A step with its name and input. |
-| `step_started` | A delivery started an attempt. Each start is a new attempt. A flow that starts a new step inline records it in the same write as `step_created`, with `ownerMessageId` set to its queued message. |
+| `step_created` | A step queued as a step delivery, with its name and input, or one whose input did not encode, failed at once. |
+| `step_started` | A delivery started an attempt. Each start is a new attempt. An inline step's first `step_started` creates it, with its name, input, and `inline` set, and no `step_created` precedes it. |
 | `step_completed` | The step's output. |
 | `step_retrying` | A failed attempt and when the step is retried. |
 | `step_failed` | The step's final error. |
@@ -97,17 +105,35 @@ and keeps the rest, such as a step's name.
 | `wait_created` | A timer. |
 | `wait_completed` | The timer fired or was woken. |
 
+## Writers
+
+A run has one orchestrator, its flow, which makes every decision. What a
+flow writes is **in-band**: `run_started` on the run's first flow,
+`run_completed`, `run_failed`, `step_created`, every event of a step it runs
+inline, `wait_created`, `wait_completed`, `hook_created`, `hook_disposed`, and
+`attr_set` from workflow code. Each in-band write is fenced by the run's
+in-band count, which a flow reads from the snapshot of its log listing and
+which counts `run_created` too: the World refuses it with
+`ErrInBandSuperseded` when another flow has written in-band since. Everything
+else is **out-of-band** and never refused by the fence: the events a step
+delivery writes, `hook_received` from `ResumeHook` and webhooks, cancellation,
+`run_cancelled` from a client, and `RunsSetAttributes`. See
+[Concurrent flows](/guide/replay#concurrent-flows).
+
+An in-band write tells the World how many events the flow holds, and the
+World answers with the events between those and its own, so the flow never
+uses a result of its own before the events in front of it. It also carries
+when it occurred, which the World stores as its `CreatedAt`.
+
 ## Admission rules
 
-Appending is how the runtime decides what may happen, so Worlds enforce these
-rules atomically:
-
-- Terminal runs reject new work (`ErrRunTerminal`). A running step may still record its final completion or failure without reviving the run or scheduling a retry.
-- A step can only be started while pending or running (`ErrStepNotStartable`).
-  Starting a running step appends a new attempt, so a delivery can take over a
-  step whose previous delivery died.
-- A step's result (`step_completed`, `step_failed`, or `step_retrying`) is only
-  recorded while the step is running (`ErrStepNotStartable`).
+- A finished run refuses `step_created`, `step_started`, `step_retrying`,
+  `wait_created`, and other new work (`ErrRunTerminal`), and still records a
+  step's `step_completed` or `step_failed` and a `wait_completed`.
+- Other checks of a step or wait against the events before it are optional
+  (`ErrStepNotStartable`): the runtime decides from the log alone. Replay
+  ignores any event of a step, hook, or wait after its final one, so the
+  first writer of a result wins.
 - `hook_disposed` only targets a hook of the same run (`ErrHookNotActive`).
 - `hook_received` only targets an active hook of the same run that still owns
   its token (`ErrHookNotActive`, or `ErrHookForceClaimed` after a forced claim).
@@ -116,24 +142,26 @@ rules atomically:
 - An event that repeats an admitted transition, such as a second
   `run_started`, `step_created`, or `hook_disposed`, returns the earlier event
   without appending.
-- A flow's writes are in-band: each is fenced by the run's `InBandCount` and
-  refused with `ErrInBandSuperseded` when another flow has written since. See
-  [Concurrent flows](/guide/replay#concurrent-flows).
+- A batch is fenced as one block, but not all-or-nothing: each event gets its
+  own outcome, and once one is refused, every later event of the batch with
+  the same correlation ID is refused too.
 
 Managed cancellation records its cause as hook payload data and uses a stream for live notification. Cancelled attempts record `step_failed` with `FatalError` wrapping `context.Canceled`. The first committed cancellation cause wins.
 
 ## A sample run
 
-A run of a workflow that calls one step:
+A run of a workflow that calls one step, which its flow runs inline:
 
 | Slot | Type | Correlation |
 | --- | --- | --- |
 | 1 | `run_created` | |
 | 2 | `run_started` | |
-| 3 | `step_created` | step ID |
-| 4 | `step_started` | step ID |
-| 5 | `step_completed` | step ID |
-| 6 | `run_completed` | |
+| 3 | `step_started` | step ID |
+| 4 | `step_completed` | step ID |
+| 5 | `run_completed` | |
+
+The same step queued as a step delivery records `step_created` before its
+`step_started`, which the step delivery writes.
 
 Read the log from any World:
 
