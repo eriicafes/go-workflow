@@ -91,9 +91,8 @@ refuses the write with `worlds.ErrInBandSuperseded` and appends nothing. The
 refused flow stops writing and starting steps, and asks the queue for its
 message again a second later, when it replays the run with the other flow's
 writes. Since every event of an inline step is in-band too, two flows never
-both record one. Worlds deliver one flow of a run at a time where their queue
-can (`Capabilities().MaxConcurrency`), which makes such an overlap rare; the
-fence is what keeps it safe. Writes from step deliveries, hook resumes,
+both record one. Worlds deliver one flow of a run at a time, which makes
+such an overlap rare; the fence is what keeps it safe. Writes from step deliveries, hook resumes,
 cancellation, and clients are out-of-band: they are never fenced and don't
 move the count. Replay ignores any event of a step, hook, or timer after its
 final one, so the first writer of a step's result wins.

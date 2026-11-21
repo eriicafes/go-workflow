@@ -69,13 +69,6 @@ type Capabilities struct {
 	// RegionalRunIDs reports that the World implements RegionalRunIDs, so
 	// clients ask it for new run IDs (Client.RunsNewID).
 	RegionalRunIDs bool `cbor:"regionalRunIds"`
-	// InBandFence reports that the World fences in-band writes (see
-	// EventsCreateOptions.InBandCount). Every World does.
-	InBandFence bool `cbor:"inBandFence"`
-	// MaxConcurrency reports that the World's queue delivers one
-	// serialized flow of a run at a time (see QueueInput.SerializedFlow).
-	// The fence keeps overlapping flows safe, and this makes them rare.
-	MaxConcurrency bool `cbor:"maxConcurrency"`
 	// MaxQueueDelay is the furthest NotBefore the World's queue accepts
 	// from now. The runtime reaches a later timer in hops. Zero means no
 	// limit.

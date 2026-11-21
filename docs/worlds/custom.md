@@ -88,8 +88,7 @@ type World interface {
   `EventsCreateBatchInput` for the whole block) is accepted only when it
   equals the run's count, in the same atomic step as the append, and advances
   it by the positions it allocates. A mismatch returns `ErrInBandSuperseded`
-  and appends nothing. Out-of-band writes never move it. Report
-  `Capabilities().InBandFence`.
+  and appends nothing. Out-of-band writes never move it.
 - **Snapshots and skipped slots.** Every `EventsList` page carries the run's
   counters in `Snapshot`, read before the page. An in-band write with
   `EventCount` returns in `Events` every event between that count and its own
@@ -116,9 +115,8 @@ type World interface {
   acknowledges it when `Execute` returns nil. A `*worlds.Redelivery` asks for
   the same message again after its `After`, with the next `DeliveryCount`,
   counting an `Attempt` unless `After` is zero. Any other error retries it.
-- **One flow at a time.** Where your queue can, deliver one flow of a run at a
-  time (`QueueInput.SerializedFlow`), and report
-  `Capabilities().MaxConcurrency`. The fence keeps overlapping flows safe,
+- **One flow at a time.** Deliver one flow of a run at a time
+  (`QueueInput.SerializedFlow`). The fence keeps overlapping flows safe,
   and this makes them rare.
 
 Pushing a run's events is optional. A World that implements

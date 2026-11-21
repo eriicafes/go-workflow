@@ -186,8 +186,7 @@ expired. The lease lasts two minutes and is renewed every 30 seconds while the
 flow executes, then deleted. A flow that finds the lease taken is sent again
 two seconds later without counting a delivery. Step deliveries, intermediate
 hops of a wait's timer, and retention deliveries never take the lease. The
-lease makes overlapping flows rare and the run's in-band fence keeps them safe,
-so `Capabilities()` reports `MaxConcurrency` and `InBandFence`.
+lease makes overlapping flows rare and the run's in-band fence keeps them safe.
 
 Lambda runs the handler with the invocation's deadline. Once a batch is
 halfway to it, the handler starts no further messages and reports them in

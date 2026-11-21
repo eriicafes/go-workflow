@@ -322,9 +322,8 @@ is no longer needed only replays its run. A message with an `IdempotencyKey`
 is stored once while it lives, for at least `MinDeduplicationWindow`.
 `Runtime.Execute` returns a `*Redelivery` to ask for the same message again
 after `After`: zero is a handoff, which does not count as an attempt. A World
-whose `Capabilities().MaxConcurrency` is set delivers one flow of a run at a
-time (`QueueInput.SerializedFlow`), and `Capabilities().MaxQueueDelay` is the
-furthest `NotBefore` its queue accepts: the runtime reaches a later timer in
+delivers one flow of a run at a time (`QueueInput.SerializedFlow`), and
+`Capabilities().MaxQueueDelay` is the furthest `NotBefore` its queue accepts: the runtime reaches a later timer in
 hops anchored on its deadline, keyed `wait:<id>:<resumeAtMs>:<hopAtMs>`. A World sets `Attempt` from its
 backend's delivery count, and the Runtime gives up on a delivery past
 `MaxDeliveries` (48) attempts, as the Workflow SDK does: a flow delivery fails
