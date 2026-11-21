@@ -46,6 +46,7 @@ export namespace RPC {
 		deploymentId: string;
 		encryptionPublicKey?: string;
 		inBandCount: number;
+		specVersion?: number;
 		createdAt: Date;
 		updatedAt: Date;
 		startedAt: Date | null;
@@ -95,7 +96,16 @@ export namespace RPC {
 		run?: Run;
 		step?: Step;
 	};
-	export type EventBatchResult = { results: BatchEventResult[]; inBandCount: number };
+	export type EventBatchResult = {
+		results: BatchEventResult[];
+		inBandCount: number;
+		allocated: number;
+		events?: Event[];
+		hasMore?: boolean;
+	};
+	/** A run's position counters, read before an events.list page. */
+	export type EventsSnapshot = { eventCount: number; inBandCount: number };
+	export type EventsPage = Page<Event> & { snapshot: EventsSnapshot };
 	export type WebhookResponse = {
 		status: number;
 		header?: Record<string, string[]>;

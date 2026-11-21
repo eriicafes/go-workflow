@@ -44,6 +44,10 @@ func (m *World) stepPayloadsLocked(step worlds.Step, resolve worlds.ResolveData)
 			if resolve != worlds.ResolveDataNone {
 				step.Input = worlds.EventPayload(event)
 			}
+		case worlds.EventTypeStepStarted:
+			if resolve != worlds.ResolveDataNone && worlds.StartCreatesStep(event.Data) {
+				step.Input = worlds.EventPayload(event)
+			}
 		case worlds.EventTypeStepCompleted:
 			step.Output, step.Error = nil, nil
 			if resolve != worlds.ResolveDataNone {

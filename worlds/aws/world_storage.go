@@ -27,8 +27,9 @@ type runView struct {
 }
 
 // stepView is a STEP# item. Its Step holds no payloads; createdEventID and
-// resultEventID name the step_created event and latest result event holding
-// them.
+// resultEventID name the event that created the step, its step_created or
+// an inline step's first step_started, and its latest result event, which
+// hold them.
 type stepView struct {
 	worlds.Step
 	createdEventID worlds.EventID
@@ -154,6 +155,7 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 		"updatedAt":     avs(stamp(run.UpdatedAt)),
 		"eventCount":    avn(int64(view.eventCount)),
 		"inBandCount":   avn(int64(run.InBandCount)),
+		"specVersion":   avn(int64(run.SpecVersion)),
 		"list_pk":       avs("RUNS"),
 		"list_sk":       avs(indexSortKey(run.CreatedAt, string(run.RunID))),
 		"list_group_pk": avs("RUNS#" + run.WorkflowName),
@@ -196,6 +198,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			DeploymentID:        read(item, "deploymentId"),
 			EncryptionPublicKey: read(item, "encryptionPublicKey"),
 			InBandCount:         int(readInt(item, "inBandCount")),
+			SpecVersion:         int(readInt(item, "specVersion")),
 			CreatedAt:           readTime(item, "createdAt"),
 			UpdatedAt:           readTime(item, "updatedAt"),
 			StartedAt:           readTimePtr(item, "startedAt"),
@@ -214,7 +217,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "encryptionPublicKey", "executionContext", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "encryptionPublicKey", "executionContext", "specVersion", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
 	for _, name := range []string{"resultEventId", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {

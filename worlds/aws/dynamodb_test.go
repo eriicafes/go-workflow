@@ -170,9 +170,9 @@ func TestTokenCondition(t *testing.T) {
 
 func TestViewItems(t *testing.T) {
 	now := time.Now().UTC()
-	run := runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusCompleted, Attributes: map[string]string{"k": "v"}, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 3, startedEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(3)}
+	run := runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusCompleted, Attributes: map[string]string{"k": "v"}, InBandCount: 2, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 3, startedEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(3)}
 	decoded := runFromItem(runItem(run))
-	if decoded.RunID != run.RunID || decoded.resultEventID != run.resultEventID || decoded.Attributes["k"] != "v" || decoded.eventCount != 3 || decoded.startedEventID != run.startedEventID || decoded.StartedAt != nil || !decoded.CompletedAt.Equal(now) {
+	if decoded.RunID != run.RunID || decoded.InBandCount != 2 || decoded.SpecVersion != worlds.SpecVersion || decoded.resultEventID != run.resultEventID || decoded.Attributes["k"] != "v" || decoded.eventCount != 3 || decoded.startedEventID != run.startedEventID || decoded.StartedAt != nil || !decoded.CompletedAt.Equal(now) {
 		t.Fatalf("run = %#v", decoded)
 	}
 	set, remove := runUpdate(run)

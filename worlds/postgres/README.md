@@ -89,8 +89,9 @@ drop it once you no longer need its data.
 Every event append is one transaction. It locks the run row with
 `SELECT ... FOR UPDATE`, checks the transition rules against the views inside
 the transaction, inserts the events at the next slots, and updates the views.
-Writers to one run are therefore serialized across processes, slots are
-contiguous, and a batch is all-or-nothing.
+Writers to one run are therefore serialized across processes, and slots are
+contiguous. A batch is one transaction too, which checks each event before
+inserting it, so a refused event is skipped and the others are appended.
 
 `EventsCreate(hook_created)` locks the token row. A forced claim over a live owner also locks
 the owner's run, taking run locks in run ID order to avoid deadlocks, and

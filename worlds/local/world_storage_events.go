@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"time"
 
@@ -107,19 +108,22 @@ func (t *txn) releaseToken(token string, hookID worlds.HookID) error {
 // ID is an idempotent replay of that earlier event.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
 	if t.run.Status.Terminal() {
+		// A finished run still records what was running when it finished: a
+		// step's final result, and a wait's completion.
+		finishing := event.EventType == worlds.EventTypeWaitCompleted
 		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
 			step, err := t.step(worlds.StepID(event.CorrelationID))
 			if err != nil {
 				return "", err
 			}
-			if step != nil && step.Status == worlds.StatusRunning {
-				return "", nil
+			finishing = step != nil && !step.Status.Terminal()
+		}
+		if !finishing {
+			if event.EventType == worlds.EventTypeRunCancelled && t.run.Status == worlds.StatusCancelled {
+				return t.run.CancelledEventID, nil
 			}
+			return "", worlds.ErrRunTerminal
 		}
-		if event.EventType == worlds.EventTypeRunCancelled && t.run.Status == worlds.StatusCancelled {
-			return t.run.CancelledEventID, nil
-		}
-		return "", worlds.ErrRunTerminal
 	}
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
@@ -131,11 +135,23 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if err != nil {
 			return "", err
 		}
-		if step == nil {
-			return "", worlds.ErrStepNotStartable
+		creates := worlds.StartCreatesStep(event.Data)
+		if creates && step != nil {
+			// An inline step is created once.
+			earlier, err := t.findEvent(worlds.EventTypeStepStarted, event.CorrelationID)
+			if err != nil || earlier != "" {
+				return earlier, err
+			}
 		}
-		// A running step can be redelivered after its worker dies.
-		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
+		if step == nil {
+			if !creates {
+				return "", worlds.ErrStepNotStartable
+			}
+			return "", nil
+		}
+		// A started step can be started again, as a new attempt, after its
+		// worker dies.
+		if step.Status.Terminal() {
 			return "", worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeStepCreated:
@@ -149,7 +165,8 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if err != nil {
 			return "", err
 		}
-		if step == nil || step.Status != worlds.StatusRunning {
+		// A step's result is recorded while the step is not finished.
+		if step == nil || step.Status.Terminal() {
 			return "", worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
@@ -202,24 +219,28 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 	return "", nil
 }
 
-// findEvent returns the ID of the run's earlier eventType event for
-// correlationID, or "" when it has none.
+// findEvent returns the ID of the run's first eventType event for
+// correlationID, committed or staged, or "" when it has none.
 func (t *txn) findEvent(eventType worlds.EventType, correlationID string) (worlds.EventID, error) {
-	for _, event := range t.appended {
-		if event.EventType == eventType && event.CorrelationID == correlationID {
-			return event.EventID, nil
-		}
-	}
 	committed, err := t.w.readEvents(t.run.RunID, 1, t.run.EventCount)
 	if err != nil {
 		return "", err
 	}
-	for _, event := range committed {
+	for _, event := range append(committed, t.appended...) {
 		if event.EventType == eventType && event.CorrelationID == correlationID {
 			return event.EventID, nil
 		}
 	}
 	return "", nil
+}
+
+// eventTime returns the creation time of event: its OccurredAt for an
+// in-band write that sets one, and now otherwise.
+func eventTime(event worlds.EventsCreateEvent, inBand *int, now time.Time) time.Time {
+	if inBand != nil && !event.OccurredAt.IsZero() {
+		return event.OccurredAt.UTC()
+	}
+	return now
 }
 
 // append stages the next slot and materializes it.
@@ -266,6 +287,20 @@ func (t *txn) materialize(event worlds.Event) error {
 		id := worlds.StepID(event.CorrelationID)
 		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
 	case worlds.EventTypeStepStarted:
+		if worlds.StartCreatesStep(event.Data) {
+			// An inline step is created by its first step_started, which
+			// holds its input.
+			id := worlds.StepID(event.CorrelationID)
+			current, err := t.step(id)
+			if err != nil {
+				return err
+			}
+			if current == nil {
+				var value worlds.DataStepStarted
+				_ = json.Unmarshal(event.Data, &value)
+				t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
+			}
+		}
 		return t.updateStep(event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
 		return t.updateStep(event, worlds.StatusCompleted)
@@ -563,7 +598,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
+	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
 	var hook *hookRecord
 	if start := input.StartHook; start != nil {
@@ -589,7 +624,8 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		return worlds.EventResult{}, err
 	}
 	w.signal()
-	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, AllocatedEventCount: 1}, nil
+	// run_created takes the first position, which counts as in-band.
+	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 // createRun clears leftovers of an uncommitted create, then writes slot one and
@@ -649,6 +685,11 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	if replay != "" {
 		result := worlds.EventResult{EventID: replay, EventType: input.Event.EventType, Events: delta, InBandCount: t.run.InBandCount}
+		if earlier, ok, err := t.load(eventSlot(worlds.Event{EventID: replay})); err != nil {
+			return worlds.EventResult{}, err
+		} else if ok {
+			result.CreatedAt, result.Data = earlier.CreatedAt, earlier.Data
+		}
 		if input.Event.EventType == worlds.EventTypeStepCreated {
 			step, err := t.step(worlds.StepID(input.Event.CorrelationID))
 			if err != nil {
@@ -664,7 +705,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 		return result, nil
 	}
-	event, err := t.append(input.Event, now)
+	event, err := t.append(input.Event, eventTime(input.Event, input.Options.InBandCount, now))
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -676,12 +717,17 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	return t.result(event, delta), nil
 }
 
+// EventsCreateBatch stages each admitted event in one txn and commits them
+// together. A refused event is left out without touching the staged state,
+// so the others keep their own outcomes.
 func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	if len(input.Events) == 0 {
-		return worlds.EventBatchResult{}, nil
+	for _, value := range input.Events {
+		if !validAppend(value.EventType) || value.EventType == worlds.EventTypeHookCreated {
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
 	}
 	unlock, err := w.writeLock()
 	if err != nil {
@@ -695,31 +741,51 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if err := t.fence(input.InBandCount); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	results := make([]worlds.EventResult, 0, len(input.Events))
-	for _, value := range input.Events {
-		if !validAppend(value.EventType) {
-			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+	result := worlds.EventBatchResult{Results: make([]worlds.EventBatchItem, len(input.Events))}
+	if input.EventCount != nil {
+		if result.Events, err = w.delta(t.run, worlds.EventsCreateOptions{EventCount: input.EventCount}); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
+	}
+	// A refused event refuses the later events of its correlation ID.
+	refused := map[string]bool{}
+	for index, value := range input.Events {
+		if value.CorrelationID != "" && refused[value.CorrelationID] {
+			result.Results[index].Err = fmt.Errorf("%w: an earlier event of %s was refused", worlds.ErrStepNotStartable, value.CorrelationID)
+			continue
 		}
 		now := time.Now().UTC()
 		replay, err := t.admit(value, now)
+		if err == nil && replay != "" {
+			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
+		}
+		if err != nil && !refusal(err) {
+			return worlds.EventBatchResult{}, err
+		}
+		if err != nil {
+			result.Results[index].Err = err
+			refused[value.CorrelationID] = value.CorrelationID != ""
+			continue
+		}
+		event, err := t.append(value, eventTime(value, input.InBandCount, now))
 		if err != nil {
 			return worlds.EventBatchResult{}, err
 		}
-		if replay != "" {
-			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
-		}
-		event, err := t.append(value, now)
-		if err != nil {
-			return worlds.EventBatchResult{}, err
-		}
-		results = append(results, t.result(event, nil))
+		result.Results[index].EventResult = t.result(event, nil)
+		result.AllocatedEventCount++
 	}
-	t.advance(input.InBandCount, len(input.Events))
+	t.advance(input.InBandCount, result.AllocatedEventCount)
 	if err := t.commit(); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	w.signal()
-	return worlds.EventBatchResult{Events: results, InBandCount: t.run.InBandCount}, nil
+	result.InBandCount = t.run.InBandCount
+	for index := range result.Results {
+		result.Results[index].InBandCount = result.InBandCount
+	}
+	if result.AllocatedEventCount > 0 {
+		w.signal()
+	}
+	return result, nil
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
@@ -746,24 +812,26 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	return worlds.ResolveEvents(events, input.ResolveData)[0], nil
 }
 
-func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
 	// Pages are by slot. The cursor is the last returned event ID, in either
 	// order.
 	if err := ctx.Err(); err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
 	unlock, err := w.readLock()
 	if err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
 	defer unlock()
 	run, err := w.readRun(input.RunID)
 	if err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
+	// The run record holds both counters, read with the page under the lock.
+	snapshot := worlds.EventsSnapshot{EventCount: run.EventCount, InBandCount: run.InBandCount}
 	cursor, err := eventCursor(input.Pagination.Cursor)
 	if err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
 	limit := input.Pagination.Limit
 	if input.Pagination.SortOrder == worlds.SortOrderDescending {
@@ -777,12 +845,12 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		}
 		events, err := w.readEvents(input.RunID, low, high)
 		if err != nil {
-			return worlds.Page[worlds.Event]{}, err
+			return worlds.EventsPage{}, err
 		}
 		for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
 			events[i], events[j] = events[j], events[i]
 		}
-		return eventsPage(worlds.ResolveEvents(events, input.ResolveData), low > 1), nil
+		return worlds.EventsPage{Page: eventsPage(worlds.ResolveEvents(events, input.ResolveData), low > 1), Snapshot: snapshot}, nil
 	}
 	low := cursor + 1
 	high := run.EventCount
@@ -791,9 +859,9 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	}
 	events, err := w.readEvents(input.RunID, low, high)
 	if err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
-	return eventsPage(worlds.ResolveEvents(events, input.ResolveData), high < run.EventCount), nil
+	return worlds.EventsPage{Page: eventsPage(worlds.ResolveEvents(events, input.ResolveData), high < run.EventCount), Snapshot: snapshot}, nil
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
@@ -835,6 +903,17 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 		matched, hasMore = matched[:input.Pagination.Limit], true
 	}
 	return eventsPage(worlds.ResolveEvents(matched, input.ResolveData), hasMore), nil
+}
+
+// refusal reports whether err is an event's refusal rather than a storage
+// failure.
+func refusal(err error) bool {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func validAppend(eventType worlds.EventType) bool {

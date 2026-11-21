@@ -449,16 +449,17 @@ func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			zero := 0
+			// run_created holds the first in-band position.
+			one := 1
 			if phase == 2 {
-				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_claimant", Event: event, Options: worlds.EventsCreateOptions{InBandCount: &zero}}); err != nil {
+				if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_claimant", Event: event, Options: worlds.EventsCreateOptions{InBandCount: &one}}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if err := world.Close(); err != nil {
 				t.Fatal(err)
 			}
-			writeRecord(t, dir, "hook-handoff.json", map[string]any{"RunID": "wrun_claimant", "Event": event, "InBandCount": 0, "Previous": previous, "At": time.Now().UTC()})
+			writeRecord(t, dir, "hook-handoff.json", map[string]any{"RunID": "wrun_claimant", "Event": event, "InBandCount": 1, "Previous": previous, "At": time.Now().UTC()})
 			for range 2 {
 				reopened := startWorld(t, dir, nil)
 				owner, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "handoff"})
@@ -476,7 +477,7 @@ func TestRecoveryCompletesForcedHookHandoffAtEveryCommitBoundary(t *testing.T) {
 					}
 				}
 				run, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_claimant"})
-				if err != nil || run.InBandCount != 1 {
+				if err != nil || run.InBandCount != 2 {
 					t.Fatalf("in-band count=%d err=%v", run.InBandCount, err)
 				}
 				if err := reopened.Close(); err != nil {

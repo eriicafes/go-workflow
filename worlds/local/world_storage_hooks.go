@@ -148,7 +148,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	}
 	input.Event.Data, _ = json.Marshal(created)
 
-	event, err := claimant.append(input.Event, now)
+	event, err := claimant.append(input.Event, eventTime(input.Event, input.Options.InBandCount, now))
 	if err != nil {
 		return w.recoverClaim(input, err)
 	}

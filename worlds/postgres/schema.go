@@ -148,6 +148,9 @@ ALTER TABLE go_workflow_runs ADD COLUMN expired_at timestamptz,
 -- A run's executionContext, as the Workflow SDK records it.
 ALTER TABLE go_workflow_runs ADD COLUMN execution_context jsonb;
 CREATE INDEX go_workflow_runs_expired_idx ON go_workflow_runs (expired_at) WHERE expired_at IS NOT NULL AND NOT data_purged;
+`, `
+-- A run records the spec version it was created under.
+ALTER TABLE go_workflow_runs ADD COLUMN spec_version integer NOT NULL DEFAULT 0;
 `}
 
 // migrate applies pending migrations in one transaction under a

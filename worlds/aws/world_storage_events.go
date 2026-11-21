@@ -36,7 +36,8 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	// run_created takes the first position, which counts as in-band.
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
 	items := []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))}
 	if input.StartHook != nil {
@@ -61,7 +62,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, AllocatedEventCount: 1}, nil
+	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -95,7 +96,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if replay != nil {
 			result = *replay
 		} else {
-			event, err := tx.append(ctx, run, input.Event)
+			event, err := tx.append(ctx, run, input.Event, createdAt(input.Event, input.Options.InBandCount))
 			if err != nil {
 				return err
 			}
@@ -126,14 +127,15 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if err := ctx.Err(); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	if len(input.Events) == 0 {
-		return worlds.EventBatchResult{}, nil
+	for _, value := range input.Events {
+		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeHookCreated || !value.EventType.Valid() {
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
 	}
-	var results []worlds.EventResult
-	var inBandCount int
+	var result worlds.EventBatchResult
 	var finished worlds.Run
 	err := w.appendRetry(ctx, func(tx *appendTx) error {
-		results = make([]worlds.EventResult, 0, len(input.Events))
+		result = worlds.EventBatchResult{Results: make([]worlds.EventBatchItem, len(input.Events))}
 		if err := tx.preload(ctx, input.RunID, input.Events); err != nil {
 			return err
 		}
@@ -142,28 +144,52 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			return err
 		}
 		defer func() { finished = run.view.Run }()
+		// The fence holds for the whole block: the commit requires the event
+		// count read here, which every in-band write moves.
 		if err := fence(run, input.InBandCount); err != nil {
 			return err
 		}
-		for _, value := range input.Events {
-			if value.EventType == worlds.EventTypeRunCreated || !value.EventType.Valid() {
-				return worlds.ErrEventInvalid
+		if input.EventCount != nil {
+			// Read before the commit, as in EventsCreate.
+			result.Events, err = w.delta(ctx, input.RunID, run.seen, worlds.EventsCreateOptions{EventCount: input.EventCount})
+			if err != nil {
+				return err
+			}
+		}
+		refused := map[string]bool{}
+		for index, value := range input.Events {
+			item := &result.Results[index]
+			if value.CorrelationID != "" && refused[value.CorrelationID] {
+				// A step's outcome never lands behind its refused creation.
+				item.Err = fmt.Errorf("%w: an earlier event of %s was refused", worlds.ErrStepNotStartable, value.CorrelationID)
+				continue
 			}
 			replay, err := tx.admit(ctx, run, value)
+			if err == nil && replay != nil {
+				err = fmt.Errorf("%w: %s would replay %s", worlds.ErrEventInvalid, value.EventType, replay.EventID)
+			}
+			if err != nil {
+				if !refusal(err) {
+					return err
+				}
+				item.Err = err
+				if value.CorrelationID != "" {
+					refused[value.CorrelationID] = true
+				}
+				continue
+			}
+			event, err := tx.append(ctx, run, value, createdAt(value, input.InBandCount))
 			if err != nil {
 				return err
 			}
-			if replay != nil {
-				return fmt.Errorf("%w: %s would replay %s", worlds.ErrEventInvalid, value.EventType, replay.EventID)
-			}
-			event, err := tx.append(ctx, run, value)
-			if err != nil {
-				return err
-			}
-			results = append(results, tx.result(event, true))
+			item.EventResult = tx.result(event, true)
+			result.AllocatedEventCount++
 		}
-		advance(run, input.InBandCount, len(input.Events))
-		inBandCount = run.view.InBandCount
+		advance(run, input.InBandCount, result.AllocatedEventCount)
+		result.InBandCount = run.view.InBandCount
+		for index := range result.Results {
+			result.Results[index].InBandCount = result.InBandCount
+		}
 		return nil
 	})
 	if err != nil {
@@ -174,7 +200,27 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			return worlds.EventBatchResult{}, err
 		}
 	}
-	return worlds.EventBatchResult{Events: results, InBandCount: inBandCount}, nil
+	return result, nil
+}
+
+// refusal reports whether err is an event's refusal by the transition rules,
+// rather than a failure to read or write.
+func refusal(err error) bool {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// createdAt returns the creation time of event: its OccurredAt for an
+// in-band write that sets one, and now otherwise.
+func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
+	if inBand != nil && !event.OccurredAt.IsZero() {
+		return event.OccurredAt.UTC()
+	}
+	return time.Now().UTC()
 }
 
 // fence returns ErrInBandSuperseded when an in-band write's count is not the
@@ -187,7 +233,8 @@ func fence(run *runEntry, count *int) error {
 	return nil
 }
 
-// advance adds appended in-band events to the run view the commit writes.
+// advance adds the positions an in-band write allocated to the run view the
+// commit writes.
 func advance(run *runEntry, count *int, appended int) {
 	if count != nil {
 		run.view.InBandCount += appended
@@ -252,7 +299,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 					token.cur = nil
 				} else {
 					data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
-					if _, err := tx.append(ctx, owner, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(previous.hookID), Data: data}); err != nil {
+					if _, err := tx.append(ctx, owner, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(previous.hookID), Data: data}, time.Now().UTC()); err != nil {
 						return err
 					}
 				}
@@ -260,7 +307,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		}
 		input.Event.Data, _ = json.Marshal(created)
 
-		event, err := tx.append(ctx, claimant, input.Event)
+		event, err := tx.append(ctx, claimant, input.Event, createdAt(input.Event, input.Options.InBandCount))
 		if err != nil {
 			return err
 		}
@@ -300,8 +347,25 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 	return worlds.Event{}, worlds.ErrEventNotFound
 }
 
-func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
-	return w.eventsPage(ctx, input.RunID, "", input.Pagination, input.ResolveData)
+// EventsList reads the run's META item with a consistent read before the
+// page, so its snapshot counts no position the page's query cannot see.
+func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	if err := ctx.Err(); err != nil {
+		return worlds.EventsPage{}, err
+	}
+	item, found, err := w.item(ctx, runKey(string(input.RunID)))
+	if err != nil {
+		return worlds.EventsPage{}, err
+	}
+	if !found {
+		return worlds.EventsPage{}, worlds.ErrRunNotFound
+	}
+	view := runFromItem(item)
+	page, err := w.eventsPage(ctx, input.RunID, "", input.Pagination, input.ResolveData)
+	if err != nil {
+		return worlds.EventsPage{}, err
+	}
+	return worlds.EventsPage{Page: page, Snapshot: worlds.EventsSnapshot{EventCount: view.eventCount, InBandCount: view.InBandCount}}, nil
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
@@ -681,19 +745,22 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		return &worlds.EventResult{EventID: id, EventType: requested.EventType}
 	}
 	if run.view.Status.Terminal() {
+		// A finished run still records what was running when it finished: a
+		// step's final result, and a wait's completion.
+		finishing := requested.EventType == worlds.EventTypeWaitCompleted
 		if requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed {
 			entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
 			if err != nil {
 				return nil, err
 			}
-			if entry.view != nil && entry.view.Status == worlds.StatusRunning {
-				return nil, nil
+			finishing = entry.view != nil && !entry.view.Status.Terminal()
+		}
+		if !finishing {
+			if requested.EventType == worlds.EventTypeRunCancelled && run.view.Status == worlds.StatusCancelled {
+				return replay(run.view.cancelledEventID), nil
 			}
+			return nil, worlds.ErrRunTerminal
 		}
-		if requested.EventType == worlds.EventTypeRunCancelled && run.view.Status == worlds.StatusCancelled {
-			return replay(run.view.cancelledEventID), nil
-		}
-		return nil, worlds.ErrRunTerminal
 	}
 	switch requested.EventType {
 	case worlds.EventTypeRunStarted:
@@ -720,12 +787,17 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if err != nil {
 			return nil, err
 		}
-		if entry.view == nil {
+		creates := worlds.StartCreatesStep(requested.Data)
+		switch {
+		case creates && entry.view != nil:
+			// An inline step is created once, by the step_started its view
+			// names as its creation.
+			return replay(entry.view.createdEventID), nil
+		case entry.view == nil && !creates:
 			return nil, worlds.ErrStepNotStartable
-		}
-		step := entry.view
-		// Redelivery of a running step records another attempt.
-		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
+		case entry.view != nil && entry.view.Status.Terminal():
+			// A started step may be started again, and each start records a
+			// new attempt.
 			return nil, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
@@ -733,7 +805,8 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if err != nil {
 			return nil, err
 		}
-		if entry.view == nil || entry.view.Status != worlds.StatusRunning {
+		// A step's result is recorded while the step is not finished.
+		if entry.view == nil || entry.view.Status.Terminal() {
 			return nil, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
@@ -795,8 +868,9 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 	return nil, nil
 }
 
-// append assigns the run's next slot to the event and materializes it.
-func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) (worlds.Event, error) {
+// append assigns the run's next slot to the event, created at createdAt, and
+// materializes it. Retention is measured from the World's clock.
+func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent, createdAt time.Time) (worlds.Event, error) {
 	run.view.eventCount++
 	event := worlds.Event{
 		RunID:         run.view.RunID,
@@ -804,9 +878,10 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 		EventType:     requested.EventType,
 		CorrelationID: requested.CorrelationID,
 		Data:          bytes.Clone(requested.Data),
-		CreatedAt:     time.Now().UTC(),
+		CreatedAt:     createdAt,
 	}
-	if worlds.RunDataExpired(run.view.Run, event.CreatedAt) {
+	now := time.Now().UTC()
+	if worlds.RunDataExpired(run.view.Run, now) {
 		// A step still running when its run's data was deleted settles after
 		// it. What it brought is deleted as it lands.
 		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
@@ -819,9 +894,9 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 		// The run's data expires with the commit that finishes it under
 		// $retention "0", or at its workflow's retention after it.
 		if worlds.ReadRunRetention(run.view.Attributes) == worlds.RetainNone {
-			run.view.ExpiredAt = &event.CreatedAt
+			run.view.ExpiredAt = &now
 		} else if retention := worlds.RetentionFor(tx.world.config.Retention, tx.world.config.Retentions, run.view.WorkflowName); retention > 0 {
-			expires := event.CreatedAt.Add(retention)
+			expires := now.Add(retention)
 			run.view.ExpiredAt = &expires
 		}
 	}
@@ -872,6 +947,18 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		entry.view = &stepView{Step: worlds.Step{RunID: run.view.RunID, StepID: worlds.StepID(event.CorrelationID), StepName: data.StepName, Status: worlds.StatusPending, Input: data.Input, CreatedAt: now, UpdatedAt: now}, createdEventID: event.EventID}
 		entry.dirty = true
 	case worlds.EventTypeStepStarted:
+		if worlds.StartCreatesStep(event.Data) {
+			// An inline step's first step_started creates it and holds its
+			// input, so the view names it as the step's creation.
+			var data worlds.DataStepStarted
+			_ = json.Unmarshal(event.Data, &data)
+			entry, err := tx.step(ctx, run.view.RunID, event.CorrelationID)
+			if err != nil {
+				return err
+			}
+			entry.view = &stepView{Step: worlds.Step{RunID: run.view.RunID, StepID: worlds.StepID(event.CorrelationID), StepName: data.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, createdEventID: event.EventID}
+			entry.dirty = true
+		}
 		return tx.updateStep(ctx, event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
 		return tx.updateStep(ctx, event, worlds.StatusCompleted)

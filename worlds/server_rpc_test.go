@@ -250,11 +250,12 @@ func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
 		t.Fatalf("step event allocated = %d err=%v", allocated, err)
 	}
 
-	// A batch reports each event's own outcome: run_created cannot be
-	// appended, while the wait is committed.
+	// A batch reports each event's own outcome: a repeated run_started is
+	// refused, while the wait is committed.
 	waitData, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC)})
 	batch := callRPC(t, handler, "events.createBatch", worlds.EventsCreateBatchInput{RunID: run.RunID, Events: []worlds.EventsCreateEvent{
-		{EventType: worlds.EventTypeRunCreated},
+		{EventType: worlds.EventTypeRunStarted},
+		{EventType: worlds.EventTypeRunStarted},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_rpc", Data: waitData},
 	}})
 	var results []struct {
@@ -262,14 +263,18 @@ func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
 		Error  string
 		Event  *worlds.Event
 	}
-	if err := cbor.Unmarshal(batch["Results"], &results); err != nil || len(results) != 2 {
+	if err := cbor.Unmarshal(batch["Results"], &results); err != nil || len(results) != 3 {
 		t.Fatalf("batch results = %#v err=%v", results, err)
 	}
-	if results[0].Status != http.StatusBadRequest || results[0].Error != "invalid_argument" || results[0].Event != nil {
-		t.Fatalf("run_created result = %#v", results[0])
+	if results[0].Status != http.StatusOK || results[1].Status != http.StatusBadRequest || results[1].Error != "invalid_argument" || results[1].Event != nil {
+		t.Fatalf("run_started results = %#v, %#v", results[0], results[1])
 	}
-	if results[1].Status != http.StatusOK || results[1].Event == nil || results[1].Event.CorrelationID != "wait_rpc" {
-		t.Fatalf("wait result = %#v", results[1])
+	if results[2].Status != http.StatusOK || results[2].Event == nil || results[2].Event.CorrelationID != "wait_rpc" {
+		t.Fatalf("wait result = %#v", results[2])
+	}
+	var allocated2 int
+	if err := cbor.Unmarshal(batch["Allocated"], &allocated2); err != nil || allocated2 != 2 {
+		t.Fatalf("batch allocated = %d err=%v", allocated2, err)
 	}
 }
 

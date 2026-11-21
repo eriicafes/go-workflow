@@ -1817,7 +1817,7 @@ func TestFailedStartReleasesTheStepForTheNextDelivery(t *testing.T) {
 // undatedWorld returns events without their creation time.
 type undatedWorld struct{ *testworld.World }
 
-func (w undatedWorld) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+func (w undatedWorld) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
 	page, err := w.World.EventsList(ctx, input)
 	for i := range page.Data {
 		page.Data[i].CreatedAt = time.Time{}

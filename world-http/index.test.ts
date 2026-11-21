@@ -41,6 +41,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
 		hookForceClaim: true,
+		inBandFence: true,
 	});
 
 	const run = await world.runs.get("wrun_01");
@@ -244,6 +245,7 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 					{ EventID: "evnt_03", EventType: "run_started", CorrelationID: "", Data: null },
 				],
 				HasMore: false,
+				Snapshot: { EventCount: 3, InBandCount: 2 },
 			});
 		},
 	});
@@ -255,6 +257,7 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 		undefined,
 	]);
 	expect(events.data[0]).not.toHaveProperty("data");
+	expect(events.snapshot).toEqual({ seq: 3, seqInBand: 2 });
 });
 
 test("writes event data as JSON and shapes event results like the Workflow SDK", async () => {

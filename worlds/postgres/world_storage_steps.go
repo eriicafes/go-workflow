@@ -35,7 +35,7 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 }
 
 // stepSelect selects steps as s with their payloads joined from the event
-// log: the input from step_created and the output or error from the latest
+// log: the input from the event that created the step and the output or error from the latest
 // result. ResolveDataNone joins only an error result.
 func stepSelect(resolve worlds.ResolveData) string {
 	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = s.run_id AND ie.slot = s.created_slot"+runLive("s.run_id")
@@ -54,6 +54,8 @@ func scanStep(row pgx.Row) (worlds.Step, error) {
 		return worlds.Step{}, err
 	}
 	if input != nil {
+		// The created slot holds a step_created, or the step_started that
+		// created an inline step, which carries its input the same way.
 		step.Input = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeStepCreated, Data: input})
 	}
 	if resultType != nil && result != nil {

@@ -14,7 +14,8 @@ import (
 //
 // A run's input is its run_created event, slot 1, and resultEventId names its
 // run_completed or run_failed event. A step's createdEventId names its
-// step_created event, and resultEventId its latest step_completed,
+// step_created event, or the step_started that created an inline step, and
+// resultEventId its latest step_completed,
 // step_failed, or step_retrying event. A hook's createdEventId names its
 // hook_created event in the hook's run.
 

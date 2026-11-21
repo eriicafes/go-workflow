@@ -89,7 +89,8 @@ When `Prepare` finds an event file past a run's `eventCount`, it rebuilds that
 run's steps, hooks, and token claims by replaying the committed events, then
 deletes the uncommitted event files. A token now owned by another run's hook
 is left alone. Event directories without a run file (an interrupted create)
-are removed. Batches are therefore all-or-nothing even across crashes. If a
+are removed. The events a batch admits therefore commit together even across
+crashes. If a
 write fails while the process is running, the same repair runs immediately;
 if the repair also fails, the World refuses further calls until it is
 restarted.

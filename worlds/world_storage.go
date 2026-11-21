@@ -60,42 +60,56 @@ type StorageSteps interface {
 // updates the run, step, and hook views derived from it in the same operation.
 type StorageEvents interface {
 	// EventsCreateRun creates the identified run and its initial run_created
-	// event. It does not deduplicate calls. It returns ErrRunAlreadyExists when
-	// the run already exists. Its result has AllocatedEventCount set to one.
+	// event, recording SpecVersion on the run. It does not deduplicate calls.
+	// It returns ErrRunAlreadyExists when the run already exists. Its result
+	// has AllocatedEventCount and InBandCount set to one: run_created takes
+	// the first position and counts as in-band, without being fenced.
 	EventsCreateRun(context.Context, EventsCreateRunInput) (EventResult, error)
 	// EventsCreate appends a lifecycle event to a run. Events in the result are
 	// selected by EventsCreateOptions. For a step_created event, Step holds the
 	// step and StepCreated reports whether this call created it.
 	//
-	// It enforces the transition rules, so it returns ErrEventInvalid for a
-	// malformed event, ErrRunTerminal when the run is terminal,
-	// ErrStepNotStartable or ErrHookNotActive when the target step or hook does
-	// not allow the event, and ErrHookConflict when a hook_created token is
-	// taken.
+	// It returns ErrEventInvalid for a malformed event, ErrRunTerminal when
+	// the run is terminal and the event needs a running run, ErrHookNotActive
+	// when the target hook does not allow the event, and ErrHookConflict when
+	// a hook_created token is taken.
 	//
-	// A step's step_completed, step_failed, or step_retrying needs the step to
-	// be running, and a hook_disposed needs a hook of the same run.
+	// A finished run refuses step_created, step_started, step_retrying, and
+	// wait_created, and still accepts step_completed, step_failed, and
+	// wait_completed, which record what was running when it finished. Other
+	// checks of a step or wait against the events before it, which a World
+	// returns as ErrStepNotStartable, are optional: the runtime decides from
+	// the log alone, and a World that appends every such event is correct. A
+	// World that checks accepts a step's result while the step is not
+	// finished, and a step_started that creates the step it starts: an
+	// inline step's first step_started, whose DataStepStarted has Inline,
+	// StepName, and Input, and which no step_created precedes.
 	//
 	// An event that repeats an admitted transition, such as a second
 	// run_started, step_created, or hook_disposed, returns the earlier event
 	// with AllocatedEventCount zero instead of appending. A step_started for a
-	// running step is not a repeat. It appends a new attempt, so a delivery can
-	// take over a step whose previous delivery died.
+	// step already started is not a repeat. It appends a new attempt.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	// EventsCreateBatch appends Events to a run in order, as one in-band
-	// write when InBandCount is set. It appends none of them when any event
-	// is invalid. When one cannot be admitted it returns that refusal, and
-	// the events of other steps, hooks, and waits in the batch may still be
-	// appended, so the runtime replays whatever the log holds. A refused
-	// in-band write appends none of them.
+	// write when InBandCount is set, fenced as one block. It appends none of
+	// them, and returns an error, when any event is invalid, the run does not
+	// exist, or the fence refuses the block. Otherwise each event has a
+	// result in EventBatchResult.Results, refused or appended as EventsCreate
+	// would refuse or append it alone, and a repeated transition is refused
+	// with ErrEventInvalid. A batch is not all-or-nothing, but it is ordered
+	// per correlation ID: once an event is refused, every later event of the
+	// batch with the same correlation ID is refused too, so a step's outcome
+	// never lands behind its refused creation.
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
 	// EventsGet returns the event identified by RunID and EventID. It returns
 	// ErrEventNotFound when the event does not exist. It applies ResolveData to
 	// the returned event.
 	EventsGet(context.Context, EventsGetInput) (Event, error)
 	// EventsList returns the events in a run. It applies Pagination and
-	// ResolveData to the result.
-	EventsList(context.Context, EventsListInput) (Page[Event], error)
+	// ResolveData to the result. Every page carries the run's Snapshot, read
+	// before the page, so a listing from the first page to the last covers
+	// every position the first page's Snapshot counts.
+	EventsList(context.Context, EventsListInput) (EventsPage, error)
 	// EventsListByCorrelationID returns events in a run that match CorrelationID.
 	// It applies Pagination and ResolveData to the result.
 	EventsListByCorrelationID(context.Context, EventsListByCorrelationIDInput) (Page[Event], error)
@@ -223,10 +237,14 @@ type Run struct {
 	// outside the run seal payloads to. It is empty when the run's payloads
 	// are not encrypted.
 	EncryptionPublicKey string
-	// InBandCount counts the events appended by in-band writes, those the
-	// run's orchestrator fences with EventsCreateOptions.InBandCount. A flow
-	// starts from it and passes it with each in-band write.
+	// InBandCount counts the positions allocated to in-band writes, those
+	// the run's orchestrator fences with EventsCreateOptions.InBandCount,
+	// run_created's included. A flow fences its writes with the count an
+	// EventsList snapshot reports.
 	InBandCount int
+	// SpecVersion is the spec version the run was created under,
+	// SpecVersion.
+	SpecVersion int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
@@ -440,13 +458,18 @@ type (
 	}
 	// EventsCreateOptions selects the events returned in EventResult.Events,
 	// letting a caller catch up on events appended since it last read the
-	// log.
+	// log, and fences an in-band write.
 	EventsCreateOptions struct {
-		// EventCount is the number of events the caller already holds. When
-		// set, Events holds every event after that count that was in the log
-		// before this call, plus an induced same-run disposal on force claim.
-		// The primary returned event is not included. It
-		// takes precedence over SinceCursor.
+		// EventCount is the number of events the caller already holds, the
+		// position it decided the write from. When set, Events holds every
+		// event after that count that was in the log before this call, plus
+		// an induced same-run disposal on force claim. The primary returned
+		// event is not included. It takes precedence over SinceCursor.
+		//
+		// For an in-band write, Events is the skipped-slot report: every
+		// event between EventCount and the write's own position, in order.
+		// When the World cannot return all of them, it returns what it can
+		// and sets EventResult.MoreEvents.
 		EventCount *int
 		// SinceCursor is the ID of the last event the caller holds. When set
 		// and EventCount is nil, Events holds the earlier events after it, on
@@ -456,8 +479,8 @@ type (
 		// InBandCount makes the append an in-band write: one made by the run's
 		// orchestrator, which fences it with the run's InBandCount as the
 		// orchestrator last saw it. The World appends only when the run's
-		// InBandCount still equals it, and advances the count by the events it
-		// appends. Otherwise it returns ErrInBandSuperseded and appends
+		// InBandCount still equals it, and advances the count by the positions
+		// it allocates. Otherwise it returns ErrInBandSuperseded and appends
 		// nothing, because another orchestrator has written since. Nil makes
 		// the write out-of-band, which is never refused and leaves the count
 		// unchanged.
@@ -469,7 +492,11 @@ type (
 		// InBandCount fences the whole batch as one in-band write, as
 		// EventsCreateOptions.InBandCount does.
 		InBandCount *int
-		Events      []EventsCreateEvent
+		// EventCount is the position the batch was decided from. For an
+		// in-band batch, EventBatchResult.Events is the skipped-slot report
+		// of the block, as for EventsCreateOptions.EventCount.
+		EventCount *int
+		Events     []EventsCreateEvent
 	}
 	// EventsGetInput holds the arguments to EventsGet.
 	EventsGetInput struct {
@@ -485,6 +512,11 @@ type (
 		CorrelationID string
 		// Data is the event payload, whose shape depends on EventType.
 		Data []byte
+		// OccurredAt is when the writer decided the event. A World stores an
+		// in-band write's OccurredAt as the event's CreatedAt, so a replay
+		// reads the time the writer used. A zero OccurredAt, or an
+		// out-of-band write, takes the World's clock.
+		OccurredAt time.Time
 	}
 	// EventsListInput holds the arguments to EventsList.
 	EventsListInput struct {
@@ -509,25 +541,60 @@ type (
 		CreatedAt time.Time
 		// Events holds the events selected by EventsCreateOptions.
 		Events []Event
+		// MoreEvents reports that an in-band write's skipped-slot report in
+		// Events is incomplete. The write was appended, and the writer reads
+		// the log before it uses anything the write resolves.
+		MoreEvents bool
 		// Step is the step created by a step_created event.
 		Step *Step
 		Hook *Hook
 		Data []byte
 		// StepCreated reports whether this call appended the step_created event.
 		StepCreated bool
-		// AllocatedEventCount is the number of events newly appended by this call.
+		// AllocatedEventCount is the number of positions this call
+		// allocated: one for an appended event, zero for a repeat.
 		AllocatedEventCount int
 		// InBandCount is the run's InBandCount after the call.
 		InBandCount int
 	}
-	// EventBatchResult is the result of EventsCreateBatch, with one
-	// EventResult per event in order.
+	// EventBatchResult is the result of EventsCreateBatch.
 	EventBatchResult struct {
-		Events []EventResult
+		// Results holds one result per event, in order.
+		Results []EventBatchItem
+		// Events is the skipped-slot report of an in-band batch with
+		// EventCount, and MoreEvents reports that it is incomplete, as in
+		// EventResult.
+		Events     []Event
+		MoreEvents bool
+		// AllocatedEventCount is the number of events the batch appended.
+		AllocatedEventCount int
 		// InBandCount is the run's InBandCount after the batch.
 		InBandCount int
 	}
+	// EventBatchItem is one event's outcome in an EventBatchResult: Err is
+	// its refusal, or nil when it was appended.
+	EventBatchItem struct {
+		EventResult
+		Err error
+	}
+	// EventsPage is one page of a run's events.
+	EventsPage struct {
+		Page[Event]
+		// Snapshot is the run's position counters, read before the page.
+		Snapshot EventsSnapshot
+	}
+	// EventsSnapshot is a run's position counters: EventCount, the number of
+	// positions in its log, and InBandCount, the positions in-band writes
+	// allocated, run_created's included.
+	EventsSnapshot struct {
+		EventCount  int
+		InBandCount int
+	}
 )
+
+// SpecVersion is the version of the Workflow SDK's specification every run
+// follows. A World records it on each run it creates.
+const SpecVersion = 9
 
 // Event is one entry in a run's event log.
 type Event struct {

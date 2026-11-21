@@ -124,7 +124,7 @@ func (w *World) recoverHandoff() error {
 		if err != nil {
 			return err
 		}
-		if _, err := claimant.append(handoff.Event, handoff.At); err != nil {
+		if _, err := claimant.append(handoff.Event, eventTime(handoff.Event, handoff.InBandCount, handoff.At)); err != nil {
 			return err
 		}
 		claimant.advance(handoff.InBandCount, 1)
