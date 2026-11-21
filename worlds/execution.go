@@ -68,6 +68,9 @@ type Execution struct {
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
 	inBand int
+	// startHook is the run's start hook, decoded once by StartHook.
+	startHook     *StartHook
+	startHookRead bool
 	// continuations holds callbacks that react as replay delivers events.
 	continuations []func()
 	// suspended marks a runtime exit before the workflow body finishes.
@@ -154,11 +157,12 @@ func (e *Execution) Run() Run {
 }
 
 // StartHook returns the start hook the run's run_created records, or nil.
+// It decodes run_created once per execution.
 func (e *Execution) StartHook() *StartHook {
-	if len(e.events) == 0 || e.events[0].EventType != EventTypeRunCreated {
-		return nil
+	if !e.startHookRead && len(e.events) > 0 && e.events[0].EventType == EventTypeRunCreated {
+		e.startHook, e.startHookRead = RunStartHook(e.events[0].Data), true
 	}
-	return RunStartHook(e.events[0].Data)
+	return e.startHook
 }
 
 // TargetStepID returns the step a step delivery executes. It reports false

@@ -72,6 +72,9 @@ type Capabilities struct {
 	// StartHook reports that EventsCreateRun creates a run's StartHook with
 	// it, as the Workflow SDK's atomicStartHook capability does.
 	StartHook bool `cbor:"startHook"`
+	// RegionalRunIDs reports that the World implements RegionalRunIDs, so
+	// clients ask it for new run IDs (Client.RunsNewID).
+	RegionalRunIDs bool `cbor:"regionalRunIds"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that

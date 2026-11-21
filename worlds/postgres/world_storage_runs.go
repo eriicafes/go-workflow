@@ -80,7 +80,7 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 // result slot. ResolveDataNone joins only a run_failed result, for the error.
 func runSelect(resolve worlds.ResolveData) string {
 	// Payloads read as NULL once the run's expired_at has passed.
-	live := " AND (r.expired_at IS NULL OR r.expired_at > now())"
+	live := runLive("r.run_id")
 	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = r.run_id AND ie.slot = 1"+live
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""

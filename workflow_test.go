@@ -417,6 +417,12 @@ func (regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.R
 	return id + worlds.RunID("_"+region.String())
 }
 
+func (w regionalWorld) Capabilities() worlds.Capabilities {
+	capabilities := w.World.Capabilities()
+	capabilities.RegionalRunIDs = true
+	return capabilities
+}
+
 func (regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
 	_, code, _ := strings.Cut(strings.TrimPrefix(string(id), "wrun_"), "_")
 	return worlds.ParseRegion(code)
