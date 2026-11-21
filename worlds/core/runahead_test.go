@@ -21,14 +21,16 @@ func TestRunAheadHazardClassifiesEventsBelowAWriteAhead(t *testing.T) {
 		{worlds.Event{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_observed"}, true},
 		{worlds.Event{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_observed"}, true},
 		{worlds.Event{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_system"}, true},
-		{worlds.Event{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_other"}, true},
-		{worlds.Event{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_other"}, true},
+		{worlds.Event{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_awaited"}, true},
+		{worlds.Event{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_awaited"}, true},
+		{worlds.Event{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_idle"}, false},
 		{worlds.Event{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_own"}, false},
 		{worlds.Event{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}, true},
 		{worlds.Event{EventType: worlds.EventTypeRunCancelled}, false},
 		{worlds.Event{EventType: worlds.EventTypeAttrSet}, false},
 	} {
-		if got := e.runAheadHazard(test.event, map[worlds.HookID]bool{"hook_observed": true}) != ""; got != test.hazard {
+		write := &aheadWrite{observed: map[worlds.HookID]bool{"hook_observed": true}, awaited: map[string]bool{"step_awaited": true, "step_own": true}}
+		if got := e.runAheadHazard(test.event, write) != ""; got != test.hazard {
 			t.Errorf("hazard(%s %s) = %v, want %v", test.event.EventType, test.event.CorrelationID, got, test.hazard)
 		}
 	}

@@ -62,6 +62,9 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"RunAheadFoldsUnwatchedHookPayloads", conformRunAheadFoldsUnwatchedHookPayloads},
 		{"RunAheadStopsAtPathChangingEvents", conformRunAheadStopsAtPathChangingEvents},
 		{"RunAheadStopsForAnotherTime", conformRunAheadStopsForAnotherTime},
+		{"RunAheadFoldsUnwatchedStepResults", conformRunAheadFoldsUnwatchedStepResults},
+		{"RunAheadRepairsTwiceInARow", conformRunAheadRepairsTwiceInARow},
+		{"RunAheadReadsAnIncompleteReport", conformRunAheadReadsAnIncompleteReport},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
