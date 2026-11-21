@@ -458,6 +458,13 @@ type DataAttrSet struct {
 	AllowReservedAttributes bool                  `json:"allowReservedAttributes,omitempty" cbor:"allowReservedAttributes,omitempty"`
 }
 
+// WorkflowAttrSet reports whether an attr_set's Data was written by the
+// workflow, whose attribute writes are recorded once per correlation ID.
+func WorkflowAttrSet(data []byte) bool {
+	var set DataAttrSet
+	return json.Unmarshal(data, &set) == nil && set.Writer.Type == AttributeWriterWorkflow
+}
+
 // EncodeAttrSet returns the Data of the attr_set event that applies input.
 func EncodeAttrSet(input RunsSetAttributesInput) ([]byte, error) {
 	data := DataAttrSet{Changes: input.Changes, Writer: AttributeWriter{Type: AttributeWriterWorkflow}, AllowReservedAttributes: input.AllowReservedAttributes}

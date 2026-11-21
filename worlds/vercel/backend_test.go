@@ -73,7 +73,9 @@ func TestClassify(t *testing.T) {
 		{http.StatusConflict, "run-terminal", worlds.EventTypeStepStarted, worlds.ErrRunTerminal},
 		{http.StatusConflict, "", worlds.EventTypeRunCompleted, worlds.ErrRunTerminal},
 		{http.StatusGone, "", worlds.EventTypeRunFailed, worlds.ErrRunTerminal},
-		{http.StatusConflict, "", worlds.EventTypeHookCreated, worlds.ErrHookConflict},
+		{http.StatusConflict, "", worlds.EventTypeHookCreated, worlds.ErrEventConflict},
+		{http.StatusConflict, "run-already-started", worlds.EventTypeRunStarted, worlds.ErrEventConflict},
+		{http.StatusConflict, "entity-conflict", worlds.EventTypeWaitCompleted, worlds.ErrEventConflict},
 		{http.StatusBadRequest, "validation-error", worlds.EventTypeAttrSet, worlds.ErrEventInvalid},
 	} {
 		err := classify(&apiError{Status: test.status, Code: test.code}, test.eventType)

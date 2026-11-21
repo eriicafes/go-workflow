@@ -164,7 +164,7 @@ test("raises structured RPC errors", async () => {
 		code: "not_found",
 		status: 404,
 		sentinel: "run_not_found",
-		name: HTTPWorldError.name,
+		name: "WorkflowRunNotFoundError",
 	});
 });
 

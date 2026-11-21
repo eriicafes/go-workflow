@@ -141,18 +141,20 @@ func conformTerminalSteps(t *testing.T, world worlds.World) {
 }
 
 // conformStepAdmission checks the step checks the runtime relies on: a
-// repeated step_created returns the earlier event, and a step's result is
+// repeated step_created is refused, and a step's result is
 // recorded whether or not its step is running.
 func conformStepAdmission(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "step_admission")
 	conformAppend(t, world, runID, worlds.EventTypeRunStarted, "", nil)
-	created := conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "first", Input: json.RawMessage(`"in"`)})
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "first", Input: json.RawMessage(`"in"`)})
 
-	// A repeated step_created returns the earlier event and keeps the step.
-	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "second"})})
-	if err != nil || repeat.EventID != created.EventID || repeat.AllocatedEventCount != 0 || repeat.StepCreated || repeat.Step == nil || repeat.Step.StepName != "first" {
-		t.Fatalf("repeated step_created = %#v step=%#v err=%v", repeat, repeat.Step, err)
+	// A repeated step_created is refused and keeps the step, as in the
+	// Workflow SDK's Worlds.
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "second"})})
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated step_created")
+	if step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"}); err != nil || step.StepName != "first" {
+		t.Fatalf("step after a repeated step_created = %#v err=%v", step, err)
 	}
 
 	// A step that ran out of attempts fails without starting, and a step
@@ -203,10 +205,8 @@ func conformInlineSteps(t *testing.T, world worlds.World) {
 		t.Fatalf("creating step_started without data = %#v err=%v", stripped, err)
 	}
 	// An inline step is created once.
-	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_inline", creation)})
-	if err != nil || repeat.EventID != started.EventID || repeat.AllocatedEventCount != 0 {
-		t.Fatalf("repeated creating step_started = %#v err=%v", repeat, err)
-	}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_inline", creation)})
+	conformExpect(t, err, worlds.ErrEventConflict, "repeated creating step_started")
 
 	// A failed inline attempt retries as a step delivery, which starts and
 	// completes it.

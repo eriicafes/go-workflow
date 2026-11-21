@@ -354,11 +354,26 @@ func classify(err error, eventType worlds.EventType) error {
 		return fmt.Errorf("%w: %v", worlds.ErrStartHookRejected, err)
 	case api.Status == http.StatusConflict && api.Code == "hook-force-claimed":
 		return fmt.Errorf("%w: %v", worlds.ErrHookForceClaimed, err)
+	case api.Status == http.StatusConflict && (api.Code == "run-already-started" || api.Code == "entity-conflict"):
+		// A repeat of an event the log holds, which world-vercel reports as
+		// an EntityConflictError: a run_started of a running run, or a
+		// second creation.
+		return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
 	case api.Status == http.StatusConflict, api.Status == http.StatusGone:
+		if strings.Contains(api.Code, "run") {
+			if eventType == worlds.EventTypeRunCreated {
+				return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
+			}
+			return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+		}
 		switch eventType {
 		case worlds.EventTypeRunCreated:
 			return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
-		case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet, worlds.EventTypeHookCreated:
+			// The backend refuses a second creation, as world-vercel's
+			// EntityConflictError reports it.
+			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
+		case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 			if strings.Contains(api.Code, "run") {
 				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
 			}
@@ -368,11 +383,6 @@ func classify(err error, eventType worlds.EventType) error {
 				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
 			}
 			return fmt.Errorf("%w: %v", worlds.ErrHookNotActive, err)
-		case worlds.EventTypeHookCreated:
-			if strings.Contains(api.Code, "run") {
-				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
-			}
-			return fmt.Errorf("%w: %v", worlds.ErrHookConflict, err)
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
 	case api.Status == http.StatusBadRequest || api.Status == http.StatusUnprocessableEntity || api.Status == http.StatusRequestEntityTooLarge:

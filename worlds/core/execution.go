@@ -534,12 +534,24 @@ func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(er
 			return worlds.EventResult{}
 		case errors.Is(err, worlds.ErrInBandSuperseded):
 			e.supersede()
+		case errors.Is(err, worlds.ErrEventConflict):
+			// Another writer recorded it, as the Workflow SDK's runtime
+			// takes an EntityConflictError: the log holds it now.
+			e.reload()
+			return worlds.EventResult{}
 		default:
 			panic(e.exit(deliveryError{cause: err}))
 		}
 	}
 	if inBand != nil {
 		e.inBand = result.InBandCount
+	}
+	if result.EventID == "" {
+		// The World appended nothing, such as for a run that started
+		// before: the log holds what the event would record.
+		e.mergeEvents(result.Events)
+		e.reload()
+		return result
 	}
 	data := event.Data
 	if result.Data != nil {

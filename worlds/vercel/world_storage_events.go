@@ -27,18 +27,6 @@ type createResponse struct {
 	HasMore bool             `cbor:"hasMore"`
 }
 
-// repeatable lists the event types whose repeat returns the event that
-// admitted the transition instead of failing. The backend refuses a repeat as
-// a conflict, so the World finds that event.
-var repeatable = map[worlds.EventType]bool{
-	worlds.EventTypeRunStarted:    true,
-	worlds.EventTypeRunCancelled:  true,
-	worlds.EventTypeStepCreated:   true,
-	worlds.EventTypeHookCreated:   true,
-	worlds.EventTypeWaitCreated:   true,
-	worlds.EventTypeWaitCompleted: true,
-}
-
 // runCreationMeta returns the frame meta of a run's creation, which
 // run_created carries, and a first flow's run_started too.
 func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType worlds.EventType) map[string]any {
@@ -136,14 +124,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	response, err := w.postEvent(ctx, input.RunID, input.Event.EventType, meta, payload)
 	if err != nil {
-		err = classify(err, input.Event.EventType)
-		var conflict *worlds.HookConflictError
-		if repeatable[input.Event.EventType] && !errors.Is(err, worlds.ErrInBandSuperseded) && !errors.Is(err, worlds.ErrRunNotFound) && !errors.As(err, &conflict) && !errors.Is(err, worlds.ErrStartHookRejected) {
-			if result, found, findErr := w.findAdmitted(ctx, input, held, hasHeld); findErr != nil || found {
-				return result, findErr
-			}
-		}
-		return worlds.EventResult{}, err
+		return worlds.EventResult{}, classify(err, input.Event.EventType)
 	}
 	wire := wireEventFromMap(response.Event)
 	event, err := toEvent(input.RunID, wire, worlds.EventsResolveDataAll)
@@ -246,55 +227,6 @@ func (w *World) catchUp(ctx context.Context, input worlds.EventsCreateInput, res
 	return nil
 }
 
-// findAdmitted returns the earlier event that admitted the transition input
-// repeats, when there is one.
-func (w *World) findAdmitted(ctx context.Context, input worlds.EventsCreateInput, held int, hasHeld bool) (worlds.EventResult, bool, error) {
-	var events []worlds.Event
-	if input.Event.CorrelationID != "" {
-		page, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: input.Event.CorrelationID})
-		if err != nil {
-			return worlds.EventResult{}, false, err
-		}
-		events = page.Data
-	} else {
-		page, err := w.listEvents(ctx, input.RunID, 0, 0, worlds.EventsResolveDataAll)
-		if err != nil {
-			return worlds.EventResult{}, false, err
-		}
-		events = page.Events
-	}
-	for _, event := range events {
-		matches := event.EventType == input.Event.EventType || (input.Event.EventType == worlds.EventTypeHookCreated && event.EventType == worlds.EventTypeHookConflict)
-		if !matches || event.CorrelationID != input.Event.CorrelationID {
-			continue
-		}
-		result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data}
-		if input.Options.InBandCount != nil {
-			result.InBandCount = *input.Options.InBandCount
-		}
-		if input.Event.EventType == worlds.EventTypeStepCreated {
-			step, err := w.StepsGet(ctx, worlds.StepsGetInput{RunID: input.RunID, StepID: worlds.StepID(input.Event.CorrelationID)})
-			if err != nil {
-				return worlds.EventResult{}, false, err
-			}
-			result.Step = &step
-		}
-		if hasHeld {
-			page, err := w.listEvents(ctx, input.RunID, held, 0, input.Options.ResolveData)
-			if err != nil {
-				return worlds.EventResult{}, false, err
-			}
-			for _, later := range page.Events {
-				if later.EventID != event.EventID {
-					result.Events = append(result.Events, later)
-				}
-			}
-		}
-		return result, true, nil
-	}
-	return worlds.EventResult{}, false, nil
-}
-
 // batchResponse is the answer to a batch write: one outcome per event.
 type batchResponse struct {
 	Results []struct {
@@ -370,22 +302,11 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			if errors.Is(err, worlds.ErrInBandSuperseded) {
 				return worlds.EventBatchResult{}, err
 			}
-			if repeatable[event.EventType] && item.Status == http.StatusConflict && item.Error != "batch-earlier-item-failed" {
-				// A batch appends new transitions only, so one that repeats
-				// an admitted transition is invalid.
-				_, repeated, findErr := w.findAdmitted(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: event}, 0, false)
-				if findErr != nil {
-					return worlds.EventBatchResult{}, findErr
-				}
-				if repeated {
-					err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, event.EventType, event.CorrelationID)
-				}
-			}
 			result.Results[index].Err = err
 			continue
 		}
 		if item.Allocated != nil && *item.Allocated == 0 {
-			result.Results[index].Err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, event.EventType, event.CorrelationID)
+			result.Results[index].Err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
 			continue
 		}
 		appended, err := toEvent(input.RunID, wireEventFromMap(item.Event), worlds.EventsResolveDataAll)

@@ -73,6 +73,7 @@ var rpcSentinels = []struct {
 	{"event_not_found", "not_found", ErrEventNotFound},
 	{"hook_not_found", "not_found", ErrHookNotFound},
 	{"event_invalid", "invalid_argument", ErrEventInvalid},
+	{"event_conflict", "conflict", ErrEventConflict},
 	{"run_already_exists", "conflict", ErrRunAlreadyExists},
 	{"run_terminal", "conflict", ErrRunTerminal},
 	{"step_not_startable", "conflict", ErrStepNotStartable},
@@ -644,14 +645,15 @@ type (
 
 // RPCEventResult is the output of the events.create and events.createRun RPC
 // methods: the committed Event and the run, step, or hook it created or
-// changed.
+// changed. Event is nil for an event accepted without appending, such as a
+// run_started of a running run.
 type RPCEventResult struct {
-	Event       *Event
-	Run         *Run  `cbor:",omitempty"`
-	Step        *Step `cbor:",omitempty"`
-	Hook        *Hook `cbor:",omitempty"`
-	Wait        *Wait `cbor:",omitempty"`
-	StepCreated bool  `cbor:",omitempty"`
+	Event       *Event `cbor:",omitempty"`
+	Run         *Run   `cbor:",omitempty"`
+	Step        *Step  `cbor:",omitempty"`
+	Hook        *Hook  `cbor:",omitempty"`
+	Wait        *Wait  `cbor:",omitempty"`
+	StepCreated bool   `cbor:",omitempty"`
 	// Allocated is the number of positions the write allocated in the log.
 	Allocated   int
 	InBandCount int
@@ -690,6 +692,21 @@ type RPCBatchEventResult struct {
 // rpcEventResult reads the committed event of result and the entity it
 // created or changed.
 func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID string, result EventResult) (RPCEventResult, error) {
+	if result.EventID == "" {
+		// An event accepted without appending, such as a run_started of a
+		// running run, is answered with the run alone, as world-local's is.
+		value := RPCEventResult{Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
+		run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID})
+		if err != nil {
+			return RPCEventResult{}, err
+		}
+		value.Run = &run
+		if result.Events != nil {
+			hasMore := result.MoreEvents
+			value.Events, value.HasMore = result.Events, &hasMore
+		}
+		return value, nil
+	}
 	event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID})
 	if err != nil {
 		return RPCEventResult{}, err

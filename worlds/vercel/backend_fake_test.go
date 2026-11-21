@@ -516,13 +516,11 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		}
 		return refuse(err)
 	}
-	// The backend refuses a repeated transition instead of answering with
-	// the event that admitted it, except run_started.
-	// A repeated resume returns the event it committed, as world-local's
-	// does.
-	resumed := eventType == worlds.EventTypeHookReceived && str(in.Meta, "resumeId") != ""
-	if result.AllocatedEventCount == 0 && eventType != worlds.EventTypeRunStarted && eventType != worlds.EventTypeStepStarted && !resumed {
-		return outcome{status: http.StatusConflict, code: "entity-conflict", message: "already " + string(eventType)}
+	// The backend refuses a run_started of a running run as a conflict
+	// (@workflow/errors RUN_ALREADY_STARTED_CODE), where world-local appends
+	// nothing.
+	if eventType == worlds.EventTypeRunStarted && result.EventID == "" {
+		return outcome{status: http.StatusConflict, code: "run-already-started", message: "run already started"}
 	}
 	event, err := f.store.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: result.EventID})
 	if err != nil {
@@ -866,6 +864,8 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusNotFound, "not-found"
 	case errors.Is(err, worlds.ErrHookNotFound), errors.Is(err, worlds.ErrHookNotActive):
 		return http.StatusNotFound, "hook-not-found"
+	case errors.Is(err, worlds.ErrEventConflict):
+		return http.StatusConflict, "entity-conflict"
 	case errors.Is(err, worlds.ErrRunAlreadyExists):
 		return http.StatusConflict, "run-exists"
 	case errors.Is(err, worlds.ErrRunTerminal):

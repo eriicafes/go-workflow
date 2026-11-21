@@ -148,9 +148,12 @@ when it occurred, which the World stores as its `CreatedAt`.
   its token (`ErrHookNotFound`, or `ErrHookForceClaimed` after a forced claim).
   A hook, a webhook included, receives repeated payloads, consumed in order with `Next`.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
-- An event that repeats an admitted transition, such as a second
-  `run_started`, `step_created`, or `hook_disposed`, returns the earlier event
-  without appending.
+- An event that repeats a creation the log holds, a second `step_created`,
+  `wait_created`, `wait_completed`, `hook_created`, inline step creation, or
+  workflow `attr_set` of one correlation ID, is refused with
+  `ErrEventConflict`, as the Workflow SDK's Worlds refuse it. A `run_started`
+  of a running run appends nothing, and a `run_cancelled` of a cancelled run
+  is recorded and changes nothing.
 - A batch is fenced as one block, but not all-or-nothing: each event gets its
   own outcome, and once one is refused, every later event of the batch with
   the same correlation ID is refused too.

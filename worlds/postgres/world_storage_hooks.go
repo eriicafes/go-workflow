@@ -128,6 +128,13 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		if err := claimant.fence(input.Options.InBandCount); err != nil {
 			return err
 		}
+		// A hook is created once, as world-postgres's unique index on a
+		// run's creations keeps it.
+		if earlier, err := claimant.replay(ctx, worlds.EventTypeHookCreated, input.Event.CorrelationID, false); err != nil {
+			return err
+		} else if earlier.EventID != "" {
+			return fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, input.Event.CorrelationID)
+		}
 		holder, err := w.lockToken(ctx, tx, token, now())
 		if err != nil {
 			return err
