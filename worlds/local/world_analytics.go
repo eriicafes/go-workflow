@@ -2,8 +2,6 @@ package localworld
 
 import (
 	"context"
-	"encoding/json"
-	"maps"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -23,7 +21,7 @@ func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInp
 	var run worlds.AnalyticsRun
 	err := a.world.read(ctx, func(s *store) error {
 		record, err := s.getRun(input.RunID)
-		run = analyticsRun(record.Run)
+		run = worlds.NewAnalyticsRun(record.Run)
 		return err
 	})
 	return run, err
@@ -53,7 +51,7 @@ func (a analytics) matchingRuns(ctx context.Context, workflowName string, status
 			}
 		}
 		if matched {
-			runs = append(runs, analyticsRun(run))
+			runs = append(runs, worlds.NewAnalyticsRun(run))
 		}
 	}
 	return runs, nil
@@ -98,67 +96,4 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	pagination := input.Pagination
 	pagination.SortOrder = worlds.SortOrderAscending
 	return keyPage(values, pagination, func(item worlds.AnalyticsAttribute) string { return item.Key })
-}
-
-func (a analytics) WaitsGet(ctx context.Context, input worlds.AnalyticsWaitsGetInput) (worlds.AnalyticsWait, error) {
-	waits, err := a.waits(ctx, input.RunID)
-	if err != nil {
-		return worlds.AnalyticsWait{}, err
-	}
-	for _, wait := range waits {
-		if wait.WaitID == input.WaitID {
-			return wait, nil
-		}
-	}
-	return worlds.AnalyticsWait{}, worlds.ErrEventNotFound
-}
-
-func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsListInput) (worlds.Page[worlds.AnalyticsWait], error) {
-	waits, err := a.waits(ctx, input.RunID)
-	if err != nil {
-		return worlds.Page[worlds.AnalyticsWait]{}, err
-	}
-	pagination := input.Pagination
-	pagination.SortOrder = worlds.SortOrderAscending
-	return keyPage(waits, pagination, func(wait worlds.AnalyticsWait) string { return sortKey(wait.CreatedAt, string(wait.WaitID)) })
-}
-
-// waits derives waits from the run's committed wait_created and
-// wait_completed events.
-func (a analytics) waits(ctx context.Context, runID worlds.RunID) ([]worlds.AnalyticsWait, error) {
-	var events []worlds.Event
-	if err := a.world.read(ctx, func(s *store) error {
-		run, err := s.getRun(runID)
-		if err != nil {
-			return err
-		}
-		events, err = s.readEvents(runID, 1, run.EventCount)
-		return err
-	}); err != nil {
-		return nil, err
-	}
-	index := map[worlds.WaitID]int{}
-	var waits []worlds.AnalyticsWait
-	for _, event := range events {
-		id := worlds.WaitID(event.CorrelationID)
-		switch event.EventType {
-		case worlds.EventTypeWaitCreated:
-			var data worlds.DataWaitCreated
-			if json.Unmarshal(event.Data, &data) != nil {
-				continue
-			}
-			index[id] = len(waits)
-			waits = append(waits, worlds.AnalyticsWait{RunID: runID, WaitID: id, DueAt: data.ResumeAt, CreatedAt: event.CreatedAt})
-		case worlds.EventTypeWaitCompleted:
-			if position, ok := index[id]; ok {
-				at := event.CreatedAt
-				waits[position].CompletedAt = &at
-			}
-		}
-	}
-	return waits, nil
-}
-
-func analyticsRun(run worlds.Run) worlds.AnalyticsRun {
-	return worlds.AnalyticsRun{RunID: run.RunID, WorkflowName: run.WorkflowName, Status: run.Status, Attributes: maps.Clone(run.Attributes), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt}
 }

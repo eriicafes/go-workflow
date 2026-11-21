@@ -300,6 +300,16 @@ func EncodeRunFailed(err error, options PayloadOptions) ([]byte, error) {
 	return json.Marshal(DataRunFailed{Error: payload, ErrorCode: runErrorCode(err)})
 }
 
+// RunFailedErrorCode returns the ErrorCode of a run_failed event's Data,
+// "" when it has none.
+func RunFailedErrorCode(data []byte) string {
+	var failed DataRunFailed
+	if json.Unmarshal(data, &failed) != nil {
+		return ""
+	}
+	return failed.ErrorCode
+}
+
 // RunErrorCoder is implemented by an error that names the ErrorCode of the
 // run_failed event a run that failed with it records.
 type RunErrorCoder interface{ RunErrorCode() string }

@@ -83,6 +83,7 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		WorkflowName:        str(values, "workflowName"),
 		Status:              worlds.Status(str(values, "status")),
 		Error:               payloadBytes(values["error"]),
+		ErrorCode:           str(values, "errorCode"),
 		Attributes:          stringMap(values["attributes"]),
 		DeploymentID:        str(values, "deploymentId"),
 		EncryptionPublicKey: str(values, "encryptionPublicKey"),

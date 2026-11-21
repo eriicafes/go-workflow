@@ -203,7 +203,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	}
 	analytics := world.Analytics()
 	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: "wrun_wait_analytics", WaitID: "wait_1"})
-	if err != nil || !wait.DueAt.Equal(dueAt) {
+	if err != nil || wait.ResumeAt == nil || !wait.ResumeAt.Equal(dueAt) || wait.Status != worlds.WaitStatusWaiting {
 		t.Fatalf("wait = %#v, %v", wait, err)
 	}
 	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_wait_analytics"})

@@ -1043,6 +1043,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusCompleted, &now, event.EventID
 	case worlds.EventTypeRunFailed:
 		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusFailed, &now, event.EventID
+		view.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		view.Status, view.CompletedAt, view.cancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:

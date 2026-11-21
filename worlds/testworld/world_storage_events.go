@@ -458,6 +458,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		run.Status, run.CompletedAt = worlds.StatusCompleted, &now
 	case worlds.EventTypeRunFailed:
 		run.Status, run.CompletedAt = worlds.StatusFailed, &now
+		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		run.Status, run.CompletedAt = worlds.StatusCancelled, &now
 	case worlds.EventTypeAttrSet:
@@ -612,7 +613,7 @@ func (m *World) analyticsRunsGet(ctx context.Context, input worlds.AnalyticsRuns
 	if err != nil {
 		return worlds.AnalyticsRun{}, err
 	}
-	return analyticsRun(run), nil
+	return worlds.NewAnalyticsRun(run), nil
 }
 
 func (m *World) analyticsRunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
@@ -636,7 +637,7 @@ func (m *World) analyticsRunsList(ctx context.Context, input worlds.AnalyticsRun
 			}
 		}
 		if matched {
-			values = append(values, analyticsRun(run))
+			values = append(values, worlds.NewAnalyticsRun(run))
 		}
 	}
 	return page(values, input.Pagination), nil

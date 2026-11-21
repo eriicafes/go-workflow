@@ -162,8 +162,8 @@ type AnalyticsHook struct {
 	IsSystem   bool
 }
 
-// LogAnalytics implements AnalyticsSteps, AnalyticsEvents, and
-// AnalyticsHooks from a World's storage reads, as the Workflow SDK's
+// LogAnalytics implements AnalyticsSteps, AnalyticsEvents, AnalyticsHooks,
+// and AnalyticsWaits from a World's storage reads, as the Workflow SDK's
 // analytics report them. A World embeds it in its Analytics.
 type LogAnalytics struct{ World World }
 
@@ -470,4 +470,58 @@ func keyPage[T any](values []T, pagination Pagination, key func(T) string) (Page
 		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
 	}
 	return page, nil
+}
+
+func (a LogAnalytics) WaitsGet(ctx context.Context, input AnalyticsWaitsGetInput) (AnalyticsWait, error) {
+	waits, err := a.waits(ctx, input.RunID)
+	if err != nil {
+		return AnalyticsWait{}, err
+	}
+	for _, wait := range waits {
+		if wait.WaitID == input.WaitID {
+			return wait, nil
+		}
+	}
+	return AnalyticsWait{}, ErrEventNotFound
+}
+
+func (a LogAnalytics) WaitsList(ctx context.Context, input AnalyticsWaitsListInput) (Page[AnalyticsWait], error) {
+	waits, err := a.waits(ctx, input.RunID)
+	if err != nil {
+		return Page[AnalyticsWait]{}, err
+	}
+	if input.Status != "" {
+		waits = slices.DeleteFunc(waits, func(wait AnalyticsWait) bool { return wait.Status != input.Status })
+	}
+	return keyPage(waits, input.Pagination, func(wait AnalyticsWait) string {
+		return wait.CreatedAt.UTC().Format(time.RFC3339Nano) + "/" + string(wait.WaitID)
+	})
+}
+
+// waits folds a run's wait events, in log order, into its waits.
+func (a LogAnalytics) waits(ctx context.Context, runID RunID) ([]AnalyticsWait, error) {
+	events, err := a.log(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	var waits []AnalyticsWait
+	index := map[string]int{}
+	for _, event := range events {
+		switch event.EventType {
+		case EventTypeWaitCreated:
+			wait := AnalyticsWait{RunID: runID, WaitID: WaitID(event.CorrelationID), Status: WaitStatusWaiting, CreatedAt: event.CreatedAt, UpdatedAt: event.CreatedAt}
+			var created DataWaitCreated
+			if json.Unmarshal(event.Data, &created) == nil && !created.ResumeAt.IsZero() {
+				wait.ResumeAt = &created.ResumeAt
+			}
+			index[event.CorrelationID] = len(waits)
+			waits = append(waits, wait)
+		case EventTypeWaitCompleted:
+			if i, found := index[event.CorrelationID]; found && waits[i].CompletedAt == nil {
+				at := event.CreatedAt
+				waits[i].Status, waits[i].UpdatedAt, waits[i].CompletedAt = WaitStatusCompleted, at, &at
+			}
+		}
+	}
+	return waits, nil
 }

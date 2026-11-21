@@ -171,6 +171,7 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	}
 	setString(item, "deploymentId", run.DeploymentID)
 	setString(item, "encryptionPublicKey", run.EncryptionPublicKey)
+	setString(item, "errorCode", run.ErrorCode)
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	setString(item, "resultEventId", string(view.resultEventID))
@@ -206,6 +207,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			Attributes:          attributes,
 			DeploymentID:        read(item, "deploymentId"),
 			EncryptionPublicKey: read(item, "encryptionPublicKey"),
+			ErrorCode:           read(item, "errorCode"),
 			InBandCount:         int(readInt(item, "inBandCount")),
 			SpecVersion:         int(readInt(item, "specVersion")),
 			CreatedAt:           readTime(item, "createdAt"),

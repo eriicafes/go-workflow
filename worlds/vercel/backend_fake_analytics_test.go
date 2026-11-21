@@ -100,7 +100,7 @@ func (f *fakeBackend) analytics(ctx context.Context, writer http.ResponseWriter,
 		value = wireAnalyticsWait(wait)
 	case len(parts) == 3 && parts[0] == "runs" && parts[2] == "waits":
 		var page worlds.Page[worlds.AnalyticsWait]
-		page, err = store.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: worlds.RunID(parts[1]), Pagination: pagination(query)})
+		page, err = store.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: worlds.RunID(parts[1]), Status: worlds.WaitStatus(first("status")), Pagination: pagination(query)})
 		value = wirePage(page, wireAnalyticsWait)
 	default:
 		writeError(writer, http.StatusNotFound, "", "no analytics route "+request.URL.Path)
@@ -132,7 +132,7 @@ func naivePtr(at *time.Time) any {
 }
 
 func wireAnalyticsRun(run worlds.AnalyticsRun) map[string]any {
-	return map[string]any{"runId": string(run.RunID), "status": string(run.Status), "workflowName": run.WorkflowName, "deploymentId": "", "attributes": run.Attributes, "createdAt": naive(run.CreatedAt), "updatedAt": naive(run.UpdatedAt), "startedAt": naivePtr(run.StartedAt), "completedAt": naivePtr(run.CompletedAt)}
+	return map[string]any{"runId": string(run.RunID), "status": string(run.Status), "workflowName": run.WorkflowName, "deploymentId": run.DeploymentID, "specVersion": run.SpecVersion, "errorCode": nilIfEmpty(run.ErrorCode), "attributes": run.Attributes, "createdAt": naive(run.CreatedAt), "updatedAt": naive(run.UpdatedAt), "startedAt": naivePtr(run.StartedAt), "completedAt": naivePtr(run.CompletedAt)}
 }
 
 func wireAnalyticsStep(step worlds.AnalyticsStep) map[string]any {
@@ -155,5 +155,5 @@ func wireAnalyticsHook(hook worlds.AnalyticsHook) map[string]any {
 }
 
 func wireAnalyticsWait(wait worlds.AnalyticsWait) map[string]any {
-	return map[string]any{"runId": string(wait.RunID), "waitId": string(wait.WaitID), "status": "waiting", "resumeAt": naive(wait.DueAt), "createdAt": naive(wait.CreatedAt), "updatedAt": naive(wait.CreatedAt), "completedAt": naivePtr(wait.CompletedAt)}
+	return map[string]any{"runId": string(wait.RunID), "waitId": string(wait.WaitID), "status": string(wait.Status), "resumeAt": naivePtr(wait.ResumeAt), "createdAt": naive(wait.CreatedAt), "updatedAt": naive(wait.UpdatedAt), "completedAt": naivePtr(wait.CompletedAt)}
 }

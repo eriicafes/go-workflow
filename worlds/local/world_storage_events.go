@@ -320,6 +320,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		run.Status, run.CompletedAt, run.OutputSlot = worlds.StatusCompleted, &now, eventSlot(event)
 	case worlds.EventTypeRunFailed:
 		run.Status, run.CompletedAt, run.ErrorSlot = worlds.StatusFailed, &now, eventSlot(event)
+		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
 	case worlds.EventTypeAttrSet:

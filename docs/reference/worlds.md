@@ -205,6 +205,7 @@ type Run struct {
 	Input        []byte // payload: the argument list, [input]
 	Output       []byte // payload
 	Error        []byte // payload; DecodeErrorPayload decodes it
+	ErrorCode    string // a failed run's error category, such as USER_ERROR
 	Attributes   map[string]string
 	DeploymentID string // the deployment the run is pinned to
 	EncryptionPublicKey string // base64, set when the run's payloads are encrypted
@@ -418,11 +419,12 @@ own without their payloads:
 | `AnalyticsSteps` | `StepsGet`, `StepsList` | A run's steps. |
 | `AnalyticsEvents` | `EventsGet`, `EventsGetMany`, `EventsList`, `EventsListByCorrelationID` | A run's events, with the run's workflow and deployment, filtered by type or correlation ID. |
 | `AnalyticsHooks` | `HooksGet`, `HooksList` | A run's hooks, read from their events, so a disposed hook is still reported, with its status and when it was received and disposed. |
-| `AnalyticsWaits` | `WaitsGet`, `WaitsList` | A run's waits. |
+| `AnalyticsWaits` | `WaitsGet`, `WaitsList` | A run's waits, read from their events, so a finished run's waits are still reported, filtered by status. |
 
 A World returns it only when `Capabilities().Analytics` is true.
-`worlds.LogAnalytics` implements the steps, events, and hooks from a World's
-storage reads, for a World to embed.
+`worlds.LogAnalytics` implements the steps, events, hooks, and waits from a
+World's storage reads, for a World to embed. A time window takes both
+`StartTime` and `EndTime` or neither, as the Workflow SDK's analytics do.
 
 ## Client
 
