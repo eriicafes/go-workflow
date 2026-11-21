@@ -113,3 +113,23 @@ func TestExecutionDrawsFromRunSeed(t *testing.T) {
 		}
 	}
 }
+
+// TestNextHookIDSkipsTheStartHookID checks that a hook never draws the ID of
+// the run's start hook, hook_ and the run ID's ULID.
+func TestNextHookIDSkipsTheStartHookID(t *testing.T) {
+	run := Run{RunID: "wrun_01JQ8Z5K3M4N5P6Q7R8S9T0VW1", WorkflowName: "w"}
+	created, err := json.Marshal(DataRunCreated{StartHook: &StartHook{Token: "start", HookID: StartHookID(run.RunID)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := newExecution(t.Context(), nil, run, []Event{{EventType: EventTypeRunCreated, Data: created}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make the next correlation ULID the run's own.
+	copy(execution.seed.last[:], "4N5P6Q7R8S9T0VW0")
+	execution.seed.minted = true
+	if id := execution.NextHookID(); id != "hook_01JQ8Z5K3M4N5P6Q7R8S9T0VW2" {
+		t.Fatalf("NextHookID = %s, want the ID after the start hook's", id)
+	}
+}

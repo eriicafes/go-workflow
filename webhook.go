@@ -39,7 +39,8 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 	if len(options) != 0 {
 		option = options[len(options)-1]
 	}
-	hook := &Hook[worlds.WebhookRequest]{declared: execution.NextHookID(), token: worlds.NewHookToken(), isWebhook: true}
+	hook := &Hook[worlds.WebhookRequest]{declared: execution.NextHookID(), isWebhook: true}
+	hook.token = execution.NextHookToken()
 	if option.Manual || option.Response != nil {
 		metadata := worlds.WebhookMetadata{Manual: option.Manual}
 		if !option.Manual {
