@@ -41,20 +41,19 @@ type Config struct {
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
 	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
-	// delivery due then, which deletes its data as the Workflow SDK does: the
-	// run, step, event, hook, and token items stay, and its streams are left
-	// empty and closed. Zero keeps the data. A run created with $retention
-	// "0" loses its data as it finishes, whatever Retention is. Retention
-	// over 15 minutes, the SQS delay limit, requires Scheduler.
+	// delivery due then, which deletes its data: the run, step, event, hook,
+	// and token items stay, and its streams are left empty and closed. Zero
+	// keeps the data. A run created with $retention "0" loses its data as it
+	// finishes, whatever Retention is. Retention over 15 minutes, the SQS
+	// delay limit, requires Scheduler.
 	Retention time.Duration
 	// Retentions overrides Retention for the workflows it names, by workflow
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
 	// forever. Any retention over 15 minutes requires Scheduler.
 	Retentions map[string]time.Duration
 	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
-	// key derived from it for the run, as the Workflow SDK does. Empty leaves
-	// payloads unencrypted. Changing it leaves earlier runs' payloads
-	// unreadable.
+	// key derived from it for the run. Empty leaves payloads unencrypted.
+	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
 }
 

@@ -55,7 +55,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	creationIndex, exists := options.Execution.index[position]
 	if !exists {
 		// First execution persists the declaration and dispatches its target work.
-		stepID := NewStepIDAt(position)
+		stepID := NewStepID(position)
 		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}

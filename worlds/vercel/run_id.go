@@ -29,8 +29,8 @@ const (
 	runIDRegionUnknown = 0
 )
 
-// regionIDs maps each region to the ID world-vercel encodes in run IDs. IDs
-// are never reordered or reused.
+// regionIDs maps each region to the ID encoded in its run IDs. IDs are never
+// reordered or reused.
 var regionIDs = map[worlds.Region]byte{
 	worlds.RegionIAD1: 1, worlds.RegionSFO1: 2, worlds.RegionPDX1: 3, worlds.RegionCLE1: 4,
 	worlds.RegionYUL1: 5, worlds.RegionGRU1: 6, worlds.RegionDUB1: 7, worlds.RegionLHR1: 8,
@@ -41,7 +41,7 @@ var regionIDs = map[worlds.Region]byte{
 }
 
 // envRegion returns the region of VERCEL_REGION, or iad1 when it names none
-// of the Workflow SDK's regions, as outside a deployment.
+// of the worlds.Region values, as outside a deployment.
 func envRegion() worlds.Region {
 	if region, ok := worlds.ParseRegion(os.Getenv("VERCEL_REGION")); ok {
 		return region
@@ -50,15 +50,15 @@ func envRegion() worlds.Region {
 }
 
 // RegionRunID returns id tagged with region, or with the region of
-// VERCEL_REGION, else iad1, for the zero Region, as world-vercel's
-// createRunId does. An id that is not wrun_ and a ULID is returned unchanged.
+// VERCEL_REGION, else iad1, for the zero Region. An id that is not wrun_ and
+// a ULID is returned unchanged.
 func (w *World) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
 	return tagRunID(id, region)
 }
 
-// RegionForRunID returns the region a run's data lives in, as world-vercel's
-// regionForRunId does: a tagged ID's region, and iad1 for an untagged one or
-// a region this package does not know.
+// RegionForRunID returns the region a run's data lives in: a tagged ID's
+// region, and iad1 for an untagged one or a region this package does not
+// know.
 func (w *World) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
 	return runRegion(id)
 }

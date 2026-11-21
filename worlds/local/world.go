@@ -35,9 +35,8 @@ type Config struct {
 	// Empty uses http://localhost:3000/v1/workflow.
 	BaseURL string
 	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
-	// key derived from it for the run, as the Workflow SDK does. Empty leaves
-	// payloads unencrypted. Changing it leaves earlier runs' payloads
-	// unreadable.
+	// key derived from it for the run. Empty leaves payloads unencrypted.
+	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
 }
 

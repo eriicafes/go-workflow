@@ -21,6 +21,10 @@ var (
 	// ErrInvalidStartOptions is returned by Start for StartOptions it cannot
 	// use, such as a ReplayedFromRunID that is not a run ID.
 	ErrInvalidStartOptions = errors.New("workflow: invalid start options")
+	// ErrStartHookOptions is the error of a hook that opens its run's start
+	// hook with HookOption.MinRetention or Force, which only
+	// StartOptions.Hook can set.
+	ErrStartHookOptions = worlds.ErrStartHookOptions
 	// ErrRunExpired is returned when awaiting a run whose data was deleted,
 	// such as a run started with RetainNone.
 	ErrRunExpired = worlds.ErrRunExpired

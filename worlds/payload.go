@@ -37,7 +37,7 @@ import (
 // a Go run's data as its own. A payload starts with a 4-byte label, and labels
 // nest: devalue text (devl), optionally compressed (zstd or gzip), optionally
 // encrypted with the run's key (encr) or sealed to the run's public key
-// (encp). Values map onto the SDK's devalue types: []byte is a Uint8Array,
+// (encp). Values map onto devalue's JavaScript types: []byte is a Uint8Array,
 // time.Time a Date, *big.Int a BigInt, *url.URL a URL, http.Header Headers,
 // a map with keys other than strings a Map, and an error an Error.
 
@@ -59,7 +59,7 @@ const (
 	payloadCompressSavings = 0.05
 	payloadNonceSize       = 12
 	payloadKeySize         = 32
-	// payloadMaxFrame bounds a stream frame, as the Workflow SDK does.
+	// payloadMaxFrame bounds a stream frame.
 	payloadMaxFrame = 100_000_000
 
 	payloadScalarInfo     = "workflow/encp/x25519/v1"
@@ -81,10 +81,10 @@ type PayloadUnmarshaler interface {
 	UnmarshalPayload(decode func(any) error) error
 }
 
-// PayloadReduced is a value of a type the Workflow SDK reduces, devalue's
-// ["Type", value], such as a Request or a ReadableStream reference. Decoding
-// into a PayloadReduced whose Value holds a pointer decodes the reduced
-// value into it; otherwise Value holds it as an any does.
+// PayloadReduced is a value of a reduced type, devalue's ["Type", value],
+// such as a Request or a ReadableStream reference. Decoding into a
+// PayloadReduced whose Value holds a pointer decodes the reduced value into
+// it; otherwise Value holds it as an any does.
 type PayloadReduced struct {
 	Type  string
 	Value any
@@ -206,9 +206,9 @@ func protectPayload(data []byte, keys *RunKeys, sealTo []byte) ([]byte, error) {
 	return data, nil
 }
 
-// compressPayload compresses a labelled payload as the Workflow SDK does:
-// payloads of at least 1 KiB, kept only when that saves at least 5%. It
-// writes zstd at the SDK's level, or gzip with WORKFLOW_COMPRESSION_CODEC=gzip.
+// compressPayload compresses a labelled payload: payloads of at least 1 KiB,
+// kept only when that saves at least 5%. It writes zstd at level 3, or gzip
+// with WORKFLOW_COMPRESSION_CODEC=gzip.
 // WORKFLOW_DISABLE_COMPRESSION=1 turns it off.
 func compressPayload(data []byte) []byte {
 	if len(data) < payloadCompressMin || os.Getenv("WORKFLOW_DISABLE_COMPRESSION") == "1" {
@@ -232,10 +232,10 @@ func compressPayload(data []byte) []byte {
 	return labelPayload(label, compressed)
 }
 
-// newZstdEncoder returns an encoder at zstd level 3, the SDK's, or nil if
-// one cannot be made, and payloads are then written with gzip. It is made for
-// the call, as unzstd's decoder is, since an encoder's channels cannot be
-// shared across synctest bubbles.
+// newZstdEncoder returns an encoder at zstd level 3, or nil if one cannot be
+// made, and payloads are then written with gzip. It is made for the call, as
+// unzstd's decoder is, since an encoder's channels cannot be shared across
+// synctest bubbles.
 func newZstdEncoder() *zstd.Encoder {
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
 	if err != nil {
@@ -265,9 +265,9 @@ func gunzip(data []byte) ([]byte, error) {
 
 // Keys
 
-// DeriveRunKey returns a run's 32-byte key derived from a 32-byte key, as
-// the Workflow SDK's Vercel World derives it from a deployment key:
-// HKDF-SHA256 with a zero salt and "{scope}|{runID}" as info.
+// DeriveRunKey returns a run's 32-byte key derived from a 32-byte key, such
+// as a deployment key: HKDF-SHA256 with a zero salt and "{scope}|{runID}" as
+// info.
 func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error) {
 	if len(key) != payloadKeySize {
 		return nil, fmt.Errorf("workflow: encryption key is %d bytes, want %d", len(key), payloadKeySize)
@@ -301,8 +301,8 @@ func NewRunKeys(runKey []byte) (*RunKeys, error) {
 	return &RunKeys{key: slices.Clone(runKey), private: private, PublicKey: private.PublicKey().Bytes()}, nil
 }
 
-// EncodePublicKey returns a run's public key as the Workflow SDK publishes
-// it, in standard base64.
+// EncodePublicKey returns a run's public key as it is published, in
+// standard base64.
 func EncodePublicKey(publicKey []byte) string {
 	return base64.StdEncoding.EncodeToString(publicKey)
 }
@@ -334,8 +334,8 @@ func (k *RunKeys) open(body []byte) ([]byte, error) {
 }
 
 // PayloadSealer seals payloads to a run's public key. Its payloads share
-// one key exchange, each with a fresh nonce, as a Workflow SDK stream
-// writer's do.
+// one key exchange, each with a fresh nonce, so a stream writer seals all
+// its frames with one exchange.
 type PayloadSealer struct {
 	ephemeral []byte
 	aead      cipher.AEAD
@@ -428,10 +428,10 @@ func openAEAD(aead cipher.AEAD, body []byte) ([]byte, error) {
 
 // Streams
 
-// EncodeStreamFrame returns value as one frame of an object stream, as the
-// Workflow SDK writes one: a big-endian u32 length, then value's payload,
-// encrypted with keys or sealed with sealer when set. A Go stream writer's
-// chunk is a []byte, a Uint8Array. Stream frames are never compressed.
+// EncodeStreamFrame returns value as one frame of an object stream: a
+// big-endian u32 length, then value's payload, encrypted with keys or sealed
+// with sealer when set. A Go stream writer's chunk is a []byte, a Uint8Array.
+// Stream frames are never compressed.
 func EncodeStreamFrame(value any, keys *RunKeys, sealer *PayloadSealer) ([]byte, error) {
 	text, err := MarshalDevalue(value)
 	if err != nil {
@@ -542,8 +542,8 @@ func (o *dvObject) get(key string) (any, bool) {
 	return nil, false
 }
 
-// MarshalDevalue returns value as devalue text, with the Workflow SDK's
-// reducers for the types it maps.
+// MarshalDevalue returns value as devalue text, with reducers for the
+// JavaScript types Go values map onto.
 func MarshalDevalue(value any) ([]byte, error) {
 	node, err := encodeNode(reflect.ValueOf(value), nil)
 	if err != nil {
@@ -1131,7 +1131,7 @@ func writeNodeJSON(buffer *bytes.Buffer, node any) error {
 		buffer.WriteByte('}')
 		return nil
 	}
-	// Strings, booleans, special numbers, and the SDK's types are written as
+	// Strings, booleans, special numbers, and the mapped types are written as
 	// encoding/json writes their Go values.
 	converted, err := nodeAny(node)
 	if err != nil {
@@ -1289,9 +1289,8 @@ func (p *dvParser) buildSparse(rest []any) (any, error) {
 }
 
 // buildTyped builds ["type", ...]. Except for devalue's own null-prototype
-// objects and boxed primitives, it reads the type as the Workflow SDK's
-// revivers do: the second entry is the reduced value's index, or the value
-// itself when it is not a number.
+// objects and boxed primitives, the second entry is the reduced value's
+// index, or the value itself when it is not a number.
 func (p *dvParser) buildTyped(typ string, rest []any) (any, error) {
 	switch typ {
 	case "null":
@@ -1846,8 +1845,8 @@ func decodeMapKey(key string, v reflect.Value) error {
 }
 
 // nodeAny returns node as the Go value an any holds: objects as
-// map[string]any, arrays as []any, numbers as float64, and the mapped SDK
-// types as their Go types.
+// map[string]any, arrays as []any, numbers as float64, and the mapped
+// JavaScript types as their Go types.
 func nodeAny(node any) (any, error) {
 	switch value := node.(type) {
 	case nil, dvUndefined:
@@ -1948,7 +1947,7 @@ func isErrorType(typ string) bool {
 	return typ == "Error" || strings.HasSuffix(typ, "Error") || typ == "DOMException"
 }
 
-// EncodeErrorPayload encodes err as the Workflow SDK's Error value.
+// EncodeErrorPayload encodes err as an Error value.
 func EncodeErrorPayload(err error, options PayloadOptions) ([]byte, error) {
 	node, encodeErr := encodeErrorNode(err)
 	if encodeErr != nil {
@@ -1980,11 +1979,11 @@ func DecodeErrorPayload(data []byte, keys *RunKeys) *Error {
 	return NewError(err)
 }
 
-// EncryptionKeys is an optional World interface, the Workflow SDK's
-// getEncryptionKeyForRun. A run's payloads are encrypted with the 32-byte
-// key it returns. A nil key, or a World that does not implement it, leaves
-// them unencrypted. deploymentID is the run's deployment, and the same run
-// must always resolve to the same key.
+// EncryptionKeys is an optional World interface that resolves run keys. A
+// run's payloads are encrypted with the 32-byte key it returns. A nil key, or
+// a World that does not implement it, leaves them unencrypted. deploymentID
+// is the run's deployment, and the same run must always resolve to the same
+// key.
 type EncryptionKeys interface {
 	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
 }
@@ -2045,8 +2044,8 @@ func CheckEncryptionKey(key []byte) error {
 }
 
 // ConfiguredRunKey returns the key of runID's payloads in a World configured
-// with key, derived as the Workflow SDK derives run keys, or nil when key is
-// empty and payloads are not encrypted.
+// with key, derived with DeriveRunKey in ConfiguredKeyScope, or nil when key
+// is empty and payloads are not encrypted.
 func ConfiguredRunKey(key []byte, runID RunID) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, nil

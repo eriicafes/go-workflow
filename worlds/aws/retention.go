@@ -79,12 +79,12 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 	return err
 }
 
-// A run's data is deleted as the Workflow SDK deletes it: the run, step,
-// event, hook, and token items stay, the payloads in the run's event items go,
-// and its streams are left empty and closed. The run's expiredAt is set first,
-// so its payloads are unreadable before they are deleted, and dataPurged is
-// set last, so a deletion cut short is finished by its expiry delivery or the
-// next RunsDeleteDataMany.
+// When a run's data is deleted, the run, step, event, hook, and token items
+// stay, the payloads in the run's event items go, and its streams are left
+// empty and closed. The run's expiredAt is set first, so its payloads are
+// unreadable before they are deleted, and dataPurged is set last, so a
+// deletion cut short is finished by its expiry delivery or the next
+// RunsDeleteDataMany.
 
 // expireRun deletes the data of the run of an expiry delivery.
 func (w *World) expireRun(ctx context.Context, input worlds.QueueInput) error {

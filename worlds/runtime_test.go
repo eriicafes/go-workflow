@@ -729,7 +729,7 @@ func (w *racingWorld) EventsCreateBatch(ctx context.Context, input worlds.Events
 		other := input.Events[0]
 		// Another flow declared a step at the same position first.
 		position, _ := worlds.OperationPosition(other.CorrelationID)
-		other.CorrelationID = string(worlds.NewStepIDAt(position))
+		other.CorrelationID = string(worlds.NewStepID(position))
 		w.otherStep = other.CorrelationID
 		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: other, Options: worlds.EventsCreateOptions{InBandCount: input.InBandCount}}); err != nil {
 			return worlds.EventBatchResult{}, err

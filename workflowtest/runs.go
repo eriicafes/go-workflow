@@ -218,13 +218,9 @@ func conformAttributes(t *testing.T, world worlds.World) {
 
 func conformDeleteData(t *testing.T, world worlds.World) {
 	ctx := context.Background()
-	if !world.Capabilities().DeleteData {
-		_, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{conformRunID("unsupported")}})
-		conformExpect(t, err, errors.ErrUnsupported, "RunsDeleteDataMany without DeleteData")
-		return
-	}
 
-	// A run created with $retention "0" loses its data as it finishes.
+	// Every World deletes the data of a run created with $retention "0" as
+	// it finishes.
 	purged := conformRunID("retain_none")
 	attributes := map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String(), "tier": "gold"}
 	create := worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes}
@@ -267,7 +263,14 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 	err = world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "new", Chunk: []byte("more")})
 	conformExpect(t, err, worlds.ErrStreamClosed, "new stream of a deleted run")
 
-	// A retention the SDK does not support keeps the data, until
+	// RunsDeleteDataMany is optional.
+	if !world.Capabilities().DeleteData {
+		_, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{purged}})
+		conformExpect(t, err, errors.ErrUnsupported, "RunsDeleteDataMany without DeleteData")
+		return
+	}
+
+	// A retention other than RetainNone keeps the data, until
 	// RunsDeleteDataMany deletes it.
 	kept := conformRunID("retain_kept")
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: kept, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{worlds.RetentionAttribute: "86400"}}); err != nil {

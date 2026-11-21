@@ -62,7 +62,7 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   30 seconds per request. Clients repeat the request to wait longer.
 
 - **Spec version:** when `specVersion` is set and differs from the World's
-  (`worlds.SpecVersion`, currently `3`), the request fails with
+  (`worlds.SpecVersion`, currently `2`), the request fails with
   `invalid_argument`. Clients call `client.spec` first, which returns
   `{ specVersion, capabilities }`.
 

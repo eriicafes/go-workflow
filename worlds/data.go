@@ -100,15 +100,14 @@ func EventPayload(event Event) []byte {
 }
 
 // EventPayloadFields returns, by event type, the Data field holding user
-// data, as the Workflow SDK's getEventDataRefFields does. ScrubEventData
-// removes it. A World that deletes data in its own storage, such as in SQL,
-// uses it to find the payloads.
+// data. ScrubEventData removes it. A World that deletes data in its own
+// storage, such as in SQL, uses it to find the payloads.
 func EventPayloadFields() map[EventType]string {
 	return maps.Clone(eventPayloadFields)
 }
 
-// ScrubEventData returns event Data without its user data, as the Workflow
-// SDK deletes a run's data: the payload field of eventType is removed and its
+// ScrubEventData returns event Data without its user data, as deleting a
+// run's data leaves it: the payload field of eventType is removed and its
 // metadata, such as a step's name or a hook's token, is kept.
 func ScrubEventData(eventType EventType, data []byte) []byte {
 	return ResolveEventData(eventType, data, EventsResolveDataNone)
@@ -140,12 +139,11 @@ type DataRunCreated struct {
 	StartHook *StartHook `json:"startHook,omitempty"`
 }
 
-// StartHook is a hook a World creates in the same write as its run, as the
-// Workflow SDK's start({ experimental_hook }) does, so a second start with
-// the same token is refused before it becomes a run. Its ID is StartHookID of
-// the run, and no hook_created is recorded for it: run_created stands for it.
-// From then on it is an ordinary hook of the run, which the workflow opens
-// with a hook of the same token.
+// StartHook is a hook a World creates in the same write as its run, so a
+// second start with the same token is refused before it becomes a run. Its ID
+// is StartHookID of the run, and no hook_created is recorded for it:
+// run_created stands for it. From then on it is an ordinary hook of the run,
+// which the workflow opens with a hook of the same token.
 type StartHook struct {
 	Token string `json:"token"`
 	// HookID is the hook's ID, which the World sets on what it records.
@@ -158,7 +156,7 @@ type StartHook struct {
 }
 
 // StartHookID returns the ID of the start hook of runID: hook_ and the run
-// ID's ULID, as the Workflow SDK's startHookId.
+// ID's ULID.
 func StartHookID(runID RunID) HookID {
 	return HookID("hook_" + strings.TrimPrefix(string(runID), "wrun_"))
 }
@@ -173,8 +171,7 @@ func RunStartHook(data []byte) *StartHook {
 }
 
 // ExecutionContextReplayedFromRunID is the executionContext key naming the
-// run a run was replayed from, as the Workflow SDK records it, so tools link
-// the replay to its source.
+// run a run was replayed from, so tools link the replay to its source.
 const ExecutionContextReplayedFromRunID = "replayedFromRunId"
 
 // RunCreatedData returns the Data of the run_created event of input.
@@ -221,9 +218,9 @@ func DecodeRunCompleted(data []byte) []byte {
 type DataRunFailed struct {
 	// Error is the run's error as a payload.
 	Error []byte `json:"error,omitempty"`
-	// ErrorCode is the Workflow SDK's category of the error, such as
-	// USER_ERROR or MAX_DELIVERIES_EXCEEDED, kept in plain text so tools can
-	// sort failures without opening the payload.
+	// ErrorCode is the category of the error, such as USER_ERROR or
+	// MAX_DELIVERIES_EXCEEDED, kept in plain text so tools can sort failures
+	// without opening the payload.
 	ErrorCode string `json:"errorCode,omitempty"`
 }
 
@@ -247,8 +244,7 @@ func EncodeRunFailed(err error, options PayloadOptions) ([]byte, error) {
 	return json.Marshal(DataRunFailed{Error: payload, ErrorCode: runErrorCode(err)})
 }
 
-// runErrorCode returns the Workflow SDK's RUN_ERROR_CODES value for the error
-// a run failed with.
+// runErrorCode returns the ErrorCode of the error a run failed with.
 func runErrorCode(err error) string {
 	var divergence replayDivergenceError
 	var delivery deliveryError
@@ -359,7 +355,7 @@ func EncodeAttrSet(input RunsSetAttributesInput) ([]byte, error) {
 	return json.Marshal(data)
 }
 
-// Run attribute limits, as in the Workflow SDK.
+// Run attribute limits. See CheckAttributes.
 const (
 	// MaxAttributeKeyLength is the longest attribute key, in UTF-16 code
 	// units as JavaScript counts a string's length.
@@ -374,10 +370,9 @@ const (
 )
 
 // CheckAttributes returns ErrAttributeInvalid unless attributes are within
-// the Workflow SDK's limits: at most MaxAttributesPerRun, with non-empty keys
-// of at most MaxAttributeKeyLength and values of at most
-// MaxAttributeValueBytes. Keys starting with ReservedAttributePrefix are
-// refused unless allowReserved.
+// the limits: at most MaxAttributesPerRun, with non-empty keys of at most
+// MaxAttributeKeyLength and values of at most MaxAttributeValueBytes. Keys
+// starting with ReservedAttributePrefix are refused unless allowReserved.
 func CheckAttributes(attributes map[string]string, allowReserved bool) error {
 	if len(attributes) > MaxAttributesPerRun {
 		return fmt.Errorf("%w: %d attributes, over the limit of %d", ErrAttributeInvalid, len(attributes), MaxAttributesPerRun)

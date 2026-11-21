@@ -68,9 +68,12 @@ type Execution struct {
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
 	inBand int
-	// startHook is the run's start hook, decoded once by StartHook.
-	startHook     *StartHook
-	startHookRead bool
+	// startHook is the run's start hook, decoded once by StartHook, and
+	// startHookBound reports that a hook of this replay has opened it (see
+	// OpenStartHook).
+	startHook      *StartHook
+	startHookRead  bool
+	startHookBound bool
 	// continuations holds callbacks that react as replay delivers events.
 	continuations []func()
 	// suspended marks a runtime exit before the workflow body finishes.
@@ -154,6 +157,23 @@ func (e *Execution) Context() context.Context {
 // Run returns the run as loaded at the start of the delivery.
 func (e *Execution) Run() Run {
 	return e.run
+}
+
+// OpenStartHook reports whether a hook declared with token opens the run's
+// start hook, and returns its ID. The first hook declared with the start
+// hook's token opens it, and nothing is recorded for it. Whether a hook opens
+// it depends only on the hooks declared before it, so every replay decides it
+// the same way. A later hook with the token is created as any hook is, and
+// conflicts with the start hook.
+func (e *Execution) OpenStartHook(token string) (HookID, bool) {
+	if e.startHookBound || token == "" {
+		return "", false
+	}
+	if hook := e.StartHook(); hook == nil || hook.Token != token {
+		return "", false
+	}
+	e.startHookBound = true
+	return StartHookID(e.run.RunID), true
 }
 
 // StartHook returns the start hook the run's run_created records, or nil.
@@ -617,8 +637,7 @@ func (e *Execution) decodeError(data []byte) *Error {
 	return DecodeErrorPayload(data, e.keys)
 }
 
-// stepArgs is a step's input as the Workflow SDK records it: its argument
-// list.
+// stepArgs is a step's input as it is recorded: its argument list.
 type stepArgs[In any] struct {
 	Args [1]In `json:"args"`
 }
@@ -630,8 +649,8 @@ func (e *Execution) runFailedData(err error) []byte {
 	return data
 }
 
-// StreamFrame returns chunk as a frame of the run's stream, as the Workflow
-// SDK writes one, encrypted when the run's payloads are.
+// StreamFrame returns chunk as a frame of the run's stream, encrypted when
+// the run's payloads are.
 func (e *Execution) StreamFrame(chunk []byte) ([]byte, error) {
 	return EncodeStreamFrame(chunk, e.keys, nil)
 }

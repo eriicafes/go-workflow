@@ -417,18 +417,31 @@ func ptr(value int) *int { return &value }
 
 func TestOperationPosition(t *testing.T) {
 	for _, position := range []int{0, 1, 7, 1 << 20} {
-		for _, id := range []string{string(worlds.NewStepIDAt(position)), string(worlds.NewHookIDAt(position)), string(worlds.NewWaitIDAt(position))} {
+		for _, id := range []string{string(worlds.NewStepID(position)), string(worlds.NewHookID(position)), string(worlds.NewWaitID(position))} {
 			if got, ok := worlds.OperationPosition(id); !ok || got != position {
 				t.Fatalf("worlds.OperationPosition(%s) = %d, %v, want %d", id, got, ok, position)
 			}
 		}
 	}
-	if worlds.NewStepIDAt(3) == worlds.NewStepIDAt(3) {
+	if worlds.NewStepID(3) == worlds.NewStepID(3) {
 		t.Fatal("positioned IDs repeat")
 	}
 	for _, id := range []string{"", "step", "step_notaulid", "evnt_00000000000000000000000001x"} {
 		if _, ok := worlds.OperationPosition(id); ok {
 			t.Errorf("worlds.OperationPosition(%q) reported ok", id)
 		}
+	}
+}
+
+func TestHookTokensUseNanoIDsAlphabet(t *testing.T) {
+	const alphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
+	run := worlds.Run{RunID: "wrun_tokens", WorkflowName: "wf"}
+	for _, token := range []string{worlds.NewHookToken(), worlds.NewRunHookToken(run, 3)} {
+		if len(token) != 21 || strings.Trim(token, alphabet) != "" {
+			t.Errorf("token %q is not 21 characters of Nano ID's alphabet", token)
+		}
+	}
+	if worlds.NewRunHookToken(run, 3) != worlds.NewRunHookToken(run, 3) || worlds.NewRunHookToken(run, 3) == worlds.NewRunHookToken(run, 4) {
+		t.Error("run hook tokens are not stable per position")
 	}
 }

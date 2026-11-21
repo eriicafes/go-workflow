@@ -63,11 +63,12 @@ run, step, event and hook records stay with their IDs, statuses, timestamps
 and attributes, the run's `ExpiredAt` is set, and the Workflow web UI shows its
 data as expired. Reading its result returns `workflow.ErrRunExpired`.
 
-Every World with `Capabilities().DeleteData` deletes a run's data:
+A run's data is deleted:
 
 - when the run finishes, if it was created with `$retention: "0"`
-  (`worlds.RetainNone`);
-- on demand, with `workflow.DeleteRuns` or `RunsDeleteDataMany`;
+  (`worlds.RetainNone`), in every World;
+- on demand, with `workflow.DeleteRuns` or `RunsDeleteDataMany`, in a World
+  with `Capabilities().DeleteData`;
 - after `Config.Retention`, in a World that supports it.
 
 `Config.Retention` keeps a finished run's data for that long, and

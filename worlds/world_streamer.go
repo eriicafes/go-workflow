@@ -10,9 +10,9 @@ import (
 )
 
 // UserStreamName returns the stored name of the user stream name of run
-// runID, as the Workflow SDK names it: strm_ and the run ID's ULID, then
-// _user, and for a named stream _ and the name in unpadded base64url. The
-// empty name is the run's default stream.
+// runID: strm_ and the run ID's ULID, then _user, and for a named stream _
+// and the name in unpadded base64url. The empty name is the run's default
+// stream.
 func UserStreamName(runID RunID, name string) string {
 	stored := strings.Replace(string(runID), "wrun_", "strm_", 1) + "_user"
 	if name == "" {
@@ -21,11 +21,11 @@ func UserStreamName(runID RunID, name string) string {
 	return stored + "_" + base64.RawURLEncoding.EncodeToString([]byte(name))
 }
 
-// Streamer stores streams, which are named, ordered sequences of chunks that a
-// run writes and readers consume. A stream is identified by its run ID and
-// name. Any number of writers may append to a stream at once, as in the
-// Workflow SDK: each write's chunks stay in order, and the writes of
-// different writers interleave in the order the World stores them.
+// Streamer stores streams, which are named, ordered sequences of chunks that
+// a run writes and readers consume. A stream is identified by its run ID and
+// name. Any number of writers may append to a stream at once: each write's
+// chunks stay in order, and the writes of different writers interleave in the
+// order the World stores them.
 type Streamer interface {
 	// StreamsWrite appends Chunk. It returns ErrStreamClosed when the stream
 	// is closed.

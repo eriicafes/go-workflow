@@ -37,7 +37,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 
 	expect(world.specVersion).toBe(SPEC_VERSION_CURRENT);
 	expect(world._spec).toEqual({ specVersion: 1, capabilities: { analytics: false, setAttributes: true } });
-	expect(requests[0]?.envelope.specVersion).toBe(3);
+	expect(requests[0]?.envelope.specVersion).toBe(2);
 	expect(world.capabilities).toEqual({
 		hookRetention: { active: true },
 		hookForceClaim: true,
@@ -47,7 +47,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 	expect(run.runId).toBe("wrun_01");
 	expect(run.workflowName).toBe("report");
 	expect(run.attributes).toEqual({ "external-id": "42" });
-	expect(requests[1]?.envelope.specVersion).toBe(3);
+	expect(requests[1]?.envelope.specVersion).toBe(2);
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
 });
@@ -445,7 +445,7 @@ test("deletes run data only when the Go world supports it, and reports deleted r
 			fetch: async (_url, init) => {
 				const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
 				if (envelope.method === "client.spec") {
-					return rpcResponse({ SpecVersion: 3, Capabilities: { Analytics: false, SetAttributes: false, DeleteData: deleteData } });
+					return rpcResponse({ SpecVersion: 2, Capabilities: { Analytics: false, SetAttributes: false, DeleteData: deleteData } });
 				}
 				if (envelope.method === "runs.get") {
 					return rpcResponse({ RunID: "wrun_01", Status: "completed", ExpiredAt: new Date("2026-01-02T03:04:05Z"), StartedAt: null, CompletedAt: null });
@@ -484,7 +484,7 @@ test("passes a run's executionContext through with its keys as written", async (
 		fetch: async (_url, init) => {
 			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
 			if (envelope.method === "client.spec") {
-				return rpcResponse({ SpecVersion: 3, Capabilities: {} });
+				return rpcResponse({ SpecVersion: 2, Capabilities: {} });
 			}
 			if (envelope.method === "runs.get") {
 				return rpcResponse({ RunID: "wrun_01", ExecutionContext: { replayedFromRunId: "wrun_00" }, StartedAt: null, CompletedAt: null });
@@ -510,7 +510,7 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 		fetch: async (_url, init) => {
 			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
 			if (envelope.method === "client.spec") {
-				return rpcResponse({ SpecVersion: 3, Capabilities: { StartHook: true } });
+				return rpcResponse({ SpecVersion: 2, Capabilities: { StartHook: true } });
 			}
 			const input = envelope.input as Record<string, unknown>;
 			inputs.push(input);

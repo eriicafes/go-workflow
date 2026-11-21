@@ -49,7 +49,10 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -397,18 +400,18 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 type DeleteRunsResult = worlds.RunsDeleteDataManyResult
 
 // Delays DeleteRuns waits in a step before sending retryable failures again,
-// and before the step retries them, as the Workflow SDK's deleteRuns does.
+// and before the step retries them.
 const (
 	deleteRunsResendDelay = time.Second
 	deleteRunsRetryDelay  = 10 * time.Second
 )
 
 // DeleteRuns deletes the data of one to 100 finished runs, using the Client
-// in ctx, as the Workflow SDK's deleteRuns does: their inputs, outputs, and
-// errors, the payloads of their steps, events, and hooks, and their streams'
-// chunks. It cannot be undone. The runs, steps, events, and hooks stay, with
-// their IDs, names, statuses, timestamps, and attributes, and a run's
-// Run.Value then returns ErrRunExpired.
+// in ctx: their inputs, outputs, and errors, the payloads of their steps,
+// events, and hooks, and their streams' chunks. It cannot be undone. The
+// runs, steps, events, and hooks stay, with their IDs, names, statuses,
+// timestamps, and attributes, and a run's Run.Value then returns
+// ErrRunExpired.
 //
 // A run that has not finished is skipped and left running. Each run's
 // outcome is in the result. Called in a step, DeleteRuns sends retryable
@@ -508,7 +511,7 @@ func retryableDeletions(results []worlds.DeleteDataResult) []worlds.RunID {
 	return ids
 }
 
-// Retention is how long a finished run's data is kept, as the Workflow SDK's
+// Retention is how long a finished run's data is kept, as the run's
 // $retention attribute records it. Its zero value is RetainDefault.
 type Retention = worlds.Retention
 
@@ -525,8 +528,7 @@ var (
 // deployment that starts the run.
 type Deployment = worlds.Deployment
 
-// LatestDeployment starts a run on the World's latest deployment, as the
-// Workflow SDK's deploymentId: 'latest' does.
+// LatestDeployment starts a run on the World's latest deployment.
 var LatestDeployment = worlds.LatestDeployment
 
 // Region is the region a run's data lives in. Its values are the
@@ -537,8 +539,8 @@ type Region = worlds.Region
 // OnDeployment starts a run on the deployment id.
 func OnDeployment(id string) Deployment { return worlds.OnDeployment(id) }
 
-// StartOptions holds the options to Start, as the Workflow SDK's start
-// options. The zero value starts a run as Start without options does.
+// StartOptions holds the options to Start. The zero value starts a run as
+// Start without options does.
 type StartOptions struct {
 	// Deployment is the deployment the run starts on and stays pinned to.
 	// LatestDeployment starts it on the World's latest deployment, so a
@@ -556,7 +558,7 @@ type StartOptions struct {
 	// RetainDefault, leaves it to the World.
 	Retention Retention
 	// Attributes are plain-text attributes set on the run as it is created,
-	// within the Workflow SDK's limits (see worlds.CheckAttributes).
+	// within the limits worlds.CheckAttributes enforces.
 	Attributes map[string]string
 	// AllowReservedAttributes permits keys in Attributes that start with "$",
 	// which are reserved for framework and library code.
@@ -567,14 +569,14 @@ type StartOptions struct {
 	// Region is the region the run's data lives in and its deliveries are
 	// routed to, one of the worlds.Region values such as worlds.RegionFRA1.
 	// Only a World that implements worlds.RegionalRunIDs, such as the Vercel
-	// World, uses it, by tagging the run's ID; others ignore it, as in the
-	// Workflow SDK. The zero value leaves it to the World.
+	// World, uses it, by tagging the run's ID; others ignore it. The zero
+	// value leaves it to the World.
 	Region Region
-	// Hook creates a hook with the run, claiming its token, as the Workflow
-	// SDK's experimental_hook does. When another run holds the token, Start
-	// creates no run and returns a *worlds.HookConflictError naming it. The
-	// workflow opens the hook with CreateHook and the same token. It needs a
-	// World with Capabilities().StartHook.
+	// Hook creates a hook with the run, claiming its token. When another run
+	// holds the token, Start creates no run and returns a
+	// *worlds.HookConflictError naming it. The workflow opens the hook with
+	// CreateHook and the same token. It needs a World with
+	// Capabilities().StartHook.
 	Hook *StartHook
 	// ReplayedFromRunID is the ID of the run this run replays, wrun_ and a
 	// ULID. It is recorded in the run's ExecutionContext, so tools such as
@@ -605,16 +607,16 @@ func startOptions(values []StartOptions) StartOptions {
 
 // startSettings are StartOptions as a child run's start step records them.
 type startSettings struct {
-	DeploymentID  string            `json:"deploymentId,omitempty"`
-	Latest        bool              `json:"latest,omitempty"`
-	Retention     string            `json:"retention,omitempty"`
-	ReplayedFrom  string            `json:"replayedFrom,omitempty"`
-	Region        string            `json:"region,omitempty"`
-	HookToken     string            `json:"hookToken,omitempty"`
-	HookRetention time.Duration     `json:"hookRetention,omitempty"`
+	DeploymentID  string        `json:"deploymentId,omitempty"`
+	Latest        bool          `json:"latest,omitempty"`
+	Retention     string        `json:"retention,omitempty"`
+	ReplayedFrom  string        `json:"replayedFrom,omitempty"`
+	Region        string        `json:"region,omitempty"`
+	HookToken     string        `json:"hookToken,omitempty"`
+	HookRetention time.Duration `json:"hookRetention,omitempty"`
 	// HookMetadata is the hook's metadata as devalue text, encrypted with
 	// the run's keys once they are known.
-	HookMetadata []byte `json:"hookMetadata,omitempty"`
+	HookMetadata  []byte            `json:"hookMetadata,omitempty"`
 	Attributes    map[string]string `json:"attributes,omitempty"`
 	NoCompression bool              `json:"noCompression,omitempty"`
 }
@@ -624,8 +626,12 @@ func (options StartOptions) settings() (startSettings, error) {
 	if err := worlds.CheckAttributes(options.Attributes, options.AllowReservedAttributes); err != nil {
 		return startSettings{}, err
 	}
-	if id := options.ReplayedFromRunID; id != "" && !worlds.ValidRunID(worlds.RunID(id)) {
-		return startSettings{}, fmt.Errorf("%w: ReplayedFromRunID %.64q is not wrun_ and a ULID", ErrInvalidStartOptions, id)
+	if id := options.ReplayedFromRunID; id != "" {
+		// It names a run, so it must be shaped as a run ID.
+		rest, ok := strings.CutPrefix(id, "wrun_")
+		if _, err := ulid.ParseStrict(rest); !ok || err != nil {
+			return startSettings{}, fmt.Errorf("%w: ReplayedFromRunID %.64q is not wrun_ and a ULID", ErrInvalidStartOptions, id)
+		}
 	}
 	var hookToken string
 	var hookRetention time.Duration
@@ -704,8 +710,7 @@ func (settings startSettings) deployment() Deployment {
 }
 
 // attributes returns the run's attributes: lineage, then the caller's, which
-// may replace it with AllowReservedAttributes, then the retention, as the
-// Workflow SDK merges them.
+// may replace it with AllowReservedAttributes, then the retention.
 func (settings startSettings) attributes(lineage map[string]string) map[string]string {
 	if len(lineage) == 0 && len(settings.Attributes) == 0 && settings.Retention == "" {
 		return nil
@@ -721,8 +726,8 @@ func (settings startSettings) attributes(lineage map[string]string) map[string]s
 
 // Start starts a run of workflow In with input and returns a handle to the run
 // without waiting for it. It needs only the workflow type, not its runner.
-// options set its retention, attributes, and how its input is stored, as the
-// Workflow SDK's start options do. Attributes outside the SDK's limits return
+// options set its retention, attributes, and how its input is stored.
+// Attributes outside the limits of worlds.CheckAttributes return
 // worlds.ErrAttributeInvalid.
 //
 // Called in workflow context, Start starts a child run in a step, so replay
@@ -880,7 +885,7 @@ func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, er
 		if !ok {
 			return nil, ErrNoWorkflow
 		}
-		// The input is the workflow's argument list, as in the Workflow SDK.
+		// The input is the workflow's argument list.
 		var args [1]In
 		if err := execution.DecodePayload(raw, &args); err != nil {
 			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)

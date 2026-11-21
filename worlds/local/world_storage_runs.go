@@ -151,10 +151,10 @@ func (w *World) markUnpurged(runID worlds.RunID) {
 	w.unpurged[runID] = true
 }
 
-// purgeData deletes the data of a run whose ExpiredAt has committed, as the
-// Workflow SDK does: the payloads in its event files, which are also its run,
-// step, and hook payloads, and its stream chunks, leaving each stream empty
-// and closed. It then records that the run's files are purged.
+// purgeData deletes the data of a run whose ExpiredAt has committed: the
+// payloads in its event files, which are also its run, step, and hook
+// payloads, and its stream chunks, leaving each stream empty and closed. It
+// then records that the run's files are purged.
 func (w *World) purgeData(run runRecord) error {
 	for slot := 1; slot <= run.EventCount; slot++ {
 		var event worlds.Event

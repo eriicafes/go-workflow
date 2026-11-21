@@ -25,7 +25,7 @@ import (
 
 // SpecVersion is the RPC protocol version implemented by this package. A
 // World returns it from its SpecVersion method.
-const SpecVersion = 3
+const SpecVersion = 2
 
 // World is the backend a run is recorded in. It provides event storage, a
 // delivery queue, and streams. The runtime, the client, and HTTPHandler all
@@ -65,12 +65,11 @@ type Capabilities struct {
 	Analytics          bool `cbor:"analytics"`
 	SetAttributes      bool `cbor:"setAttributes"`
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
-	// DeleteData reports that the World deletes run data: it implements
-	// RunsDeleteDataMany and honors the RetentionAttribute value of
-	// RetainNone.
+	// DeleteData reports that the World implements RunsDeleteDataMany, which
+	// is optional.
 	DeleteData bool `cbor:"deleteData"`
 	// StartHook reports that EventsCreateRun creates a run's StartHook with
-	// it, as the Workflow SDK's atomicStartHook capability does.
+	// it.
 	StartHook bool `cbor:"startHook"`
 	// RegionalRunIDs reports that the World implements RegionalRunIDs, so
 	// clients ask it for new run IDs (Client.RunsNewID).
@@ -176,46 +175,32 @@ type WaitID string
 // event's position in the log (see EventIDForSlot and EventSlot).
 type EventID string
 
-// NewChildRunID returns the ID of the run started by step stepID. It shares the
-// step ID's ULID, so every attempt of the step derives the same run ID.
+// NewRunID returns a new run ID: wrun_ and a ULID.
+func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
+
+// NewChildRunID returns the run ID of the run started by step stepID: wrun_
+// and the step ID's ULID, so every attempt of the step derives the same ID.
 func NewChildRunID(stepID StepID) RunID {
 	return RunID("wrun_" + strings.TrimPrefix(string(stepID), "step_"))
 }
 
-// NewRunID returns a new unique run ID.
-func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
+// NewStreamName returns a new stream name: strm_ and a ULID.
+func NewStreamName() string { return "strm_" + ulid.Make().String() }
 
-// ValidRunID reports whether id is wrun_ and a ULID, as the Workflow SDK
-// mints run IDs.
-func ValidRunID(id RunID) bool {
-	rest, ok := strings.CutPrefix(string(id), "wrun_")
-	if !ok {
-		return false
-	}
-	_, err := ulid.ParseStrict(rest)
-	return err == nil
-}
+// NewWriterID returns a new stream writer ID: wrtr_ and a ULID.
+func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
 
-// NewStepID returns a new unique step ID.
-func NewStepID() StepID { return StepID("step_" + ulid.Make().String()) }
+// NewStepID returns a new step ID for the step declared at position: step_
+// and a ULID carrying position, which OperationPosition recovers.
+func NewStepID(position int) StepID { return StepID(positionedID("step_", position)) }
 
-// NewHookID returns a new unique hook ID.
-func NewHookID() HookID { return HookID("hook_" + ulid.Make().String()) }
+// NewHookID returns a new hook ID for the hook declared at position: hook_
+// and a ULID carrying position, which OperationPosition recovers.
+func NewHookID(position int) HookID { return HookID(positionedID("hook_", position)) }
 
-// NewWaitID returns a new unique wait ID.
-func NewWaitID() WaitID { return WaitID("wait_" + ulid.Make().String()) }
-
-// NewStepIDAt returns a new unique ID for the step declared at position,
-// which OperationPosition recovers from it.
-func NewStepIDAt(position int) StepID { return StepID(positionedID("step_", position)) }
-
-// NewHookIDAt returns a new unique ID for the hook declared at position,
-// which OperationPosition recovers from it.
-func NewHookIDAt(position int) HookID { return HookID(positionedID("hook_", position)) }
-
-// NewWaitIDAt returns a new unique ID for the wait declared at position,
-// which OperationPosition recovers from it.
-func NewWaitIDAt(position int) WaitID { return WaitID(positionedID("wait_", position)) }
+// NewWaitID returns a new wait ID for the wait declared at position: wait_
+// and a ULID carrying position, which OperationPosition recovers.
+func NewWaitID(position int) WaitID { return WaitID(positionedID("wait_", position)) }
 
 // positionedID returns prefix and a ULID whose first four bytes of entropy
 // hold position, so the ID of a declaration carries its replay position even
@@ -230,9 +215,9 @@ func positionedID(prefix string, position int) string {
 }
 
 // OperationPosition returns the replay position carried by a step, hook, or
-// wait ID minted by NewStepIDAt, NewHookIDAt, or NewWaitIDAt, which the
-// runtime uses for every declaration. It reports false for an ID that is not
-// a prefixed ULID. For other ULIDs the result is meaningless.
+// wait ID minted by NewStepID, NewHookID, or NewWaitID, which the runtime
+// uses for every declaration. It reports false for an ID that is not a
+// prefixed ULID. For other ULIDs the result is meaningless.
 func OperationPosition(id string) (int, bool) {
 	_, body, ok := strings.Cut(id, "_")
 	if !ok {
@@ -245,37 +230,31 @@ func OperationPosition(id string) (int, bool) {
 	return int(binary.BigEndian.Uint32(parsed.Entropy()[:4])), true
 }
 
-// NewWriterID returns a new unique stream writer ID, which has the prefix
-// "wrtr_" the Workflow SDK uses.
-func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
+// hookTokenAlphabet is Nano ID's URL alphabet, whose 64 characters each take
+// six bits of a random byte.
+const hookTokenAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
 
-const hookTokenAlphabet = "useandom-26T19834_0v5b7qw9zxcgfkrljAIJPVYKhpGUCXW"
+// NewHookToken returns a new hook token: 21 random characters of Nano ID's
+// URL alphabet.
+func NewHookToken() string {
+	var random [21]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		panic(err)
+	}
+	token := make([]byte, len(random))
+	for index, value := range random {
+		token[index] = hookTokenAlphabet[value&63]
+	}
+	return string(token)
+}
 
-// NewRunHookToken returns a 21-character token derived from the run and hook
-// declaration position. It stays the same across replays, including retries
-// before the hook registration is committed.
+// NewRunHookToken returns the hook token of the hook run declares at
+// position: 21 characters of Nano ID's URL alphabet derived from the run's ID,
+// workflow name, and deployment and the position, so every replay derives the
+// same token, including retries before the hook is registered.
 func NewRunHookToken(run Run, position int) string {
 	seed := sha256.Sum256(fmt.Appendf(nil, "%s:%s:%s:hook:%d", run.RunID, run.WorkflowName, run.DeploymentID, position))
 	return base64.RawURLEncoding.EncodeToString(seed[:])[:21]
-}
-
-// NewHookToken returns a new random hook token, which is a 21-character Nano
-// ID.
-func NewHookToken() string {
-	bytes := make([]byte, 21)
-	limit := 256 - 256%len(hookTokenAlphabet)
-	for index := 0; index < len(bytes); {
-		var random [1]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			panic(err)
-		}
-		if int(random[0]) >= limit {
-			continue
-		}
-		bytes[index] = hookTokenAlphabet[int(random[0])%len(hookTokenAlphabet)]
-		index++
-	}
-	return string(bytes)
 }
 
 type (
@@ -443,16 +422,14 @@ func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, err
 	return run.DeploymentID, err
 }
 
-// Deployment is the deployment a new run starts on, as the Workflow SDK's
-// deploymentId start option names it. Its zero value is the deployment that
-// starts the run.
+// Deployment is the deployment a new run starts on. Its zero value is the
+// deployment that starts the run.
 type Deployment struct {
 	id     string
 	latest bool
 }
 
-// LatestDeployment starts a run on the World's latest deployment, as the
-// Workflow SDK's deploymentId: 'latest' does.
+// LatestDeployment starts a run on the World's latest deployment.
 var LatestDeployment = Deployment{latest: true}
 
 // OnDeployment starts a run on the deployment id. An empty id is the zero
@@ -467,9 +444,8 @@ func (d Deployment) ID() string { return d.id }
 func (d Deployment) Latest() bool { return d.latest }
 
 // Region is the region a run's data lives in and its deliveries are routed
-// to, as the Workflow SDK's region start option names it. Its zero value
-// leaves it to the World. Only a World that implements RegionalRunIDs, such
-// as the Vercel World, uses it; the others ignore it, as in the SDK.
+// to. Its zero value leaves it to the World. Only a World that implements
+// RegionalRunIDs, such as the Vercel World, uses it; the others ignore it.
 type Region struct{ code string }
 
 // The Workflow SDK's regions, the Vercel compute regions, including hel1 and
@@ -508,7 +484,7 @@ var regions = []Region{RegionIAD1, RegionSFO1, RegionPDX1, RegionCLE1, RegionYUL
 func (r Region) String() string { return r.code }
 
 // ParseRegion returns the Region of code, such as "iad1", and false when code
-// is not one of the Workflow SDK's regions.
+// is not one of the Region values.
 func ParseRegion(code string) (Region, bool) {
 	for _, region := range regions {
 		if region.code == code {
@@ -519,8 +495,7 @@ func ParseRegion(code string) (Region, bool) {
 }
 
 // RegionalRunIDs is implemented by a World whose run IDs carry the region the
-// run's data lives in, as the Workflow SDK's createRunId and regionForRunId
-// do for the Vercel World.
+// run's data lives in.
 type RegionalRunIDs interface {
 	// RegionRunID returns id tagged with region, or with the World's own
 	// region for the zero Region. It is deterministic, so a child run's ID
@@ -544,8 +519,7 @@ func RegionRunID(world World, id RunID, region Region) RunID {
 // with DeploymentAffinity, that is the deployment OnDeployment named, or for
 // LatestDeployment the World's latest one when it implements
 // LatestDeployments and knows one. Otherwise it is World.DeploymentID, so on
-// Worlds without deployments the option changes nothing, as in the Workflow
-// SDK.
+// Worlds without deployments the option changes nothing.
 func StartDeploymentID(ctx context.Context, world World, deployment Deployment) (string, error) {
 	if world.Capabilities().DeploymentAffinity {
 		if deployment.id != "" {
@@ -577,10 +551,10 @@ func RunDelivery(ctx context.Context, world World, runID RunID) (QueueInput, err
 	return input, nil
 }
 
-// HookPayloadOptions returns how a payload sent to hook is written, as the
-// Workflow SDK writes one from outside its run: sealed to the run's public
-// key, or, for a run that published none, encrypted with the run's key from
-// client, or unencrypted when the run has no key.
+// HookPayloadOptions returns how a payload sent to hook from outside its run
+// is written: sealed to the run's public key, or, for a run that published
+// none, encrypted with the run's key from client, or unencrypted when the run
+// has no key.
 func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadOptions, error) {
 	if publicKey := DecodePublicKey(hook.ResumeContext.EncryptionPublicKey); publicKey != nil {
 		return PayloadOptions{SealTo: publicKey}, nil

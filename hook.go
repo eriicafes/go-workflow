@@ -61,6 +61,15 @@ func (d HookDefinition[T]) Create(ctx context.Context) *Hook[T] {
 	if hook.token == "" {
 		hook.token = worlds.NewRunHookToken(execution.Run(), hook.position)
 	}
+	if id, ok := execution.OpenStartHook(hook.token); ok {
+		// The run's start hook was created with the run, so nothing is
+		// registered for it, and options only a write could apply are
+		// refused.
+		hook.id, hook.registered = id, true
+		if hook.minRetention > 0 || hook.force {
+			hook.err = ErrStartHookOptions
+		}
+	}
 	return hook
 }
 
@@ -281,9 +290,9 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 
 // ResumeHook resumes the active hook with token, sending value as its
 // payload, and queues a delivery so its run resumes. The payload is sealed
-// to the run's public key when its payloads are encrypted, as in the
-// Workflow SDK, so the caller cannot read the run back. It uses the
-// Client in ctx and returns ErrHookNotFound when no active hook has the token.
+// to the run's public key when its payloads are encrypted, so the caller
+// cannot read the run back. It uses the Client in ctx and returns
+// ErrHookNotFound when no active hook has the token.
 // It is for steps and external callers; workflow context returns ErrNotInStep.
 func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	if _, ok := workflowExecutionFromContext(ctx); ok {

@@ -494,7 +494,7 @@ type purgeResult struct {
 }
 
 // RunsDeleteDataMany deletes the data of finished runs through the backend,
-// as world-vercel does. The backend keeps their metadata.
+// which keeps their metadata.
 func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
 	if err := worlds.CheckDeleteDataInput(input); err != nil {
 		return worlds.RunsDeleteDataManyResult{}, err

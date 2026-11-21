@@ -27,10 +27,10 @@ const (
 	// API, which accepts a Vercel access token from outside a deployment.
 	DefaultProxyURL = "https://api.vercel.com/v1/workflow"
 
-	// specVersion is the Workflow SDK spec version of every run this World
-	// creates: slot-numbered event IDs, a sealed log whose in-band writes are
-	// fenced, hook token retention, and forced hook claims. Later versions
-	// change the orchestration model, so runs stay on it.
+	// specVersion is the spec version of every run this World creates:
+	// slot-numbered event IDs, a sealed log whose in-band writes are fenced,
+	// hook token retention, and forced hook claims. Later versions change the
+	// orchestration model, so runs stay on it.
 	specVersion = 8
 
 	cborContentType  = "application/cbor"
@@ -310,8 +310,8 @@ func classify(err error, eventType worlds.EventType) error {
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunNotFound, err)
 	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":
-		// Another run owns a start hook's token, which the backend names, as
-		// world-vercel reads it.
+		// Another run owns a start hook's token, which the backend names in
+		// details.conflictingRunId.
 		conflict := &worlds.HookConflictError{}
 		if details, ok := api.Fields["details"].(map[string]any); ok {
 			id, _ := details["conflictingRunId"].(string)

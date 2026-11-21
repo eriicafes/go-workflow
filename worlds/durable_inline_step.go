@@ -104,7 +104,7 @@ func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineSt
 		if options.Execution.target != nil {
 			panic(options.Execution.exit(errReplaySuspended))
 		}
-		stepID := NewStepIDAt(position)
+		stepID := NewStepID(position)
 		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step input: %w", err)}
