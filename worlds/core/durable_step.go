@@ -60,7 +60,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}
 		}
-		created := worlds.DataStepCreated{StepName: options.Name, Input: encoded}
+		created := worlds.DataStepCreated{StepName: options.Name, WorkflowName: options.Execution.run.WorkflowName, Input: encoded, CreatorMessageID: options.Execution.delivery.MessageID}
 		if options.Execution.target == nil && !options.Rollback {
 			// A flow holds the step back until the runner waits, and then
 			// runs it inline or queues it.

@@ -123,7 +123,7 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 		if err != nil {
 			return cancellationData{}, err
 		}
-		encoded, err := worlds.EncodeHookReceived(payload)
+		encoded, err := worlds.EncodeHookReceived(payload, execution.Run().WorkflowName)
 		if err != nil {
 			return cancellationData{}, err
 		}

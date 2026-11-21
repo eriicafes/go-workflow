@@ -38,7 +38,7 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	if !exists {
 		// On first execution, schedule the timer, then persist its
 		// declaration.
-		data := worlds.DataWaitCreated{ResumeAt: options.DueAt}
+		data := worlds.DataWaitCreated{ResumeAt: options.DueAt, CreatorMessageID: options.Execution.delivery.MessageID}
 		options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		encoded, err := json.Marshal(data)
 		if err != nil {

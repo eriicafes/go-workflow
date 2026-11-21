@@ -500,10 +500,6 @@ func (e *Execution) startSteps() {
 	}
 	pending := e.pending
 	e.pending = nil
-	started, err := json.Marshal(worlds.DataStepStarted{OwnerMessageID: e.delivery.MessageID})
-	if err != nil {
-		panic(e.exit(deliveryError{cause: err}))
-	}
 	var events []worlds.EventsCreateEvent
 	var inline, queued []pendingStep
 	var claimed, rechecks []string
@@ -547,6 +543,10 @@ func (e *Execution) startSteps() {
 			claimed = append(claimed, e.stepKey(step.stepID))
 		}
 		if runInline {
+			started, err := json.Marshal(worlds.DataStepStarted{StepName: e.stepName(step.stepID, step.created), Attempt: step.attempt, OwnerMessageID: e.delivery.MessageID})
+			if err != nil {
+				panic(e.exit(deliveryError{cause: err}))
+			}
 			events = append(events, worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.stepID), Data: started})
 			inline = append(inline, step)
 		} else {
@@ -643,6 +643,12 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataSte
 			eventType = worlds.EventTypeStepRetrying
 		}
 	}
+	result.StepName, result.Attempt, result.WorkflowName = e.stepName(stepID, nil), 0, ""
+	if eventType == worlds.EventTypeStepCompleted {
+		result.WorkflowName = e.run.WorkflowName
+	} else {
+		result.Attempt = stepAttempt(e, stepID)
+	}
 	payload, err := json.Marshal(result)
 	if err != nil {
 		return worlds.Event{}, err
@@ -674,6 +680,38 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataSte
 	e.merge(created, event)
 	e.inBand = inBand
 	return event, nil
+}
+
+// stepName returns the name of step stepID, from created when it is not yet
+// recorded, or from the event that created it.
+func (e *Execution) stepName(stepID worlds.StepID, created *worlds.DataStepCreated) string {
+	if created != nil {
+		return created.StepName
+	}
+	return stepNameIn(e.events, stepID)
+}
+
+// stepNameIn returns the name the step_created, or creating step_started, of
+// step stepID among events records, or "" when none does.
+func stepNameIn(events []worlds.Event, stepID worlds.StepID) string {
+	for _, event := range events {
+		if event.CorrelationID != string(stepID) {
+			continue
+		}
+		switch event.EventType {
+		case worlds.EventTypeStepCreated:
+			var data worlds.DataStepCreated
+			_ = json.Unmarshal(event.Data, &data)
+			return data.StepName
+		case worlds.EventTypeStepStarted:
+			var data worlds.DataStepStarted
+			_ = json.Unmarshal(event.Data, &data)
+			if data.StepName != "" {
+				return data.StepName
+			}
+		}
+	}
+	return ""
 }
 
 // finishSteps waits for every step the flow runs inline to finish and records

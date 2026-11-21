@@ -367,9 +367,9 @@ type DataHookReceived struct {
 }
 
 // EncodeHookReceived returns the Data of a hook_received event carrying
-// payload.
-func EncodeHookReceived(payload []byte) ([]byte, error) {
-	return json.Marshal(DataHookReceived{Payload: payload})
+// payload to a hook of a run of workflowName.
+func EncodeHookReceived(payload []byte, workflowName string) ([]byte, error) {
+	return json.Marshal(DataHookReceived{Payload: payload, WorkflowName: workflowName})
 }
 
 // DecodeHookReceived returns the Payload of hook_received event Data, or nil
