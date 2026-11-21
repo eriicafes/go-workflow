@@ -674,9 +674,6 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 		return a.updateWait(ctx, event)
 	case worlds.EventTypeHookCreated:
 		return a.createHook(ctx, event, slot)
-	case worlds.EventTypeHookReceived:
-		_, err := a.tx.Exec(ctx, a.w.q(`UPDATE workflow.workflow_hooks SET updated_at = $2, received_at = $2 WHERE hook_id = $1`), event.CorrelationID, at)
-		return err
 	case worlds.EventTypeHookDisposed:
 		// Disposal deletes the hook, which releases its token. The event
 		// records the disposal and any forced claim.
@@ -742,10 +739,11 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int6
 	claimed, _ := json.Marshal(value.ForceClaimedFrom)
 	// The token had no holder when admission checked it, so a concurrent
 	// claimant may have claimed it since. Losing that race is a conflict.
-	tag, err := a.tx.Exec(ctx, a.w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, claims_token, metadata_slot, is_webhook, is_system, created_at, updated_at, token_retention_until, claimed_from, spec_version, run_spec_version)
-		VALUES ($1, $2, $3, $4, $5, $6, $15, $7, $8, $9, $10, $10, $11, $12, $13, $14)
+	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: a.run.DeploymentID, WorkflowName: a.run.WorkflowName, EncryptionPublicKey: a.run.EncryptionPublicKey, RunSpecVersion: a.run.SpecVersion})
+	tag, err := a.tx.Exec(ctx, a.w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, is_system, created_at, token_retention_until, claimed_from, spec_version)
+		VALUES ($1, $2, $3, $4, $12, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (token) WHERE claims_token DO NOTHING`),
-		event.CorrelationID, event.RunID, a.run.WorkflowName, a.run.DeploymentID, a.run.EncryptionPublicKey, value.Token, slot, value.IsWebhook, value.IsSystem, event.CreatedAt, value.TokenRetentionUntil, claimed, event.SpecVersion, a.run.SpecVersion, value.Token != "")
+		event.CorrelationID, event.RunID, resume, value.Token, slot, value.IsWebhook, value.IsSystem, event.CreatedAt, value.TokenRetentionUntil, claimed, event.SpecVersion, value.Token != "")
 	if err != nil {
 		return err
 	}
@@ -948,9 +946,10 @@ func (w *World) createStartHook(ctx context.Context, tx pgx.Tx, input worlds.Eve
 		return &worlds.HookConflictError{RunID: holder.runID}
 	}
 	// metadata_slot 1 joins run_created, which holds the hook's metadata.
-	tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, claims_token, metadata_slot, is_webhook, created_at, updated_at, token_retention_until, spec_version, run_spec_version)
-		VALUES ($1, $2, $3, $4, $5, $6, true, 1, false, $7, $7, $8, $9, $9)
-		ON CONFLICT (token) WHERE claims_token DO NOTHING`), worlds.StartHookID(input.RunID), input.RunID, input.WorkflowName, input.DeploymentID, input.EncryptionPublicKey, start.Token, at, start.TokenRetentionUntil, worlds.SpecVersion)
+	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion})
+	tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, created_at, token_retention_until, spec_version)
+		VALUES ($1, $2, $3, $4, true, 1, false, $5, $6, $7)
+		ON CONFLICT (token) WHERE claims_token DO NOTHING`), worlds.StartHookID(input.RunID), input.RunID, resume, start.Token, at, start.TokenRetentionUntil, worlds.SpecVersion)
 	if err != nil {
 		return err
 	}

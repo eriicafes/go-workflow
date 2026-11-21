@@ -182,7 +182,7 @@ func TestViewItems(t *testing.T) {
 	if strings.Join(remove, ",") != "startedAt,cancelledEventId" {
 		t.Fatalf("remove = %v", remove)
 	}
-	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), IsWebhook: true, ResumeContext: worlds.HookResumeContext{EncryptionPublicKey: "pub"}, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: &now}
+	hook := worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", Metadata: []byte("m"), IsWebhook: true, ResumeContext: worlds.HookResumeContext{EncryptionPublicKey: "pub"}, CreatedAt: now, TokenRetentionUntil: &now}
 	item, err := hookItem(hook)
 	if err != nil {
 		t.Fatal(err)

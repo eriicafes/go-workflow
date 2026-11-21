@@ -11,7 +11,12 @@ import (
 
 // analytics is required only because worlds.Analytics.RunsGet/RunsList have the
 // same names as StorageRuns methods but different input types.
-type analytics struct{ world *World }
+// Steps, events, and hooks are read from the event log, by
+// worlds.LogAnalytics.
+type analytics struct {
+	worlds.LogAnalytics
+	world *World
+}
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	return a.world.analyticsRunsGet(ctx, input)

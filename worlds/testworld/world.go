@@ -51,10 +51,12 @@ type World struct {
 
 // Close stops delivering queued work, and deliveries already running see
 // their context cancelled. State stays readable.
-func (w *World) Close()                      { w.cancel() }
-func (*World) BaseURL() string               { return baseURL }
-func (*World) DeploymentID() string          { return "" }
-func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
+func (w *World) Close()             { w.cancel() }
+func (*World) BaseURL() string      { return baseURL }
+func (*World) DeploymentID() string { return "" }
+func (w *World) Analytics() worlds.Analytics {
+	return analytics{LogAnalytics: worlds.LogAnalytics{World: w}, world: w}
+}
 func (w *World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, HookResumeDedup: true}
 }

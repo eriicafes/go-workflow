@@ -309,9 +309,11 @@ func waitChange(ctx context.Context, changed <-chan struct{}, timer <-chan time.
 	return nil
 }
 
-func (w *World) BaseURL() string             { return w.baseURL }
-func (*World) DeploymentID() string          { return "" }
-func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
+func (w *World) BaseURL() string    { return w.baseURL }
+func (*World) DeploymentID() string { return "" }
+func (w *World) Analytics() worlds.Analytics {
+	return analytics{LogAnalytics: worlds.LogAnalytics{World: w}, world: w}
+}
 func (*World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, HookResumeDedup: true}
 }

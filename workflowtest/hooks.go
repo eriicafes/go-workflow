@@ -159,7 +159,7 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_plain", conformReceived(t, []byte(`{"value":1}`)))
 	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_plain"})
-	if err != nil || hook.ReceivedAt == nil {
+	if err != nil || hook.HookID != "hook_plain" {
 		t.Fatalf("received hook = %#v err=%v", hook, err)
 	}
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: plain})
@@ -211,7 +211,7 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 		conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_web", conformReceived(t, []byte("devl-request")))
 	}
 	hook, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
-	if err != nil || hook.ReceivedAt == nil {
+	if err != nil || hook.HookID != "hook_web" {
 		t.Fatalf("webhook after requests = %#v err=%v", hook, err)
 	}
 	plain := token + "-plain"

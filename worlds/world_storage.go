@@ -384,8 +384,6 @@ type Hook struct {
 	// may attest it per read rather than as a capability.
 	ResumeDedup bool
 	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	ReceivedAt  *time.Time
 }
 
 // WaitStatus is the status of a wait.

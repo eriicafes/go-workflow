@@ -145,8 +145,6 @@ export namespace RPC {
 		webhook: Webhook | null;
 		webhookEventId: string;
 		createdAt: Date;
-		updatedAt: Date;
-		receivedAt: Date | null;
 		tokenRetentionUntil: Date | null;
 		claimedFrom: { runId: string; hookId: string } | null;
 	};

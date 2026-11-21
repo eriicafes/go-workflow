@@ -447,92 +447,21 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			}
 			return encodeRPC(value)
 		case "analytics.steps.get":
-			input, err := decodeRPC[StepsGetInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.StepsGet(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.StepsGet)
 		case "analytics.steps.list":
-			input, err := decodeRPC[StepsListInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.StepsList(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.StepsList)
 		case "analytics.events.get":
-			input, err := decodeRPC[EventsGetInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.EventsGet(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.EventsGet)
 		case "analytics.events.getMany":
-			input, err := decodeRPC[rpcEventsGetManyInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			values := make([]Event, 0, len(input.EventIDs))
-			for _, eventID := range input.EventIDs {
-				value, err := world.EventsGet(ctx, EventsGetInput{RunID: input.RunID, EventID: eventID})
-				if errors.Is(err, ErrEventNotFound) {
-					continue
-				}
-				if err != nil {
-					return nil, err
-				}
-				values = append(values, value)
-			}
-			return encodeRPC(values)
+			return analyticsRPC(ctx, request.Input, analytics.EventsGetMany)
 		case "analytics.events.list":
-			input, err := decodeRPC[EventsListInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.EventsList(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.EventsList)
 		case "analytics.events.listByCorrelationId":
-			input, err := decodeRPC[EventsListByCorrelationIDInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.EventsListByCorrelationID(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.EventsListByCorrelationID)
 		case "analytics.hooks.get":
-			input, err := decodeRPC[HooksGetInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.HooksGet(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.HooksGet)
 		case "analytics.hooks.list":
-			input, err := decodeRPC[HooksListInput](request.Input)
-			if err != nil {
-				return nil, err
-			}
-			value, err := world.HooksList(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			return encodeRPC(value)
+			return analyticsRPC(ctx, request.Input, analytics.HooksList)
 		case "analytics.waits.get":
 			input, err := decodeRPC[AnalyticsWaitsGetInput](request.Input)
 			if err != nil {
@@ -661,10 +590,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 }
 
 type (
-	rpcEventsGetManyInput struct {
-		RunID    RunID
-		EventIDs []EventID
-	}
 	// ClientRunsCreateInput holds the arguments to the client.runs.create RPC
 	// method, which creates a run and queues its first delivery. An empty
 	// RunID is replaced with a new one.
@@ -891,6 +816,20 @@ var rpcEncoding = func() cbor.EncMode {
 	}
 	return mode
 }()
+
+// analyticsRPC decodes an analytics call's input, calls read, and encodes
+// its result.
+func analyticsRPC[In, Out any](ctx context.Context, raw cbor.RawMessage, read func(context.Context, In) (Out, error)) (cbor.RawMessage, error) {
+	input, err := decodeRPC[In](raw)
+	if err != nil {
+		return nil, err
+	}
+	value, err := read(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return encodeRPC(value)
+}
 
 func encodeRPC(value any) (cbor.RawMessage, error) {
 	encoded, err := rpcEncoding.Marshal(value)

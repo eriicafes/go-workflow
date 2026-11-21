@@ -73,4 +73,45 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrEventNotFound, "missing wait")
 	_, err = analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_missing"})
 	conformExpect(t, err, worlds.ErrRunNotFound, "waits of missing run")
+
+	// Steps, events, and hooks are summarized without their payloads, and a
+	// disposed hook is still reported, from its events.
+	conformAppend(t, world, second, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "charge", Input: []byte("input")})
+	step, err := analytics.StepsGet(ctx, worlds.AnalyticsStepsGetInput{RunID: second, StepID: "step_a"})
+	if err != nil || step.StepName != "charge" || step.Status != worlds.StatusPending {
+		t.Fatalf("analytics step = %#v err=%v", step, err)
+	}
+	if steps, err := analytics.StepsList(ctx, worlds.AnalyticsStepsListInput{RunID: second}); err != nil || len(steps.Data) != 1 || steps.Data[0].StepID != "step_a" {
+		t.Fatalf("analytics steps = %#v err=%v", steps, err)
+	}
+	token := fmt.Sprintf("analytics-%d", time.Now().UnixNano())
+	if _, err := conformClaim(world, second, "hook_a", token, false); err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, second, worlds.EventTypeHookReceived, "hook_a", conformReceived(t, []byte("payload")))
+	conformAppend(t, world, second, worlds.EventTypeHookDisposed, "hook_a", nil)
+	hook, err := analytics.HooksGet(ctx, worlds.AnalyticsHooksGetInput{RunID: second, HookID: "hook_a"})
+	if err != nil || hook.Status != worlds.AnalyticsHookDisposed || hook.ReceivedAt == nil || hook.DisposedAt == nil || hook.UpdatedAt.Before(hook.CreatedAt) {
+		t.Fatalf("analytics disposed hook = %#v err=%v", hook, err)
+	}
+	if hooks, err := analytics.HooksList(ctx, worlds.AnalyticsHooksListInput{RunID: second}); err != nil || len(hooks.Data) != 1 || hooks.Data[0].HookID != "hook_a" {
+		t.Fatalf("analytics hooks = %#v err=%v", hooks, err)
+	}
+	_, err = analytics.HooksGet(ctx, worlds.AnalyticsHooksGetInput{RunID: second, HookID: "hook_missing"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "analytics missing hook")
+
+	created, err := analytics.EventsList(ctx, worlds.AnalyticsEventsListInput{RunID: second, EventType: worlds.EventTypeStepCreated})
+	if err != nil || len(created.Data) != 1 || created.Data[0].StepName != "charge" || created.Data[0].WorkflowName != name || created.Data[0].RunCreatedAt.IsZero() {
+		t.Fatalf("analytics step_created events = %#v err=%v", created, err)
+	}
+	if timers, err := analytics.EventsList(ctx, worlds.AnalyticsEventsListInput{RunID: second, EventType: worlds.EventTypeWaitCreated, Pagination: worlds.Pagination{Limit: 1}}); err != nil || len(timers.Data) != 1 || !timers.HasMore || timers.Data[0].ResumeAt == nil || !timers.Data[0].ResumeAt.Equal(due) {
+		t.Fatalf("analytics wait_created events = %#v err=%v", timers, err)
+	}
+	if byHook, err := analytics.EventsListByCorrelationID(ctx, worlds.AnalyticsEventsListByCorrelationIDInput{RunID: second, CorrelationID: "hook_a"}); err != nil || len(byHook.Data) != 3 || byHook.Data[0].IsWebhook == nil {
+		t.Fatalf("analytics hook events = %#v err=%v", byHook, err)
+	}
+	many, err := analytics.EventsGetMany(ctx, worlds.AnalyticsEventsGetManyInput{RunID: second, EventIDs: []worlds.EventID{created.Data[0].EventID, worlds.EventIDForSlot(9999)}})
+	if err != nil || len(many) != 1 || many[0].EventID != created.Data[0].EventID {
+		t.Fatalf("analytics events getMany = %#v err=%v", many, err)
+	}
 }
