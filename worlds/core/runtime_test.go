@@ -2027,3 +2027,47 @@ func TestStepDeliveryPastTheCapFailsAStepWithNoActivityForAnHour(t *testing.T) {
 		}
 	})
 }
+
+// runReads counts the reads of a run, which a step delivery's full log read
+// starts with.
+type runReads struct {
+	worlds.World
+	reads int
+}
+
+func (w *runReads) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	w.reads++
+	return w.World.RunsGet(ctx, input)
+}
+
+func TestStepRedeliveryWaitsForAPendingRetryFromTheStepsLatestEvent(t *testing.T) {
+	ctx := context.Background()
+	base := testworld.NewManual()
+	defer base.Close()
+	world := &runReads{World: base}
+	runtime := core.NewRuntime(world, core.Runners())
+	if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_retry", WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	due := time.Now().Add(time.Minute)
+	retryAfter, _ := json.Marshal(worlds.DataStepResult{Error: []byte(`{"message":"x"}`), Attempt: 1, RetryAfter: &due})
+	for _, event := range []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeRunStarted},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
+		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a", Data: []byte(`{"attempt":1}`)},
+		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: retryAfter},
+	} {
+		if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_retry", Event: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stepID := worlds.StepID("step_a")
+	err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_retry", StepID: &stepID, DeliveryCount: 2, Attempt: 2})
+	redelivery, ok := worlds.RedeliveryOf(err)
+	if !ok || redelivery.After <= 0 || redelivery.After > time.Minute {
+		t.Fatalf("err = %v, want a redelivery when the retry is due", err)
+	}
+	if world.reads != 0 {
+		t.Fatalf("the delivery read the run %d times, want none", world.reads)
+	}
+}

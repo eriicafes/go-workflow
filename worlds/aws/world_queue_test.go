@@ -1,10 +1,10 @@
 package awsworld
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -98,8 +98,7 @@ func fullInput() worlds.QueueInput {
 	return worlds.QueueInput{
 		RunID: "wrun_full", QueueName: "q", WorkflowName: "flow", StepID: &stepID,
 		IdempotencyKey: "key", DeploymentID: "dpl", DeploymentMismatchRetryCount: 1, ReplayDivergenceCount: 2,
-		StepName: "step", StepAttempt: 3, StepResent: true, StepInput: []byte("input"),
-		RunSpecVersion: worlds.SpecVersion, RunInput: &worlds.RunInput{WorkflowName: "flow", DeploymentID: "dpl", SpecVersion: worlds.SpecVersion},
+		StepName: "step", StepAttempt: 3, StepResent: true, RunSpecVersion: worlds.SpecVersion,
 		CompleteWaits:    []string{"wait_1"},
 		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_1", Attempt: 2, ResumeAt: &resumeAt, HopAt: &hopAt},
@@ -136,10 +135,13 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := awsv2.ToString(schedules.schedules[scheduleName(scheduled.MessageID)].Target.Input)
-	if err := json.Unmarshal([]byte(body), &message); err != nil || message.ID != scheduled.MessageID || !bytes.Equal(message.Input.StepInput, input.StepInput) || message.Input.WaitContinuation == nil {
+	if err := json.Unmarshal([]byte(body), &message); err != nil || message.ID != scheduled.MessageID || !reflect.DeepEqual(message.Input.CompleteWaits, input.CompleteWaits) || message.Input.WaitContinuation == nil {
 		t.Fatalf("schedule body = %s, %v", body, err)
 	}
-	input.StepInput = bytes.Repeat([]byte("x"), worlds.MaxStepMessageInput)
+	input.CompleteWaits = nil
+	for len(input.CompleteWaits) < maxScheduleInput/8 {
+		input.CompleteWaits = append(input.CompleteWaits, fmt.Sprintf("wait_%d", len(input.CompleteWaits)))
+	}
 	large, err := world.Queue(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +150,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	if len(body) > maxScheduleInput || json.Unmarshal([]byte(body), &message) != nil || message.ID != large.MessageID {
 		t.Fatalf("large schedule body of %d bytes", len(body))
 	}
-	if record, _, _ := world.queueRecord(ctx, large.MessageID); len(record.input.StepInput) != worlds.MaxStepMessageInput {
-		t.Fatal("the record lost the large step input")
+	if record, _, _ := world.queueRecord(ctx, large.MessageID); !reflect.DeepEqual(record.input.CompleteWaits, input.CompleteWaits) {
+		t.Fatal("the record lost the large input")
 	}
 }

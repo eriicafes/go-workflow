@@ -391,6 +391,9 @@ func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) erro
 	if input.StepID == nil {
 		return nil
 	}
+	if due, ok := r.pendingRetry(ctx, input); ok {
+		return worlds.Redeliver(time.Until(due))
+	}
 	run, events, err := r.loadRun(ctx, input.RunID)
 	if err != nil || run.Status.Terminal() {
 		return err
@@ -664,6 +667,30 @@ const stepStallWindow = time.Hour
 // stepStalled reports whether the step of input, delivered past
 // MaxDeliveries, has shown no activity for stepStallWindow. A step whose log
 // cannot be read is taken as stalled.
+// pendingRetry returns when the retry a step delivery waits for is due, read
+// from the step's latest event alone before the delivery reads the whole
+// log, when that event is a step_retrying not yet due. Only a delivery that
+// may be a retry's early redelivery reads it: a redelivery of the message, or
+// one of an inline step's retry handed to a step delivery. A failed read
+// leaves the decision to the whole log.
+func (r *Runtime) pendingRetry(ctx context.Context, input worlds.QueueInput) (time.Time, bool) {
+	if input.DeliveryCount == 1 && input.StepAttempt <= 1 {
+		return time.Time{}, false
+	}
+	page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{
+		RunID: input.RunID, CorrelationID: string(*input.StepID),
+		Pagination: worlds.Pagination{Limit: 1, SortOrder: worlds.SortOrderDescending},
+	})
+	if err != nil || len(page.Data) == 0 || page.Data[0].EventType != worlds.EventTypeStepRetrying {
+		return time.Time{}, false
+	}
+	var data worlds.DataStepResult
+	if json.Unmarshal(page.Data[0].Data, &data) != nil || data.RetryAfter == nil || !time.Now().Before(*data.RetryAfter) {
+		return time.Time{}, false
+	}
+	return *data.RetryAfter, true
+}
+
 func (r *Runtime) stepStalled(ctx context.Context, input worlds.QueueInput) bool {
 	page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: string(*input.StepID)})
 	if err != nil {
