@@ -233,22 +233,24 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	}
 
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: other, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
-	conformExpect(t, err, worlds.ErrHookNotActive, "dispose another run's hook")
+	conformExpect(t, err, worlds.ErrHookNotFound, "dispose another run's hook")
 	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token}); err != nil || owner.HookID != "hook_a" {
 		t.Fatalf("token owner = %#v err=%v", owner, err)
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_missing", nil)})
-	conformExpect(t, err, worlds.ErrHookNotActive, "dispose a missing hook")
+	conformExpect(t, err, worlds.ErrHookNotFound, "dispose a missing hook")
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_missing"})
 	conformExpect(t, err, worlds.ErrHookNotFound, "hook after disposing a missing hook")
 
-	disposed := conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
-	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
-	if err != nil || repeat.EventID != disposed.EventID || repeat.AllocatedEventCount != 0 {
-		t.Fatalf("repeated hook_disposed = %#v err=%v", repeat, err)
-	}
+	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
+	// A disposed hook is gone, so a repeated disposal or a late delivery
+	// finds no hook, as in the Workflow SDK's Worlds.
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
+	conformExpect(t, err, worlds.ErrHookNotFound, "repeated hook_disposed")
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_a", conformReceived(t, []byte("late")))})
+	conformExpect(t, err, worlds.ErrHookNotFound, "resume a disposed hook")
 
-	// Disposing a hook that lost its token to a forced claim keeps the claim.
+	// A forced claim disposes the hook it took the token from, in its run.
 	forced := token + "-forced"
 	if _, err := conformClaim(world, runID, "hook_f", forced, false); err != nil {
 		t.Fatal(err)
@@ -256,9 +258,8 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	if _, err := conformClaim(world, other, "hook_g", forced, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_f", nil)}); err != nil {
-		t.Fatalf("dispose a force-claimed hook: %v", err)
-	}
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_f", nil)})
+	conformExpect(t, err, worlds.ErrHookNotFound, "dispose a force-claimed hook")
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_f"})
 	conformExpect(t, err, worlds.ErrHookNotFound, "force-claimed hook")
 	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: forced}); err != nil || owner.HookID != "hook_g" {

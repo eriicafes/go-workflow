@@ -94,7 +94,8 @@ They differ from world-postgres's where Go needs it:
 - `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
   `Config.Retention`.
 - Hooks keep the run's workflow, deployment, public key, and spec version,
-  which wake the run, and keep their row after disposal.
+  which wake the run, and when they were last updated and received, which
+  the analytics hook reads return.
 - The queue is Go's own. There are no graphile-worker, snapshot, or
   invocation tables.
 

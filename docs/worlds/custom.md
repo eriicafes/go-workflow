@@ -58,13 +58,14 @@ type World interface {
   then only has to fit in one event, and results are written once.
 - **Exclusive hook tokens.** `EventsCreate(hook_created)` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
-  `ForceClaimedBy` to the previous owner's run. `hook_disposed` needs a hook
-  of the same run (`ErrHookNotActive`).
+  `ForceClaimedBy` to the previous owner's run. `hook_disposed` and
+  `hook_received` need a hook of the same run (`ErrHookNotFound`).
 - **Hooks end.** A disposed hook is deleted, as the Workflow SDK's Worlds
   delete it, and so is a finished run's hook once its token retention ends:
-  `HooksGet` returns `ErrHookNotFound` and `HooksList` leaves it out. Keep
-  the disposal itself, so a repeated `hook_disposed` returns the first and a
-  `hook_received` for a force-claimed hook returns `ErrHookForceClaimed`.
+  `HooksGet` returns `ErrHookNotFound` and `HooksList` leaves it out, and a
+  repeated `hook_disposed` returns `ErrHookNotFound`. Remember a forced
+  claim's disposal, so a `hook_received` for a force-claimed hook returns
+  `ErrHookForceClaimed`.
 - **Start hooks.** With `Capabilities().StartHook`, `EventsCreateRun`
   creates `EventsCreateRunInput.StartHook` with the run, as hook
   `worlds.StartHookID(runID)`, or creates nothing and returns a

@@ -271,7 +271,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an admission refusal, as opposed to a
 // storage failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -483,17 +483,17 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			if forced {
 				return nil, worlds.ErrHookForceClaimed
 			}
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 		if hook.RunID != a.run.RunID {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 		owner, err := a.w.tokenOwner(ctx, a.tx, hook.Token)
 		if err != nil {
 			return nil, err
 		}
 		if owner != hook.HookID {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookDisposed:
@@ -501,15 +501,10 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			// A repeated disposal answers with the committed one.
-			result, err := a.replay(ctx, event.EventType, event.CorrelationID, true)
-			if err != nil || result.EventID != "" {
-				return result, err
-			}
-		}
+		// A disposed hook is gone, so disposing it again finds no hook, as
+		// in world-postgres.
 		if !found || hook.RunID != a.run.RunID {
-			return nil, worlds.ErrHookNotActive
+			return nil, worlds.ErrHookNotFound
 		}
 
 	case worlds.EventTypeHookCreated:

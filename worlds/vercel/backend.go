@@ -331,7 +331,7 @@ func classify(err error, eventType worlds.EventType) error {
 	case api.Status == http.StatusNotFound && api.Code != "":
 		switch eventType {
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
-			return fmt.Errorf("%w: %v", worlds.ErrHookNotActive, err)
+			return fmt.Errorf("%w: %v", worlds.ErrHookNotFound, err)
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunNotFound, err)
 	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":

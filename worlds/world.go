@@ -416,7 +416,8 @@ func ResumeDigest(payload []byte) string {
 
 // ResumeHook appends payload to hook as a hook_received event and queues a
 // delivery so the hook's run resumes, addressed to the run's deployment. When
-// the World refuses the payload with ErrHookNotActive, it still queues the
+// the World refuses the payload with ErrHookNotFound or ErrHookNotActive, it
+// still queues the
 // delivery, because an earlier resume may have recorded its payload without
 // queueing one, and returns the error.
 //
@@ -456,7 +457,7 @@ func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte, res
 		}
 		result, err = world.EventsCreate(ctx, input)
 	}
-	if err != nil && !errors.Is(err, ErrHookNotActive) {
+	if err != nil && !errors.Is(err, ErrHookNotFound) && !errors.Is(err, ErrHookNotActive) {
 		return result, err
 	}
 	// The hook carries the context of its run, so resuming it reads no run.

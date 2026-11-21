@@ -142,9 +142,10 @@ when it occurred, which the World stores as its `CreatedAt`.
   (`ErrStepNotStartable`): the runtime decides from the log alone. Replay
   ignores any event of a step, hook, or wait after its final one, so the
   first writer of a result wins.
-- `hook_disposed` only targets a hook of the same run (`ErrHookNotActive`).
+- `hook_disposed` only targets a hook of the same run (`ErrHookNotFound`), so
+  a repeated disposal is refused, as in the Workflow SDK's Worlds.
 - `hook_received` only targets an active hook of the same run that still owns
-  its token (`ErrHookNotActive`, or `ErrHookForceClaimed` after a forced claim).
+  its token (`ErrHookNotFound`, or `ErrHookForceClaimed` after a forced claim).
   A hook, a webhook included, receives repeated payloads, consumed in order with `Next`.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
 - An event that repeats an admitted transition, such as a second

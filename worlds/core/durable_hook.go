@@ -184,7 +184,9 @@ func DurableDisposeHook(execution *Execution, hookID worlds.HookID) {
 		return
 	}
 	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID)}, func(err error) error {
-		if errors.Is(err, worlds.ErrRunTerminal) {
+		// A run that ended, a hook that is gone, and a concurrent disposal
+		// leave nothing to dispose, as the Workflow SDK's runtime skips them.
+		if errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrHookNotFound) || errors.Is(err, worlds.ErrHookNotActive) {
 			return nil
 		}
 		return err

@@ -309,8 +309,8 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 }
 
 // disposalItem replaces a disposed hook's HOOK# item: the hook is gone, and
-// the item keeps only what refuses its later deliveries and answers a
-// repeated disposal. It is in no index.
+// the item keeps only what refuses its later deliveries, and its disposal's
+// event ID marks it. It is in no index.
 func disposalItem(id worlds.HookID, disposal hookDisposal) map[string]ddb.AttributeValue {
 	item := merge(hookKey(string(id)), map[string]ddb.AttributeValue{
 		"runId":           avs(string(disposal.runID)),
