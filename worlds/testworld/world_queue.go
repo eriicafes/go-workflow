@@ -39,34 +39,130 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 
 func (w *World) deliver(id string, input worlds.QueueInput) {
 	input.MessageID = id
-	if input.NotBefore != nil {
-		timer := time.NewTimer(time.Until(*input.NotBefore))
+	wait := func(until *time.Time) bool {
+		if until == nil {
+			return true
+		}
+		timer := time.NewTimer(time.Until(*until))
+		defer timer.Stop()
 		select {
 		case <-w.ctx.Done():
-			return
+			return false
 		case <-timer.C:
+			return true
 		}
 	}
-	// A failed delivery is retried a few times, as a real queue redelivers it.
-	for attempt := range deliveryAttempts {
-		if attempt > 0 {
-			timer := time.NewTimer(time.Duration(attempt) * 10 * time.Millisecond)
-			select {
-			case <-w.ctx.Done():
-				return
-			case <-timer.C:
-			}
-		}
-		input.Attempt = attempt + 1
-		if w.runtime.Execute(w.ctx, input) == nil {
+	if !wait(input.NotBefore) {
+		return
+	}
+	// A failed delivery is retried a few times, as a real queue redelivers
+	// it, and a delivery that asks for its message again gets it.
+	failures := 0
+	for count := 1; count <= maxDeliveries; count++ {
+		input.DeliveryCount = count
+		input.Attempt = count - w.handoffs(id)
+		err := w.execute(input)
+		if err == nil {
 			_ = w.Acknowledge(w.ctx, id)
+			return
+		}
+		if redelivery, ok := worlds.RedeliveryOf(err); ok {
+			if redelivery.After == 0 {
+				w.addHandoff(id)
+			}
+			until := time.Now().Add(redelivery.After)
+			if !wait(&until) {
+				return
+			}
+			continue
+		}
+		if failures++; failures >= deliveryAttempts {
+			return
+		}
+		until := time.Now().Add(time.Duration(failures) * 10 * time.Millisecond)
+		if !wait(&until) {
 			return
 		}
 	}
 }
 
-// deliveryAttempts is how often an automatic World executes a delivery.
-const deliveryAttempts = 3
+// execute executes input, one flow of a run at a time: a flow message waits
+// for the run's flow that is executing to finish. Step messages do not wait.
+func (w *World) execute(input worlds.QueueInput) error {
+	if input.StepID == nil {
+		gate := w.flowGate(input.RunID)
+		select {
+		case gate <- struct{}{}:
+		case <-w.ctx.Done():
+			return w.ctx.Err()
+		}
+		defer func() { <-gate }()
+	}
+	return w.runtime.Execute(w.ctx, input)
+}
+
+// flowGate returns the gate that lets one flow of runID execute at a time.
+func (w *World) flowGate(runID worlds.RunID) chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	gate, ok := w.flowGates[runID]
+	if !ok {
+		gate = make(chan struct{}, 1)
+		w.flowGates[runID] = gate
+	}
+	return gate
+}
+
+const (
+	// maxDeliveries caps how often an automatic World delivers one message.
+	maxDeliveries = 200
+	// deliveryAttempts is how often an automatic World executes a delivery
+	// that fails.
+	deliveryAttempts = 3
+)
+
+func (w *World) handoffs(id string) int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.handedOff[id]
+}
+
+func (w *World) addHandoff(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.handedOff[id]++
+}
+
+// Redeliver puts back the delivery identified by id, which a test using a
+// NewManual World calls when executing it returned a worlds.Redelivery: the
+// message moves to the back of the queue, due after the redelivery's delay,
+// with its DeliveryCount raised, and its Attempt raised unless the
+// redelivery is a handoff. It returns ErrMessageNotFound when no such
+// delivery is queued.
+func (w *World) Redeliver(ctx context.Context, id string, redelivery *worlds.Redelivery) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	defer w.notify()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for index, message := range w.queued {
+		if message.id != id {
+			continue
+		}
+		w.queued = append(w.queued[:index], w.queued[index+1:]...)
+		message.input.DeliveryCount = max(message.input.DeliveryCount, 1) + 1
+		message.input.Attempt = max(message.input.Attempt, 1)
+		if redelivery.After > 0 {
+			message.input.Attempt++
+			due := time.Now().Add(redelivery.After)
+			message.input.NotBefore = &due
+		}
+		w.queued = append(w.queued, message)
+		return nil
+	}
+	return ErrMessageNotFound
+}
 
 // ErrMessageNotFound is returned by Acknowledge for a message the World does
 // not hold.
@@ -125,6 +221,8 @@ func (w *World) QueuedMessages() []QueueMessage {
 	for index, message := range w.queued {
 		input := cloneQueueInput(message.input)
 		input.MessageID = message.id
+		input.DeliveryCount = max(input.DeliveryCount, 1)
+		input.Attempt = max(input.Attempt, 1)
 		values[index] = QueueMessage{ID: message.id, Input: input}
 	}
 	return values

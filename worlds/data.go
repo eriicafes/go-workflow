@@ -303,10 +303,6 @@ type DataStepStarted struct {
 	WorkflowName string `json:"workflowName,omitempty"`
 	Input        []byte `json:"input,omitempty"`
 	Inline       bool   `json:"inline,omitempty"`
-	// OwnerMessageID is the queued message of the flow that started the
-	// attempt inline, which owns it until inlineStepLease passes. It is
-	// empty for an attempt a step delivery started.
-	OwnerMessageID string `json:"ownerMessageId,omitempty"`
 }
 
 // StartCreatesStep reports whether a step_started event's data creates the

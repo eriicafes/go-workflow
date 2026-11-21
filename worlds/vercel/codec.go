@@ -148,7 +148,6 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		}
 		setString(meta, "stepName", data.StepName)
 		setString(meta, "workflowName", data.WorkflowName)
-		setString(meta, "ownerMessageId", data.OwnerMessageID)
 		if data.Attempt > 0 {
 			meta["attempt"] = data.Attempt
 		}
@@ -277,7 +276,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 	case worlds.EventTypeStepStarted:
 		attempt, _ := asInt(d["attempt"])
 		inline, _ := d["inline"].(bool)
-		return json.Marshal(worlds.DataStepStarted{StepName: str(d, "stepName"), Attempt: attempt, WorkflowName: str(d, "workflowName"), Input: payload("input"), Inline: inline, OwnerMessageID: str(d, "ownerMessageId")})
+		return json.Marshal(worlds.DataStepStarted{StepName: str(d, "stepName"), Attempt: attempt, WorkflowName: str(d, "workflowName"), Input: payload("input"), Inline: inline})
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		attempt, _ := asInt(d["attempt"])
 		result := worlds.DataStepResult{StepName: str(d, "stepName"), WorkflowName: str(d, "workflowName"), Attempt: attempt, CreatorMessageID: str(d, "creatorMessageId")}

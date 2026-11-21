@@ -2,6 +2,8 @@ package worlds
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -58,11 +60,26 @@ type (
 		// ignores it.
 		MessageID string
 		// Attempt is the 1-based number of this delivery of the message,
-		// which the World sets before Runtime.Execute and Queue ignores.
-		// Zero means the World does not count deliveries. Past
-		// MaxDeliveries, Runtime.Execute fails the delivery's run or step
-		// instead of executing it.
+		// which the World sets before Runtime.Execute and Queue ignores. A
+		// handoff (a Redeliver of zero) does not count. Zero means the World
+		// does not count deliveries. Past MaxDeliveries, Runtime.Execute
+		// fails the delivery's run or step instead of executing it.
 		Attempt int
+		// DeliveryCount is the 1-based number of this delivery of the
+		// message, which rises on every redelivery, handoffs included. The
+		// World sets it before Runtime.Execute and Queue ignores it. Zero
+		// means the World does not count deliveries, which the Runtime
+		// treats as a possible redelivery.
+		DeliveryCount int
+		// StepName is the name of the step a step delivery executes.
+		StepName string
+		// StepAttempt is the attempt a step delivery is queued for, when it
+		// is above 1: an inline step's retry handed to a step delivery.
+		StepAttempt int
+		// StepResent marks a step delivery queued again by a flow that could
+		// not tell whether the step's first message was sent. Its delivery
+		// reads the log before it runs the step.
+		StepResent bool
 	}
 	// QueueBatchInput holds the arguments to QueueBatch.
 	QueueBatchInput struct {
@@ -73,3 +90,29 @@ type (
 		MessageID string
 	}
 )
+
+// Redelivery is the result of a delivery that asks its World to deliver the
+// same message again, with the same MessageID and a higher DeliveryCount,
+// after After. Runtime.Execute returns it as its error, and the World does
+// not acknowledge the message. A Redelivery of zero is a handoff: the
+// message is delivered again at once, and the redelivery does not count as
+// an Attempt. Any other Redelivery counts as one.
+type Redelivery struct {
+	After time.Duration
+}
+
+func (r *Redelivery) Error() string {
+	return fmt.Sprintf("workflow: redeliver after %s", r.After)
+}
+
+// Redeliver returns a Redelivery of after, zero or more.
+func Redeliver(after time.Duration) error {
+	return &Redelivery{After: max(after, 0)}
+}
+
+// RedeliveryOf reports the Redelivery err carries.
+func RedeliveryOf(err error) (*Redelivery, bool) {
+	var redelivery *Redelivery
+	ok := errors.As(err, &redelivery)
+	return redelivery, ok
+}

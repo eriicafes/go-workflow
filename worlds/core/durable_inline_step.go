@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -17,13 +16,6 @@ const (
 	DefaultMaxInlineSteps = 3
 	// maxInlineStepsLimit caps WithMaxInlineSteps.
 	maxInlineStepsLimit = 16
-	// inlineStepLease is how long an attempt a flow started inline belongs
-	// to that flow's queued message, whose redelivery runs it again. A flow
-	// that replays after the lease without its result takes it over.
-	inlineStepLease = 15 * time.Minute
-	// retryRecheckDelay is how long a retry's flow that arrived while its
-	// attempt was still being recorded waits before it replays again.
-	retryRecheckDelay = 50 * time.Millisecond
 	// DefaultMaxInlineStepsDuration is how long a flow delivery starts new
 	// steps inline, unless WithMaxInlineStepsDuration sets another duration.
 	// After it, the flow queues them, so a long-running flow hands its steps
@@ -81,153 +73,54 @@ type DurableInlineStepOptions struct {
 	MaxRetries int
 }
 
-// DurableInlineStep declares the next inline step, which runs
-// fn with input in the flow, never as a step delivery. It reports the step's
-// ID, whose result StepOutcome reads once the walk reaches it. When the runner
-// waits with nothing left to deliver, Execution.Wait records step_created
-// with input and step_started in one write, calls fn alongside the other steps
-// it runs inline, records the result, and delivers it. Every attempt uses the
-// recorded input.
-//
-// A failed attempt that may retry queues a flow for the retry time before
-// step_retrying is recorded, and the replay that reaches the step at that time
-// runs the next attempt. An attempt without a result belongs to the queued
-// message of the flow that started it. That message's redelivery runs another
-// attempt at once, and any other flow only after inlineStepLease. A step
-// delivery never runs it: it suspends at an inline step that is not recorded.
-// When the operation recorded with its ID is not a step with
-// options.Name, it ends the replay with a panic carrying a
-// replayDivergenceError.
+// DurableInlineStep declares the next inline step, which is created inline
+// whatever the flow's limit, and otherwise behaves as DurableStep: the flow
+// that creates it runs its first attempt, a flow that finds an attempt
+// without a result runs another, and a retry is handed to a step delivery.
 func DurableInlineStep[In, Out any](ctx context.Context, options DurableInlineStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
-	stepID := options.Execution.NextStepID()
-	creationIndex, exists := options.Execution.declared(string(stepID))
-	if !exists {
-		if options.Execution.target != nil {
-			panic(options.Execution.exit(errReplaySuspended))
-		}
-		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
-		if err != nil {
-			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode inline step input: %w", err)}
-		}
-		created := worlds.DataStepCreated{StepName: options.Name, WorkflowName: options.Execution.run.WorkflowName, Input: encoded, CreatorMessageID: options.Execution.delivery.MessageID}
-		options.Execution.hold(pendingStep{
-			stepID:   stepID,
-			created:  &created,
-			explicit: true,
-			attempt:  1,
-			run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
-		})
-		return DurableStepResult[Out]{StepID: stepID}
-	}
-
-	// Replay the recorded declaration.
-	event := options.Execution.events[creationIndex]
-	if event.EventType != worlds.EventTypeStepCreated {
-		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
-	}
-	var createdData worlds.DataStepCreated
-	if err := json.Unmarshal(event.Data, &createdData); err != nil {
-		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode inline step: %w", err)}
-	}
-	if createdData.StepName != options.Name {
-		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
-	}
-	if _, settled := options.Execution.settles[string(stepID)]; settled || options.Execution.target != nil {
-		return DurableStepResult[Out]{StepID: stepID}
-	}
-
-	// The last retry decides when the next attempt runs, and an attempt
-	// without a result belongs to the flow that started it until its lease
-	// passes.
-	attempts := 0
-	var retryAfter *time.Time
-	var running *worlds.Event
-	for _, event := range options.Execution.events[creationIndex+1:] {
-		if event.CorrelationID != string(stepID) {
-			continue
-		}
-		switch event.EventType {
-		case worlds.EventTypeStepStarted:
-			attempts++
-			retryAfter, running = nil, &event
-		case worlds.EventTypeStepRetrying:
-			running = nil
-			var result worlds.DataStepResult
-			if json.Unmarshal(event.Data, &result) == nil {
-				retryAfter = result.RetryAfter
-			}
-		}
-	}
-	if running != nil {
-		// The owner queues its retry's flow before it records the retry, so
-		// that flow takes the attempt over too.
-		if _, leased := attemptOwner(options.Execution, *running); leased && options.Execution.delivery.IdempotencyKey != stepRetryKey(stepID, attempts) {
-			return DurableStepResult[Out]{StepID: stepID}
-		}
-	}
-	if retryAfter != nil && time.Now().Before(*retryAfter) {
-		// The retry's own flow can arrive early when clocks disagree. It is
-		// consumed by this replay, so it queues its replacement.
-		key := stepRetryKey(stepID, attempts)
-		if options.Execution.delivery.IdempotencyKey == key {
-			options.Execution.queue(worlds.QueueInput{NotBefore: retryAfter, IdempotencyKey: key})
-		}
-		return DurableStepResult[Out]{StepID: stepID}
-	}
-
-	// Later attempts always use the input captured by step_created.
-	var args stepArgs[In]
-	if err := options.Execution.DecodePayload(createdData.Input, &args); err != nil {
-		return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode inline step input: %w", err)}
-	}
-	input = args.Args[0]
-	options.Execution.hold(pendingStep{
-		stepID:   stepID,
-		explicit: true,
-		attempt:  attempts + 1,
-		run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
-	})
-	return DurableStepResult[Out]{StepID: stepID}
-}
-
-// attemptOwner returns the queued message that owns the started attempt, and
-// whether its lease still keeps this flow from taking it over. An attempt a
-// step delivery started has no owner. A start with no recorded time keeps its
-// lease, since its age is unknown.
-func attemptOwner(execution *Execution, started worlds.Event) (string, bool) {
-	var data worlds.DataStepStarted
-	_ = json.Unmarshal(started.Data, &data)
-	if data.OwnerMessageID == "" || data.OwnerMessageID == execution.delivery.MessageID {
-		return data.OwnerMessageID, false
-	}
-	return data.OwnerMessageID, started.CreatedAt.IsZero() || time.Now().Before(started.CreatedAt.Add(inlineStepLease))
+	return durableStep(ctx, DurableStepOptions{Execution: options.Execution, Name: options.Name, MaxRetries: options.MaxRetries}, true, fn, input)
 }
 
 // pendingStep is a step a flow declared, or must attempt again, that
-// Execution.Wait starts once every recorded event is delivered: inline when it
-// is explicit, recovered, or within its limit, and otherwise queued as a step
-// delivery.
+// Execution.Wait creates or starts once every recorded event is delivered:
+// inline when it is explicit, recovered, or within its limit, and otherwise
+// as a step delivery.
 type pendingStep struct {
 	stepID worlds.StepID
-	// created is the step's declaration, which is not yet recorded. It is
-	// nil for a step an earlier delivery recorded.
-	created *worlds.DataStepCreated
-	// explicit marks an inline step, which always runs inline and is
-	// retried by a flow.
+	name   string
+	// input is the step's encoded arguments, for a step not yet recorded.
+	input []byte
+	// failure is why the step's input did not encode. The step is recorded
+	// failed.
+	failure error
+	// explicit marks an inline step, which is created inline whatever the
+	// limit.
 	explicit bool
-	// recovered marks a step this flow's message started inline in a
-	// delivery that stopped, which always runs inline again.
+	// recovered marks an inline step whose attempt started in a delivery
+	// that stopped, which runs again as attempt.
 	recovered bool
-	// limit is the number of steps the flow may promote to run inline.
+	// exhausted marks a recovered step whose attempts all started, which
+	// fails without another.
+	exhausted bool
+	// limit is the number of steps the flow may run inline at once.
 	limit int
-	// duration is how long after the delivery started the flow may promote
-	// the step to run inline.
+	// duration is how long after the delivery started the flow may create
+	// the step inline.
 	duration time.Duration
 	// attempt is the attempt that runs.
 	attempt int
 	// run calls the step function as attempt, and returns its result to
 	// record, or a World error that stopped it.
 	run func(attempt int) (worlds.DataStepResult, error)
+}
+
+// pendingWait is a timer a flow declared, which Execution.Wait records once
+// every recorded event is delivered.
+type pendingWait struct {
+	waitID worlds.WaitID
+	dueAt  time.Time
+	// refs are the cancellation contexts the replay declared the timer in.
+	refs []cancellationReference
 }
 
 type inlineOutcome struct {

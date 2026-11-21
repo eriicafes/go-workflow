@@ -62,7 +62,6 @@ var storedKeys = map[string]string{
 	"hookTokenRetentionUntil": "tokenRetentionUntil",
 	"hookForce":               "force",
 	"encryptionPublicKey":     "encryptionPublicKey",
-	"ownerMessageId":          "ownerMessageId",
 	"attempt":                 "attempt",
 	"inline":                  "inline",
 	"creatorMessageId":        "creatorMessageId",

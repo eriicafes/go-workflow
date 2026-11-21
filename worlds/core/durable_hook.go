@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -111,14 +112,19 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	return result
 }
 
-// HookEvent reports the next delivered payload or disposal after cursor.
+// HookEvent reports the next delivered payload or disposal after cursor. A
+// hook's disposal is its last event: anything recorded for it after is
+// ignored.
 func HookEvent(execution *Execution, id worlds.HookID, cursor worlds.EventID) (worlds.Event, bool) {
 	for _, event := range execution.events[:execution.horizon] {
-		if event.CorrelationID != string(id) || event.EventID <= cursor {
+		if event.CorrelationID != string(id) || event.EventType != worlds.EventTypeHookDisposed && event.EventType != worlds.EventTypeHookReceived {
 			continue
 		}
-		if event.EventType == worlds.EventTypeHookDisposed || event.EventType == worlds.EventTypeHookReceived {
+		if event.EventID > cursor {
 			return event, true
+		}
+		if event.EventType == worlds.EventTypeHookDisposed {
+			break
 		}
 	}
 	return worlds.Event{}, false
@@ -150,4 +156,25 @@ func HookOutcome[T any](execution *Execution, hookID worlds.HookID, after worlds
 		return result
 	}
 	return result
+}
+
+// DurableDisposeHook records that the run's hook hookID released its token,
+// as a write of the flow, unless the log already records it. A step delivery
+// reaches a disposal the flow recorded before it declared the step, so it
+// records nothing.
+func DurableDisposeHook(execution *Execution, hookID worlds.HookID) {
+	for _, event := range execution.events {
+		if event.EventType == worlds.EventTypeHookDisposed && event.CorrelationID == string(hookID) {
+			return
+		}
+	}
+	if execution.target != nil {
+		return
+	}
+	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID)}, func(err error) error {
+		if errors.Is(err, worlds.ErrRunTerminal) {
+			return nil
+		}
+		return err
+	})
 }

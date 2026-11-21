@@ -257,22 +257,8 @@ func (h *Hook[T]) Dispose(ctx context.Context) {
 	if h.err != nil {
 		return
 	}
-	_, err := InlineStep(execution.Context(), disposeHook, h.id)
-	if err != nil {
-		panic(err)
-	}
+	core.DurableDisposeHook(execution, h.id)
 	h.disposed = true
-}
-
-func disposeHook(ctx context.Context, id worlds.HookID) (struct{}, error) {
-	// A repeated hook_disposed returns the earlier event, so the write needs
-	// no fence. A World error retries the delivery, not the disposal.
-	execution, _ := core.ExecutionFromContext(ctx)
-	_, err := execution.World().EventsCreate(ctx, worlds.EventsCreateInput{RunID: execution.Run().RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(id)}})
-	if err != nil && !errors.Is(err, worlds.ErrRunTerminal) {
-		return struct{}{}, core.DeliveryError(err)
-	}
-	return struct{}{}, nil
 }
 
 // GetHook looks up the active hook with token using the Client in ctx. It
