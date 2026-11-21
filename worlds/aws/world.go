@@ -159,7 +159,6 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 // supplied clients, which the caller keeps owning.
 func (*World) Close()                        {}
 func (w *World) BaseURL() string             { return w.config.BaseURL }
-func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {

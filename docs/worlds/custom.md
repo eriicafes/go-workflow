@@ -19,8 +19,6 @@ type World interface {
 	Analytics() Analytics
 	// Capabilities reports the optional behavior this World implements.
 	Capabilities() Capabilities
-	// SpecVersion returns the RPC protocol version implemented by this World.
-	SpecVersion() int
 	// DeploymentID returns the deployment whose code this World's deliveries
 	// execute, or "" when the World has no deployments.
 	DeploymentID() string

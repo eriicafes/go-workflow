@@ -121,8 +121,8 @@ type Client interface {
 
 // ClientSpec describes the World a Client calls.
 type ClientSpec struct {
-	// SpecVersion is the World's RPC protocol version.
-	SpecVersion int `cbor:"specVersion"`
+	// RPCVersion is the RPC protocol version of the server.
+	RPCVersion int `cbor:"rpcVersion"`
 	// Capabilities reports the optional behavior the World implements.
 	Capabilities Capabilities `cbor:"capabilities"`
 }
@@ -257,7 +257,7 @@ func (c worldClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 }
 
 func (c worldClient) Spec(context.Context) (ClientSpec, error) {
-	return ClientSpec{SpecVersion: c.world.SpecVersion(), Capabilities: c.world.Capabilities()}, nil
+	return ClientSpec{RPCVersion: RPCVersion, Capabilities: c.world.Capabilities()}, nil
 }
 
 func (c worldClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
@@ -316,8 +316,8 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 		}
 		raw = encoded
 	}
-	specVersion := SpecVersion
-	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw, SpecVersion: &specVersion})
+	rpcVersion := RPCVersion
+	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw, RPCVersion: &rpcVersion})
 	if err != nil {
 		return err
 	}

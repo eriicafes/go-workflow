@@ -31,9 +31,9 @@ func TestNormalizeBaseURL(t *testing.T) {
 }
 
 type rpcRequest struct {
-	Method      string          `cbor:"method"`
-	Input       cbor.RawMessage `cbor:"input"`
-	SpecVersion *int            `cbor:"specVersion,omitempty"`
+	Method     string          `cbor:"method"`
+	Input      cbor.RawMessage `cbor:"input"`
+	RPCVersion *int            `cbor:"rpcVersion,omitempty"`
 }
 
 type rpcResponse struct {
@@ -408,7 +408,7 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	if err := cbor.Unmarshal(envelope.Output, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.SpecVersion != worlds.SpecVersion || !spec.Capabilities.Analytics || !spec.Capabilities.SetAttributes {
+	if spec.RPCVersion != worlds.RPCVersion || !spec.Capabilities.Analytics || !spec.Capabilities.SetAttributes {
 		t.Fatalf("spec=%#v", spec)
 	}
 }

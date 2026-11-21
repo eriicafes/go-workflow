@@ -268,7 +268,7 @@ func TestHTTPClientCachesItsSpec(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := (worlds.ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()}); spec != want {
+		if want := (worlds.ClientSpec{RPCVersion: worlds.RPCVersion, Capabilities: world.Capabilities()}); spec != want {
 			t.Fatalf("spec = %#v, want %#v", spec, want)
 		}
 	}

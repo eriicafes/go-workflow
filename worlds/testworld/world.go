@@ -38,7 +38,6 @@ type World struct {
 // their context cancelled. State stays readable.
 func (w *World) Close()                      { w.cancel() }
 func (*World) BaseURL() string               { return baseURL }
-func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {

@@ -25,11 +25,10 @@ import type {
 	World,
 } from "@workflow/world";
 import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
-import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
 
-const HTTP_WORLD_SPEC_VERSION = 2;
+const HTTP_WORLD_RPC_VERSION = 1;
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
@@ -69,7 +68,7 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 	});
 	// The first request already carries the protocol version, so a mismatched
 	// server fails it instead of answering.
-	client.specVersion = HTTP_WORLD_SPEC_VERSION;
+	client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 	const spec = await client.call<RPC.Spec>("client.spec", {});
 	return new HTTPWorld(client, spec);
 }
@@ -112,7 +111,7 @@ export class HTTPWorld implements World {
 	readonly getEncryptionKeyForRun: NonNullable<World["getEncryptionKeyForRun"]>;
 
 	constructor(client: RPCClient, spec: RPC.Spec) {
-		client.specVersion = HTTP_WORLD_SPEC_VERSION;
+		client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 		this._spec = spec;
 		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
 		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});

@@ -43,7 +43,7 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   `415`), a body of at most 8 MiB:
 
   ```
-  { method: string, input: <cbor>, specVersion?: int }
+  { method: string, input: <cbor>, rpcVersion?: int }
   ```
 
 - **Response:** `200` with `Content-Type: application/cbor`, including when the
@@ -66,10 +66,10 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 - **Waits:** `runs.waitForTerminalStatus` and `streams.getChunks` wait at most
   30 seconds per request. Clients repeat the request to wait longer.
 
-- **Spec version:** when `specVersion` is set and differs from the World's
-  (`worlds.SpecVersion`, currently `2`), the request fails with
+- **RPC version:** when `rpcVersion` is set and differs from the server's
+  (`worlds.RPCVersion`, currently `1`), the request fails with
   `invalid_argument`. Clients call `client.spec` first, which returns
-  `{ specVersion, capabilities }`.
+  `{ rpcVersion, capabilities }`.
 
 ### Methods
 
