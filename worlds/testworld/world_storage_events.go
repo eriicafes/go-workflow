@@ -467,20 +467,26 @@ func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string) []wor
 func (m *World) materializeLocked(event worlds.Event) {
 	run := m.runs[event.RunID]
 	now := event.CreatedAt
-	run.UpdatedAt = now
+	// The run itself changes, and is updated, only on its own events, as
+	// the Workflow SDK's Worlds update it.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
+		run.UpdatedAt = now
 		run.Status, run.StartedAt = worlds.StatusRunning, &now
 	case worlds.EventTypeRunCompleted:
+		run.UpdatedAt = now
 		run.Status, run.CompletedAt = worlds.StatusCompleted, &now
 	case worlds.EventTypeRunFailed:
+		run.UpdatedAt = now
 		run.Status, run.CompletedAt = worlds.StatusFailed, &now
 		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		if run.Status != worlds.StatusCancelled {
+			run.UpdatedAt = now
 			run.Status, run.CompletedAt = worlds.StatusCancelled, &now
 		}
 	case worlds.EventTypeAttrSet:
+		run.UpdatedAt = now
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
 			for _, change := range value.Changes {

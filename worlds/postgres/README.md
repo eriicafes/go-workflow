@@ -73,6 +73,9 @@ releases:
 - **A `workflow_event_chunk` notification names its stream by a hash** of its
   run and name. Postgres refuses a notification of 8000 bytes or more, and a
   stream name has no length limit.
+- **It appends batches** (`EventsCreateBatch`), which world-postgres does
+  not: the SDK's `createBatch` is optional, but Go's runtime records a flow's
+  steps and timers in one fenced write.
 - **It serves analytics,** which world-postgres does not: runs and
   attributes from its tables, and steps, events, hooks, and waits from the
   event log.

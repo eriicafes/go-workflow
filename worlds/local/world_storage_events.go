@@ -323,20 +323,26 @@ func (t *txn) append(value worlds.EventsCreateEvent, now time.Time) (worlds.Even
 func (t *txn) materialize(event worlds.Event) error {
 	run := &t.run
 	now := event.CreatedAt
-	run.UpdatedAt = now
+	// The run itself changes, and is updated, only on its own events, as
+	// the Workflow SDK's Worlds update it.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
+		run.UpdatedAt = now
 		run.Status, run.StartedAt, run.StartedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
+		run.UpdatedAt = now
 		run.Status, run.CompletedAt, run.OutputSlot = worlds.StatusCompleted, &now, eventSlot(event)
 	case worlds.EventTypeRunFailed:
+		run.UpdatedAt = now
 		run.Status, run.CompletedAt, run.ErrorSlot = worlds.StatusFailed, &now, eventSlot(event)
 		run.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		if run.Status != worlds.StatusCancelled {
+			run.UpdatedAt = now
 			run.Status, run.CompletedAt, run.CancelledEventID = worlds.StatusCancelled, &now, event.EventID
 		}
 	case worlds.EventTypeAttrSet:
+		run.UpdatedAt = now
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
 			for _, change := range value.Changes {

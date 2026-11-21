@@ -157,8 +157,9 @@ type (
 		// WorkflowName selects runs of one workflow. Empty selects every
 		// workflow.
 		WorkflowName string
-		// Status selects runs in any of the listed statuses. Empty selects
-		// every status.
+		// Status selects runs in any of the listed statuses. Nil selects
+		// every status, and an empty, non-nil Status selects none, as the
+		// Workflow SDK's status: [] does.
 		Status      []Status
 		Pagination  Pagination
 		ResolveData ResolveData

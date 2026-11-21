@@ -1091,20 +1091,26 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds.Event) error {
 	now := event.CreatedAt
 	view := &run.view
-	view.UpdatedAt = now
+	// The run itself changes, and is updated, only on its own events, as
+	// the Workflow SDK's Worlds update it.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
+		view.UpdatedAt = now
 		view.Status, view.StartedAt, view.startedEventID = worlds.StatusRunning, &now, event.EventID
 	case worlds.EventTypeRunCompleted:
+		view.UpdatedAt = now
 		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusCompleted, &now, event.EventID
 	case worlds.EventTypeRunFailed:
+		view.UpdatedAt = now
 		view.Status, view.CompletedAt, view.resultEventID = worlds.StatusFailed, &now, event.EventID
 		view.ErrorCode = worlds.RunFailedErrorCode(event.Data)
 	case worlds.EventTypeRunCancelled:
 		if view.Status != worlds.StatusCancelled {
+			view.UpdatedAt = now
 			view.Status, view.CompletedAt, view.cancelledEventID = worlds.StatusCancelled, &now, event.EventID
 		}
 	case worlds.EventTypeAttrSet:
+		view.UpdatedAt = now
 		var data worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &data) == nil {
 			view.Attributes = maps.Clone(view.Attributes)
