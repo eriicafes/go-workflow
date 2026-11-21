@@ -12,6 +12,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // requestIDKey holds, in a delivery's context, the Vercel request ID of its
@@ -103,7 +104,7 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 
 type consumer struct {
 	world   *World
-	runtime *worlds.Runtime
+	runtime *core.Runtime
 }
 
 func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

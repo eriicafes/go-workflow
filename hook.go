@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // HookOption holds the options to DefineHook and CreateHook.
@@ -94,16 +95,16 @@ type Hook[T any] struct {
 	minRetention   time.Duration
 	force          bool
 	received       worlds.EventID
-	executionState *worlds.Execution
+	executionState *core.Execution
 	err            error
 	conflict       worlds.RunID
 	// ClaimedFrom identifies the previous owner of a force-claimed token.
 	ClaimedFrom *worlds.HookForceClaim
 }
 
-func (h *Hook[T]) create(execution *worlds.Execution, token string) {
+func (h *Hook[T]) create(execution *core.Execution, token string) {
 	h.registered, h.executionState = true, execution
-	result := worlds.DurableHook[T](worlds.DurableHookOptions{
+	result := core.DurableHook[T](core.DurableHookOptions{
 		Execution:    execution,
 		ID:           h.declared,
 		Token:        token,
@@ -132,7 +133,7 @@ func (h *Hook[T]) settlementID() (string, bool) {
 	if h.conflict != "" {
 		return string(h.id), true
 	}
-	event, ok := worlds.HookEvent(h.executionState, h.id, h.received)
+	event, ok := core.HookEvent(h.executionState, h.id, h.received)
 	return string(event.EventID), ok
 }
 
@@ -161,7 +162,7 @@ func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
 		}
 		return true, h.err, nil
 	}
-	outcome := worlds.HookOutcome[T](execution, h.id, h.received)
+	outcome := core.HookOutcome[T](execution, h.id, h.received)
 	if outcome.EventID == "" {
 		return false, nil, nil
 	}
@@ -177,7 +178,7 @@ func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 		// A payload that fails to decode is still consumed, so the next call
 		// moves on to the payload after it.
 		if execution, ok := workflowExecutionFromContext(ctx); ok && h.executionState == execution && h.err == nil && !h.disposed {
-			if outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received); outcome.Received {
+			if outcome := core.HookOutcome[T](h.executionState, h.id, h.received); outcome.Received {
 				h.received = outcome.EventID
 				if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok {
 					h.executionState.AdvanceClock(event.CreatedAt)
@@ -186,7 +187,7 @@ func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 		}
 		return zero, err
 	}
-	outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received)
+	outcome := core.HookOutcome[T](h.executionState, h.id, h.received)
 	h.received = outcome.EventID
 	if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok && outcome.Received {
 		h.executionState.AdvanceClock(event.CreatedAt)
@@ -266,10 +267,10 @@ func (h *Hook[T]) Dispose(ctx context.Context) {
 func disposeHook(ctx context.Context, id worlds.HookID) (struct{}, error) {
 	// A repeated hook_disposed returns the earlier event, so the write needs
 	// no fence. A World error retries the delivery, not the disposal.
-	execution, _ := worlds.ExecutionFromContext(ctx)
+	execution, _ := core.ExecutionFromContext(ctx)
 	_, err := execution.World().EventsCreate(ctx, worlds.EventsCreateInput{RunID: execution.Run().RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(id)}})
 	if err != nil && !errors.Is(err, worlds.ErrRunTerminal) {
-		return struct{}{}, worlds.DeliveryError(err)
+		return struct{}{}, core.DeliveryError(err)
 	}
 	return struct{}{}, nil
 }

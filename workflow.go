@@ -56,6 +56,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 type (
@@ -238,7 +239,7 @@ func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, err
 // runPendingWaits returns the pending waits of input.RunID that WakeUp would
 // wake, in workflow context, where the run is in the execution's World.
 func runPendingWaits(ctx context.Context, input worlds.ClientRunsWakeInput) ([]string, error) {
-	execution, ok := worlds.ExecutionFromContext(ctx)
+	execution, ok := core.ExecutionFromContext(ctx)
 	if !ok {
 		return nil, ErrNoWorkflow
 	}
@@ -386,14 +387,14 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 }
 
 // Use registers fn as the runner of workflow In. Pass the returned Runner to
-// worlds.Runners so the runtime can execute the workflow. The workflow name is
+// core.Runners so the runtime can execute the workflow. The workflow name is
 // the package path and type name of In. fn replays on every delivery, so it
 // must be deterministic. It does side effects only through steps and reads
 // time only through Now.
-func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) core.Runner {
 	name := worlds.WorkflowName[In]()
-	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
-		execution, ok := worlds.ExecutionFromContext(ctx)
+	return core.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
+		execution, ok := core.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, ErrNoWorkflow
 		}
@@ -732,7 +733,7 @@ type childStartInput[In any] struct {
 // delivery again, to the deployment it was pinned to, while it has not
 // started.
 func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.RunID, error) {
-	execution, ok := worlds.ExecutionFromContext(ctx)
+	execution, ok := core.ExecutionFromContext(ctx)
 	if !ok {
 		return "", ErrNoWorkflow
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/jackc/pgx/v5"
 	"github.com/oklog/ulid/v2"
 )
@@ -128,7 +129,7 @@ func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delive
 // work is the Worker loop. It claims as many due rows as there are free slots,
 // executes each in its own goroutine, and sleeps until a notification, a free
 // slot, or PollInterval.
-func (w *World) work(ctx context.Context, runtime *worlds.Runtime, options WorkerOptions) error {
+func (w *World) work(ctx context.Context, runtime *core.Runtime, options WorkerOptions) error {
 	var group sync.WaitGroup
 	defer group.Wait()
 	finished := make(chan struct{}, options.Concurrency)
@@ -186,7 +187,7 @@ func (w *World) work(ctx context.Context, runtime *worlds.Runtime, options Worke
 // backoff. A shutdown releases the lease so another worker takes it now. A
 // lease lost to another worker, as after this worker stalled past it,
 // cancels the execution.
-func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item delivery) {
+func (w *World) deliver(ctx context.Context, runtime *core.Runtime, item delivery) {
 	executeCtx, loseLease := context.WithCancel(ctx)
 	defer loseLease()
 	renewCtx, stopRenew := context.WithCancel(ctx)

@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"errors"
@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -25,7 +26,7 @@ type runSeed struct {
 
 // newRunSeed returns the generator of run, which needs a run ID of wrun_ and
 // a ULID for the time of its correlation IDs.
-func newRunSeed(run Run) (*runSeed, error) {
+func newRunSeed(run worlds.Run) (*runSeed, error) {
 	created, err := runCreatedAt(run.RunID)
 	if err != nil {
 		return nil, err
@@ -37,7 +38,7 @@ func newRunSeed(run Run) (*runSeed, error) {
 
 // runCreatedAt returns the creation time encoded in a run ID, in Unix
 // milliseconds: the time of its ULID with the region tag bit cleared.
-func runCreatedAt(id RunID) (uint64, error) {
+func runCreatedAt(id worlds.RunID) (uint64, error) {
 	rest, ok := strings.CutPrefix(string(id), "wrun_")
 	if !ok {
 		return 0, fmt.Errorf("workflow: run ID %q is not wrun_ and a ULID", id)
@@ -114,7 +115,7 @@ func (s *runSeed) hookToken() string {
 	_, _ = s.Read(random[:])
 	token := make([]byte, 21)
 	for index := range token {
-		token[index] = hookTokenAlphabet[random[hookTokenBatch-1-index]&63]
+		token[index] = worlds.HookTokenAlphabet[random[hookTokenBatch-1-index]&63]
 	}
 	return string(token)
 }

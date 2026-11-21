@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -196,7 +197,7 @@ type WorkerOptions struct {
 // share one database, and each delivery runs on one worker at a time. With
 // Config.Retention set, it also deletes expired runs in the background. The
 // last options apply.
-func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options ...WorkerOptions) error {
+func Worker(ctx context.Context, world *World, runners core.RunnerSet, options ...WorkerOptions) error {
 	var option WorkerOptions
 	if len(options) > 0 {
 		option = options[len(options)-1]
@@ -212,7 +213,7 @@ func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options
 			world.expireLoop(ctx)
 		}()
 	}
-	return world.work(ctx, worlds.NewRuntime(world, runners), option)
+	return world.work(ctx, core.NewRuntime(world, runners), option)
 }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -231,7 +231,7 @@ func TestThenPreservesRecordedSettlementOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+			runtime := core.NewRuntime(world, core.Runners(runner))
 			// The manual queue executes first, middle, then last before replaying
 			// the flow, so every result is visible when Select compares them.
 			for len(world.QueuedMessages()) != 0 {

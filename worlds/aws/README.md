@@ -41,7 +41,7 @@ Entrypoints:
 
 ```go
 // Queue worker: registers workflow implementations.
-runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+runners := core.Runners(workflow.Use(flows.GenerateReport))
 lambda.Start(awsworld.Queue(world, runners))
 
 // App-facing API: needs no workflow implementations.

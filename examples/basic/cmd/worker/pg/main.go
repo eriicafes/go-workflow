@@ -10,7 +10,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows/flows"
-	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	postgresworld "github.com/eriicafes/go-workflow/worlds/postgres"
 )
 
@@ -28,7 +28,7 @@ func main() {
 	}
 	defer world.Close()
 
-	runners := worlds.Runners(
+	runners := core.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)

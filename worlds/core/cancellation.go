@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type cancelContextKey struct{}
@@ -22,9 +24,9 @@ type cancellationContext struct {
 // stream that notifies running steps. It is runtime metadata rather than
 // part of a user's step input.
 type cancellationReference struct {
-	HookID    HookID `json:"hookId"`
-	Token     string `json:"token"`
-	CanCancel bool   `json:"canCancel,omitempty"`
+	HookID    worlds.HookID `json:"hookId"`
+	Token     string        `json:"token"`
+	CanCancel bool          `json:"canCancel,omitempty"`
 }
 
 // stream returns the name of the stream that notifies running steps of the
@@ -62,11 +64,11 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 	refs = append(refs, ref)
 	execution.OnAdvance(func() {
 		for _, event := range execution.events[:execution.horizon] {
-			if event.EventType != EventTypeHookReceived || event.CorrelationID != string(ref.HookID) {
+			if event.EventType != worlds.EventTypeHookReceived || event.CorrelationID != string(ref.HookID) {
 				continue
 			}
 			var data cancellationData
-			if execution.DecodePayload(DecodeHookReceived(event.Data), &data) == nil && data.Cause != nil {
+			if execution.DecodePayload(worlds.DecodeHookReceived(event.Data), &data) == nil && data.Cause != nil {
 				execution.AdvanceClock(event.CreatedAt)
 				cancel(data.Cause)
 				return
@@ -80,7 +82,7 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 		if cause == nil {
 			cause = context.Canceled
 		}
-		input := cancelContextInput{Reference: ref, Cause: NewError(cause)}
+		input := cancelContextInput{Reference: ref, Cause: worlds.NewError(cause)}
 		outcome := DurableInlineStep(execution.Context(), DurableInlineStepOptions{
 			Execution: execution,
 			Name:      runtime.FuncForPC(reflect.ValueOf(CancelContext).Pointer()).Name(),
@@ -117,15 +119,15 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 		return cancellationData{}, err
 	}
 	if data.Cause == nil {
-		payload, err := execution.EncodePayload(cancellationData{Cause: NewError(cause)})
+		payload, err := execution.EncodePayload(cancellationData{Cause: worlds.NewError(cause)})
 		if err != nil {
 			return cancellationData{}, err
 		}
-		encoded, err := EncodeHookReceived(payload)
+		encoded, err := worlds.EncodeHookReceived(payload)
 		if err != nil {
 			return cancellationData{}, err
 		}
-		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: runID, Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(ref.HookID), Data: encoded}}); err != nil {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: string(ref.HookID), Data: encoded}}); err != nil {
 			return cancellationData{}, err
 		}
 		// Concurrent requests may both append, but the earliest committed cause
@@ -138,20 +140,20 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 	if state, ok := ctx.Value(cancelContextKey{}).(*cancellationContext); ok && state != nil && state.cancel != nil {
 		state.cancel(data.Cause)
 	}
-	frame, err := EncodeStreamFrame(data, execution.keys, nil)
+	frame, err := worlds.EncodeStreamFrame(data, execution.keys, nil)
 	if err != nil {
 		return cancellationData{}, err
 	}
-	if err := world.StreamsWrite(ctx, StreamsWriteInput{RunID: runID, Name: stream, Chunk: frame}); err != nil {
-		info, infoErr := world.StreamsGetInfo(ctx, StreamsGetInfoInput{RunID: runID, Name: stream})
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: stream, Chunk: frame}); err != nil {
+		info, infoErr := world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: runID, Name: stream})
 		if infoErr != nil || !info.Done {
 			return cancellationData{}, err
 		}
 	}
-	if err := world.StreamsClose(ctx, StreamsCloseInput{RunID: runID, Name: stream}); err != nil {
+	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: stream}); err != nil {
 		return cancellationData{}, err
 	}
-	queue, err := RunDelivery(ctx, world, runID)
+	queue, err := worlds.RunDelivery(ctx, world, runID)
 	if err != nil {
 		return cancellationData{}, err
 	}
@@ -163,7 +165,7 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 // streamCancellation returns the cause a cancellation stream chunk holds, or
 // nil.
 func streamCancellation(execution *Execution, chunk []byte) error {
-	payloads, err := SplitStreamFrames(chunk)
+	payloads, err := worlds.SplitStreamFrames(chunk)
 	if err != nil {
 		return nil
 	}
@@ -216,16 +218,16 @@ func CombineCancelContexts(ctx context.Context, execution *Execution, sources ..
 func readCancellation(ctx context.Context, execution *Execution, ref cancellationReference) (cancellationData, error) {
 	cursor := ""
 	for {
-		page, err := execution.World().EventsListByCorrelationID(ctx, EventsListByCorrelationIDInput{RunID: execution.Run().RunID, CorrelationID: string(ref.HookID), Pagination: Pagination{Cursor: cursor}})
+		page, err := execution.World().EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: execution.Run().RunID, CorrelationID: string(ref.HookID), Pagination: worlds.Pagination{Cursor: cursor}})
 		if err != nil {
 			return cancellationData{}, err
 		}
 		for _, event := range page.Data {
-			if event.EventType != EventTypeHookReceived {
+			if event.EventType != worlds.EventTypeHookReceived {
 				continue
 			}
 			var data cancellationData
-			if execution.DecodePayload(DecodeHookReceived(event.Data), &data) == nil && data.Cause != nil {
+			if execution.DecodePayload(worlds.DecodeHookReceived(event.Data), &data) == nil && data.Cause != nil {
 				return data, nil
 			}
 		}
@@ -261,7 +263,7 @@ func stepCancelContext(ctx context.Context, execution *Execution, refs []cancell
 	var wg sync.WaitGroup
 	for _, ref := range refs {
 		stream := ref.stream()
-		page, err := execution.World().StreamsGetChunks(readerCtx, StreamsGetChunksInput{RunID: runID, Name: stream})
+		page, err := execution.World().StreamsGetChunks(readerCtx, worlds.StreamsGetChunksInput{RunID: runID, Name: stream})
 		if err != nil {
 			stop()
 			wg.Wait()
@@ -279,7 +281,7 @@ func stepCancelContext(ctx context.Context, execution *Execution, refs []cancell
 		cursor := page.Cursor
 		wg.Go(func() {
 			for readerCtx.Err() == nil {
-				page, err := execution.World().StreamsGetChunks(readerCtx, StreamsGetChunksInput{RunID: runID, Name: stream, Cursor: cursor, Wait: time.Second})
+				page, err := execution.World().StreamsGetChunks(readerCtx, worlds.StreamsGetChunksInput{RunID: runID, Name: stream, Cursor: cursor, Wait: time.Second})
 				if err != nil {
 					if readerCtx.Err() != nil {
 						return

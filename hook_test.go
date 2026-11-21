@@ -11,6 +11,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -63,7 +64,7 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worlds.NewRuntime(world, worlds.Runners(runner)).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+	if err := core.NewRuntime(world, core.Runners(runner)).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	output, err := run.Value(ctx)
@@ -182,7 +183,7 @@ func TestHookRejectsOtherExecution(t *testing.T) {
 				defer world.Close()
 				ctx, cancel := context.WithTimeout(workflow.NewContext(t.Context(), workflow.NewClient(world)), time.Second)
 				defer cancel()
-				runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+				runtime := core.NewRuntime(world, core.Runners(runner))
 				owner, err := workflow.Start(ctx, hookResumeInput{Token: "owner"})
 				if err != nil {
 					t.Fatal(err)
@@ -225,7 +226,7 @@ func TestDeferredHookDisposalRetriesTheDeliveryOnStorageErrors(t *testing.T) {
 	}
 	// A storage error is not the disposal's failure: the delivery fails and
 	// its redelivery disposes the hook, however many times storage fails.
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	delivery := base.QueuedMessages()[0]
 	for range 2 {
 		if err := runtime.Execute(ctx, delivery.Input); !errors.Is(err, storageErr) {
@@ -284,7 +285,7 @@ func TestHookCombinatorsRegisterBeforeWaitingForPayload(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+			runtime := core.NewRuntime(world, core.Runners(runner))
 			delivery := world.QueuedMessages()[0].Input
 			if err := runtime.Execute(ctx, delivery); err != nil {
 				t.Fatal(err)
@@ -339,7 +340,7 @@ func TestHookRegistersOnlyWhenUsedAndKeepsTokenAfterInterruptedCommit(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	delivery := base.QueuedMessages()[0].Input
 	if err := runtime.Execute(ctx, delivery); err != nil {
 		t.Fatal(err)
@@ -510,7 +511,7 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownerDelivery := base.QueuedMessages()[0].Input
-	if err := worlds.NewRuntime(base, worlds.Runners(ownerRunner)).Execute(ctx, ownerDelivery); err != nil {
+	if err := core.NewRuntime(base, core.Runners(ownerRunner)).Execute(ctx, ownerDelivery); err != nil {
 		t.Fatal(err)
 	}
 	run, err := workflow.Start(ctx, hookResumeInput{Token: "ordered-conflict"})
@@ -520,7 +521,7 @@ func TestSelectOrdersHookConflictAfterAnEarlierStepSettlement(t *testing.T) {
 	commitErr := errors.New("registration unavailable")
 	world := &flakyEventWorld{World: base, eventType: worlds.EventTypeHookCreated, err: commitErr}
 	world.failures.Store(1)
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	if err := runtime.Execute(ctx, base.QueuedMessages()[1].Input); err != nil {
 		t.Fatal(err)
 	}

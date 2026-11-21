@@ -17,6 +17,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 	"github.com/oklog/ulid/v2"
 )
@@ -739,7 +740,7 @@ func (w *flakyEventWorld) EventsCreateBatch(ctx context.Context, input worlds.Ev
 	return w.World.EventsCreateBatch(ctx, input)
 }
 
-func inlineStepRunner() worlds.Runner {
+func inlineStepRunner() core.Runner {
 	return workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
 		first, err := workflow.InlineStep(ctx, nextInlineValue, struct{}{})
 		if err != nil {
@@ -799,7 +800,7 @@ func TestInlineStepStorageErrorRetriesDeliveryAndCompletesStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	delivery := world.QueuedMessages()[0].Input
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 	before := inlineCounter.Load()
 	// fn runs, then recording step_completed fails, so the delivery returns
 	// the storage error instead of failing the run.
@@ -891,7 +892,7 @@ func TestInlineStepStorageErrorBeforeStepCreatedRecordsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worlds.NewRuntime(world, worlds.Runners(runner)).Execute(ctx, world.QueuedMessages()[0].Input); !errors.Is(err, storageErr) {
+	if err := core.NewRuntime(world, core.Runners(runner)).Execute(ctx, world.QueuedMessages()[0].Input); !errors.Is(err, storageErr) {
 		t.Fatalf("delivery error = %v, want the storage error", err)
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
@@ -926,7 +927,7 @@ func TestInlineStepQueuesItsRetryBeforeRecordingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := world.QueuedMessages()[0]
-	runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+	runtime := core.NewRuntime(world, core.Runners(runner))
 
 	// The attempt fails, its retry flow is queued, and then recording
 	// step_retrying fails.
@@ -1062,7 +1063,7 @@ type inlineBackgroundOutput struct{ Sum int }
 
 func (inlineBackgroundInput) Workflow(inlineBackgroundOutput) {}
 
-func inlineBackgroundRunner(calls *atomic.Int32) worlds.Runner {
+func inlineBackgroundRunner(calls *atomic.Int32) core.Runner {
 	return workflow.Use(func(ctx context.Context, input inlineBackgroundInput) (inlineBackgroundOutput, error) {
 		double := func(_ context.Context, value int) (int, error) {
 			if calls.Add(1) == 1 && input.Fail {
@@ -1120,7 +1121,7 @@ func TestInlineBackgroundRunsInlineWithoutStepDeliveries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime := worlds.NewRuntime(world, worlds.Runners(runner))
+		runtime := core.NewRuntime(world, core.Runners(runner))
 		for len(world.QueuedMessages()) != 0 {
 			message := world.QueuedMessages()[0]
 			if message.Input.StepID != nil {

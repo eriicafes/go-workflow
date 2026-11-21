@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // WithCancel creates a durable cancellation context in workflow context.
@@ -24,7 +24,7 @@ func WithCancelCause(ctx context.Context) (context.Context, func(error) error, e
 	if !ok {
 		return nil, nil, ErrNoWorkflow
 	}
-	return worlds.NewCancelContext(ctx, execution)
+	return core.NewCancelContext(ctx, execution)
 }
 
 // WithTimeout creates a durable cancellation context that is cancelled after duration.
@@ -78,10 +78,10 @@ func CancelFunc(ctx context.Context) (func() error, bool) {
 	if _, ok := stepExecutionFromContext(ctx); !ok {
 		return nil, false
 	}
-	for _, ref := range worlds.CancellationReferences(ctx) {
+	for _, ref := range core.CancellationReferences(ctx) {
 		if ref.CanCancel {
 			return func() error {
-				_, err := worlds.CancelContext(context.WithoutCancel(ctx), ref, context.Canceled)
+				_, err := core.CancelContext(context.WithoutCancel(ctx), ref, context.Canceled)
 				return err
 			}, true
 		}
@@ -96,5 +96,5 @@ func CancelAny(ctx context.Context, sources ...context.Context) context.Context 
 	if !ok {
 		return ctx
 	}
-	return worlds.CombineCancelContexts(ctx, execution, sources...)
+	return core.CombineCancelContexts(ctx, execution, sources...)
 }

@@ -67,7 +67,7 @@ type World interface {
   including `ReplayDivergenceCount` and `DeploymentMismatchRetryCount`: the
   runtime counts its recovery deliveries in them.
 - **Executing deliveries.** Whatever consumes your queue calls
-  `worlds.NewRuntime(world, runners).Execute(ctx, input)` for each delivery,
+  `core.NewRuntime(world, runners).Execute(ctx, input)` for each delivery,
   acknowledges it when `Execute` returns nil, and retries it otherwise.
 
 Supporting [retention](/worlds/#retention) is optional. A World that supports

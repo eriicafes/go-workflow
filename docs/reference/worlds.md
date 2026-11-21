@@ -5,14 +5,18 @@ import "github.com/eriicafes/go-workflow/worlds"
 ```
 
 Package `worlds` defines the World contract that runs are recorded in, the
-runtime that executes deliveries against it, the Client, and the HTTP server
-that exposes a World to clients. Full godoc is on
+Client, and the HTTP server that exposes a World to clients. Package
+`worlds/core` holds the runtime that executes deliveries against a World, the
+runners it replays, and the durable primitives workflow code is built on. Full
+godoc is on
 [pkg.go.dev](https://pkg.go.dev/github.com/eriicafes/go-workflow/worlds).
 
-Most applications only touch `worlds.Runners`. This page is for operators,
+Most applications only touch `core.Runners`. This page is for operators,
 tool builders, and people [implementing a World](/worlds/custom).
 
 ## Runners and runtime
+
+These live in package `core` (`github.com/eriicafes/go-workflow/worlds/core`).
 
 ```go
 func Runners(values ...Runner) RunnerSet
@@ -443,6 +447,8 @@ such as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata`, the SDK's
 `Request`, `Response`, and `{respondWith}`.
 
 ## Durable primitives
+
+These live in package `core`.
 
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced

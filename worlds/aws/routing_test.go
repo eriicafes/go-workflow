@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 type routedWorkflow struct {
@@ -147,7 +148,7 @@ func TestConsumerResendsAnEarlyDeliveryToItsQueue(t *testing.T) {
 	ctx := context.Background()
 	queue, schedules := &fakeSQS{}, newFakeScheduler()
 	world := routingWorld(t, queue, schedules)
-	handler := Queue(world, worlds.Runners())
+	handler := Queue(world, core.Runners())
 
 	later := time.Now().Add(10 * time.Minute)
 	standard := worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later}
@@ -201,7 +202,7 @@ func TestConsumerChangesVisibilityOnTheSourceQueue(t *testing.T) {
 	dynamo := newFakeDynamo()
 	dynamo.getErr = context.DeadlineExceeded
 	world.dynamo = dynamo
-	if _, err := Queue(world, worlds.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{record}}); err != nil {
+	if _, err := Queue(world, core.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{record}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(queue.visibility) == 0 || awsv2.ToString(queue.visibility[len(queue.visibility)-1].QueueUrl) != backfillURL {

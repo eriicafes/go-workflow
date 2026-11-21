@@ -16,6 +16,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/workflowtest"
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
@@ -493,7 +494,7 @@ func (doubleInput) Workflow(doubleOutput) {}
 
 func TestRunsWorkflows(t *testing.T) {
 	t.Parallel()
-	world := startWorld(t, t.TempDir(), worlds.Runners(workflow.Use(double)))
+	world := startWorld(t, t.TempDir(), core.Runners(workflow.Use(double)))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, doubleInput{Value: 21})
@@ -513,7 +514,7 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
-	runners := worlds.Runners(workflow.Use(double))
+	runners := core.Runners(workflow.Use(double))
 	world := startWorld(t, dir, runners)
 	input, err := worlds.EncodePayload([1]doubleInput{{Value: 4}}, worlds.PayloadOptions{})
 	if err != nil {
@@ -648,7 +649,7 @@ func TestNewBorrowsRoot(t *testing.T) {
 	}
 }
 
-func startWorld(t *testing.T, dir string, runners worlds.RunnerSet) *localworld.World {
+func startWorld(t *testing.T, dir string, runners core.RunnerSet) *localworld.World {
 	t.Helper()
 	world, err := localworld.Open(localworld.Config{Dir: dir}, runners)
 	if err != nil {

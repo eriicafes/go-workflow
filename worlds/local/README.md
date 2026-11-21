@@ -6,7 +6,7 @@ own JSON file, and delivers queued work in-process, so local work needs no
 worker, queue service, or database and survives a restart.
 
 ```go
-runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+runners := core.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
@@ -101,7 +101,7 @@ ignored and overwritten by the next write.
 
 `Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
 ordered by `NotBefore`; a single timer tracks the earliest delivery. Each due
-delivery runs `worlds.NewRuntime(world, runners).Execute` in its own
+delivery runs `core.NewRuntime(world, runners).Execute` in its own
 goroutine, and its record is deleted on success. A failed delivery is retried
 with exponential backoff from 100ms up to 30s. `IdempotencyKey` deduplicates
 per run while the delivery is pending; the key is released when delivery

@@ -33,10 +33,12 @@ type fakeBackend struct {
 	sockets bool
 	// vercelIDs holds the vercelId of each event frame written with one.
 	vercelIDs []string
+	// specs holds the spec version each run was created with.
+	specs map[worlds.RunID]int
 }
 
 func newFakeBackend(t testing.TB) *fakeBackend {
-	fake := &fakeBackend{t: t, store: testworld.NewManual(), requests: map[string]int{}}
+	fake := &fakeBackend{t: t, store: testworld.NewManual(), requests: map[string]int{}, specs: map[worlds.RunID]int{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(func() {
 		fake.server.Close()
@@ -99,13 +101,13 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		mux.ServeHTTP(writer, request)
 	case len(parts) == 3 && parts[0] == "v4" && parts[1] == "runs" && parts[2] == "purge" && request.Method == http.MethodPost:
 		f.purge(ctx, writer, request)
-	case len(parts) == 5 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && parts[4] == "batch" && request.Method == http.MethodPost:
-		f.createBatch(ctx, writer, request, worlds.RunID(parts[2]))
-	case len(parts) == 5 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodPost:
-		f.createEvent(ctx, writer, request, worlds.RunID(parts[2]))
-	case len(parts) == 4 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
-		f.listEvents(ctx, writer, worlds.RunID(parts[2]), query)
-	case len(parts) == 5 && parts[0] == "v4" && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
+	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && parts[4] == "batch" && request.Method == http.MethodPost:
+		f.createBatch(ctx, writer, request, worlds.RunID(parts[2]), parts[0])
+	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodPost:
+		f.createEvent(ctx, writer, request, worlds.RunID(parts[2]), parts[0])
+	case len(parts) == 4 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
+		f.listEvents(ctx, writer, worlds.RunID(parts[2]), query, parts[0])
+	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
 		event, err := f.store.EventsGet(ctx, worlds.EventsGetInput{RunID: worlds.RunID(parts[2]), EventID: worlds.EventID(parts[4])})
 		if err != nil {
 			writeGoError(writer, err)
@@ -221,6 +223,12 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 	}
 }
 
+// eventsRoute reports whether version serves the run-scoped event routes.
+// /v5 serves the runs of every spec version, and is the only route that
+// writes to a spec 9 run and enforces the in-band fence. /v4 serves the runs
+// below spec 9 and ignores the fence.
+func eventsRoute(version string) bool { return version == "v4" || version == "v5" }
+
 func routeName(parts []string) string {
 	var names []string
 	for index, part := range parts {
@@ -260,31 +268,32 @@ type outcome struct {
 	code    string
 	message string
 	answer  map[string]any
-	// seqInBand is the run's in-band count, for an in-band refusal.
-	seqInBand int
+	// seq and seqInBand are the run's position counters, for an in-band
+	// refusal.
+	seq, seqInBand int
 	// details is the structured body of a refusal, such as the owner of a
 	// start hook's token.
 	details map[string]any
 }
 
-func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID) {
+func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID, version string) {
 	body, _ := io.ReadAll(request.Body)
 	in, err := newFrameReader(strings.NewReader(string(body))).next()
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, "bad-frame", err.Error())
 		return
 	}
-	var fence *int
-	if inBand, _ := in.Meta["inBand"].(bool); inBand {
-		count, _ := asInt(in.Meta["expectedSeqInBand"])
-		fence = &count
+	fence, report, refusal := f.fence(ctx, runID, version, in)
+	if refusal != nil {
+		writeError(writer, refusal.status, refusal.code, refusal.message)
+		return
 	}
-	result := f.apply(ctx, runID, in, fence)
+	result := f.apply(ctx, runID, in, fence, report)
 	switch {
 	case result.status == http.StatusPreconditionFailed:
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(result.status)
-		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "seqInBand": result.seqInBand})
+		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "seq": result.seq, "seqInBand": result.seqInBand})
 	case result.details != nil:
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(result.status)
@@ -296,11 +305,60 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 	}
 }
 
+// fence returns the in-band count a write on route version is fenced with,
+// and the slot it reports skipped events after. /v5 fences a frame with
+// inBand, refuses one without expectedSeqInBand, and reports the events after
+// its maxSlot. /v4 refuses a write to a spec 9 run and reports nothing.
+//
+// The real backend most likely enforces the fence only on /v5. Until the
+// World writes through /v5, the fake still fences a /v4 frame with inBand, as
+// the World's tests expect.
+func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version string, in frame) (*int, *int, *outcome) {
+	spec, _ := asInt(in.Meta["specVersion"])
+	if worlds.EventType(str(in.Meta, "eventType")) != worlds.EventTypeRunCreated {
+		spec = f.specVersion(ctx, runID)
+	}
+	if version == "v4" {
+		if spec >= 9 {
+			return nil, nil, &outcome{status: http.StatusBadRequest, code: "spec-version", message: "a spec 9 run is written through /v5"}
+		}
+		if inBand, _ := in.Meta["inBand"].(bool); inBand {
+			count, _ := asInt(in.Meta["expectedSeqInBand"])
+			return &count, nil, nil
+		}
+		return nil, nil, nil
+	}
+	inBand, _ := in.Meta["inBand"].(bool)
+	if !inBand {
+		return nil, nil, nil
+	}
+	count, ok := asInt(in.Meta["expectedSeqInBand"])
+	if !ok {
+		return nil, nil, &outcome{status: http.StatusBadRequest, code: "bad-request", message: "an in-band write needs expectedSeqInBand"}
+	}
+	var report *int
+	if slot, ok := asInt(in.Meta["maxSlot"]); ok {
+		report = &slot
+	}
+	return &count, report, nil
+}
+
+// specVersion returns the spec version run_created stamped on runID.
+func (f *fakeBackend) specVersion(ctx context.Context, runID worlds.RunID) int {
+	page, err := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1}})
+	if err != nil || len(page.Data) == 0 {
+		return 0
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.specs[runID]
+}
+
 // createBatch applies the frames of a batch in order, as one fenced
 // allocation, and answers with an outcome per frame. Like the backend, it
 // keeps the events it admitted when another is refused, and refuses an event
 // behind a refused one of the same correlation ID.
-func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID) {
+func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWriter, request *http.Request, runID worlds.RunID, version string) {
 	body, _ := io.ReadAll(request.Body)
 	reader := newFrameReader(strings.NewReader(string(body)))
 	var frames []frame
@@ -315,16 +373,27 @@ func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWrite
 		}
 		frames = append(frames, next)
 	}
-	var fence *int
-	if len(frames) > 0 {
-		if inBand, _ := frames[0].Meta["inBand"].(bool); inBand {
-			count, _ := asInt(frames[0].Meta["expectedSeqInBand"])
-			fence = &count
-		}
+	if len(frames) == 0 {
+		writeError(writer, http.StatusBadRequest, "bad-request", "empty batch")
+		return
 	}
 	if _, err := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil {
 		writeGoError(writer, err)
 		return
+	}
+	fence, report, refusal := f.fence(ctx, runID, version, frames[0])
+	if refusal != nil {
+		writeError(writer, refusal.status, refusal.code, refusal.message)
+		return
+	}
+	var skipped []map[string]any
+	if report != nil {
+		// The events after the writer's slot that were in the log before
+		// the block.
+		page, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+		for _, event := range page.Data[min(*report, len(page.Data)):] {
+			skipped = append(skipped, f.wireEvent(event, true))
+		}
 	}
 	results := make([]map[string]any, len(frames))
 	failed := map[string]bool{}
@@ -335,12 +404,14 @@ func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWrite
 			results[index] = map[string]any{"status": http.StatusConflict, "error": "batch-earlier-item-failed", "message": "an earlier event of " + correlation + " failed"}
 			continue
 		}
-		result := f.apply(ctx, runID, next, fence)
+		result := f.apply(ctx, runID, next, fence, nil)
 		if result.status == http.StatusPreconditionFailed {
-			for index := range results {
-				results[index] = map[string]any{"status": result.status, "error": result.code, "message": result.message}
-			}
-			break
+			// A fenced block is allocated in one step, so a stale count
+			// refuses all of it.
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(result.status)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "seq": result.seq, "seqInBand": result.seqInBand})
+			return
 		}
 		if result.status != http.StatusOK {
 			failed[correlation] = true
@@ -357,12 +428,16 @@ func (f *fakeBackend) createBatch(ctx context.Context, writer http.ResponseWrite
 			}
 		}
 	}
-	writeCBOR(writer, map[string]any{"results": results, "allocated": allocated})
+	answer := map[string]any{"results": results, "allocated": allocated}
+	if report != nil {
+		answer["events"], answer["hasMore"] = skipped, false
+	}
+	writeCBOR(writer, answer)
 }
 
 // apply admits one event frame into the store, keeping only what the backend
 // keeps of it.
-func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, fence *int) outcome {
+func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, fence, report *int) outcome {
 	refuse := func(err error) outcome {
 		var conflict *worlds.HookConflictError
 		if errors.As(err, &conflict) {
@@ -377,7 +452,8 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		f.vercelIDs = append(f.vercelIDs, id)
 		f.mu.Unlock()
 	}
-	if spec, _ := asInt(in.Meta["specVersion"]); spec != specVersion {
+	spec, _ := asInt(in.Meta["specVersion"])
+	if spec != 8 && spec != 9 {
 		return outcome{status: http.StatusBadRequest, code: "spec-version", message: "unexpected spec version"}
 	}
 	// Keep only what the backend keeps, under the names it returns.
@@ -401,15 +477,18 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}); err != nil {
 			return refuse(err)
 		}
+		f.mu.Lock()
+		f.specs[runID] = spec
+		f.mu.Unlock()
 		run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 		events, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 		return outcome{status: http.StatusOK, answer: map[string]any{"event": f.wireEvent(events.Data[0], true), "run": f.wireRun(run, nil), "allocated": 1}}
 	}
-	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data}, Options: worlds.EventsCreateOptions{InBandCount: fence}})
+	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
 	if err != nil {
 		if errors.Is(err, worlds.ErrInBandSuperseded) {
-			run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-			return outcome{status: http.StatusPreconditionFailed, code: "in-band-superseded", message: err.Error(), seqInBand: run.InBandCount}
+			seq, seqInBand := f.counters(ctx, runID)
+			return outcome{status: http.StatusPreconditionFailed, code: "in-band-superseded", message: err.Error(), seq: seq, seqInBand: seqInBand}
 		}
 		return refuse(err)
 	}
@@ -423,6 +502,17 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		return refuse(err)
 	}
 	answer := map[string]any{"event": f.wireEvent(event, true), "allocated": result.AllocatedEventCount}
+	if report != nil {
+		// The skipped-slot report of an in-band write.
+		skipped := make([]map[string]any, 0, len(result.Events))
+		for _, event := range result.Events {
+			skipped = append(skipped, f.wireEvent(event, true))
+		}
+		answer["events"], answer["hasMore"] = skipped, false
+		if len(result.Events) > 0 {
+			answer["cursor"] = "eid:" + string(result.Events[len(result.Events)-1].EventID)
+		}
+	}
 	if result.Step != nil {
 		answer["step"] = f.wireStep(ctx, *result.Step, nil)
 		if result.StepCreated {
@@ -437,15 +527,32 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	return outcome{status: http.StatusOK, answer: answer}
 }
 
-func (f *fakeBackend) listEvents(ctx context.Context, writer http.ResponseWriter, runID worlds.RunID, query map[string][]string) {
+func (f *fakeBackend) listEvents(ctx context.Context, writer http.ResponseWriter, runID worlds.RunID, query map[string][]string, version string) {
+	// The counters are read before the listing, so the listing covers every
+	// position they count.
+	seq, seqInBand := f.counters(ctx, runID)
 	page, err := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 	if err != nil {
 		writeGoError(writer, err)
 		return
 	}
-	run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	events, cursor, hasMore := pageEvents(page.Data, query)
-	f.writeEvents(writer, events, cursor, hasMore, map[string]any{"seq": len(page.Data), "seqInBand": run.InBandCount})
+	// The World still reads the in-band count from a /v4 listing's end
+	// frame until it reads /v5.
+	snapshot := map[string]any{"seq": seq, "seqInBand": seqInBand}
+	if version == "v5" {
+		writer.Header().Set("X-Wf-Snapshot-Seq", strconv.Itoa(seq))
+		writer.Header().Set("X-Wf-Snapshot-Seq-In-Band", strconv.Itoa(seqInBand))
+	}
+	f.writeEvents(writer, events, cursor, hasMore, snapshot)
+}
+
+// counters returns the run's position counter, the number of events in its
+// log, and its in-band count.
+func (f *fakeBackend) counters(ctx context.Context, runID worlds.RunID) (int, int) {
+	run, _ := f.store.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
+	page, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID, ResolveData: worlds.EventsResolveDataNone})
+	return len(page.Data), run.InBandCount
 }
 
 // pageEvents applies a list's order, cursor, and limit to events. Cursors

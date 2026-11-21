@@ -1,9 +1,11 @@
-package worlds
+package core
 
 import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type (
@@ -14,7 +16,7 @@ type (
 		Execution *Execution
 		// ID is a hook ID drawn earlier by Execution.NextHookID. When empty,
 		// DurableHook draws the next one.
-		ID    HookID
+		ID    worlds.HookID
 		Token string
 		// Metadata is the hook's metadata payload. A webhook's is its
 		// WebhookMetadata.
@@ -36,13 +38,13 @@ type (
 	// Data holds a decoded payload, and Err reports disposal, takeover, or
 	// decoding failures. An unsettled outcome has an empty EventID and an Err.
 	DurableHookResult[T any] struct {
-		HookID        HookID
+		HookID        worlds.HookID
 		Token         string
 		Data          T
 		Err           error
-		ConflictRunID RunID
-		EventID       EventID
-		ClaimedFrom   *HookForceClaim
+		ConflictRunID worlds.RunID
+		EventID       worlds.EventID
+		ClaimedFrom   *worlds.HookForceClaim
 		// Received reports that EventID is a delivered payload, which a
 		// consumer advances past even when Data fails to decode.
 		Received bool
@@ -68,7 +70,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	}
 	creationIndex, exists := options.Execution.declared(string(hookID))
 	if !exists {
-		created := DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
+		created := worlds.DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
 		if options.MinRetention > 0 {
 			until := options.Execution.Now().Add(options.MinRetention)
 			created.TokenRetentionUntil = &until
@@ -77,26 +79,26 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		if err != nil {
 			return DurableHookResult[T]{Err: err}
 		}
-		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeHookCreated, CorrelationID: string(hookID), Data: data}, nil)
+		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: data}, nil)
 		creationIndex, _ = options.Execution.declared(string(hookID))
 	}
 	event := options.Execution.events[creationIndex]
-	if event.EventType != EventTypeHookCreated && event.EventType != EventTypeHookConflict {
+	if event.EventType != worlds.EventTypeHookCreated && event.EventType != worlds.EventTypeHookConflict {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(hookID), Reason: fmt.Sprintf("recorded %s, replay reached a hook", event.EventType)}))
 	}
-	var created DataHookCreated
+	var created worlds.DataHookCreated
 	if err := json.Unmarshal(event.Data, &created); err != nil {
 		return DurableHookResult[T]{Err: fmt.Errorf("workflow: decode hook: %w", err)}
 	}
 	if created.Token != options.Token {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(hookID), Reason: fmt.Sprintf("recorded hook token %q, replay reached hook token %q", created.Token, options.Token)}))
 	}
-	result := DurableHookResult[T]{HookID: HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
-	if event.EventType == EventTypeHookConflict {
-		result.Err, result.ConflictRunID = ErrHookConflict, created.ConflictingRunID
+	result := DurableHookResult[T]{HookID: worlds.HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
+	if event.EventType == worlds.EventTypeHookConflict {
+		result.Err, result.ConflictRunID = worlds.ErrHookConflict, created.ConflictingRunID
 	}
 	if created.ForceClaimedFrom != nil {
-		queue, err := RunDelivery(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
+		queue, err := worlds.RunDelivery(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))
 		}
@@ -110,22 +112,22 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 }
 
 // HookEvent reports the next delivered payload or disposal after cursor.
-func HookEvent(execution *Execution, id HookID, cursor EventID) (Event, bool) {
+func HookEvent(execution *Execution, id worlds.HookID, cursor worlds.EventID) (worlds.Event, bool) {
 	for _, event := range execution.events[:execution.horizon] {
 		if event.CorrelationID != string(id) || event.EventID <= cursor {
 			continue
 		}
-		if event.EventType == EventTypeHookDisposed || event.EventType == EventTypeHookReceived {
+		if event.EventType == worlds.EventTypeHookDisposed || event.EventType == worlds.EventTypeHookReceived {
 			return event, true
 		}
 	}
-	return Event{}, false
+	return worlds.Event{}, false
 }
 
 // HookOutcome decodes the next delivered payload or disposal after the cursor.
 // If no such event is visible to replay, EventID is empty and Err reports that
 // the hook has not settled. A settled outcome includes EventID even on failure.
-func HookOutcome[T any](execution *Execution, hookID HookID, after EventID) DurableHookResult[T] {
+func HookOutcome[T any](execution *Execution, hookID worlds.HookID, after worlds.EventID) DurableHookResult[T] {
 	result := DurableHookResult[T]{HookID: hookID}
 	event, ok := HookEvent(execution, hookID, after)
 	if !ok {
@@ -133,17 +135,17 @@ func HookOutcome[T any](execution *Execution, hookID HookID, after EventID) Dura
 		return result
 	}
 	result.EventID = event.EventID
-	if event.EventType == EventTypeHookDisposed {
-		var disposed HookDisposedEventData
+	if event.EventType == worlds.EventTypeHookDisposed {
+		var disposed worlds.HookDisposedEventData
 		if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil && disposed.ForceClaimedBy != nil {
-			result.Err = ErrHookForceClaimed
+			result.Err = worlds.ErrHookForceClaimed
 		} else {
-			result.Err = ErrHookNotActive
+			result.Err = worlds.ErrHookNotActive
 		}
 		return result
 	}
 	result.Received = true
-	if err := execution.DecodePayload(DecodeHookReceived(event.Data), &result.Data); err != nil {
+	if err := execution.DecodePayload(worlds.DecodeHookReceived(event.Data), &result.Data); err != nil {
 		result.Err = fmt.Errorf("workflow: decode hook value: %w", err)
 		return result
 	}

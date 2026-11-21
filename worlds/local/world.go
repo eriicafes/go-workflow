@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 const defaultBaseURL = "http://localhost:3000/v1/workflow"
@@ -61,7 +62,7 @@ type World struct {
 	unpurged map[worlds.RunID]bool
 	ctx      context.Context
 	cancel   context.CancelFunc
-	runtime  *worlds.Runtime
+	runtime  *core.Runtime
 	workers  sync.WaitGroup
 
 	changesMu sync.Mutex
@@ -76,7 +77,7 @@ type World struct {
 // World that executes deliveries for the workflows of runners. The World owns the
 // directory handle and closes it on Close. Open reads no state, so call Prepare
 // before using the World.
-func Open(config Config, runners worlds.RunnerSet) (*World, error) {
+func Open(config Config, runners core.RunnerSet) (*World, error) {
 	if config.Dir == "" {
 		return nil, errors.New("workflow/local: storage directory is required")
 	}
@@ -103,7 +104,7 @@ func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 // in runners. The caller keeps owning root and closes it after Close.
 // config.Dir is ignored. New reads no state, so call Prepare before using the
 // World.
-func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error) {
+func New(root *os.Root, config Config, runners core.RunnerSet) (*World, error) {
 	if root == nil {
 		return nil, errors.New("workflow/local: nil storage root")
 	}
@@ -119,7 +120,7 @@ func New(root *os.Root, config Config, runners worlds.RunnerSet) (*World, error)
 		baseURL = normalized
 	}
 	world := &World{root: root, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), changes: make(chan struct{}), queueWake: make(chan struct{}, 1)}
-	world.runtime = worlds.NewRuntime(world, runners)
+	world.runtime = core.NewRuntime(world, runners)
 	return world, nil
 }
 

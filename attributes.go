@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // SetAttributesOptions holds the options for SetAttributes.
@@ -59,7 +60,7 @@ func SetAttributes(ctx context.Context, attributes map[string]*string, options .
 		changes[index] = worlds.RunsAttributeChange{Key: key, Value: attributes[key]}
 	}
 	if inStep {
-		step, _ := worlds.StepMetadataFromContext(ctx)
+		step, _ := core.StepMetadataFromContext(ctx)
 		return stepExecution.World().RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{
 			RunID:                   stepExecution.Run().RunID,
 			Changes:                 changes,
@@ -70,5 +71,5 @@ func SetAttributes(ctx context.Context, attributes map[string]*string, options .
 	if !execution.World().Capabilities().SetAttributes {
 		return FatalError(fmt.Errorf("workflow: the World does not store attribute writes: %w", errors.ErrUnsupported))
 	}
-	return worlds.DurableSetAttributes(worlds.DurableSetAttributesOptions{Execution: execution, Changes: changes, AllowReservedAttributes: option.AllowReservedAttributes})
+	return core.DurableSetAttributes(core.DurableSetAttributesOptions{Execution: execution, Changes: changes, AllowReservedAttributes: option.AllowReservedAttributes})
 }

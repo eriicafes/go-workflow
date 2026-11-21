@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 const baseURL = "http://localhost/v1/workflow"
@@ -20,7 +21,7 @@ type World struct {
 	encryptionKey []byte
 	ctx           context.Context
 	cancel        context.CancelFunc
-	runtime       *worlds.Runtime
+	runtime       *core.Runtime
 	runs          map[worlds.RunID]worlds.Run
 	events        map[worlds.RunID][]worlds.Event
 	steps         map[worlds.RunID]map[worlds.StepID]worlds.Step
@@ -46,21 +47,21 @@ func (*World) Capabilities() worlds.Capabilities {
 
 // New returns a World that executes deliveries for the workflows of runners
 // in-process, each in its own goroutine once it is due.
-func New(runners ...worlds.Runner) *World {
+func New(runners ...core.Runner) *World {
 	return newWorld(true, runners...)
 }
 
 // NewManual returns a World that records deliveries without executing them.
 // Tests execute them through QueuedMessages and acknowledge each with
 // Acknowledge.
-func NewManual(runners ...worlds.Runner) *World {
+func NewManual(runners ...core.Runner) *World {
 	return newWorld(false, runners...)
 }
 
-func newWorld(autoRun bool, runners ...worlds.Runner) *World {
+func newWorld(autoRun bool, runners ...core.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, changes: make(chan struct{})}
-	w.runtime = worlds.NewRuntime(w, worlds.Runners(runners...))
+	w.runtime = core.NewRuntime(w, core.Runners(runners...))
 	return w
 }
 

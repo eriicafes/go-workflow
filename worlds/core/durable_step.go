@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eriicafes/go-workflow/worlds"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,7 +33,7 @@ type (
 	// the step, and the step's result is read with StepOutcome once replay
 	// delivers its settling event.
 	DurableStepResult[T any] struct {
-		StepID StepID
+		StepID worlds.StepID
 		Data   T
 		Err    error
 	}
@@ -59,7 +60,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}
 		}
-		created := DataStepCreated{StepName: options.Name, Input: encoded}
+		created := worlds.DataStepCreated{StepName: options.Name, Input: encoded}
 		if options.Execution.target == nil && !options.Rollback {
 			// A flow holds the step back until the runner waits, and then
 			// runs it inline or queues it.
@@ -76,17 +77,17 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: err}
 		}
-		options.Execution.CreateEvent(EventsCreateEvent{EventType: EventTypeStepCreated, CorrelationID: string(stepID), Data: data}, nil)
-		options.Execution.queue(QueueInput{StepID: &stepID, IdempotencyKey: string(stepID)})
+		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: string(stepID), Data: data}, nil)
+		options.Execution.queue(worlds.QueueInput{StepID: &stepID, IdempotencyKey: string(stepID)})
 		return DurableStepResult[Out]{StepID: stepID}
 	}
 
 	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
-	if event.EventType != EventTypeStepCreated {
+	if event.EventType != worlds.EventTypeStepCreated {
 		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
-	var createdData DataStepCreated
+	var createdData worlds.DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode step: %w", err)}
 	}
@@ -108,22 +109,22 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		// retry that is not yet due is expected to be unstarted.
 		last, attempts := event, 0
 		for _, later := range options.Execution.events[creationIndex+1:] {
-			if later.CorrelationID == string(stepID) && (later.EventType == EventTypeStepStarted || later.EventType == EventTypeStepRetrying) {
+			if later.CorrelationID == string(stepID) && (later.EventType == worlds.EventTypeStepStarted || later.EventType == worlds.EventTypeStepRetrying) {
 				last = later
-				if later.EventType == EventTypeStepStarted {
+				if later.EventType == worlds.EventTypeStepStarted {
 					attempts++
 				}
 			}
 		}
-		input := QueueInput{StepID: &stepID, IdempotencyKey: string(stepID)}
-		if last.EventType == EventTypeStepRetrying {
+		input := worlds.QueueInput{StepID: &stepID, IdempotencyKey: string(stepID)}
+		if last.EventType == worlds.EventTypeStepRetrying {
 			input.IdempotencyKey = stepRetryKey(stepID, attempts)
-			var result DataStepResult
+			var result worlds.DataStepResult
 			if json.Unmarshal(last.Data, &result) == nil {
 				input.NotBefore = result.RetryAfter
 			}
 		}
-		if last.EventType != EventTypeStepStarted {
+		if last.EventType != worlds.EventTypeStepStarted {
 			if input.NotBefore == nil || !time.Now().Before(*input.NotBefore) {
 				options.Execution.queue(input)
 			}
@@ -186,16 +187,16 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	// Report the target result to the engine, which appends the lifecycle
 	// event.
 	if callErr != nil {
-		result := DataStepResult{Error: options.Execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, options.MaxRetries, attempt)}
+		result := worlds.DataStepResult{Error: options.Execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, options.MaxRetries, attempt)}
 		options.Execution.SetTargetResult(result)
 		panic(options.Execution.exit(errReplayComplete))
 	}
 
 	output, err := options.Execution.EncodePayload(value)
 	if err != nil {
-		options.Execution.SetTargetResult(DataStepResult{Error: options.Execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))})
+		options.Execution.SetTargetResult(worlds.DataStepResult{Error: options.Execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))})
 	} else {
-		options.Execution.SetTargetResult(DataStepResult{Result: output})
+		options.Execution.SetTargetResult(worlds.DataStepResult{Result: output})
 	}
 	panic(options.Execution.exit(errReplayComplete))
 }
@@ -227,7 +228,7 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 		err = returnErr
 	}
 	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
-		err = FatalError{Cause: context.Canceled}
+		err = worlds.FatalError{Cause: context.Canceled}
 	}
 	return value, err
 }
@@ -277,17 +278,17 @@ func OnStepReturn(ctx context.Context, fn func() error) bool {
 // StepOutcome decodes the result of the step stepID, which must have settled
 // for the walk (Execution.Settled). A completed step returns its output, a
 // failed one its error as an *Error.
-func StepOutcome[Out any](execution *Execution, stepID StepID) (Out, error) {
+func StepOutcome[Out any](execution *Execution, stepID worlds.StepID) (Out, error) {
 	var data Out
 	event, ok := execution.SettledEvent(string(stepID))
 	if !ok {
 		return data, fmt.Errorf("workflow: step %s has not settled", stepID)
 	}
-	var result DataStepResult
+	var result worlds.DataStepResult
 	if err := json.Unmarshal(event.Data, &result); err != nil {
 		return data, fmt.Errorf("workflow: decode step result: %w", err)
 	}
-	if event.EventType == EventTypeStepFailed {
+	if event.EventType == worlds.EventTypeStepFailed {
 		return data, execution.decodeError(result.Error)
 	}
 	if err := execution.DecodePayload(result.Result, &data); err != nil {
@@ -296,10 +297,10 @@ func StepOutcome[Out any](execution *Execution, stepID StepID) (Out, error) {
 	return data, nil
 }
 
-func stepAttempt(execution *Execution, stepID StepID) int {
+func stepAttempt(execution *Execution, stepID worlds.StepID) int {
 	attempt := 0
 	for _, event := range execution.events {
-		if event.EventType == EventTypeStepStarted && event.CorrelationID == string(stepID) {
+		if event.EventType == worlds.EventTypeStepStarted && event.CorrelationID == string(stepID) {
 			attempt++
 		}
 	}
@@ -310,11 +311,11 @@ func stepAttempt(execution *Execution, stepID StepID) int {
 }
 
 func stepRetryAfter(cause error, maxRetries int, attempt int) *time.Time {
-	var fatal FatalError
+	var fatal worlds.FatalError
 	if errors.As(cause, &fatal) || attempt > maxRetries {
 		return nil
 	}
-	var retryable RetryableError
+	var retryable worlds.RetryableError
 	due := time.Now()
 	if errors.As(cause, &retryable) && retryable.After > 0 {
 		due = due.Add(retryable.After)
@@ -324,7 +325,7 @@ func stepRetryAfter(cause error, maxRetries int, attempt int) *time.Time {
 
 // stepRetryKey is the idempotency key of the delivery that runs the attempt
 // after attempt of stepID, so every queue call for one retry shares it.
-func stepRetryKey(stepID StepID, attempt int) string {
+func stepRetryKey(stepID worlds.StepID, attempt int) string {
 	return fmt.Sprintf("retry:%s:%d", stepID, attempt)
 }
 
@@ -332,7 +333,7 @@ func stepRetryKey(stepID StepID, attempt int) string {
 // OpenTelemetry tracer, as a child of the span in ctx. A runner that puts a
 // span context in the ctx it passes to a step parents the step's span under
 // it, since the step runs in the replay that delivers it.
-func startStepSpan(ctx context.Context, execution *Execution, stepID StepID, name string, attempt int) (context.Context, trace.Span) {
+func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.StepID, name string, attempt int) (context.Context, trace.Span) {
 	short := strings.TrimSuffix(name[strings.LastIndex(name, "/")+1:], "-fm")
 	run := execution.Run()
 	return otel.Tracer("github.com/eriicafes/go-workflow").Start(ctx, "step "+short, trace.WithAttributes(

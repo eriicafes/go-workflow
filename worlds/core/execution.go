@@ -1,4 +1,4 @@
-package worlds
+package core
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type executionContextKey struct{}
@@ -17,7 +19,7 @@ type stepContextKey struct{}
 // StepMetadata describes the step whose function is executing. Attempt
 // starts at 1 and StartedAt is the start of the current attempt.
 type StepMetadata struct {
-	ID        StepID
+	ID        worlds.StepID
 	Name      string
 	StartedAt time.Time
 	Attempt   int
@@ -43,19 +45,19 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 // recorded outcomes. Results become
 // visible as Wait walks the event log.
 type Execution struct {
-	world  World
+	world  worlds.World
 	ctx    context.Context
-	run    Run
-	events []Event
+	run    worlds.Run
+	events []worlds.Event
 	// target identifies the step this delivery executes; nil marks a flow delivery.
-	target *StepID
+	target *worlds.StepID
 	// delivery is the queue message being executed.
-	delivery QueueInput
+	delivery worlds.QueueInput
 	// result holds the target step's outcome for the runtime to persist.
-	result *DataStepResult
+	result *worlds.DataStepResult
 	// keys encrypts and opens the run's payloads. It is nil when the run's
 	// payloads are not encrypted.
-	keys *RunKeys
+	keys *worlds.RunKeys
 	// seed draws the run's correlation IDs, hook tokens, and random values.
 	seed *runSeed
 	// index maps the ULID of each recorded declaration to its index in
@@ -79,7 +81,7 @@ type Execution struct {
 	// startHook is the run's start hook, decoded once by StartHook, and
 	// startHookBound reports that a hook of this replay has opened it (see
 	// OpenStartHook).
-	startHook      *StartHook
+	startHook      *worlds.StartHook
 	startHookRead  bool
 	startHookBound bool
 	// continuations holds callbacks that react as replay delivers events.
@@ -108,7 +110,7 @@ type Execution struct {
 	inlineUntil time.Time
 }
 
-func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) (*Execution, error) {
+func newExecution(ctx context.Context, world worlds.World, run worlds.Run, events []worlds.Event, target *worlds.StepID) (*Execution, error) {
 	seed, err := newRunSeed(run)
 	if err != nil {
 		return nil, err
@@ -136,20 +138,20 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 	return execution, nil
 }
 
-func (e *Execution) trackEvent(index int, event Event) {
+func (e *Execution) trackEvent(index int, event worlds.Event) {
 	// Indexing an event ID does not settle its correlated operation. The
 	// cases below index operation IDs only when their outcome is recorded.
 	e.settles[string(event.EventID)] = index
 	switch event.EventType {
-	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeWaitCompleted, EventTypeHookReceived, EventTypeHookDisposed:
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeWaitCompleted, worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 		if _, settled := e.settles[event.CorrelationID]; !settled && event.CorrelationID != "" {
 			e.settles[event.CorrelationID] = index
 		}
 		return
-	case EventTypeHookConflict:
+	case worlds.EventTypeHookConflict:
 		e.settles[event.CorrelationID] = index
 		// A conflict also records the declaration, so index it below.
-	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeAttrSet:
+	case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeHookCreated, worlds.EventTypeAttrSet:
 	default:
 		return
 	}
@@ -159,7 +161,7 @@ func (e *Execution) trackEvent(index int, event Event) {
 }
 
 // World returns the World the run is recorded in.
-func (e *Execution) World() World {
+func (e *Execution) World() worlds.World {
 	return e.world
 }
 
@@ -170,7 +172,7 @@ func (e *Execution) Context() context.Context {
 }
 
 // Run returns the run as loaded at the start of the delivery.
-func (e *Execution) Run() Run {
+func (e *Execution) Run() worlds.Run {
 	return e.run
 }
 
@@ -180,7 +182,7 @@ func (e *Execution) Run() Run {
 // it depends only on the hooks declared before it, so every replay decides it
 // the same way. A later hook with the token is created as any hook is, and
 // conflicts with the start hook.
-func (e *Execution) OpenStartHook(token string) (HookID, bool) {
+func (e *Execution) OpenStartHook(token string) (worlds.HookID, bool) {
 	if e.startHookBound || token == "" {
 		return "", false
 	}
@@ -188,21 +190,21 @@ func (e *Execution) OpenStartHook(token string) (HookID, bool) {
 		return "", false
 	}
 	e.startHookBound = true
-	return StartHookID(e.run.RunID), true
+	return worlds.StartHookID(e.run.RunID), true
 }
 
 // StartHook returns the start hook the run's run_created records, or nil.
 // It decodes run_created once per execution.
-func (e *Execution) StartHook() *StartHook {
-	if !e.startHookRead && len(e.events) > 0 && e.events[0].EventType == EventTypeRunCreated {
-		e.startHook, e.startHookRead = RunStartHook(e.events[0].Data), true
+func (e *Execution) StartHook() *worlds.StartHook {
+	if !e.startHookRead && len(e.events) > 0 && e.events[0].EventType == worlds.EventTypeRunCreated {
+		e.startHook, e.startHookRead = worlds.RunStartHook(e.events[0].Data), true
 	}
 	return e.startHook
 }
 
 // TargetStepID returns the step a step delivery executes. It reports false
 // for a flow, which replays the runner without executing a step.
-func (e *Execution) TargetStepID() (StepID, bool) {
+func (e *Execution) TargetStepID() (worlds.StepID, bool) {
 	if e.target == nil {
 		return "", false
 	}
@@ -212,20 +214,20 @@ func (e *Execution) TargetStepID() (StepID, bool) {
 // SetTargetResult records the result of the step a step delivery executes,
 // for the Runtime to append once the replay ends. It is meaningful only during
 // a step delivery.
-func (e *Execution) SetTargetResult(result DataStepResult) {
+func (e *Execution) SetTargetResult(result worlds.DataStepResult) {
 	var retryAt *time.Time
 	if result.RetryAfter != nil {
 		value := *result.RetryAfter
 		retryAt = &value
 	}
-	e.result = &DataStepResult{Result: bytes.Clone(result.Result), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
+	e.result = &worlds.DataStepResult{Result: bytes.Clone(result.Result), Error: bytes.Clone(result.Error), RetryAfter: retryAt}
 }
 
 // GetTargetResult returns the step result recorded by SetTargetResult. It
 // reports false when none has been recorded.
-func (e *Execution) GetTargetResult() (DataStepResult, bool) {
+func (e *Execution) GetTargetResult() (worlds.DataStepResult, bool) {
 	if e.result == nil {
-		return DataStepResult{}, false
+		return worlds.DataStepResult{}, false
 	}
 	result := *e.result
 	result.Result = bytes.Clone(result.Result)
@@ -239,20 +241,20 @@ func (e *Execution) GetTargetResult() (DataStepResult, bool) {
 
 // NextStepID draws the ID of the next step the runner declares: step_ and the
 // run's next correlation ULID.
-func (e *Execution) NextStepID() StepID { return StepID("step_" + e.seed.ulid()) }
+func (e *Execution) NextStepID() worlds.StepID { return worlds.StepID("step_" + e.seed.ulid()) }
 
 // NextWaitID draws the ID of the next timer the runner declares: wait_ and
 // the run's next correlation ULID.
-func (e *Execution) NextWaitID() WaitID { return WaitID("wait_" + e.seed.ulid()) }
+func (e *Execution) NextWaitID() worlds.WaitID { return worlds.WaitID("wait_" + e.seed.ulid()) }
 
 // NextHookID draws the ID of the next hook the runner declares: hook_ and the
 // run's next correlation ULID, drawing again on the ID of the run's start
 // hook, which no other hook may take.
-func (e *Execution) NextHookID() HookID {
-	id := HookID("hook_" + e.seed.ulid())
+func (e *Execution) NextHookID() worlds.HookID {
+	id := worlds.HookID("hook_" + e.seed.ulid())
 	if e.StartHook() != nil {
-		for id == StartHookID(e.run.RunID) {
-			id = HookID("hook_" + e.seed.ulid())
+		for id == worlds.StartHookID(e.run.RunID) {
+			id = worlds.HookID("hook_" + e.seed.ulid())
 		}
 	}
 	return id
@@ -328,15 +330,15 @@ func (e *Execution) Settled(id string) bool {
 }
 
 // SettledEvent returns the event that settled id, when Settled reports true.
-func (e *Execution) SettledEvent(id string) (Event, bool) {
+func (e *Execution) SettledEvent(id string) (worlds.Event, bool) {
 	if !e.Settled(id) {
-		return Event{}, false
+		return worlds.Event{}, false
 	}
 	return e.events[e.settles[id]], true
 }
 
 // DeliveredEventID identifies the last event delivered to workflow code.
-func (e *Execution) DeliveredEventID() EventID {
+func (e *Execution) DeliveredEventID() worlds.EventID {
 	if e.horizon == 0 {
 		return ""
 	}
@@ -366,7 +368,7 @@ func (e *Execution) AddRollback(fn func(context.Context, *Execution) error) {
 
 // queue queues input for this run, addressed to its deployment. A storage
 // error ends the replay so the queue retries the delivery.
-func (e *Execution) queue(input QueueInput) QueueResult {
+func (e *Execution) queue(input worlds.QueueInput) worlds.QueueResult {
 	input.RunID = e.run.RunID
 	input.WorkflowName = e.run.WorkflowName
 	input.DeploymentID = e.run.DeploymentID
@@ -380,7 +382,7 @@ func (e *Execution) queue(input QueueInput) QueueResult {
 // merge adds result.Events and latest, the event just appended, to the events
 // the Execution holds, skipping latest when it is already among them. It does
 // not read storage.
-func (e *Execution) merge(result EventResult, latest Event) {
+func (e *Execution) merge(result worlds.EventResult, latest worlds.Event) {
 	e.inBand = result.InBandCount
 	for index, event := range result.Events {
 		e.trackEvent(len(e.events)+index, event)
@@ -405,12 +407,12 @@ func (e *Execution) merge(result EventResult, latest Event) {
 // mapError, when not nil, sees the World's error first. It may act on it and
 // return it, return another error, or return nil to accept it, and CreateEvent
 // then adds nothing.
-func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) error) EventResult {
+func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(error) error) worlds.EventResult {
 	eventCount := len(e.events)
-	result, err := e.world.EventsCreate(e.ctx, EventsCreateInput{
+	result, err := e.world.EventsCreate(e.ctx, worlds.EventsCreateInput{
 		RunID:   e.run.RunID,
 		Event:   event,
-		Options: EventsCreateOptions{EventCount: &eventCount, InBandCount: e.InBandCount()},
+		Options: worlds.EventsCreateOptions{EventCount: &eventCount, InBandCount: e.InBandCount()},
 	})
 	if err != nil {
 		if mapError != nil {
@@ -418,8 +420,8 @@ func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) er
 		}
 		switch {
 		case err == nil:
-			return EventResult{}
-		case errors.Is(err, ErrInBandSuperseded):
+			return worlds.EventResult{}
+		case errors.Is(err, worlds.ErrInBandSuperseded):
 			panic(e.exit(errReplaySuperseded))
 		default:
 			panic(e.exit(deliveryError{cause: err}))
@@ -429,7 +431,7 @@ func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) er
 	if result.Data != nil {
 		data = result.Data
 	}
-	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data, CreatedAt: result.CreatedAt})
+	e.merge(result, worlds.Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data, CreatedAt: result.CreatedAt})
 	return result
 }
 
@@ -458,7 +460,7 @@ func (e *Execution) advance() bool {
 	}
 	e.horizon++
 	switch event := e.events[e.horizon-1]; event.EventType {
-	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeWaitCompleted, EventTypeHookCreated, EventTypeHookConflict:
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeWaitCompleted, worlds.EventTypeHookCreated, worlds.EventTypeHookConflict:
 		// The walk delivers a step's result, a timer, and a hook's
 		// registration outcome as it passes them, and a hook's payload when
 		// a consumer takes it.
@@ -498,11 +500,11 @@ func (e *Execution) startSteps() {
 	}
 	pending := e.pending
 	e.pending = nil
-	started, err := json.Marshal(DataStepStarted{OwnerMessageID: e.delivery.MessageID})
+	started, err := json.Marshal(worlds.DataStepStarted{OwnerMessageID: e.delivery.MessageID})
 	if err != nil {
 		panic(e.exit(deliveryError{cause: err}))
 	}
-	var events []EventsCreateEvent
+	var events []worlds.EventsCreateEvent
 	var inline, queued []pendingStep
 	var claimed, rechecks []string
 	for _, step := range pending {
@@ -522,7 +524,7 @@ func (e *Execution) startSteps() {
 			if err != nil {
 				panic(e.exit(deliveryError{cause: err}))
 			}
-			events = append(events, EventsCreateEvent{EventType: EventTypeStepCreated, CorrelationID: string(step.stepID), Data: data})
+			events = append(events, worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: string(step.stepID), Data: data})
 		}
 		if runInline && step.created != nil {
 			// Claimed before the write, so another delivery of this flow's
@@ -545,14 +547,14 @@ func (e *Execution) startSteps() {
 			claimed = append(claimed, e.stepKey(step.stepID))
 		}
 		if runInline {
-			events = append(events, EventsCreateEvent{EventType: EventTypeStepStarted, CorrelationID: string(step.stepID), Data: started})
+			events = append(events, worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.stepID), Data: started})
 			inline = append(inline, step)
 		} else {
 			queued = append(queued, step)
 		}
 	}
 	// The events are added to the log with the next write's delta.
-	result, err := e.world.EventsCreateBatch(e.ctx, EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), Events: events})
+	result, err := e.world.EventsCreateBatch(e.ctx, worlds.EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), Events: events})
 	if err != nil {
 		// The attempts did not start, so a later delivery may run them.
 		for _, key := range claimed {
@@ -560,18 +562,18 @@ func (e *Execution) startSteps() {
 		}
 	}
 	switch {
-	case errors.Is(err, ErrInBandSuperseded):
+	case errors.Is(err, worlds.ErrInBandSuperseded):
 		panic(e.exit(errReplaySuperseded))
 	case err != nil:
 		panic(e.exit(deliveryError{cause: err}))
 	}
 	e.inBand = result.InBandCount
 	for _, step := range queued {
-		e.queue(QueueInput{StepID: &step.stepID, IdempotencyKey: string(step.stepID)})
+		e.queue(worlds.QueueInput{StepID: &step.stepID, IdempotencyKey: string(step.stepID)})
 	}
 	for _, key := range rechecks {
 		notBefore := time.Now().Add(retryRecheckDelay)
-		e.queue(QueueInput{NotBefore: &notBefore, IdempotencyKey: key})
+		e.queue(worlds.QueueInput{NotBefore: &notBefore, IdempotencyKey: key})
 	}
 	if e.outcomes == nil {
 		e.outcomes = make(chan inlineOutcome)
@@ -604,8 +606,8 @@ func (e *Execution) recordNext() error {
 // delivery does. A retry of a new step is queued as a step delivery, and a
 // retry of an inline step as a flow that runs it again, queued before the
 // retry is recorded.
-func (e *Execution) completeInlineStep(step pendingStep, result DataStepResult) error {
-	retry := QueueInput{RunID: e.run.RunID, WorkflowName: e.run.WorkflowName, NotBefore: result.RetryAfter, IdempotencyKey: stepRetryKey(step.stepID, step.attempt), DeploymentID: e.run.DeploymentID}
+func (e *Execution) completeInlineStep(step pendingStep, result worlds.DataStepResult) error {
+	retry := worlds.QueueInput{RunID: e.run.RunID, WorkflowName: e.run.WorkflowName, NotBefore: result.RetryAfter, IdempotencyKey: stepRetryKey(step.stepID, step.attempt), DeploymentID: e.run.DeploymentID}
 	if result.RetryAfter != nil && step.explicit {
 		if _, err := e.world.Queue(e.ctx, retry); err != nil {
 			return err
@@ -615,7 +617,7 @@ func (e *Execution) completeInlineStep(step pendingStep, result DataStepResult) 
 	if err != nil {
 		return err
 	}
-	if event.EventType == EventTypeStepRetrying && !step.explicit {
+	if event.EventType == worlds.EventTypeStepRetrying && !step.explicit {
 		retry.StepID = &step.stepID
 		_, err = e.world.Queue(e.ctx, retry)
 	}
@@ -628,41 +630,41 @@ func (e *Execution) completeInlineStep(step pendingStep, result DataStepResult) 
 // first. A terminal run records a retry as the step's final failure. It returns
 // the recorded event, or the zero Event when the step already settled or the
 // run ended before it started.
-func (e *Execution) recordStepResult(stepID StepID, result DataStepResult) (Event, error) {
-	eventType := EventTypeStepCompleted
+func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataStepResult) (worlds.Event, error) {
+	eventType := worlds.EventTypeStepCompleted
 	if len(result.Error) != 0 {
-		eventType = EventTypeStepFailed
+		eventType = worlds.EventTypeStepFailed
 		if result.RetryAfter != nil {
-			eventType = EventTypeStepRetrying
+			eventType = worlds.EventTypeStepRetrying
 		}
 	}
 	payload, err := json.Marshal(result)
 	if err != nil {
-		return Event{}, err
+		return worlds.Event{}, err
 	}
 	eventCount := len(e.events)
-	input := EventsCreateInput{
+	input := worlds.EventsCreateInput{
 		RunID:   e.run.RunID,
-		Event:   EventsCreateEvent{EventType: eventType, CorrelationID: string(stepID), Data: payload},
-		Options: EventsCreateOptions{EventCount: &eventCount},
+		Event:   worlds.EventsCreateEvent{EventType: eventType, CorrelationID: string(stepID), Data: payload},
+		Options: worlds.EventsCreateOptions{EventCount: &eventCount},
 	}
 	created, err := e.world.EventsCreate(e.ctx, input)
-	if errors.Is(err, ErrRunTerminal) && eventType == EventTypeStepRetrying {
+	if errors.Is(err, worlds.ErrRunTerminal) && eventType == worlds.EventTypeStepRetrying {
 		// A terminal run permits the started step's final failure, but no retry.
 		result.RetryAfter = nil
 		if input.Event.Data, err = json.Marshal(result); err != nil {
-			return Event{}, err
+			return worlds.Event{}, err
 		}
-		input.Event.EventType = EventTypeStepFailed
+		input.Event.EventType = worlds.EventTypeStepFailed
 		created, err = e.world.EventsCreate(e.ctx, input)
 	}
-	if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrStepNotStartable) {
-		return Event{}, nil
+	if errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrStepNotStartable) {
+		return worlds.Event{}, nil
 	}
 	if err != nil {
-		return Event{}, err
+		return worlds.Event{}, err
 	}
-	event := Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data, CreatedAt: created.CreatedAt}
+	event := worlds.Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data, CreatedAt: created.CreatedAt}
 	inBand := e.inBand
 	e.merge(created, event)
 	e.inBand = inBand
@@ -680,31 +682,31 @@ func (e *Execution) finishSteps() error {
 }
 
 // stepKey identifies stepID of the run in Runtime.running.
-func (e *Execution) stepKey(stepID StepID) string {
+func (e *Execution) stepKey(stepID worlds.StepID) string {
 	return string(e.run.RunID) + "/" + string(stepID)
 }
 
 // EncodePayload encodes value as a payload of the run, encrypted when the
 // run's payloads are.
 func (e *Execution) EncodePayload(value any) ([]byte, error) {
-	return EncodePayload(value, PayloadOptions{Keys: e.keys})
+	return worlds.EncodePayload(value, worlds.PayloadOptions{Keys: e.keys})
 }
 
 // DecodePayload decodes a payload of the run into value, a pointer.
 func (e *Execution) DecodePayload(data []byte, value any) error {
-	return DecodePayload(data, e.keys, value)
+	return worlds.DecodePayload(data, e.keys, value)
 }
 
 // encodeError encodes err as an error payload of the run.
 func (e *Execution) encodeError(err error) []byte {
 	// An Error value always encodes.
-	data, _ := EncodeErrorPayload(err, PayloadOptions{Keys: e.keys})
+	data, _ := worlds.EncodeErrorPayload(err, worlds.PayloadOptions{Keys: e.keys})
 	return data
 }
 
 // decodeError decodes an error payload of the run.
-func (e *Execution) decodeError(data []byte) *Error {
-	return DecodeErrorPayload(data, e.keys)
+func (e *Execution) decodeError(data []byte) *worlds.Error {
+	return worlds.DecodeErrorPayload(data, e.keys)
 }
 
 // stepArgs is a step's input as it is recorded: its argument list.
@@ -715,19 +717,19 @@ type stepArgs[In any] struct {
 // runFailedData returns the Data of a run_failed event for err.
 func (e *Execution) runFailedData(err error) []byte {
 	// An Error value always encodes.
-	data, _ := EncodeRunFailed(err, PayloadOptions{Keys: e.keys})
+	data, _ := worlds.EncodeRunFailed(err, worlds.PayloadOptions{Keys: e.keys})
 	return data
 }
 
 // StreamFrame returns chunk as a frame of the run's stream, encrypted when
 // the run's payloads are.
 func (e *Execution) StreamFrame(chunk []byte) ([]byte, error) {
-	return EncodeStreamFrame(chunk, e.keys, nil)
+	return worlds.EncodeStreamFrame(chunk, e.keys, nil)
 }
 
 // WriteWebhookResponse writes response as the response to request, a manual
 // webhook's request to the run, as WriteWebhookResponse does with the run's
 // keys.
-func (e *Execution) WriteWebhookResponse(ctx context.Context, request WebhookRequest, response WebhookResponse) error {
-	return WriteWebhookResponse(ctx, e.world, e.run.RunID, request, response, e.keys)
+func (e *Execution) WriteWebhookResponse(ctx context.Context, request worlds.WebhookRequest, response worlds.WebhookResponse) error {
+	return worlds.WriteWebhookResponse(ctx, e.world, e.run.RunID, request, response, e.keys)
 }

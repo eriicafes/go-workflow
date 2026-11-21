@@ -9,7 +9,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows/flows"
-	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/core"
 	vercelworld "github.com/eriicafes/go-workflow/worlds/vercel"
 )
 
@@ -22,7 +22,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runners := worlds.Runners(
+	runners := core.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)

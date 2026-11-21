@@ -244,12 +244,16 @@ func EncodeRunFailed(err error, options PayloadOptions) ([]byte, error) {
 	return json.Marshal(DataRunFailed{Error: payload, ErrorCode: runErrorCode(err)})
 }
 
+// RunErrorCoder is implemented by an error that names the ErrorCode of the
+// run_failed event a run that failed with it records.
+type RunErrorCoder interface{ RunErrorCode() string }
+
 // runErrorCode returns the ErrorCode of the error a run failed with.
 func runErrorCode(err error) string {
-	var divergence replayDivergenceError
-	var delivery deliveryError
+	var coder RunErrorCoder
+	coded := errors.As(err, &coder)
 	switch {
-	case errors.As(err, &divergence):
+	case coded && coder.RunErrorCode() == "REPLAY_DIVERGENCE":
 		return "REPLAY_DIVERGENCE"
 	case errors.Is(err, ErrCorruptedEventLog):
 		return "CORRUPTED_EVENT_LOG"
@@ -259,8 +263,8 @@ func runErrorCode(err error) string {
 		return "DEPLOYMENT_MISMATCH"
 	case errors.Is(err, ErrWorkflowNotFound):
 		return "WORKFLOW_NOT_REGISTERED"
-	case errors.As(err, &delivery):
-		return "WORLD_CONTRACT_ERROR"
+	case coded:
+		return coder.RunErrorCode()
 	}
 	return "USER_ERROR"
 }

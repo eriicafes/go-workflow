@@ -12,7 +12,7 @@ worker, queue service, or database, and survives a restart.
 ## Usage
 
 ```go
-runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+runners := core.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {

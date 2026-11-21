@@ -27,7 +27,7 @@ Deploy two functions:
 
 ```go
 // The queue consumer function.
-runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+runners := core.Runners(workflow.Use(flows.GenerateReport))
 log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
 ```
 
@@ -172,6 +172,32 @@ resume time.
 | Analytics | Not supported. `Capabilities().Analytics` is false. |
 | Retention | Vercel's plan decides how long runs are kept. |
 
+### Backend contract
+
+The run-scoped event routes come in two versions, with the same CBOR frame
+encoding. `/v5` serves runs of every spec version and is the only route that
+writes to a spec 9 run. `/v4` serves runs below spec 9. Listing by
+correlation ID stays on `/v4/events` for every run. On `/v5`:
+
+| Part | Contract |
+| --- | --- |
+| Routes | `POST /v5/runs/{run}/events/{type}`, `POST /v5/runs/{run}/events/batch`, `GET /v5/runs/{run}/events`, and `GET /v5/runs/{run}/events/{event}`. A write to a spec 9 run through `/v4` is refused with a 400. |
+| Frame meta | A write carries `specVersion`, `occurredAt`, and, from the run's orchestrator, `inBand: true` with `expectedSeqInBand` and `maxSlot`, the number of events it holds. An in-band write without `expectedSeqInBand` is a 400. `run_started` carries `executorSpecVersion`, and `step_created` carries `inline` and `creatorMessageId`. |
+| Counters | Each run has `seq`, its number of positions, and `seqInBand`, the positions allocated to in-band writes, with `seqInBand ≤ seq`. `run_created` takes the first position and counts as in-band. An in-band write advances both by the positions it allocates, and an out-of-band write moves only `seq`. |
+| Snapshot | A listing reports the counters it read before listing in the `x-wf-snapshot-seq` and `x-wf-snapshot-seq-in-band` headers and in its end frame's `snapshot`. |
+| Fence | An in-band write whose `expectedSeqInBand` is not `seqInBand` is refused with a 412 whose body has `error: "in-band-superseded"`, `seq`, `seqInBand`, and optionally the events the writer was missing. Nothing is written. A batch is fenced as one block. |
+| Skipped-slot report | The answer to an in-band write has `allocated`, and `events`, the events in the positions after `maxSlot` and before its own, in order, with `hasMore` when that list is incomplete. A batch answers with one result per frame and the report and `allocated` at the top level. |
+| Queue | Vercel Queues delivers a published message once per `Vqs-Idempotency-Key`. |
+
+The World also relies on what the client cannot see, which
+`TestBackendAssumptionsLive` checks against a real project:
+
+- The backend enforces the fence only on `/v5`.
+- An in-band write's stored `createdAt` is the `occurredAt` it was sent with.
+- `step_created` keeps `inline` and `creatorMessageId` in the event's data.
+- On a spec 9 run, a finished run refuses `step_created` and `step_started`,
+  and still accepts `step_completed`.
+
 ## Encryption
 
 The World encrypts payloads as the Workflow SDK does on Vercel, with no
@@ -280,4 +306,5 @@ in-process imitation of the workflow API, which keeps an event only as the
 backend does. Set `WORKFLOW_VERCEL_LIVE_OIDC_TOKEN` (a deployment's OIDC
 token), or `WORKFLOW_VERCEL_LIVE_TOKEN` with `VERCEL_PROJECT_ID` and
 `VERCEL_TEAM_ID`, to also run the end-to-end workflows against Vercel's
-storage.
+storage, the backend contract tests against its `/v5` routes, and the
+backend assumptions.
