@@ -405,4 +405,3 @@ func waitQueueEmpty(t *testing.T, world *World) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
-
