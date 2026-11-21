@@ -1,7 +1,9 @@
 package workflow_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1131,3 +1133,232 @@ func TestRunCanCancelItselfThroughAnInlineStep(t *testing.T) {
 // runTarget is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runTarget = worlds.NewRunID()
+
+type encryptedInput struct{ Secret string }
+type encryptedOutput struct {
+	Secret  string
+	Resumed string
+}
+
+func (encryptedInput) Workflow(encryptedOutput) {}
+
+func shout(_ context.Context, text string) (string, error) { return text + "!", nil }
+
+func writeSecret(ctx context.Context, text string) (struct{}, error) {
+	writer, err := workflow.Writer(ctx)
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer writer.Close()
+	_, err = writer.Write([]byte(text))
+	return struct{}{}, err
+}
+
+// TestEncryptedRunsKeepPayloadsOpaque runs a workflow on a World with an
+// encryption key: its own payloads are encrypted with the run's key (encr),
+// and what is sent from outside the run is sealed to its public key (encp),
+// as in the Workflow SDK, while every value reads back.
+func TestEncryptedRunsKeepPayloadsOpaque(t *testing.T) {
+	for _, mode := range []string{"in process", "over HTTP"} {
+		t.Run(mode, func(t *testing.T) { testEncryptedRun(t, mode == "over HTTP") })
+	}
+}
+
+func testEncryptedRun(t *testing.T, overHTTP bool) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, input encryptedInput) (encryptedOutput, error) {
+		secret, err := workflow.Step(ctx, shout, input.Secret)
+		if err != nil {
+			return encryptedOutput{}, err
+		}
+		if _, err := workflow.Step(ctx, writeSecret, secret); err != nil {
+			return encryptedOutput{}, err
+		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: "encrypted-" + workflow.GetWorkflowMetadata(ctx).RunID})
+		resumed, err := hook.Next(ctx)
+		if err != nil {
+			return encryptedOutput{}, err
+		}
+		return encryptedOutput{Secret: secret, Resumed: resumed}, nil
+	}))
+	defer world.Close()
+	if err := world.SetEncryptionKey(bytes.Repeat([]byte{3}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	client := workflow.NewClient(world)
+	if overHTTP {
+		// The client reads the run's key over RPC, and seals what it sends.
+		server := httptest.NewServer(worlds.HTTPHandler(world, ""))
+		defer server.Close()
+		client = workflow.NewHTTPClient(server.URL+"/v1/workflow", server.Client())
+	}
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), 3*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, encryptedInput{Secret: "plaintext-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workflow.ResumeHookWithRetries(ctx, "encrypted-"+run.ID(), "resumed-secret", 100, 10*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := run.Writer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("outside-secret")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(ctx)
+	if err != nil || output != (encryptedOutput{Secret: "plaintext-secret!", Resumed: "resumed-secret"}) {
+		t.Fatalf("output = %#v err=%v", output, err)
+	}
+
+	stored, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
+	if err != nil || worlds.DecodePublicKey(stored.EncryptionPublicKey) == nil {
+		t.Fatalf("run = %#v err=%v", stored, err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[worlds.EventType]string{}
+	for _, event := range events.Data {
+		if bytes.Contains(event.Data, []byte("secret")) {
+			t.Fatalf("%s holds plaintext: %s", event.EventType, event.Data)
+		}
+		var data map[string]json.RawMessage
+		_ = json.Unmarshal(event.Data, &data)
+		for _, field := range []string{"input", "result", "output", "payload"} {
+			var payload []byte
+			if json.Unmarshal(data[field], &payload) == nil && len(payload) > 0 {
+				labels[event.EventType] = worlds.PayloadLabel(payload)
+			}
+		}
+	}
+	want := map[worlds.EventType]string{
+		worlds.EventTypeRunCreated: worlds.PayloadEncrypted,
+		// The step runs inline, so its first step_started holds its input.
+		worlds.EventTypeStepStarted:   worlds.PayloadEncrypted,
+		worlds.EventTypeStepCompleted: worlds.PayloadEncrypted,
+		worlds.EventTypeHookReceived:  worlds.PayloadSealed,
+		worlds.EventTypeRunCompleted:  worlds.PayloadEncrypted,
+	}
+	for eventType, label := range want {
+		if labels[eventType] != label {
+			t.Errorf("%s payload = %q, want %q", eventType, labels[eventType], label)
+		}
+	}
+
+	// The stream holds the step's frame, encrypted, and the outside writer's,
+	// sealed, and reads back as written.
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(run.ID()), Name: worlds.UserStreamName(worlds.RunID(run.ID()), "")})
+	if err != nil || len(chunks.Data) != 2 {
+		t.Fatalf("stream = %#v err=%v", chunks, err)
+	}
+	for index, label := range []string{worlds.PayloadEncrypted, worlds.PayloadSealed} {
+		payloads, err := worlds.SplitStreamFrames(chunks.Data[index].Data)
+		if err != nil || len(payloads) != 1 || worlds.PayloadLabel(payloads[0]) != label {
+			t.Fatalf("frame %d = %q err=%v, want %s", index, chunks.Data[index].Data, err, label)
+		}
+	}
+	reader, err := run.Reader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := reader.Next()
+	if err != nil || string(first.Data) != "plaintext-secret!" {
+		t.Fatalf("first chunk = %q err=%v", first.Data, err)
+	}
+	second, err := reader.Next()
+	if err != nil || string(second.Data) != "outside-secret" {
+		t.Fatalf("second chunk = %q err=%v", second.Data, err)
+	}
+}
+
+type routedInput struct {
+	workflow.Struct[routedOutput]
+}
+type routedOutput struct{ Value string }
+
+func TestWorkflowNameIsTheRecordedName(t *testing.T) {
+	world := testworld.NewManual(workflow.Use(func(context.Context, structWorkflowInput) (structWorkflowOutput, error) {
+		return structWorkflowOutput{}, nil
+	}))
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, structWorkflowInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := run.WorkflowName(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name := worlds.WorkflowName[structWorkflowInput](); name != recorded {
+		t.Fatalf("WorkflowName = %q, recorded %q", name, recorded)
+	}
+	if pointer := worlds.WorkflowName[*structWorkflowInput](); pointer != recorded {
+		t.Fatalf("WorkflowName of a pointer = %q, want %q", pointer, recorded)
+	}
+}
+
+func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
+	runner := workflow.Use(func(ctx context.Context, _ routedInput) (routedOutput, error) {
+		ctx = workflow.SetMaxInlineSteps(ctx, 0)
+		value, err := workflow.Step(ctx, func(context.Context, string) (string, error) { return "step", nil }, "")
+		if err != nil {
+			return routedOutput{}, err
+		}
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: "routed"})
+		defer hook.Dispose(ctx)
+		resumed, err := hook.Next(ctx)
+		return routedOutput{Value: value + ":" + resumed}, err
+	})
+	world := testworld.NewManual(runner)
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	runtime := core.NewRuntime(world, core.Runners(runner))
+
+	run, err := workflow.Start(ctx, routedInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed := 0
+	drain := func() {
+		t.Helper()
+		for ; executed < len(world.QueuedMessages()); executed++ {
+			if err := runtime.Execute(ctx, world.QueuedMessages()[executed].Input); err != nil {
+				t.Fatalf("delivery %d: %v", executed, err)
+			}
+		}
+	}
+	drain()
+	if err := workflow.ResumeHook(ctx, "routed", "hook"); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+
+	output, err := run.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Value != "step:hook" {
+		t.Fatalf("output = %#v", output)
+	}
+	want := worlds.WorkflowName[routedInput]()
+	steps := 0
+	for _, message := range world.QueuedMessages() {
+		if message.Input.WorkflowName != want {
+			t.Errorf("delivery %+v has workflow %q, want %q", message.Input, message.Input.WorkflowName, want)
+		}
+		if message.Input.StepID != nil {
+			steps++
+		}
+	}
+	// the start, the step, its settled flow and the hook resume
+	if len(world.QueuedMessages()) < 4 || steps == 0 {
+		t.Fatalf("queued %d deliveries with %d steps, want flow and step deliveries", len(world.QueuedMessages()), steps)
+	}
+}

@@ -405,3 +405,15 @@ func TestRunFilterRefusals(t *testing.T) {
 		t.Fatalf("analytics RunsList with one bound: %v", err)
 	}
 }
+
+func TestNewRejectsARouteWithoutATopic(t *testing.T) {
+	_, err := New(Config{
+		BaseURL:  "https://app.example.com/v1/workflow",
+		QueueURL: "https://iad1.vercel-queue.com/api/v3",
+		Topic:    "workflow",
+		Routes:   worlds.Routes(worlds.Route[routedWorkflow]("backfill")),
+	})
+	if err == nil || !strings.Contains(err.Error(), "has no topic") {
+		t.Fatalf("New = %v, want an error for the queue without a topic", err)
+	}
+}

@@ -551,3 +551,32 @@ func testLimits(t *testing.T, world *World) {
 // runLimits is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runLimits = worlds.NewRunID()
+
+func TestNewValidatesQueues(t *testing.T) {
+	scheduler := &SchedulerConfig{TargetARN: defaultARN, RoleARN: schedARN}
+	tests := map[string]Config{
+		"unknown route queue": {Routes: worlds.Routes(worlds.Route[routedWorkflow]("missing"))},
+		"queue without URL":   {Queues: map[string]QueueConfig{"backfill": {ARN: backfillARN}}},
+		"FIFO without Scheduler": {
+			Queues: map[string]QueueConfig{"ordered": {URL: orderedURL, ARN: orderedARN, FIFO: true}},
+		},
+		"queue without ARN under Scheduler": {
+			Queues:    map[string]QueueConfig{"backfill": {URL: backfillURL}},
+			Scheduler: scheduler,
+		},
+	}
+	for name, config := range tests {
+		config.BaseURL, config.TableName, config.QueueURL = testBaseURL, "workflow", testQueueURL
+		var schedules schedulerAPI
+		if config.Scheduler != nil {
+			schedules = newFakeScheduler()
+		}
+		if _, err := newWorld(config, newFakeDynamo(), &fakeSQS{}, schedules); err == nil {
+			t.Errorf("%s: New accepted the config", name)
+		}
+	}
+	// a standard queue needs no ARN without Scheduler
+	if _, err := newWorld(Config{BaseURL: testBaseURL, TableName: "workflow", QueueURL: testQueueURL, Queues: map[string]QueueConfig{"backfill": {URL: backfillURL}}, Routes: worlds.Routes(worlds.Route[routedWorkflow]("backfill"))}, newFakeDynamo(), &fakeSQS{}, nil); err != nil {
+		t.Fatalf("standard queue without Scheduler: %v", err)
+	}
+}
