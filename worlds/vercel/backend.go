@@ -323,7 +323,11 @@ func classify(err error, eventType worlds.EventType) error {
 	}
 	switch {
 	case api.Status == http.StatusPreconditionFailed && api.Code == "in-band-superseded":
-		return fmt.Errorf("%w: %v", worlds.ErrInBandSuperseded, err)
+		// The refusal reports the run's counters as the backend read them.
+		superseded := &worlds.InBandSupersededError{Cause: err}
+		superseded.EventCount, _ = asInt(api.Fields["seq"])
+		superseded.InBandCount, _ = asInt(api.Fields["seqInBand"])
+		return superseded
 	case api.Status == http.StatusNotFound && api.Code != "":
 		switch eventType {
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
