@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -383,5 +384,24 @@ func TestRunsCreatedInARegionAreRoutedThere(t *testing.T) {
 	defer queue.mu.Unlock()
 	if len(queue.requests) != 1 {
 		t.Fatalf("first delivery published %d times", len(queue.requests))
+	}
+}
+
+// The backend filters runs by one status, so RunsList and the analytics
+// refuse several, and analytics refuse a window with one bound, as
+// world-vercel does.
+func TestRunFilterRefusals(t *testing.T) {
+	worldsList, _, _ := newWorlds(t, 1)
+	world, ctx := worldsList[0], context.Background()
+	statuses := []worlds.Status{worlds.StatusRunning, worlds.StatusCompleted}
+	if _, err := world.RunsList(ctx, worlds.RunsListInput{Status: statuses}); !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("RunsList by two statuses: %v", err)
+	}
+	if _, err := world.Analytics().RunsList(ctx, worlds.AnalyticsRunsListInput{Status: statuses}); !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("analytics RunsList by two statuses: %v", err)
+	}
+	start := time.Now()
+	if _, err := world.Analytics().RunsList(ctx, worlds.AnalyticsRunsListInput{StartTime: &start}); !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("analytics RunsList with one bound: %v", err)
 	}
 }
