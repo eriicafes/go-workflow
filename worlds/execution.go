@@ -149,7 +149,7 @@ func (e *Execution) trackEvent(index int, event Event) {
 	case EventTypeHookConflict:
 		e.settles[event.CorrelationID] = index
 		// A conflict also records the declaration, so index it below.
-	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated:
+	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeAttrSet:
 	default:
 		return
 	}

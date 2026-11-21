@@ -79,6 +79,22 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, wo
 A child run takes its options beside the attributes that link it to its
 parent.
 
+## Setting attributes
+
+`workflow.SetAttributes` changes a running run's attributes as one `attr_set`
+event. A nil value deletes its key, and changes are recorded in key order.
+
+```go
+err := workflow.SetAttributes(ctx, map[string]*string{"phase": &phase, "draft": nil})
+```
+
+In workflow context the write takes the ID `attr_` and the run's next
+correlation ULID, drawn from the run's seed like step IDs, and returns once it
+is recorded. Replay matches it by ID and checks the changes. In step context
+it records the write for the step's attempt at once. Attributes outside the
+limits return a `FatalError` wrapping `worlds.ErrAttributeInvalid`, and
+`SetAttributesOptions.AllowReservedAttributes` permits keys starting with `$`.
+
 ## Getting an existing run
 
 `workflow.Get` returns a handle to a run by ID. The type parameter is the

@@ -186,6 +186,9 @@ type (
 		// Writer names what set the attributes. Nil records a workflow
 		// writer.
 		Writer *AttributeWriter
+		// AllowReservedAttributes records that the writer permitted keys
+		// with the reserved prefix.
+		AllowReservedAttributes bool
 	}
 )
 

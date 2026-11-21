@@ -128,7 +128,7 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			writer["stepId"], writer["attempt"] = string(data.Writer.StepID), data.Writer.Attempt
 		}
 		meta["changes"], meta["writer"] = changes, writer
-		if hasReservedKey(data.Changes) {
+		if data.AllowReservedAttributes || hasReservedKey(data.Changes) {
 			meta["allowReservedAttributes"] = true
 		}
 		return meta, nil, nil
@@ -242,7 +242,8 @@ func eventData(wire wireEvent) ([]byte, error) {
 	case worlds.EventTypeRunFailed:
 		return json.Marshal(worlds.DataRunFailed{Error: payload("error"), ErrorCode: str(d, "errorCode")})
 	case worlds.EventTypeAttrSet:
-		return json.Marshal(worlds.DataAttrSet{Changes: attributeChanges(d["changes"]), Writer: attributeWriter(d["writer"])})
+		allowReserved, _ := d["allowReservedAttributes"].(bool)
+		return json.Marshal(worlds.DataAttrSet{Changes: attributeChanges(d["changes"]), Writer: attributeWriter(d["writer"]), AllowReservedAttributes: allowReserved})
 	case worlds.EventTypeStepCreated:
 		return json.Marshal(worlds.DataStepCreated{StepName: str(d, "stepName"), Input: payload("input")})
 	case worlds.EventTypeStepStarted:

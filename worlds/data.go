@@ -339,15 +339,17 @@ type HookDisposedEventData struct {
 	ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty"`
 }
 
-// DataAttrSet is the Data of an attr_set event.
+// DataAttrSet is the Data of an attr_set event. AllowReservedAttributes
+// records that the writer permitted keys with the reserved prefix.
 type DataAttrSet struct {
-	Changes []RunsAttributeChange `json:"changes"`
-	Writer  AttributeWriter       `json:"writer"`
+	Changes                 []RunsAttributeChange `json:"changes"`
+	Writer                  AttributeWriter       `json:"writer"`
+	AllowReservedAttributes bool                  `json:"allowReservedAttributes,omitempty"`
 }
 
 // EncodeAttrSet returns the Data of the attr_set event that applies input.
 func EncodeAttrSet(input RunsSetAttributesInput) ([]byte, error) {
-	data := DataAttrSet{Changes: input.Changes, Writer: AttributeWriter{Type: AttributeWriterWorkflow}}
+	data := DataAttrSet{Changes: input.Changes, Writer: AttributeWriter{Type: AttributeWriterWorkflow}, AllowReservedAttributes: input.AllowReservedAttributes}
 	if input.Writer != nil {
 		data.Writer = *input.Writer
 	}
