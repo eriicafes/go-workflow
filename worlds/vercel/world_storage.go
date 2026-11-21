@@ -2,13 +2,11 @@ package vercelworld
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -204,7 +202,8 @@ func (w *World) getRun(ctx context.Context, runID worlds.RunID, resolve worlds.R
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	if len(input.Status) > 1 {
-		return w.runsByStatuses(ctx, input)
+		// The backend filters by one status, so world-vercel refuses more.
+		return worlds.Page[worlds.Run]{}, fmt.Errorf("%w: the Vercel backend filters runs by one status", worlds.ErrEventInvalid)
 	}
 	var status worlds.Status
 	if len(input.Status) == 1 {
@@ -232,101 +231,6 @@ func (w *World) runsPage(ctx context.Context, input worlds.RunsListInput, status
 	var page listResponse
 	err := w.api.do(ctx, http.MethodGet, "/v2/runs", query, nil, &page)
 	return page, err
-}
-
-// runsByStatuses lists runs in any of several statuses. The backend filters
-// by one status, so it reads a page of each and merges them by creation. The
-// cursor holds each status's own cursor, "" to start and "-" once it is read
-// to the end.
-func (w *World) runsByStatuses(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
-	statuses := slices.Clone(input.Status)
-	slices.Sort(statuses)
-	statuses = slices.Compact(statuses)
-	cursors := map[worlds.Status]string{}
-	if input.Pagination.Cursor != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(input.Pagination.Cursor)
-		if err != nil || json.Unmarshal(raw, &cursors) != nil {
-			return worlds.Page[worlds.Run]{}, errors.New("workflow/vercel: invalid runs cursor")
-		}
-	}
-	type item struct {
-		run    worlds.Run
-		status worlds.Status
-	}
-	var items []item
-	pages := map[worlds.Status]listResponse{}
-	for _, status := range statuses {
-		if cursors[status] == "-" {
-			continue
-		}
-		pagination := input.Pagination
-		pagination.Cursor = cursors[status]
-		page, err := w.runsPage(ctx, input, status, pagination)
-		if err != nil {
-			return worlds.Page[worlds.Run]{}, err
-		}
-		pages[status] = page
-		for _, values := range page.Data {
-			items = append(items, item{run: toRun(values, input.ResolveData), status: status})
-		}
-	}
-	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	slices.SortStableFunc(items, func(a, b item) int {
-		order := a.run.CreatedAt.Compare(b.run.CreatedAt)
-		if order == 0 {
-			order = compareStrings(string(a.run.RunID), string(b.run.RunID))
-		}
-		if descending {
-			return -order
-		}
-		return order
-	})
-	taken := items
-	if limit := input.Pagination.Limit; limit > 0 && len(items) > limit {
-		taken = items[:limit]
-	}
-	counts := map[worlds.Status]int{}
-	result := worlds.Page[worlds.Run]{}
-	for _, item := range taken {
-		counts[item.status]++
-		result.Data = append(result.Data, item.run)
-	}
-	next := map[worlds.Status]string{}
-	for _, status := range statuses {
-		page, read := pages[status]
-		switch {
-		case !read:
-			next[status] = "-"
-		case counts[status] == len(page.Data):
-			next[status] = page.cursor()
-			if !page.HasMore {
-				next[status] = "-"
-			}
-		case counts[status] == 0:
-			next[status] = cursors[status]
-		default:
-			// Continue after the runs taken from this status, which the
-			// backend's cursor of a page of that size names.
-			pagination := input.Pagination
-			pagination.Cursor, pagination.Limit = cursors[status], counts[status]
-			shorter, err := w.runsPage(ctx, input, status, pagination)
-			if err != nil {
-				return worlds.Page[worlds.Run]{}, err
-			}
-			next[status] = shorter.cursor()
-		}
-		if next[status] != "-" {
-			result.HasMore = true
-		}
-	}
-	if result.HasMore {
-		encoded, err := json.Marshal(next)
-		if err != nil {
-			return worlds.Page[worlds.Run]{}, err
-		}
-		result.Cursor = base64.RawURLEncoding.EncodeToString(encoded)
-	}
-	return result, nil
 }
 
 func compareStrings(a, b string) int {
