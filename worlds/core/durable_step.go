@@ -99,12 +99,12 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	if _, settled := execution.settles[string(stepID)]; settled {
 		return DurableStepResult[Out]{StepID: stepID}
 	}
-	starts, retrying := stepAttempts(execution.events, stepID)
+	starts, retried := stepAttempts(execution.events, stepID)
 	if execution.target == nil {
 		// A step delivery runs a step created as one, and an inline step
 		// whose retry was handed to one. The attempts of an inline step
 		// this delivery runs are its own.
-		if !creation.inline || retrying || execution.ranInline[stepID] {
+		if !creation.inline || retried || execution.ranInline[stepID] {
 			return DurableStepResult[Out]{StepID: stepID}
 		}
 		// An inline attempt without a result was started by a delivery that
@@ -188,21 +188,22 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 }
 
 // stepAttempts returns the number of attempts of step stepID among events
-// that started, and whether its last attempt failed with a retry.
+// that started, and whether an attempt failed with a retry, which moves the
+// step to a step delivery for good.
 func stepAttempts(events []worlds.Event, stepID worlds.StepID) (int, bool) {
-	starts, retrying := 0, false
+	starts, retried := 0, false
 	for _, event := range events {
 		if event.CorrelationID != string(stepID) {
 			continue
 		}
 		switch event.EventType {
 		case worlds.EventTypeStepStarted:
-			starts, retrying = starts+1, false
+			starts++
 		case worlds.EventTypeStepRetrying:
-			retrying = true
+			retried = true
 		}
 	}
-	return starts, retrying
+	return starts, retried
 }
 
 // invoke calls fn with input in stepCtx. A panic in fn becomes its error,

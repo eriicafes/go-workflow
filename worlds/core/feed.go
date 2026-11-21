@@ -104,6 +104,13 @@ func newLiveFeed(ctx context.Context, world worlds.World, runID worlds.RunID, af
 	return f
 }
 
+// live reports whether the World's push is up.
+func (f *liveFeed) live() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.feedLive
+}
+
 // close stops the feed.
 func (f *liveFeed) close() {
 	f.stop()

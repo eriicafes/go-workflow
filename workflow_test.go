@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,6 +19,13 @@ import (
 	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
+
+// TestMain turns lingering off: the tests drive deliveries by hand, or check
+// what a delivery leaves once it suspends.
+func TestMain(m *testing.M) {
+	core.LingerDuration = 0
+	os.Exit(m.Run())
+}
 
 type timerInput struct{}
 type timerOutput struct{}

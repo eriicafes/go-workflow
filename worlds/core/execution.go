@@ -126,6 +126,10 @@ type Execution struct {
 	stopReason   string
 	repairDue    bool
 	repairReason string
+	// parked is set when the pass suspended with nothing left to run, and
+	// lingered on a pass that ran after the delivery lingered.
+	parked   bool
+	lingered bool
 	// finishing is set while finishSteps records the results of the steps
 	// still running, which a stop or repair found meanwhile does not cut
 	// short.
