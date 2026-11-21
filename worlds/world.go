@@ -52,18 +52,19 @@ type World interface {
 }
 
 // Capabilities reports optional World behavior. A capability being false does
-// not remove a method from World. Unsupported attribute writes are successful
-// no-ops, while Analytics returns nil.
-//
-// DeploymentAffinity reports that the World's deployments are atomic and its
-// queue can address a delivery to one, as Vercel's can. Runs created through
-// the World's Client are then pinned to World.DeploymentID, and the Runtime
-// replays a run only on the deployment it is pinned to, re-routing other
-// deliveries there.
-
+// not remove a method from World.
 type Capabilities struct {
-	Analytics          bool `cbor:"analytics"`
-	SetAttributes      bool `cbor:"setAttributes"`
+	// Analytics reports that the World collects analytics, so Analytics
+	// returns them rather than nil.
+	Analytics bool `cbor:"analytics"`
+	// SetAttributes reports that the World stores attribute writes. Without
+	// it, they are successful no-ops.
+	SetAttributes bool `cbor:"setAttributes"`
+	// DeploymentAffinity reports that the World's deployments are atomic and
+	// its queue can address a delivery to one. Runs created through the
+	// World's Client are then pinned to World.DeploymentID, and the Runtime
+	// replays a run only on the deployment it is pinned to, re-routing other
+	// deliveries there.
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
 	// DeleteData reports that the World implements RunsDeleteDataMany, which
 	// is optional.
@@ -84,6 +85,33 @@ type LatestDeployments interface {
 	// LatestDeploymentID returns the newest deployment this World's
 	// deployment knows of, or "" when it tracks none.
 	LatestDeploymentID(context.Context) (string, error)
+}
+
+// Region is the region a run's data lives in and its deliveries are routed
+// to. Its values belong to the World that uses it, and the empty Region
+// leaves it to the World. Only a World that implements RegionalRunIDs uses
+// it; the others ignore it.
+type Region string
+
+// RegionalRunIDs is implemented by a World whose run IDs carry the region the
+// run's data lives in.
+type RegionalRunIDs interface {
+	// RegionRunID returns id tagged with region, or with the World's own
+	// region for the empty Region. It is deterministic, so a child run's ID
+	// derived from its start step stays the same across attempts.
+	RegionRunID(id RunID, region Region) RunID
+	// RegionForRunID returns the region a run's data lives in, from its ID
+	// alone, and false when id is not a run ID.
+	RegionForRunID(id RunID) (Region, bool)
+}
+
+// RegionRunID returns id tagged with region when world implements
+// RegionalRunIDs, and id unchanged otherwise.
+func RegionRunID(world World, id RunID, region Region) RunID {
+	if regional, ok := world.(RegionalRunIDs); ok {
+		return regional.RegionRunID(id, region)
+	}
+	return id
 }
 
 // NormalizeBaseURL validates an HTTP handler's public URL and removes its
@@ -442,33 +470,6 @@ func (d Deployment) ID() string { return d.id }
 
 // Latest reports whether d is LatestDeployment.
 func (d Deployment) Latest() bool { return d.latest }
-
-// Region is the region a run's data lives in and its deliveries are routed
-// to. Its values belong to the World that uses it, and the empty Region
-// leaves it to the World. Only a World that implements RegionalRunIDs uses
-// it; the others ignore it.
-type Region string
-
-// RegionalRunIDs is implemented by a World whose run IDs carry the region the
-// run's data lives in.
-type RegionalRunIDs interface {
-	// RegionRunID returns id tagged with region, or with the World's own
-	// region for the empty Region. It is deterministic, so a child run's ID
-	// derived from its start step stays the same across attempts.
-	RegionRunID(id RunID, region Region) RunID
-	// RegionForRunID returns the region a run's data lives in, from its ID
-	// alone, and false when id is not a run ID.
-	RegionForRunID(id RunID) (Region, bool)
-}
-
-// RegionRunID returns id tagged with region when world implements
-// RegionalRunIDs, and id unchanged otherwise.
-func RegionRunID(world World, id RunID, region Region) RunID {
-	if regional, ok := world.(RegionalRunIDs); ok {
-		return regional.RegionRunID(id, region)
-	}
-	return id
-}
 
 // StartDeploymentID returns the deployment a new run is pinned to. On a World
 // with DeploymentAffinity, that is the deployment DeploymentWithID named, or
