@@ -89,7 +89,9 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	ctx = worlds.NewClientContext(ctx, nil)
 	ctx = context.WithValue(ctx, cancelContextKey{}, nil)
 	if input.Attempt > MaxDeliveries {
-		return r.exceedDeliveries(ctx, input)
+		if input.StepID == nil || r.stepStalled(ctx, input) {
+			return r.exceedDeliveries(ctx, input)
+		}
 	}
 	if input.StepID != nil {
 		return r.executeStep(ctx, input)
@@ -631,6 +633,41 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 		return nil
 	}
 	return err
+}
+
+// stepStallWindow is how long the log of a step whose message is delivered
+// past MaxDeliveries must show no activity before the step is failed: its
+// last creation, start, or retry, or a retry's due time, is older than that.
+// A delivery that runs the step writes its start first, and one that defers
+// follows a recent write or a pending retry, so only a step none of whose
+// deliveries got as far as writing anything is failed. Every World keeps
+// redelivering a failing step message at least this long.
+const stepStallWindow = time.Hour
+
+// stepStalled reports whether the step of input, delivered past
+// MaxDeliveries, has shown no activity for stepStallWindow. A step whose log
+// cannot be read is taken as stalled.
+func (r *Runtime) stepStalled(ctx context.Context, input worlds.QueueInput) bool {
+	page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: string(*input.StepID)})
+	if err != nil {
+		return true
+	}
+	since := time.Now().Add(-stepStallWindow)
+	for _, event := range page.Data {
+		switch event.EventType {
+		case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted:
+			if event.CreatedAt.After(since) {
+				return false
+			}
+		case worlds.EventTypeStepRetrying:
+			var data worlds.DataStepResult
+			_ = json.Unmarshal(event.Data, &data)
+			if event.CreatedAt.After(since) || data.RetryAfter != nil && data.RetryAfter.After(since) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // MaxDeliveries is the most attempts of one delivery Runtime.Execute makes.

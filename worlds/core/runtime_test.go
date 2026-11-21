@@ -1969,28 +1969,61 @@ func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
 		t.Fatalf("run at the cap failed for its attempts: %#v", run)
 	}
 
-	// A step past the cap fails, and a flow is queued to observe it.
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cap", WorkflowName: "w"}); err != nil {
+	// A step past the cap that is still active runs, and a flow is queued to
+	// observe its result.
+	stepCap := worlds.NewRunID()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: stepCap, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeRunStarted},
 		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
 	} {
-		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_step_cap", Event: event}); err != nil {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: stepCap, Event: event}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	stepID := worlds.StepID("step_a")
-	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_step_cap", StepID: &stepID, Attempt: core.MaxDeliveries + 1}); err != nil {
+	// A step created within the last hour is still active, so its delivery
+	// past the cap runs as any other, and the unknown workflow fails it.
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: stepCap, StepID: &stepID, Attempt: core.MaxDeliveries + 1}); err != nil {
 		t.Fatal(err)
 	}
-	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_step_cap", StepID: stepID})
-	if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
-		t.Fatalf("step past the cap = %#v err=%v", step, err)
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: stepCap, StepID: stepID})
+	if err != nil || step.Status != worlds.StatusFailed || strings.Contains(string(step.Error), "maximum attempts") {
+		t.Fatalf("active step past the cap = %#v err=%v", step, err)
 	}
 	queued := world.Queued()
-	if len(queued) == 0 || queued[len(queued)-1].RunID != "wrun_step_cap" || queued[len(queued)-1].StepID != nil {
+	if len(queued) == 0 || queued[len(queued)-1].RunID != stepCap || queued[len(queued)-1].StepID != nil {
 		t.Fatalf("queued after the failed step = %#v", queued)
 	}
+}
+
+func TestStepDeliveryPastTheCapFailsAStepWithNoActivityForAnHour(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		world := testworld.NewManual()
+		defer world.Close()
+		runtime := core.NewRuntime(world, core.Runners())
+		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stalled", WorkflowName: "w"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range []worlds.EventsCreateEvent{
+			{EventType: worlds.EventTypeRunStarted},
+			{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
+		} {
+			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_stalled", Event: event}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(time.Hour + time.Minute)
+		stepID := worlds.StepID("step_a")
+		if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_stalled", StepID: &stepID, Attempt: core.MaxDeliveries + 1}); err != nil {
+			t.Fatal(err)
+		}
+		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_stalled", StepID: stepID})
+		if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
+			t.Fatalf("stalled step past the cap = %#v err=%v", step, err)
+		}
+	})
 }
