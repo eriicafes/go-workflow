@@ -20,9 +20,17 @@ var errInvalidCursor = errors.New("workflow/postgres: invalid cursor")
 
 // inTx runs fn in a transaction and retries serialization failures and
 // deadlocks, which Postgres may raise between concurrent row-locking writers.
+// The notifications fn queues with notify are sent once it commits.
 func (w *World) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 	for attempt := 1; ; attempt++ {
-		err := pgx.BeginFunc(ctx, w.pool, fn)
+		var tx *notifyingTx
+		err := pgx.BeginFunc(ctx, w.pool, func(inner pgx.Tx) error {
+			tx = &notifyingTx{Tx: inner}
+			return fn(tx)
+		})
+		if err == nil {
+			w.announce(tx.pending)
+		}
 		if err == nil || attempt == txAttempts || !retryable(err) {
 			return err
 		}

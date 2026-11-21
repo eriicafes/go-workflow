@@ -826,9 +826,7 @@ func (a *appender) flush(ctx context.Context) error {
 	if _, err := a.tx.Exec(ctx, a.w.q(`UPDATE workflow.workflow_event_slots SET seq_in_band = $2 WHERE run_id = $1`), a.run.RunID, a.inBandCount); err != nil {
 		return err
 	}
-	if _, err := a.tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelEvents, string(a.run.RunID)); err != nil {
-		return err
-	}
+	notify(a.tx, channelEvents, string(a.run.RunID))
 	if !a.wasTerminal && a.run.Status.Terminal() {
 		// A run's waits go when it ends, and so do its hooks but those
 		// whose token is retained, which stay until their retention ends.
@@ -841,9 +839,7 @@ func (a *appender) flush(ctx context.Context) error {
 		if err := a.expire(ctx); err != nil {
 			return err
 		}
-		if _, err := a.tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelRuns, string(a.run.RunID)); err != nil {
-			return err
-		}
+		notify(a.tx, channelRuns, string(a.run.RunID))
 	}
 	return nil
 }

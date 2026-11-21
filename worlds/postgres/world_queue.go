@@ -66,8 +66,8 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			if err != nil || !inserted {
 				return err
 			}
-			_, err = tx.Exec(ctx, `SELECT pg_notify($1, '')`, channelQueue)
-			return err
+			notify(tx, channelQueue, "")
+			return nil
 		})
 		if err != nil {
 			return worlds.QueueResult{}, err

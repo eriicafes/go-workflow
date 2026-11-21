@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -83,9 +84,12 @@ type World struct {
 	concurrency   int
 	lease         time.Duration
 	notifier      *notifier
-	routes        map[string]string
-	retention     time.Duration
-	retentions    map[string]time.Duration
+	// announcing tracks the notifications sent after commits, which Close
+	// waits for.
+	announcing sync.WaitGroup
+	routes     map[string]string
+	retention  time.Duration
+	retentions map[string]time.Duration
 	// hookRetentionLimit is Config.HookRetentionLimit.
 	hookRetentionLimit time.Duration
 }
@@ -168,6 +172,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 // connection pool when Open created it. Stop Worker loops first by
 // cancelling their context.
 func (w *World) Close() {
+	w.announcing.Wait()
 	w.notifier.close()
 	if w.ownsPool {
 		w.pool.Close()

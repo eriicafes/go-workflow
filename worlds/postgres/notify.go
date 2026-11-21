@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -160,6 +161,49 @@ func (n *notifier) listen() error {
 }
 
 func notifyKey(channel, payload string) string { return channel + ":" + payload }
+
+// notifyingTx is a write transaction of inTx, which holds the notifications
+// of its writes until it commits.
+type notifyingTx struct {
+	pgx.Tx
+	pending []notification
+}
+
+type notification struct{ channel, payload string }
+
+// notify queues a notification on tx, sent once it commits. As in
+// world-postgres, a NOTIFY never runs inside the write's transaction, where
+// its failure would fail the write and every notifying commit would queue on
+// Postgres's notification lock.
+func notify(tx pgx.Tx, channel, payload string) {
+	pending := tx.(*notifyingTx)
+	for _, queued := range pending.pending {
+		if queued.channel == channel && queued.payload == payload {
+			return
+		}
+	}
+	pending.pending = append(pending.pending, notification{channel, payload})
+}
+
+// announce sends a committed transaction's notifications without holding up
+// the write, as world-postgres's announceRunEvents. They are best effort: a
+// waiter that misses one finds the change on its next poll.
+func (w *World) announce(pending []notification) {
+	if len(pending) == 0 {
+		return
+	}
+	channels, payloads := make([]string, len(pending)), make([]string, len(pending))
+	for i, n := range pending {
+		channels[i], payloads[i] = n.channel, n.payload
+	}
+	w.announcing.Add(1)
+	go func() {
+		defer w.announcing.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = w.pool.Exec(ctx, `SELECT pg_notify(n.channel, n.payload) FROM unnest($1::text[], $2::text[]) AS n(channel, payload)`, channels, payloads)
+	}()
+}
 
 // chunkNotification is the payload of a workflow_event_chunk notification.
 type chunkNotification struct {
