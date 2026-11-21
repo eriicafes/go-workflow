@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,14 +58,17 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[worlds.EventType]bool{}
+	// The step runs inline, created by its first step_started, and its
+	// retry is handed to a step delivery, which starts and completes it.
+	var types []worlds.EventType
 	for _, event := range events.Data {
-		seen[event.EventType] = true
-	}
-	for _, eventType := range []worlds.EventType{worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepRetrying, worlds.EventTypeStepCompleted} {
-		if !seen[eventType] {
-			t.Fatalf("missing %s event in %#v", eventType, events.Data)
+		if event.CorrelationID != "" {
+			types = append(types, event.EventType)
 		}
+	}
+	want := []worlds.EventType{worlds.EventTypeStepStarted, worlds.EventTypeStepRetrying, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted}
+	if !slices.Equal(types, want) {
+		t.Fatalf("step events = %v, want %v", types, want)
 	}
 }
 

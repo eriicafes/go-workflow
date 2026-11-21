@@ -117,8 +117,9 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 		}
 	}
 	want := map[worlds.EventType]string{
-		worlds.EventTypeRunCreated:    worlds.PayloadEncrypted,
-		worlds.EventTypeStepCreated:   worlds.PayloadEncrypted,
+		worlds.EventTypeRunCreated: worlds.PayloadEncrypted,
+		// The step runs inline, so its first step_started holds its input.
+		worlds.EventTypeStepStarted:   worlds.PayloadEncrypted,
 		worlds.EventTypeStepCompleted: worlds.PayloadEncrypted,
 		worlds.EventTypeHookReceived:  worlds.PayloadSealed,
 		worlds.EventTypeRunCompleted:  worlds.PayloadEncrypted,

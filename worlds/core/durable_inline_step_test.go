@@ -42,12 +42,13 @@ func TestDurableInlineStepRecordsItsResultInOneAttempt(t *testing.T) {
 	for _, event := range events.Data {
 		counts[event.EventType]++
 	}
-	if counts[worlds.EventTypeStepCreated] != 1 || counts[worlds.EventTypeStepStarted] != 1 || counts[worlds.EventTypeStepCompleted] != 1 {
+	// An inline step's first step_started creates it.
+	if counts[worlds.EventTypeStepCreated] != 0 || counts[worlds.EventTypeStepStarted] != 1 || counts[worlds.EventTypeStepCompleted] != 1 {
 		t.Fatalf("inline events = %#v", events.Data)
 	}
 }
 
-func TestInlineStepAttemptBelongsToTheFlowThatStartedIt(t *testing.T) {
+func TestFlowRunsAgainAnInlineAttemptAStoppedDeliveryLeft(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var attempts atomic.Int32
@@ -60,24 +61,17 @@ func TestInlineStepAttemptBelongsToTheFlowThatStartedIt(t *testing.T) {
 				return 0, ctx.Err()
 			}
 			return value, nil
-		}, 7)
+		}, 7, workflow.StepOptions{MaxRetries: 1})
 		return inlineOutput{Values: []int{value}}, err
 	})
 	world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
 	crash(t, ctx, runtime, delivery.Input, started)
 
-	// Another flow leaves the attempt to its owner until the lease ends.
+	// Any flow that finds the attempt without a result runs the next one,
+	// since the fence keeps a second flow from writing alongside it.
 	other := delivery.Input
 	other.MessageID = "other"
 	if err := runtime.Execute(ctx, other); err != nil {
-		t.Fatal(err)
-	}
-	if attempts.Load() != 1 {
-		t.Fatalf("attempts = %d, want the owner's only", attempts.Load())
-	}
-
-	// The owner's redelivery runs it again at once.
-	if err := runtime.Execute(ctx, delivery.Input); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runOutput(t, ctx, world, runID)

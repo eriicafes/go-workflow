@@ -25,8 +25,9 @@ type (
 	}
 )
 
-// DurableWait declares the next timer. On first execution it
-// queues a delivery for DueAt and records wait_created. On replay it matches
+// DurableWait declares the next timer. On first execution a flow holds it
+// back until the runner waits, and then records wait_created and queues a
+// delivery for DueAt. On replay it matches
 // the recorded declaration, and a flow that reaches the declaration once the
 // timer is due completes it. The timer settles when the walk reaches its
 // wait_completed, which Execution.Settled reports. When the operation recorded
@@ -36,18 +37,13 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	waitID := options.Execution.NextWaitID()
 	creationIndex, exists := options.Execution.declared(string(waitID))
 	if !exists {
-		// On first execution, schedule the timer, then persist its
-		// declaration.
-		data := worlds.DataWaitCreated{ResumeAt: options.DueAt, CreatorMessageID: options.Execution.delivery.MessageID}
-		options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
-		encoded, err := json.Marshal(data)
-		if err != nil {
-			return DurableWaitResult{WaitID: waitID, Err: err}
+		if options.Execution.target != nil {
+			// A step delivery records only its own step's events.
+			panic(options.Execution.exit(errReplaySuspended))
 		}
-		// A write that fails or is refused leaves the queued delivery behind.
-		// Queues do not recall deliveries, and the orphan only replays the run
-		// once more.
-		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: string(waitID), Data: encoded}, nil)
+		// A flow holds the timer back until the runner waits, and then
+		// records it with the steps it declared and queues its delivery.
+		options.Execution.holdWait(pendingWait{waitID: waitID, dueAt: options.DueAt, refs: CancellationReferences(ctx)})
 		return DurableWaitResult{WaitID: waitID}
 	}
 
@@ -70,25 +66,33 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	}
 	if time.Now().Before(data.ResumeAt) {
 		// The timer's own delivery can arrive early when clocks disagree. It
-		// is consumed by this replay, so it queues its replacement.
+		// is consumed by this replay, so it queues its replacement. A flow
+		// that waits for an inline step completes the timer when it is due.
 		if options.Execution.delivery.IdempotencyKey == string(waitID) {
 			options.Execution.queue(worlds.QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		}
+		options.Execution.openWaits[waitID] = pendingWait{waitID: waitID, dueAt: data.ResumeAt, refs: CancellationReferences(ctx)}
 		return DurableWaitResult{WaitID: waitID}
 	}
-	// Replay reaches this declaration before later calls that disarmed it.
-	// Inspect the recorded cancellation contexts before admitting a timer firing.
-	// The recorded cancellation contexts are the ones replay reaches the
-	// declaration in, which a World may not store.
-	for _, ref := range CancellationReferences(ctx) {
-		state, err := readCancellation(options.Execution.Context(), options.Execution, ref)
+	options.Execution.completeWait(pendingWait{waitID: waitID, dueAt: data.ResumeAt, refs: CancellationReferences(ctx)})
+	return DurableWaitResult{WaitID: waitID}
+}
+
+// completeWait records that the due timer wait completed, unless a
+// cancellation context the replay declared it in was cancelled first.
+// Replay reaches a declaration before later calls that disarmed it, so the
+// recorded cancellation contexts, which a World may not store, are inspected
+// before the timer fires.
+func (e *Execution) completeWait(wait pendingWait) {
+	delete(e.openWaits, wait.waitID)
+	for _, ref := range wait.refs {
+		state, err := readCancellation(e.Context(), e, ref)
 		if err != nil {
-			panic(options.Execution.exit(deliveryError{cause: err}))
+			panic(e.exit(deliveryError{cause: err}))
 		}
 		if state.Cause != nil {
-			return DurableWaitResult{WaitID: waitID}
+			return
 		}
 	}
-	options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(waitID)}, nil)
-	return DurableWaitResult{WaitID: waitID}
+	e.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: string(wait.waitID)}, nil)
 }

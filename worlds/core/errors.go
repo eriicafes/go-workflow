@@ -10,6 +10,9 @@ import (
 var (
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")
+	// errStepAttemptsExhausted fails a step whose every attempt started
+	// without recording a result.
+	errStepAttemptsExhausted = errors.New("workflow: step attempts exhausted")
 	// errReplaySuperseded ends a flow whose in-band write was refused
 	// because another orchestrator wrote first. The Runtime replays again.
 	errReplaySuperseded = errors.New("workflow: replay superseded")

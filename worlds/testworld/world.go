@@ -29,7 +29,12 @@ type World struct {
 	tokens        map[string]worlds.HookID
 	streams       map[worlds.RunID]map[string]*memoryStream
 	queued        []queuedMessage
-	autoRun       bool
+	// handedOff counts the handoffs of each message, which do not count as
+	// attempts.
+	handedOff map[string]int
+	// flowGates lets one flow of each run execute at a time.
+	flowGates map[worlds.RunID]chan struct{}
+	autoRun   bool
 
 	changesMu sync.Mutex
 	changes   chan struct{}
@@ -60,7 +65,7 @@ func NewManual(runners ...core.Runner) *World {
 
 func newWorld(autoRun bool, runners ...core.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, changes: make(chan struct{})}
+	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
 	w.runtime = core.NewRuntime(w, core.Runners(runners...))
 	return w
 }

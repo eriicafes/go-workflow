@@ -180,7 +180,6 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 			Execution:  execution,
 			Name:       rollbackFunctionIdentity(fn),
 			MaxRetries: option.MaxRetries,
-			Rollback:   true,
 		}, func(ctx context.Context, value In) (struct{}, error) {
 			return struct{}{}, fn(ctx, value)
 		}, input)

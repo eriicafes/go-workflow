@@ -373,7 +373,12 @@ func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 		runtime := core.NewRuntime(world, runners)
 		for delivered := 0; delivered < 3 && len(inner.QueuedMessages()) > 0; delivered++ {
 			message := inner.QueuedMessages()[0]
-			if err := runtime.Execute(ctx, message.Input); err != nil {
+			err := runtime.Execute(ctx, message.Input)
+			if _, retry := worlds.RedeliveryOf(err); retry {
+				// The step's retry waits for its message to come again.
+				break
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			_ = inner.Acknowledge(ctx, message.ID)

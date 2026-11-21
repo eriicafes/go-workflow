@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -53,8 +52,10 @@ type Execution struct {
 	target *worlds.StepID
 	// delivery is the queue message being executed.
 	delivery worlds.QueueInput
-	// result holds the target step's outcome for the runtime to persist.
-	result *worlds.DataStepResult
+	// result holds the target step's outcome for the runtime to persist,
+	// and targetAttempt the attempt it is the outcome of.
+	result        *worlds.DataStepResult
+	targetAttempt int
 	// keys encrypts and opens the run's payloads. It is nil when the run's
 	// payloads are not encrypted.
 	keys *worlds.RunKeys
@@ -78,6 +79,10 @@ type Execution struct {
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
 	inBand int
+	// superseded reports that the World refused one of this flow's in-band
+	// writes, because another flow wrote first, so the flow writes nothing
+	// more and starts no step.
+	superseded bool
 	// startHook is the run's start hook, decoded once by StartHook, and
 	// startHookBound reports that a hook of this replay has opened it (see
 	// OpenStartHook).
@@ -89,17 +94,23 @@ type Execution struct {
 	// suspended marks a runtime exit before the workflow body finishes.
 	suspended bool
 	// pending holds the steps a flow declared or must attempt again, in
-	// declaration order, which advance starts once every recorded event is
-	// delivered.
-	pending []pendingStep
+	// declaration order, and waits the timers it declared, which advance
+	// creates once every recorded event is delivered.
+	pending      []pendingStep
+	pendingWaits []pendingWait
+	// openWaits holds the recorded timers this replay reached before they
+	// were due, which a flow waiting for an inline step completes when they
+	// are.
+	openWaits map[worlds.WaitID]pendingWait
 	// outcomes receives the result of each step the flow runs inline.
 	outcomes chan inlineOutcome
 	// inline counts the steps the flow runs inline that have not recorded
-	// their results, and promoted the new steps among them.
-	inline, promoted int
-	// running holds the steps the Runtime's process runs inline. It is nil
-	// outside a flow.
-	running *sync.Map
+	// their results.
+	inline int
+	// ranInline holds the steps whose attempt this delivery started inline,
+	// until their result is recorded or their retry is handed to a step
+	// delivery.
+	ranInline map[worlds.StepID]bool
 	// startedAt is when the delivery started. A flow stops running new steps
 	// inline after each step's duration.
 	startedAt time.Time
@@ -126,6 +137,8 @@ func newExecution(ctx context.Context, world worlds.World, run worlds.Run, event
 		index:     make(map[string]int),
 		reached:   make(map[string]bool),
 		settles:   make(map[string]int),
+		ranInline: make(map[worlds.StepID]bool),
+		openWaits: make(map[worlds.WaitID]pendingWait),
 		inBand:    run.InBandCount,
 		startedAt: time.Now(),
 	}
@@ -151,12 +164,19 @@ func (e *Execution) trackEvent(index int, event worlds.Event) {
 	case worlds.EventTypeHookConflict:
 		e.settles[event.CorrelationID] = index
 		// A conflict also records the declaration, so index it below.
+	case worlds.EventTypeStepStarted:
+		// An inline step's first step_started declares it.
+		if !worlds.StartCreatesStep(event.Data) {
+			return
+		}
 	case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeHookCreated, worlds.EventTypeAttrSet:
 	default:
 		return
 	}
 	if _, key, ok := strings.Cut(event.CorrelationID, "_"); ok {
-		e.index[key] = index
+		if _, declared := e.index[key]; !declared {
+			e.index[key] = index
+		}
 	}
 }
 
@@ -383,11 +403,7 @@ func (e *Execution) queue(input worlds.QueueInput) worlds.QueueResult {
 // the Execution holds, skipping latest when it is already among them. It does
 // not read storage.
 func (e *Execution) merge(result worlds.EventResult, latest worlds.Event) {
-	e.inBand = result.InBandCount
-	for index, event := range result.Events {
-		e.trackEvent(len(e.events)+index, event)
-	}
-	e.events = append(e.events, result.Events...)
+	e.mergeEvents(result.Events)
 	for _, event := range e.events {
 		if event.EventID == latest.EventID {
 			return
@@ -397,22 +413,64 @@ func (e *Execution) merge(result worlds.EventResult, latest worlds.Event) {
 	e.events = append(e.events, latest)
 }
 
+// mergeEvents adds the events the Execution does not hold yet, which follow
+// the ones it holds, to its log.
+func (e *Execution) mergeEvents(events []worlds.Event) {
+	held := len(e.events)
+	for _, event := range events {
+		if slot, err := worlds.EventSlot(event.EventID); err == nil && int(slot) <= held {
+			continue
+		}
+		e.trackEvent(len(e.events), event)
+		e.events = append(e.events, event)
+	}
+}
+
+// reload reads the events after the ones the Execution holds, when a write's
+// report of the events before it was incomplete.
+func (e *Execution) reload() {
+	page, err := e.world.EventsList(e.ctx, worlds.EventsListInput{RunID: e.run.RunID, Pagination: worlds.Pagination{Cursor: string(worlds.EventIDForSlot(uint64(len(e.events))))}})
+	for err == nil {
+		e.mergeEvents(page.Data)
+		if !page.HasMore {
+			return
+		}
+		page, err = e.world.EventsList(e.ctx, worlds.EventsListInput{RunID: e.run.RunID, Pagination: worlds.Pagination{Cursor: page.Cursor}})
+	}
+	panic(e.exit(deliveryError{cause: err}))
+}
+
+// supersede marks the flow superseded and ends the replay, because the World
+// refused an in-band write of it.
+func (e *Execution) supersede() {
+	e.superseded = true
+	panic(e.exit(errReplaySuperseded))
+}
+
 // CreateEvent appends event to the run as a write of this replay and adds it,
 // with the events others appended since, to the events the Execution holds. A
-// flow's write is fenced by the run's in-band count: when another flow wrote
-// first, the World refuses it and CreateEvent ends the replay so the Runtime
-// replays the run again. Any other World error ends the replay so the queue
-// retries the delivery, instead of reaching runner code.
+// flow's write is in-band, fenced by the run's in-band count: when another
+// flow wrote first, the World refuses it and CreateEvent ends the replay so
+// the Runtime delivers the flow's message again. A step delivery's write is
+// out-of-band. Any other World error ends the replay so the queue retries the
+// delivery, instead of reaching runner code.
 //
 // mapError, when not nil, sees the World's error first. It may act on it and
 // return it, return another error, or return nil to accept it, and CreateEvent
 // then adds nothing.
 func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(error) error) worlds.EventResult {
+	if e.superseded {
+		panic(e.exit(errReplaySuperseded))
+	}
 	eventCount := len(e.events)
+	inBand := e.InBandCount()
+	if inBand != nil {
+		event.OccurredAt = time.Now().UTC()
+	}
 	result, err := e.world.EventsCreate(e.ctx, worlds.EventsCreateInput{
 		RunID:   e.run.RunID,
 		Event:   event,
-		Options: worlds.EventsCreateOptions{EventCount: &eventCount, InBandCount: e.InBandCount()},
+		Options: worlds.EventsCreateOptions{EventCount: &eventCount, InBandCount: inBand},
 	})
 	if err != nil {
 		if mapError != nil {
@@ -422,16 +480,22 @@ func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(er
 		case err == nil:
 			return worlds.EventResult{}
 		case errors.Is(err, worlds.ErrInBandSuperseded):
-			panic(e.exit(errReplaySuperseded))
+			e.supersede()
 		default:
 			panic(e.exit(deliveryError{cause: err}))
 		}
+	}
+	if inBand != nil {
+		e.inBand = result.InBandCount
 	}
 	data := event.Data
 	if result.Data != nil {
 		data = result.Data
 	}
 	e.merge(result, worlds.Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data, CreatedAt: result.CreatedAt})
+	if result.MoreEvents {
+		e.reload()
+	}
 	return result
 }
 
@@ -442,19 +506,23 @@ func (e *Execution) OnAdvance(fn func()) {
 }
 
 // advance delivers one recorded event and runs newly ready continuations.
-// Once every recorded event is delivered, a flow starts the steps the runner
-// declared, and waits for a step it runs inline to record its result, which
-// it then delivers, so the runner continues without replaying. advance
-// reports false when no event can arrive in this delivery.
+// Once every recorded event is delivered, a flow creates the steps and
+// timers the runner declared, and waits for a step it runs inline to record
+// its result, which it then delivers, so the runner continues without
+// replaying. advance reports false when no event can arrive in this
+// delivery.
 func (e *Execution) advance() bool {
 	if e.horizon == len(e.events) {
-		e.startSteps()
+		e.createDeclared()
 	}
 	for e.horizon == len(e.events) {
 		if e.inline == 0 {
 			return false
 		}
-		if err := e.recordNext(); err != nil {
+		if err := e.awaitInline(); err != nil {
+			if errors.Is(err, errReplaySuperseded) {
+				panic(e.exit(errReplaySuperseded))
+			}
 			panic(e.exit(deliveryError{cause: err}))
 		}
 	}
@@ -481,110 +549,96 @@ func (e *Execution) Wait() {
 	}
 }
 
-// hold adds step to the steps advance starts once every recorded event is
-// delivered.
+// hold adds step to the steps advance creates or starts once every recorded
+// event is delivered.
 func (e *Execution) hold(step pendingStep) {
 	e.pending = append(e.pending, step)
 }
 
-// startSteps starts the steps the runner declared, in declaration order.
-// Inline steps, steps this flow's message must run again, and new steps while
-// fewer than their limit run inline, and the rest are queued as step
-// deliveries. One write, fenced like every write of a flow so two flows never
-// both start a step, records every new step and starts the inline ones with
-// this flow's message as their owner. The inline steps then run concurrently,
-// each sending its result to e.outcomes.
-func (e *Execution) startSteps() {
-	if len(e.pending) == 0 {
+// holdWait adds a timer to the ones advance creates once every recorded
+// event is delivered.
+func (e *Execution) holdWait(wait pendingWait) {
+	e.pendingWaits = append(e.pendingWaits, wait)
+}
+
+// createDeclared records the steps and timers the runner declared, in one
+// in-band write, and starts the steps it runs inline. Each new step's mode is
+// fixed here: an inline step, and while fewer than its limit run inline, a
+// new step, is created by its first step_started and runs in this flow. The
+// rest are recorded with step_created and queued as step deliveries once the
+// write commits, and never run inline later. The write holds the inline
+// starts first, then the step_created events, then the timers'
+// wait_created.
+func (e *Execution) createDeclared() {
+	if len(e.pending) == 0 && len(e.pendingWaits) == 0 {
 		return
 	}
-	pending := e.pending
-	e.pending = nil
-	var events []worlds.EventsCreateEvent
-	var inline, queued []pendingStep
-	var claimed, rechecks []string
+	pending, waits := e.pending, e.pendingWaits
+	e.pending, e.pendingWaits = nil, nil
+	if e.superseded {
+		return
+	}
+	var starts, created, failed, timers []worlds.EventsCreateEvent
+	var inline, background []pendingStep
+	running := e.inline
 	for _, step := range pending {
-		runInline := step.explicit || step.recovered
-		if step.created != nil && !step.explicit {
-			// A new step runs inline only when this flow's message, whose
-			// redelivery runs it again, owns it.
-			runInline = e.delivery.MessageID != "" && e.promoted < step.limit && time.Since(e.startedAt) < step.duration &&
-				(e.inlineUntil.IsZero() || time.Now().Before(e.inlineUntil))
-			if runInline {
-				e.promoted++
-				step.attempt = 1
-			}
-		}
-		if step.created != nil {
-			data, err := json.Marshal(step.created)
-			if err != nil {
-				panic(e.exit(deliveryError{cause: err}))
-			}
-			events = append(events, worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: string(step.stepID), Data: data})
-		}
-		if runInline && step.created != nil {
-			// Claimed before the write, so another delivery of this flow's
-			// message that reads the start leaves the attempt to this one.
-			e.running.Store(e.stepKey(step.stepID), true)
-			claimed = append(claimed, e.stepKey(step.stepID))
-		}
-		if runInline && step.created == nil {
-			// Another delivery of this flow's message in this process may
-			// already run the attempt again, and records its result.
-			if _, running := e.running.LoadOrStore(e.stepKey(step.stepID), true); running {
-				// A retry's flow can arrive while the delivery that queued
-				// it still records the failed attempt, and checks again once
-				// it is recorded.
-				if key := stepRetryKey(step.stepID, step.attempt-1); e.delivery.IdempotencyKey == key {
-					rechecks = append(rechecks, key)
-				}
-				continue
-			}
-			claimed = append(claimed, e.stepKey(step.stepID))
-		}
-		if runInline {
-			started, err := json.Marshal(worlds.DataStepStarted{StepName: e.stepName(step.stepID, step.created), Attempt: step.attempt, OwnerMessageID: e.delivery.MessageID})
-			if err != nil {
-				panic(e.exit(deliveryError{cause: err}))
-			}
-			events = append(events, worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(step.stepID), Data: started})
+		switch {
+		case step.failure != nil:
+			// A step whose input did not encode fails as it is created.
+			created = append(created, e.stepEvent(worlds.EventTypeStepCreated, step.stepID, worlds.DataStepCreated{StepName: step.name, WorkflowName: e.run.WorkflowName, Inline: true, CreatorMessageID: e.delivery.MessageID}))
+			failed = append(failed, e.stepEvent(worlds.EventTypeStepFailed, step.stepID, worlds.DataStepResult{StepName: step.name, Attempt: 1, Error: e.encodeError(step.failure)}))
+			continue
+		case step.exhausted:
+			// An inline step whose attempts all started fails without
+			// another.
+			failed = append(failed, e.stepEvent(worlds.EventTypeStepFailed, step.stepID, worlds.DataStepResult{StepName: step.name, Attempt: step.attempt, Error: e.encodeError(worlds.FatalError{Cause: errStepAttemptsExhausted})}))
+			continue
+		case step.recovered:
+			// An inline step whose attempt a delivery that stopped started
+			// runs again here.
+			starts = append(starts, e.stepEvent(worlds.EventTypeStepStarted, step.stepID, worlds.DataStepStarted{StepName: step.name, Attempt: step.attempt}))
 			inline = append(inline, step)
-		} else {
-			queued = append(queued, step)
+			continue
+		}
+		runInline := step.explicit || running < step.limit && time.Since(e.startedAt) < step.duration &&
+			(e.inlineUntil.IsZero() || time.Now().Before(e.inlineUntil))
+		if runInline {
+			running++
+			starts = append(starts, e.stepEvent(worlds.EventTypeStepStarted, step.stepID, worlds.DataStepStarted{StepName: step.name, WorkflowName: e.run.WorkflowName, Attempt: 1, Input: step.input, Inline: true}))
+			inline = append(inline, step)
+			continue
+		}
+		created = append(created, e.stepEvent(worlds.EventTypeStepCreated, step.stepID, worlds.DataStepCreated{StepName: step.name, WorkflowName: e.run.WorkflowName, Input: step.input, CreatorMessageID: e.delivery.MessageID}))
+		background = append(background, step)
+	}
+	for _, wait := range waits {
+		timers = append(timers, e.stepEvent(worlds.EventTypeWaitCreated, worlds.StepID(wait.waitID), worlds.DataWaitCreated{ResumeAt: wait.dueAt, CreatorMessageID: e.delivery.MessageID}))
+	}
+	events := append(append(append(starts, created...), failed...), timers...)
+	if len(events) == 0 {
+		return
+	}
+	committed := e.writeBatch(events)
+	for _, step := range background {
+		if committed[string(step.stepID)] {
+			e.queue(stepMessage(step.stepID, step.name, 1, false))
 		}
 	}
-	// The events are added to the log with the next write's delta.
-	result, err := e.world.EventsCreateBatch(e.ctx, worlds.EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), Events: events})
-	for _, item := range result.Results {
-		if err == nil && item.Err != nil {
-			err = item.Err
+	for _, wait := range waits {
+		if committed[string(wait.waitID)] {
+			e.queue(worlds.QueueInput{NotBefore: &wait.dueAt, IdempotencyKey: string(wait.waitID)})
+			e.openWaits[wait.waitID] = wait
 		}
-	}
-	if err != nil {
-		// The attempts did not start, so a later delivery may run them.
-		for _, key := range claimed {
-			e.running.Delete(key)
-		}
-	}
-	switch {
-	case errors.Is(err, worlds.ErrInBandSuperseded):
-		panic(e.exit(errReplaySuperseded))
-	case err != nil:
-		panic(e.exit(deliveryError{cause: err}))
-	}
-	e.inBand = result.InBandCount
-	for _, step := range queued {
-		e.queue(worlds.QueueInput{StepID: &step.stepID, IdempotencyKey: string(step.stepID)})
-	}
-	for _, key := range rechecks {
-		notBefore := time.Now().Add(retryRecheckDelay)
-		e.queue(worlds.QueueInput{NotBefore: &notBefore, IdempotencyKey: key})
 	}
 	if e.outcomes == nil {
 		e.outcomes = make(chan inlineOutcome)
 	}
 	for _, step := range inline {
+		if !committed[string(step.stepID)] {
+			continue
+		}
 		e.inline++
+		e.ranInline[step.stepID] = true
 		go func() {
 			result, err := step.run(step.attempt)
 			e.outcomes <- inlineOutcome{step: step, result: result, err: err}
@@ -592,50 +646,158 @@ func (e *Execution) startSteps() {
 	}
 }
 
+// stepEvent returns the event of eventType for the step, wait, or hook id
+// with data.
+func (e *Execution) stepEvent(eventType worlds.EventType, id worlds.StepID, data any) worlds.EventsCreateEvent {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		panic(e.exit(deliveryError{cause: err}))
+	}
+	return worlds.EventsCreateEvent{EventType: eventType, CorrelationID: string(id), Data: encoded}
+}
+
+// writeBatch appends events as one in-band write of the flow and adds them,
+// with the events others appended before them, to the log. It returns the
+// correlation IDs whose every event was appended. A refusal of the whole
+// write ends the replay: a fence refusal so the Runtime delivers the flow's
+// message again, and anything else so the queue retries it. A finished run's
+// refusal of an event ends it too.
+func (e *Execution) writeBatch(events []worlds.EventsCreateEvent) map[string]bool {
+	now := time.Now().UTC()
+	for index := range events {
+		events[index].OccurredAt = now
+	}
+	eventCount := len(e.events)
+	result, err := e.world.EventsCreateBatch(e.ctx, worlds.EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), EventCount: &eventCount, Events: events})
+	switch {
+	case errors.Is(err, worlds.ErrInBandSuperseded):
+		e.supersede()
+	case err != nil:
+		panic(e.exit(deliveryError{cause: err}))
+	}
+	e.inBand = result.InBandCount
+	e.mergeEvents(result.Events)
+	if result.MoreEvents {
+		e.reload()
+	}
+	committed := make(map[string]bool, len(events))
+	var refusal error
+	for index, item := range result.Results {
+		id := events[index].CorrelationID
+		if item.Err != nil {
+			committed[id] = false
+			if refusal == nil {
+				refusal = item.Err
+			}
+			continue
+		}
+		if _, seen := committed[id]; !seen {
+			committed[id] = true
+		}
+		e.merge(worlds.EventResult{}, worlds.Event{RunID: e.run.RunID, EventID: item.EventID, EventType: item.EventType, CorrelationID: id, Data: events[index].Data, CreatedAt: item.CreatedAt})
+	}
+	if refusal != nil {
+		// What committed is in the log for the next delivery, and what was
+		// refused, such as a write to a finished run, is not retried here.
+		panic(e.exit(deliveryError{cause: refusal}))
+	}
+	return committed
+}
+
+// LogPollInterval is how often a flow that waits for a step it runs inline
+// reads the events others appended to the run's log, so a payload, a
+// cancellation, or another step's result reaches the runner while the step
+// runs.
+var LogPollInterval = 2 * time.Second
+
+// awaitInline waits for a step running inline to finish and records its
+// result. Meanwhile it completes the timers that fall due, and reads what
+// others append to the log every LogPollInterval, returning as soon as either
+// adds an event for the walk to deliver.
+func (e *Execution) awaitInline() error {
+	held := len(e.events)
+	for len(e.events) == held {
+		wait := time.Now().Add(LogPollInterval)
+		var due *pendingWait
+		for _, open := range e.openWaits {
+			if open.dueAt.Before(wait) {
+				wait, due = open.dueAt, &open
+			}
+		}
+		timer := time.NewTimer(time.Until(wait))
+		select {
+		case outcome := <-e.outcomes:
+			timer.Stop()
+			e.inline--
+			if outcome.err != nil {
+				delete(e.ranInline, outcome.step.stepID)
+				return outcome.err
+			}
+			return e.completeInlineStep(outcome.step, outcome.result)
+		case <-timer.C:
+		}
+		if e.superseded {
+			continue
+		}
+		if due != nil {
+			e.completeWait(*due)
+			continue
+		}
+		e.reload()
+	}
+	return nil
+}
+
 // recordNext waits for a step running inline to finish and records its
 // result.
 func (e *Execution) recordNext() error {
 	outcome := <-e.outcomes
 	e.inline--
-	if outcome.step.created != nil && !outcome.step.explicit {
-		e.promoted--
-	}
-	defer e.running.Delete(e.stepKey(outcome.step.stepID))
 	if outcome.err != nil {
+		delete(e.ranInline, outcome.step.stepID)
 		return outcome.err
 	}
 	return e.completeInlineStep(outcome.step, outcome.result)
 }
 
-// completeInlineStep records the result of a step that ran inline, as a step
-// delivery does. A retry of a new step is queued as a step delivery, and a
-// retry of an inline step as a flow that runs it again, queued before the
-// retry is recorded.
+// completeInlineStep records the result of a step that ran inline as an
+// in-band write. A failed attempt that may retry is handed to a step
+// delivery: its step_retrying names this flow's message as the one that
+// moved it, and the step's message is queued once it commits.
 func (e *Execution) completeInlineStep(step pendingStep, result worlds.DataStepResult) error {
-	retry := worlds.QueueInput{RunID: e.run.RunID, WorkflowName: e.run.WorkflowName, NotBefore: result.RetryAfter, IdempotencyKey: stepRetryKey(step.stepID, step.attempt), DeploymentID: e.run.DeploymentID}
-	if result.RetryAfter != nil && step.explicit {
-		if _, err := e.world.Queue(e.ctx, retry); err != nil {
-			return err
-		}
+	if e.superseded {
+		return errReplaySuperseded
 	}
-	event, err := e.recordStepResult(step.stepID, result)
+	event, err := e.recordStepResult(step.stepID, step.attempt, result, true)
 	if err != nil {
 		return err
 	}
-	if event.EventType == worlds.EventTypeStepRetrying && !step.explicit {
-		retry.StepID = &step.stepID
-		_, err = e.world.Queue(e.ctx, retry)
+	if event.EventType == worlds.EventTypeStepRetrying {
+		delete(e.ranInline, step.stepID)
+		message := stepMessage(step.stepID, step.name, step.attempt+1, false)
+		message.NotBefore = result.RetryAfter
+		if _, err := e.world.Queue(e.ctx, e.addressed(message)); err != nil {
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
-// recordStepResult appends the result of the started step stepID out of band,
-// and adds it with the events others appended since to the log. The flow keeps
-// its in-band count, so its next write is still refused when another flow wrote
-// first. A terminal run records a retry as the step's final failure. It returns
-// the recorded event, or the zero Event when the step already settled or the
-// run ended before it started.
-func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataStepResult) (worlds.Event, error) {
+// addressed returns input addressed to the run's workflow and deployment.
+func (e *Execution) addressed(input worlds.QueueInput) worlds.QueueInput {
+	input.RunID = e.run.RunID
+	input.WorkflowName = e.run.WorkflowName
+	input.DeploymentID = e.run.DeploymentID
+	return input
+}
+
+// recordStepResult appends the result of attempt of the started step stepID
+// and adds it with the events others appended since to the log: in-band for
+// a step the flow ran inline, and out-of-band for a step delivery's. A
+// terminal run records a retry as the step's final failure. It returns the
+// recorded event, or the zero Event when the run ended before the result
+// could be recorded or the step already has its result.
+func (e *Execution) recordStepResult(stepID worlds.StepID, attempt int, result worlds.DataStepResult, inBand bool) (worlds.Event, error) {
 	eventType := worlds.EventTypeStepCompleted
 	if len(result.Error) != 0 {
 		eventType = worlds.EventTypeStepFailed
@@ -647,7 +809,10 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataSte
 	if eventType == worlds.EventTypeStepCompleted {
 		result.WorkflowName = e.run.WorkflowName
 	} else {
-		result.Attempt = stepAttempt(e, stepID)
+		result.Attempt = attempt
+	}
+	if eventType == worlds.EventTypeStepRetrying && inBand {
+		result.CreatorMessageID = e.delivery.MessageID
 	}
 	payload, err := json.Marshal(result)
 	if err != nil {
@@ -659,26 +824,43 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, result worlds.DataSte
 		Event:   worlds.EventsCreateEvent{EventType: eventType, CorrelationID: string(stepID), Data: payload},
 		Options: worlds.EventsCreateOptions{EventCount: &eventCount},
 	}
+	if inBand {
+		count := e.inBand
+		input.Options.InBandCount = &count
+		input.Event.OccurredAt = time.Now().UTC()
+	}
 	created, err := e.world.EventsCreate(e.ctx, input)
 	if errors.Is(err, worlds.ErrRunTerminal) && eventType == worlds.EventTypeStepRetrying {
 		// A terminal run permits the started step's final failure, but no retry.
-		result.RetryAfter = nil
+		result.RetryAfter, result.CreatorMessageID = nil, ""
 		if input.Event.Data, err = json.Marshal(result); err != nil {
 			return worlds.Event{}, err
 		}
 		input.Event.EventType = worlds.EventTypeStepFailed
 		created, err = e.world.EventsCreate(e.ctx, input)
 	}
-	if errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrStepNotStartable) {
+	switch {
+	case errors.Is(err, worlds.ErrInBandSuperseded):
+		e.superseded = true
+		return worlds.Event{}, errReplaySuperseded
+	case errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrStepNotStartable):
+		// The first writer of a step's result wins.
+		delete(e.ranInline, stepID)
 		return worlds.Event{}, nil
-	}
-	if err != nil {
+	case err != nil:
 		return worlds.Event{}, err
 	}
+	if inBand {
+		e.inBand = created.InBandCount
+		if input.Event.EventType != worlds.EventTypeStepRetrying {
+			delete(e.ranInline, stepID)
+		}
+	}
 	event := worlds.Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data, CreatedAt: created.CreatedAt}
-	inBand := e.inBand
 	e.merge(created, event)
-	e.inBand = inBand
+	if created.MoreEvents {
+		e.reload()
+	}
 	return event, nil
 }
 
@@ -694,7 +876,25 @@ func (e *Execution) stepName(stepID worlds.StepID, created *worlds.DataStepCreat
 // stepNameIn returns the name the step_created, or creating step_started, of
 // step stepID among events records, or "" when none does.
 func stepNameIn(events []worlds.Event, stepID worlds.StepID) string {
-	for _, event := range events {
+	creation, ok := stepCreation(events, stepID)
+	if !ok {
+		return ""
+	}
+	return creation.name
+}
+
+// stepCreationEvent is the event that created a step: its step_created, or
+// an inline step's first step_started.
+type stepCreationEvent struct {
+	index  int
+	name   string
+	input  []byte
+	inline bool
+}
+
+// stepCreation returns the event among events that created step stepID.
+func stepCreation(events []worlds.Event, stepID worlds.StepID) (stepCreationEvent, bool) {
+	for index, event := range events {
 		if event.CorrelationID != string(stepID) {
 			continue
 		}
@@ -702,31 +902,29 @@ func stepNameIn(events []worlds.Event, stepID worlds.StepID) string {
 		case worlds.EventTypeStepCreated:
 			var data worlds.DataStepCreated
 			_ = json.Unmarshal(event.Data, &data)
-			return data.StepName
+			return stepCreationEvent{index: index, name: data.StepName, input: data.Input, inline: data.Inline}, true
 		case worlds.EventTypeStepStarted:
-			var data worlds.DataStepStarted
-			_ = json.Unmarshal(event.Data, &data)
-			if data.StepName != "" {
-				return data.StepName
+			if worlds.StartCreatesStep(event.Data) {
+				var data worlds.DataStepStarted
+				_ = json.Unmarshal(event.Data, &data)
+				return stepCreationEvent{index: index, name: data.StepName, input: data.Input, inline: true}, true
 			}
 		}
 	}
-	return ""
+	return stepCreationEvent{}, false
 }
 
 // finishSteps waits for every step the flow runs inline to finish and records
-// their results, once the runner has returned or stopped.
+// their results, once the runner has returned or stopped. A superseded flow
+// records none.
 func (e *Execution) finishSteps() error {
 	var errs []error
 	for e.inline > 0 {
-		errs = append(errs, e.recordNext())
+		if err := e.recordNext(); err != nil && !errors.Is(err, errReplaySuperseded) {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
-}
-
-// stepKey identifies stepID of the run in Runtime.running.
-func (e *Execution) stepKey(stepID worlds.StepID) string {
-	return string(e.run.RunID) + "/" + string(stepID)
 }
 
 // EncodePayload encodes value as a payload of the run, encrypted when the

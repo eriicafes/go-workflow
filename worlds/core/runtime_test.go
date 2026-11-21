@@ -68,6 +68,22 @@ func (w *compensationFailureWorld) EventsCreate(ctx context.Context, input world
 	return w.World.EventsCreate(ctx, input)
 }
 
+func (w *compensationFailureWorld) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
+	for _, event := range input.Events {
+		if !w.armed || event.EventType != w.eventType {
+			continue
+		}
+		w.armed = false
+		if !w.terminal {
+			return worlds.EventBatchResult{}, w.cause
+		}
+		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
+	}
+	return w.World.EventsCreateBatch(ctx, input)
+}
+
 func (w *compensationFailureWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if w.armed && w.queue && input.StepID != nil {
 		w.armed = false
@@ -108,7 +124,8 @@ func TestCompensationDeliveryErrors(t *testing.T) {
 				return versionedOutput{}, failure
 			})
 			runtime := core.NewRuntime(world, core.Runners(runner))
-			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+			// The compensation is created as a step delivery.
+			ctx, cancel := context.WithTimeout(workflow.NewContext(queuedSteps(), workflow.NewClient(world)), time.Second)
 			defer cancel()
 			run, err := workflow.Start(ctx, versionedInput{})
 			if err != nil {
@@ -207,27 +224,59 @@ func resetCalls() {
 }
 
 // deliverNext executes and acknowledges the oldest queued delivery.
+// deliverNext executes the first queued delivery that is due, and
+// acknowledges it, or puts it back when it asks for its message again.
 func deliverNext(t *testing.T, ctx context.Context, world *testworld.World, runtime *core.Runtime) worlds.QueueInput {
 	t.Helper()
-	messages := world.QueuedMessages()
-	if len(messages) == 0 {
+	message, ok := nextDue(world)
+	if !ok {
 		t.Fatal("no queued delivery")
 	}
-
-	message := messages[0]
-	if err := runtime.Execute(ctx, message.Input); err != nil {
+	err := runtime.Execute(ctx, message.Input)
+	if redelivery, ok := worlds.RedeliveryOf(err); ok {
+		if err := world.Redeliver(ctx, message.ID, redelivery); err != nil {
+			t.Fatal(err)
+		}
+		return message.Input
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
-
 	if err := world.Acknowledge(ctx, message.ID); err != nil {
 		t.Fatal(err)
 	}
 	return message.Input
 }
 
+// nextDue returns the first queued delivery to execute: a delivery is
+// executed whenever it is due, except a redelivery, which waits for its
+// delay when that ends within two seconds and is left queued otherwise. It
+// reports false when none is left to execute.
+func nextDue(world *testworld.World) (testworld.QueueMessage, bool) {
+	var earliest *time.Time
+	for _, message := range world.QueuedMessages() {
+		notBefore := message.Input.NotBefore
+		if message.Input.DeliveryCount <= 1 || notBefore == nil || !notBefore.After(time.Now()) {
+			return message, true
+		}
+		if earliest == nil || notBefore.Before(*earliest) {
+			earliest = notBefore
+		}
+	}
+	if earliest == nil || time.Until(*earliest) > 2*time.Second {
+		return testworld.QueueMessage{}, false
+	}
+	time.Sleep(time.Until(*earliest))
+	return nextDue(world)
+}
+
+// drain executes queued deliveries until none is left to execute.
 func drain(t *testing.T, ctx context.Context, world *testworld.World, runtime *core.Runtime) {
 	t.Helper()
-	for len(world.QueuedMessages()) > 0 {
+	for {
+		if _, ok := nextDue(world); !ok {
+			return
+		}
 		deliverNext(t, ctx, world, runtime)
 	}
 }
@@ -819,6 +868,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	}
 
 	// Its redelivery finds alpha recorded but never started, and queues it.
+	delivery.Input.DeliveryCount = 2
 	if err := runtime.Execute(ctx, delivery.Input); err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +888,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	}
 }
 
-func TestSupersededFlowQueuesOneFollowUpAndAcknowledges(t *testing.T) {
+func TestSupersededFlowAsksForItsMessageAgain(t *testing.T) {
 	resetCalls()
 	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
 	defer cancel()
@@ -849,21 +899,23 @@ func TestSupersededFlowQueuesOneFollowUpAndAcknowledges(t *testing.T) {
 	racing := &racingWorld{World: world}
 	runtime := core.NewRuntime(racing, core.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
-	deliverNext(t, ctx, world, runtime)
+	delivery := world.QueuedMessages()[0]
 
-	followUps := 0
+	// The flow's write is refused, so it asks for its message again in a
+	// second, and queues nothing itself.
+	err := runtime.Execute(ctx, delivery.Input)
+	redelivery, ok := worlds.RedeliveryOf(err)
+	if !ok || redelivery.After != time.Second {
+		t.Fatalf("superseded delivery = %v, want a redelivery after a second", err)
+	}
 	for _, message := range world.QueuedMessages() {
-		if strings.HasPrefix(message.Input.IdempotencyKey, "superseded:") {
-			followUps++
-			if message.Input.StepID != nil || message.Input.NotBefore != nil {
-				t.Fatalf("follow-up = %#v, want an immediate flow", message.Input)
-			}
+		if message.ID != delivery.ID && message.Input.StepID == nil {
+			t.Fatalf("queued %#v, want no follow-up", message.Input)
 		}
 	}
-	if followUps != 1 {
-		t.Fatalf("follow-ups = %d, want 1", followUps)
+	if err := world.Redeliver(ctx, delivery.ID, redelivery); err != nil {
+		t.Fatal(err)
 	}
-
 	drain(t, ctx, world, runtime)
 	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
 		t.Fatal(err)
@@ -1108,27 +1160,26 @@ func TestEarlyStepDeliveryWaitsForItsRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliverNext(t, ctx, world, runtime)
-	first := deliverNext(t, ctx, world, runtime) // fails, retry in an hour
+	// The step fails, and its message asks to be delivered again in an hour.
+	first := deliverNext(t, ctx, world, runtime)
 
-	// The first attempt's delivery is redelivered before the retry is due.
-	if err := runtime.Execute(ctx, first); err != nil {
-		t.Fatal(err)
+	// A delivery of the message before the retry is due asks again for what
+	// is left of the hour, without running the step.
+	err := runtime.Execute(ctx, first)
+	if redelivery, ok := worlds.RedeliveryOf(err); !ok || redelivery.After < 50*time.Minute {
+		t.Fatalf("early delivery = %v, want a redelivery when the retry is due", err)
 	}
 	if backoffCalls.Load() != 1 {
 		t.Fatalf("step calls = %d, want 1", backoffCalls.Load())
 	}
-	keys := map[string]bool{}
+	var messages []worlds.QueueInput
 	for _, message := range world.QueuedMessages() {
-		if message.Input.StepID == nil {
-			continue
+		if message.Input.StepID != nil {
+			messages = append(messages, message.Input)
 		}
-		if message.Input.NotBefore == nil || time.Until(*message.Input.NotBefore) < 50*time.Minute {
-			t.Fatalf("step delivery %#v is not held until the retry", message.Input)
-		}
-		keys[message.Input.IdempotencyKey] = true
 	}
-	if len(keys) != 1 {
-		t.Fatalf("retry keys = %v, want one shared key", keys)
+	if len(messages) != 1 || messages[0].NotBefore == nil || time.Until(*messages[0].NotBefore) < 50*time.Minute {
+		t.Fatalf("step messages = %#v, want the one message held until the retry", messages)
 	}
 }
 
@@ -1305,7 +1356,7 @@ func startInline(t *testing.T, ctx context.Context, runner core.Runner, input in
 	return world, core.NewRuntime(world, core.Runners(runner)), worlds.RunID(run.ID()), world.QueuedMessages()[0]
 }
 
-// inlineSteps returns the number of attempts the run's flows started inline.
+// inlineSteps returns the number of steps the run's flows created inline.
 func inlineSteps(t *testing.T, ctx context.Context, world worlds.World, runID worlds.RunID) int {
 	t.Helper()
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
@@ -1315,7 +1366,7 @@ func inlineSteps(t *testing.T, ctx context.Context, world worlds.World, runID wo
 	started := 0
 	for _, event := range events.Data {
 		var data worlds.DataStepStarted
-		if event.EventType == worlds.EventTypeStepStarted && json.Unmarshal(event.Data, &data) == nil && data.OwnerMessageID != "" {
+		if event.EventType == worlds.EventTypeStepStarted && json.Unmarshal(event.Data, &data) == nil && data.Inline {
 			started++
 		}
 	}
@@ -1395,8 +1446,9 @@ func TestPromotedStepQueuesItsRetryAsAStepDelivery(t *testing.T) {
 	if err := runtime.Execute(ctx, delivery.Input); err != nil {
 		t.Fatal(err)
 	}
+	// The retry is handed to the step's message, keyed by the step.
 	retries := stepDeliveries(world)
-	if len(retries) != 1 || retries[0].IdempotencyKey != "retry:"+string(*retries[0].StepID)+":1" {
+	if len(retries) != 1 || retries[0].StepAttempt != 2 || retries[0].IdempotencyKey != core.StepMessageKey(*retries[0].StepID, retries[0].StepName) {
 		t.Fatalf("step deliveries = %#v, want the retry", retries)
 	}
 	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
@@ -1460,48 +1512,6 @@ func TestRedeliveredFlowRunsTheStepItStartedInlineAgain(t *testing.T) {
 	if err != nil || output.Values[0] != 7 || attempts.Load() != 2 {
 		t.Fatalf("output=%v err=%v attempts=%d", output, err, attempts.Load())
 	}
-}
-
-func TestStepDeliveryTakesOverAPromotedStepAfterItsLease(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx := context.Background()
-		var attempts atomic.Int32
-		runner, started := crashingStepRunner(&attempts)
-		world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
-		crash(t, ctx, runtime, delivery.Input, started)
-		if err := world.Acknowledge(ctx, delivery.ID); err != nil {
-			t.Fatal(err)
-		}
-
-		// While the lease lasts, another flow leaves the step to its owner.
-		other := delivery.Input
-		other.MessageID = "other"
-		if err := runtime.Execute(ctx, other); err != nil {
-			t.Fatal(err)
-		}
-		if queued := world.QueuedMessages(); len(queued) != 0 {
-			t.Fatalf("queued = %#v, want nothing during the lease", queued)
-		}
-
-		// After the lease, a flow hands the step to a step delivery.
-		time.Sleep(15 * time.Minute)
-		if err := runtime.Execute(ctx, other); err != nil {
-			t.Fatal(err)
-		}
-		takeOver := stepDeliveries(world)
-		if len(takeOver) != 1 || takeOver[0].NotBefore != nil {
-			t.Fatalf("step deliveries = %#v, want an immediate take-over", takeOver)
-		}
-		drain(t, ctx, world, runtime)
-		output, err := runOutput(t, ctx, world, runID)
-		if err != nil || output.Values[0] != 7 || attempts.Load() != 2 {
-			t.Fatalf("output=%v err=%v attempts=%d", output, err, attempts.Load())
-		}
-		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: *takeOver[0].StepID})
-		if err != nil || step.Attempt != 2 {
-			t.Fatalf("step = %#v err=%v", step, err)
-		}
-	})
 }
 
 func TestMaxInlineStepsSetsTheLimit(t *testing.T) {
@@ -1596,20 +1606,20 @@ func TestFlowStopsRunningStepsInlineHalfwayToItsDeadline(t *testing.T) {
 	})
 }
 
-func TestConcurrentFlowsRunAPromotedStepOnce(t *testing.T) {
+func TestConcurrentFlowsOfARunKeepOneWriter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var calls atomic.Int32
 	release := make(chan struct{})
 	runner := workflow.Use(func(ctx context.Context, _ inlineInput) (inlineOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
-			calls.Add(1)
 			<-release
 			return value, nil
 		}, 7)
 		return inlineOutput{Values: []int{value}}, err
 	})
 	world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
+	// Without a queue that delivers one flow of a run at a time, two flows
+	// may both run the step, and the fence keeps one of them writing.
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() { _ = runtime.Execute(ctx, delivery.Input) })
@@ -1617,18 +1627,23 @@ func TestConcurrentFlowsRunAPromotedStepOnce(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
-	if calls.Load() != 1 {
-		t.Fatalf("step calls = %d, want 1", calls.Load())
+	drain(t, ctx, world, runtime)
+	output, err := runOutput(t, ctx, world, runID)
+	if err != nil || output.Values[0] != 7 {
+		t.Fatalf("output=%v err=%v", output, err)
 	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Status != worlds.StatusCompleted {
-		drain(t, ctx, world, runtime)
+	results := 0
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeRunCompleted {
+			results++
+		}
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("step calls = %d, want 1", calls.Load())
+	if results != 2 {
+		t.Fatalf("results = %d, want one step_completed and one run_completed: %v", results, events.Data)
 	}
 }
 
@@ -1734,38 +1749,14 @@ func TestFlowThatRecordsAnInlineResultIsStillSupersededByAnotherFlow(t *testing.
 		t.Fatal(err)
 	}
 	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
 
-	// Recording the first step's result does not hide that write, so the
-	// flow's next declaration is refused and a follow-up flow replays.
+	// The first step's result is an in-band write too, so it is refused, and
+	// the flow asks for its message again instead of going on.
+	if redelivery, ok := worlds.RedeliveryOf(<-done); !ok || redelivery.After != time.Second {
+		t.Fatalf("superseded delivery = %v, want a redelivery after a second", redelivery)
+	}
 	if second.Load() != 0 {
 		t.Fatal("superseded flow ran the second step")
-	}
-	followUps := 0
-	for _, message := range world.QueuedMessages() {
-		if strings.HasPrefix(message.Input.IdempotencyKey, "superseded:") {
-			followUps++
-		}
-	}
-	if followUps != 1 {
-		t.Fatalf("follow-ups = %d, want 1", followUps)
-	}
-}
-
-func TestFlowWithoutAMessageIDQueuesNewSteps(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	world, runtime, runID, delivery := startInline(t, ctx, workflow.Use(fanOut), inlineInput{Steps: 2})
-	// No message would run a step it started inline again, so none is.
-	anonymous := delivery.Input
-	anonymous.MessageID = ""
-	if err := runtime.Execute(ctx, anonymous); err != nil {
-		t.Fatal(err)
-	}
-	if promoted, queued := inlineSteps(t, ctx, world, runID), len(stepDeliveries(world)); promoted != 0 || queued != 2 {
-		t.Fatalf("inline=%d queued=%d, want 0 and 2", promoted, queued)
 	}
 }
 
@@ -1812,46 +1803,6 @@ func TestFailedStartReleasesTheStepForTheNextDelivery(t *testing.T) {
 	if err != nil || output.Values[0] != 7 || attempts.Load() != 2 {
 		t.Fatalf("output=%v err=%v attempts=%d", output, err, attempts.Load())
 	}
-}
-
-// undatedWorld returns events without their creation time.
-type undatedWorld struct{ *testworld.World }
-
-func (w undatedWorld) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
-	page, err := w.World.EventsList(ctx, input)
-	for i := range page.Data {
-		page.Data[i].CreatedAt = time.Time{}
-	}
-	return page, err
-}
-
-func TestUndatedInlineAttemptKeepsItsLease(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx := context.Background()
-		var attempts atomic.Int32
-		runner, started := crashingStepRunner(&attempts)
-		base := testworld.NewManual()
-		defer base.Close()
-		world := undatedWorld{World: base}
-		if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), inlineInput{}); err != nil {
-			t.Fatal(err)
-		}
-		runtime := core.NewRuntime(world, core.Runners(runner))
-		delivery := base.QueuedMessages()[0]
-		crash(t, ctx, runtime, delivery.Input, started)
-
-		// Without a start time, the attempt's age is unknown, so another
-		// flow leaves it to its owner however long it waits.
-		time.Sleep(time.Hour)
-		other := delivery.Input
-		other.MessageID = "other"
-		if err := runtime.Execute(ctx, other); err != nil {
-			t.Fatal(err)
-		}
-		if takeOver := stepDeliveries(base); len(takeOver) != 0 {
-			t.Fatalf("step deliveries = %#v, want none", takeOver)
-		}
-	})
 }
 
 // latestWorld is a deployedWorld whose newest deployment is latest, as the
