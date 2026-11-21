@@ -49,16 +49,16 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		err := w.inTx(ctx, func(tx pgx.Tx) error {
 			id = ""
 			var inserted bool
-			err := tx.QueryRow(ctx, `WITH inserted AS (
-					INSERT INTO go_workflow_queue (id, queue_name, run_id, step_id, idempotency_key, not_before, payload, serialized, expires_at)
+			err := tx.QueryRow(ctx, w.q(`WITH inserted AS (
+					INSERT INTO workflow.workflow_queue (id, queue_name, run_id, step_id, idempotency_key, not_before, payload, serialized, expires_at)
 					VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, now() + make_interval(secs => $9))
 					ON CONFLICT (run_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING
 					RETURNING id
 				)
 				SELECT id, true FROM inserted
 				UNION ALL
-				SELECT id, false FROM go_workflow_queue WHERE $5 <> '' AND run_id = $3 AND idempotency_key = $5
-				LIMIT 1`,
+				SELECT id, false FROM workflow.workflow_queue WHERE $5 <> '' AND run_id = $3 AND idempotency_key = $5
+				LIMIT 1`),
 				ulid.Make().String(), w.queueName(input), input.RunID, stepID, input.IdempotencyKey, input.NotBefore, payload, input.SerializedFlow(), expiresIn).Scan(&id, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
@@ -116,7 +116,7 @@ type delivery struct {
 // between two workers into a retry. The deliveries counter doubles as a
 // fencing token for later updates.
 func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delivery, error) {
-	if _, err := w.pool.Exec(ctx, `DELETE FROM go_workflow_queue WHERE expires_at < now() AND (lease_until IS NULL OR lease_until < now())`); err != nil {
+	if _, err := w.pool.Exec(ctx, w.q(`DELETE FROM workflow.workflow_queue WHERE expires_at < now() AND (lease_until IS NULL OR lease_until < now())`)); err != nil {
 		return nil, err
 	}
 	for attempt := 1; ; attempt++ {
@@ -130,13 +130,13 @@ func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delive
 }
 
 func (w *World) claimOnce(ctx context.Context, limit int, queues []string) ([]delivery, error) {
-	rows, err := w.pool.Query(ctx, `WITH locked AS (
-			SELECT q.id, q.run_id, q.serialized, q.not_before FROM go_workflow_queue q
+	rows, err := w.pool.Query(ctx, w.q(`WITH locked AS (
+			SELECT q.id, q.run_id, q.serialized, q.not_before FROM workflow.workflow_queue q
 			WHERE q.not_before <= now() AND (q.lease_until IS NULL OR q.lease_until < now())
 				AND (q.expires_at IS NULL OR q.expires_at >= now())
 				AND ($3::text[] IS NULL OR q.queue_name = ANY($3))
 				AND (NOT q.serialized OR NOT EXISTS (
-					SELECT 1 FROM go_workflow_queue r WHERE r.run_id = q.run_id AND r.running AND r.id <> q.id))
+					SELECT 1 FROM workflow.workflow_queue r WHERE r.run_id = q.run_id AND r.running AND r.id <> q.id))
 			ORDER BY q.not_before, q.id
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -145,10 +145,10 @@ func (w *World) claimOnce(ctx context.Context, limit int, queues []string) ([]de
 			UNION ALL
 			(SELECT DISTINCT ON (run_id) id FROM locked WHERE serialized ORDER BY run_id, not_before, id)
 		)
-		UPDATE go_workflow_queue q
+		UPDATE workflow.workflow_queue q
 		SET lease_until = now() + make_interval(secs => $2), deliveries = q.deliveries + 1, running = q.serialized
 		FROM candidate WHERE q.id = candidate.id
-		RETURNING q.id, q.deliveries, q.handoffs, q.serialized, q.queue_name, q.payload`,
+		RETURNING q.id, q.deliveries, q.handoffs, q.serialized, q.queue_name, q.payload`),
 		limit, w.lease.Seconds(), queuesArg(queues))
 	if err != nil {
 		return nil, err
@@ -248,7 +248,7 @@ func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				tag, err := w.pool.Exec(renewCtx, `UPDATE go_workflow_queue SET lease_until = now() + make_interval(secs => $3) WHERE id = $1 AND deliveries = $2`,
+				tag, err := w.pool.Exec(renewCtx, w.q(`UPDATE workflow.workflow_queue SET lease_until = now() + make_interval(secs => $3) WHERE id = $1 AND deliveries = $2`),
 					item.id, item.deliveries, w.lease.Seconds())
 				if err != nil && renewCtx.Err() == nil {
 					log.Printf("workflow/postgres: renew lease %s: %v", item.id, err)
@@ -271,9 +271,9 @@ func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 	notify := item.serialized
 	switch redelivery, redeliver := worlds.RedeliveryOf(err); {
 	case err == nil:
-		_, updateErr = w.pool.Exec(finish, `DELETE FROM go_workflow_queue WHERE id = $1 AND deliveries = $2`, item.id, item.deliveries)
+		_, updateErr = w.pool.Exec(finish, w.q(`DELETE FROM workflow.workflow_queue WHERE id = $1 AND deliveries = $2`), item.id, item.deliveries)
 	case ctx.Err() != nil:
-		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL, running = false WHERE id = $1 AND deliveries = $2`, item.id, item.deliveries)
+		_, updateErr = w.pool.Exec(finish, w.q(`UPDATE workflow.workflow_queue SET lease_until = NULL, running = false WHERE id = $1 AND deliveries = $2`), item.id, item.deliveries)
 	case redeliver:
 		// The same row is delivered again after the delay, and a handoff
 		// does not count as an attempt.
@@ -281,12 +281,12 @@ func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 		if redelivery.After == 0 {
 			handoff, notify = 1, true
 		}
-		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL, running = false, not_before = now() + make_interval(secs => $3), handoffs = handoffs + $4 WHERE id = $1 AND deliveries = $2`,
+		_, updateErr = w.pool.Exec(finish, w.q(`UPDATE workflow.workflow_queue SET lease_until = NULL, running = false, not_before = now() + make_interval(secs => $3), handoffs = handoffs + $4 WHERE id = $1 AND deliveries = $2`),
 			item.id, item.deliveries, redelivery.After.Seconds(), handoff)
 	default:
 		delay := worlds.DeliveryRetryDelay(err, backoff(item.input.Attempt))
 		log.Printf("workflow/postgres: delivery %s for run %s failed (attempt %d, retry in %v): %v", item.id, item.input.RunID, item.input.Attempt, delay, err)
-		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL, running = false, not_before = now() + make_interval(secs => $3) WHERE id = $1 AND deliveries = $2`,
+		_, updateErr = w.pool.Exec(finish, w.q(`UPDATE workflow.workflow_queue SET lease_until = NULL, running = false, not_before = now() + make_interval(secs => $3) WHERE id = $1 AND deliveries = $2`),
 			item.id, item.deliveries, delay.Seconds())
 	}
 	// A finished flow may let another flow of its run be claimed, and a

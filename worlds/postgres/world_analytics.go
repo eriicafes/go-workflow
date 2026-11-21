@@ -14,10 +14,10 @@ import (
 // collide with the storage methods of the same names.
 type analytics struct{ world *World }
 
-const analyticsRunColumns = "run_id, workflow_name, status, attributes, created_at, updated_at, started_at, completed_at"
+const analyticsRunColumns = "id, name, status::text, attributes, created_at, updated_at, started_at, completed_at"
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
-	run, err := scanAnalyticsRun(a.world.pool.QueryRow(ctx, `SELECT `+analyticsRunColumns+` FROM go_workflow_runs WHERE run_id = $1`, input.RunID))
+	run, err := scanAnalyticsRun(a.world.pool.QueryRow(ctx, a.world.q(`SELECT `+analyticsRunColumns+` FROM workflow.workflow_runs WHERE id = $1`), input.RunID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.AnalyticsRun{}, worlds.ErrRunNotFound
 	}
@@ -29,10 +29,10 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 	if err := runFilter(&q, input.WorkflowName, input.Status, input.StartTime, input.EndTime, input.Attributes); err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
-	if err := q.keyset(input.Pagination.Cursor, "created_at", "run_id", false); err != nil {
+	if err := q.keyset(input.Pagination.Cursor, "created_at", "id", false); err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
-	rows, err := a.world.pool.Query(ctx, `SELECT `+analyticsRunColumns+` FROM go_workflow_runs`+q.clause()+order("created_at", "run_id", false)+q.limit(input.Pagination.Limit), q.args...)
+	rows, err := a.world.pool.Query(ctx, a.world.q(`SELECT `+analyticsRunColumns+` FROM workflow.workflow_runs`+q.clause()+order("created_at", "id", false)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
@@ -53,9 +53,9 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	if input.Pagination.Cursor != "" {
 		q.where(`key COLLATE "C" > ` + q.arg(input.Pagination.Cursor))
 	}
-	sql := `SELECT key, count(*), min(created_at), max(updated_at) FROM go_workflow_runs, jsonb_object_keys(attributes) AS key` +
+	sql := `SELECT key, count(*), min(created_at), max(updated_at) FROM workflow.workflow_runs, jsonb_object_keys(attributes) AS key` +
 		q.clause() + ` GROUP BY key ORDER BY key COLLATE "C"` + q.limit(input.Pagination.Limit)
-	rows, err := a.world.pool.Query(ctx, sql, q.args...)
+	rows, err := a.world.pool.Query(ctx, a.world.q(sql), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.AnalyticsAttribute]{}, err
 	}
@@ -89,9 +89,9 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID, waitID *worlds
 		q.where("c.correlation_id = " + q.arg(*waitID))
 	}
 	completed := q.arg(worlds.EventTypeWaitCompleted)
-	rows, err := a.world.pool.Query(ctx, `SELECT c.correlation_id, c.data, c.created_at,
-			(SELECT min(d.created_at) FROM go_workflow_events d WHERE d.run_id = c.run_id AND d.correlation_id = c.correlation_id AND d.type = `+completed+`)
-		FROM go_workflow_events c`+q.clause()+` ORDER BY c.created_at, c.slot`, q.args...)
+	rows, err := a.world.pool.Query(ctx, a.world.q(`SELECT c.correlation_id, c.payload_cbor, c.created_at,
+			(SELECT min(d.created_at) FROM workflow.workflow_events d WHERE d.run_id = c.run_id AND d.correlation_id = c.correlation_id AND d.type = `+completed+`)
+		FROM workflow.workflow_events c`+q.clause()+` ORDER BY c.created_at, c.id`), q.args...)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,8 @@ func (a analytics) waits(ctx context.Context, runID worlds.RunID, waitID *worlds
 	waits := []worlds.AnalyticsWait{}
 	for _, value := range values {
 		var data worlds.DataWaitCreated
-		if json.Unmarshal(value.data, &data) != nil {
+		decoded, err := eventData(worlds.EventTypeWaitCreated, value.data)
+		if err != nil || json.Unmarshal(decoded, &data) != nil {
 			continue
 		}
 		wait := value.wait
@@ -167,10 +168,10 @@ func scanAnalyticsRun(row pgx.Row) (worlds.AnalyticsRun, error) {
 // inclusive bounds on CreatedAt.
 func runFilter(q *query, workflowName string, status []worlds.Status, start, end *time.Time, attributes map[string]string) error {
 	if workflowName != "" {
-		q.where("workflow_name = " + q.arg(workflowName))
+		q.where("name = " + q.arg(workflowName))
 	}
 	if len(status) > 0 {
-		q.where("status = ANY(" + q.arg(statusStrings(status)) + ")")
+		q.where("status::text = ANY(" + q.arg(statusStrings(status)) + ")")
 	}
 	if start != nil {
 		q.where("created_at >= " + q.arg(*start))

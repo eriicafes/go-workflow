@@ -38,7 +38,9 @@ context before calling `Close`.
 | --- | --- | --- |
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. |
 | `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
-| `URL` | required by `Open` | Connection string. |
+| `URL` | `WORKFLOW_POSTGRES_URL`, or `DATABASE_URL` | Connection string, used by `Open`. |
+| `Schema` | `workflow` | The schema the World's tables live in, created when missing. |
+| `HookRetentionLimit` | `WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |
 | `PollInterval` | 250 ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
@@ -62,36 +64,53 @@ database from both.
 
 ## Schema and migrations
 
-`Open` and `New` migrate the schema. Migrations run in one transaction under
-`pg_advisory_xact_lock`, so processes starting together migrate once, and the
-applied versions are recorded in `go_workflow_schema_version`. A database with a
-newer version than the library knows is rejected.
+`Open` and `New` create `Config.Schema` and migrate it. Migrations run in one
+transaction under `pg_advisory_xact_lock`, so processes starting together
+migrate once, and the applied versions are recorded in
+`workflow_schema_version`. A database with a newer version than the library
+knows is rejected.
 
-Tables are created in the connection's `search_path`. Set `search_path` in the
-connection string or pool config to use a dedicated schema.
+The tables are world-postgres's, with its names and columns:
 
 | Table | Contents |
 | --- | --- |
-| `go_workflow_runs` | Run view plus `event_count`. The next slot is `event_count + 1`. |
-| `go_workflow_events` | Event log keyed by `(run_id, slot)`. |
-| `go_workflow_steps` | Step view keyed by `(run_id, step_id)`. |
-| `go_workflow_hooks` | Hook view, including webhook settings and retention. |
-| `go_workflow_hook_tokens` | Token ownership. The primary key makes a token single-owner. |
-| `go_workflow_queue` | Live messages: the whole delivery in `payload`, with `not_before`, `deliveries`, `handoffs`, `lease_until`, `running`, and `expires_at`. |
-| `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
-| `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
+| `workflow_runs` | Runs, keyed by `id`, with `status` as the `status` enum, `name`, `attributes`, `error_code`, `start_hook`, and the slot of the run's result. |
+| `workflow_events` | The event log, keyed by `(run_id, id)`, where `id` is the slot's `evnt_` ID. `payload_cbor` holds the event's data. |
+| `workflow_event_slots` | Each run's in-band fence, `seq_in_band`. |
+| `workflow_steps` | Steps, keyed by `(run_id, step_id)`, with the slots of their input and result. |
+| `workflow_hooks` | Hooks. `claims_token` marks the hook that holds its token, unique per token. |
+| `workflow_waits` | A run's waits, deleted when it ends. |
+| `workflow_start_hook_admissions` | Each start hook candidate's decision, kept for a day. |
+| `workflow_stream_chunks` | Stream chunks, ordered by their `chnk_` ID. An `eof` chunk closes a stream. |
+| `workflow_queue` | Live messages: the whole delivery in `payload`, with `not_before`, `deliveries`, `handoffs`, `lease_until`, `running`, and `expires_at`. |
 
-Payloads are `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`
-at microsecond precision. Times returned by the World are UTC.
+They differ from world-postgres's where Go needs it:
+- Payloads are stored once, in the events. The run, step, and hook rows name
+  the slot of the event holding each payload, and reads join it.
+- `payload_cbor` is Go's own CBOR (`worlds.EncodeEventData`), with payloads as
+  raw bytes, not cbor-x. There are no deprecated `jsonb` columns.
+- Steps are keyed by run and step, since a step ID is unique only within its
+  run, and stream chunks by run as well as stream.
+- `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
+  `Config.Retention`.
+- Hooks keep the run's workflow, deployment, public key, and spec version,
+  which wake the run, and keep their row after disposal.
+- The queue is Go's own. There are no graphile-worker, snapshot, or
+  invocation tables.
+
+Attributes and execution contexts are `jsonb`, and timestamps are
+`timestamptz` at microsecond precision. Times returned by the World are UTC.
 
 ## Consistency
 
-Every event append is one transaction. It locks the run row with
-`SELECT ... FOR UPDATE`, checks the transition rules, inserts the events at the
-next slots, and updates the views. Writers to one run are serialized across
+Every event append is one transaction. It locks the run's row and its
+`workflow_event_slots` row with `SELECT ... FOR UPDATE`, reads the next slot as
+the run's highest event ID plus one, checks the transition rules, inserts the
+events, and updates the views. Writers to one run are serialized across
 processes, slots are contiguous, and a batch is all-or-nothing.
 
-`EventsCreate(hook_created)` locks the token row. A forced claim over a live owner also locks
+`EventsCreate(hook_created)` locks the hook claiming the token. A token is held
+while its hook's run is live or its retention lasts. A forced claim over a live owner also locks
 the owner's run, taking run locks in run ID order to avoid deadlocks. Exactly
 one concurrent claimant wins a free token. Transactions are retried on
 serialization failures and deadlocks.
@@ -114,7 +133,7 @@ workflows' on `DefaultQueue`. A worker without `Queues` claims every queue.
 ## Worker model
 
 `Queue` inserts a row holding the whole delivery and sends
-`NOTIFY go_workflow_queue` in the same transaction. A delivery with an
+`NOTIFY workflow_queue` in the same transaction. A delivery with an
 `IdempotencyKey` is stored once while its message lives: a unique index on the
 run and key makes a `Queue` with the key of a queued or executing message store
 nothing and return that message's ID. A delivery without a key is never
@@ -151,14 +170,17 @@ make duplicate deliveries inert.
 `EventsCreateRun` with a `StartHook` creates the hook `hook_<run ULID>` and
 claims its token in the transaction that creates the run. When another run
 holds the token, the transaction rolls back and returns a
-`*worlds.HookConflictError` naming it.
+`*worlds.HookConflictError` naming it. Each candidate's decision is recorded,
+so a refused candidate stays refused, and decisions older than a day are
+deleted as new ones are made.
 
 ## Retention
 
 A run's data is deleted as the Workflow SDK deletes it: the run, step, event
 and hook rows stay with their IDs, statuses, timestamps and attributes, the
-payloads in the run's events are removed, and its streams' chunks are deleted,
-leaving each stream empty and closed. The run's `expired_at` is set and
+payloads in the run's events are removed from their CBOR, keeping the rest of
+each event's data, and its streams' chunks are deleted, leaving each stream
+empty and closed. The run's `expired_at` is set and
 `data_purged` records that its rows no longer hold its data. Reads hide a run's
 payloads once `expired_at` has passed.
 
@@ -180,10 +202,13 @@ to a deleted run is refused.
 ## LISTEN/NOTIFY
 
 Each World opens one dedicated connection on first use and listens on
-`go_workflow_queue`, `go_workflow_runs` (sent when a run turns terminal), and
-`go_workflow_streams`. Workers, `RunsWaitForTerminalStatus`, and
-`StreamsGetChunks` wake on these notifications and also re-check every
-`PollInterval`, so a lost notification only adds latency.
+world-postgres's channels, `workflow_run_events` (the run ID of every committed
+write), `workflow_run_status` (sent when a run ends), and
+`workflow_event_chunk` (a written chunk's `{streamId, chunkId}`), and on
+`workflow_queue`. Workers, flows waiting on their inline steps,
+`RunsWaitForTerminalStatus`, and `StreamsGetChunks` wake on these
+notifications and also re-check every `PollInterval`, so a lost notification
+only adds latency.
 
 ::: warning Connection poolers
 Poolers in transaction mode, such as PgBouncer, do not support `LISTEN`. Point
@@ -199,8 +224,7 @@ World uses one extra connection for `LISTEN`.
 
 ## Security
 
-- Give the database role only the permissions it needs on the `go_workflow_`
-  tables (plus `CREATE` on the schema for migrations, or migrate with a
+- Give the database role only the permissions it needs on the World's schema (plus `CREATE` on the schema for migrations, or migrate with a
   separate role), require TLS, and keep the database reachable only from your
   application and worker network.
 - `HTTP(world)` performs no authentication or per-run authorization. Prefer a
@@ -217,4 +241,5 @@ go test -race ./worlds/postgres/...
 
 The tests use `DATABASE_URL`, defaulting to
 `postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`. Each
-database test creates and drops its own schema.
+database test creates and drops its own schema and passes it as
+`Config.Schema`.

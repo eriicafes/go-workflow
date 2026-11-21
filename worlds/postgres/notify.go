@@ -2,6 +2,7 @@ package postgresworld
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -9,11 +10,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// The channels are world-postgres's: workflow_run_events carries the run ID
+// of every committed write, workflow_run_status the run ID of a run that
+// ended, and workflow_event_chunk a written chunk's {streamId, chunkId}.
+// workflow_queue wakes Go's workers.
 const (
-	channelQueue   = "go_workflow_queue"
-	channelRuns    = "go_workflow_runs"
-	channelStreams = "go_workflow_streams"
-	channelEvents  = "go_workflow_events"
+	channelQueue   = "workflow_queue"
+	channelRuns    = "workflow_run_status"
+	channelStreams = "workflow_event_chunk"
+	channelEvents  = "workflow_run_events"
 )
 
 var listenChannels = []string{channelQueue, channelRuns, channelStreams, channelEvents}
@@ -142,8 +147,22 @@ func (n *notifier) listen() error {
 		if err != nil {
 			return err
 		}
-		n.signal(notifyKey(notification.Channel, notification.Payload))
+		payload := notification.Payload
+		if notification.Channel == channelStreams {
+			// A chunk's waiters wait on its stream.
+			var chunk chunkNotification
+			if json.Unmarshal([]byte(payload), &chunk) == nil {
+				payload = chunk.StreamID
+			}
+		}
+		n.signal(notifyKey(notification.Channel, payload))
 	}
 }
 
 func notifyKey(channel, payload string) string { return channel + ":" + payload }
+
+// chunkNotification is the payload of a workflow_event_chunk notification.
+type chunkNotification struct {
+	StreamID string `json:"streamId"`
+	ChunkID  string `json:"chunkId"`
+}

@@ -11,7 +11,7 @@ import (
 )
 
 // retentionTables are the tables that hold rows of a run.
-var retentionTables = []string{"go_workflow_runs", "go_workflow_events", "go_workflow_steps", "go_workflow_hooks", "go_workflow_queue", "go_workflow_streams", "go_workflow_stream_chunks"}
+var retentionTables = []string{"workflow_runs", "workflow_events", "workflow_event_slots", "workflow_steps", "workflow_hooks", "workflow_queue", "workflow_stream_chunks"}
 
 func TestExpireRuns(t *testing.T) {
 	url, schema := testSchema(t)
@@ -37,7 +37,7 @@ func TestExpireRuns(t *testing.T) {
 
 	// Once the hour has passed, reads hide the run's data before Worker
 	// deletes it.
-	if _, err := world.pool.Exec(ctx, `UPDATE go_workflow_runs SET expired_at = now() - interval '1 second' WHERE run_id = $1`, done); err != nil {
+	if _, err := world.pool.Exec(ctx, `UPDATE workflow_runs SET expired_at = now() - interval '1 second' WHERE id = $1`, done); err != nil {
 		t.Fatal(err)
 	}
 	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: done})
@@ -55,19 +55,21 @@ func TestExpireRuns(t *testing.T) {
 	}
 	// Its rows stay, as in the Workflow SDK, and the chunks go.
 	counts := rowCounts(t, world, done)
-	for _, table := range []string{"go_workflow_runs", "go_workflow_events", "go_workflow_steps", "go_workflow_hooks", "go_workflow_streams"} {
+	for _, table := range []string{"workflow_runs", "workflow_events", "workflow_steps", "workflow_hooks", "workflow_stream_chunks"} {
 		if counts[table] == 0 {
 			t.Errorf("%s lost the expired run's rows", table)
 		}
 	}
-	if counts["go_workflow_stream_chunks"] != 0 {
-		t.Errorf("stream chunks of the expired run = %d", counts["go_workflow_stream_chunks"])
+	var chunks int
+	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM workflow_stream_chunks WHERE run_id = $1 AND NOT eof`, done).Scan(&chunks); err != nil || chunks != 0 {
+		t.Errorf("stream chunks of the expired run = %d, %v", chunks, err)
 	}
-	var payloads int
-	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE run_id = $1 AND (convert_from(data, 'UTF8')::jsonb ?| array['input', 'output', 'result', 'error', 'metadata', 'payload'])`, done).Scan(&payloads); err != nil || payloads != 0 {
-		t.Fatalf("events of the expired run with payloads = %d, %v", payloads, err)
+	for _, event := range storedEvents(t, world, done) {
+		if payload := worlds.EventPayload(event); payload != nil {
+			t.Fatalf("%s of the expired run holds payload %s", event.EventType, payload)
+		}
 	}
-	if run := rowCounts(t, world, alive); run["go_workflow_runs"] != 1 || purgedData(t, world, alive) {
+	if run := rowCounts(t, world, alive); run["workflow_runs"] != 1 || purgedData(t, world, alive) {
 		t.Error("a running run was expired")
 	}
 }
@@ -124,7 +126,7 @@ func TestWorkerExpiresRuns(t *testing.T) {
 func purgedData(t *testing.T, world *World, runID worlds.RunID) bool {
 	t.Helper()
 	var purged bool
-	if err := world.pool.QueryRow(context.Background(), `SELECT data_purged FROM go_workflow_runs WHERE run_id = $1`, runID).Scan(&purged); err != nil {
+	if err := world.pool.QueryRow(context.Background(), `SELECT data_purged FROM workflow_runs WHERE id = $1`, runID).Scan(&purged); err != nil {
 		t.Fatal(err)
 	}
 	return purged
@@ -176,7 +178,11 @@ func rowCounts(t *testing.T, world *World, runID worlds.RunID) map[string]int {
 	counts := map[string]int{}
 	for _, table := range retentionTables {
 		var count int
-		if err := world.pool.QueryRow(context.Background(), `SELECT count(*) FROM `+table+` WHERE run_id = $1`, string(runID)).Scan(&count); err != nil {
+		column := "run_id"
+		if table == "workflow_runs" {
+			column = "id"
+		}
+		if err := world.pool.QueryRow(context.Background(), `SELECT count(*) FROM `+table+` WHERE `+column+` = $1`, string(runID)).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		counts[table] = count
@@ -193,12 +199,24 @@ func TestPurgeDeletesStartHookMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeEvent(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
-	var left int
-	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE run_id = $1 AND convert_from(data, 'UTF8')::jsonb #> '{startHook,metadata}' IS NOT NULL`, runID).Scan(&left); err != nil || left != 0 {
-		t.Fatalf("run_created rows still holding start hook metadata = %d, %v", left, err)
+	created := storedEvents(t, world, runID)[0]
+	start := worlds.RunStartHook(created.Data)
+	if start == nil || start.Token != "purged-start" || start.Metadata != nil {
+		t.Fatalf("run_created start hook after purge = %+v", start)
 	}
-	var token string
-	if err := world.pool.QueryRow(ctx, `SELECT convert_from(data, 'UTF8')::jsonb #>> '{startHook,token}' FROM go_workflow_events WHERE run_id = $1 AND slot = 1`, runID).Scan(&token); err != nil || token != "purged-start" {
-		t.Fatalf("start hook token after purge = %q, %v", token, err)
+	_ = ctx
+}
+
+// storedEvents returns the run's events as its rows hold them.
+func storedEvents(t *testing.T, world *World, runID worlds.RunID) []worlds.Event {
+	t.Helper()
+	rows, err := world.pool.Query(context.Background(), world.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 ORDER BY id`), runID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	events, err := collect(rows, scanEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
 }

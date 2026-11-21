@@ -1,10 +1,10 @@
 package postgresworld
 
 import (
+	"bytes"
 	"context"
 	"log"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -59,9 +59,9 @@ func (w *World) expireLoop(ctx context.Context) {
 func (w *World) expireRuns(ctx context.Context) (int, error) {
 	purged := 0
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT run_id FROM go_workflow_runs
+		rows, err := tx.Query(ctx, w.q(`SELECT id FROM workflow.workflow_runs
 			WHERE expired_at <= now() AND NOT data_purged
-			ORDER BY expired_at LIMIT $1 FOR UPDATE SKIP LOCKED`, expireBatch)
+			ORDER BY expired_at LIMIT $1 FOR UPDATE SKIP LOCKED`), expireBatch)
 		if err != nil {
 			return err
 		}
@@ -70,7 +70,7 @@ func (w *World) expireRuns(ctx context.Context) (int, error) {
 			return err
 		}
 		for _, id := range ids {
-			if err := purgeRunData(ctx, tx, id); err != nil {
+			if err := w.purgeRunData(ctx, tx, id); err != nil {
 				return err
 			}
 		}
@@ -86,61 +86,53 @@ func (w *World) retentionFor(workflow string) time.Duration {
 	return worlds.RetentionFor(w.retention, w.retentions, workflow)
 }
 
-// scrubEventsSQL removes the payload field from the Data of a run's events,
-// and a run_created's startHook.metadata, as worlds.ScrubEventData does, and
-// leaves events whose Data has nothing else empty.
-var scrubEventsSQL = func() string {
+// purgeRunData deletes a run's data in tx, which holds the run's row lock:
+// the payloads in its events, which are also its run, step, and hook
+// payloads, and its streams' chunks, leaving each stream empty and closed.
+// It sets the run's expired_at unless it has already passed. The run's row
+// is updated first, so a stream write, which takes the run's row lock to read
+// expired_at, waits for the purge.
+func (w *World) purgeRunData(ctx context.Context, tx pgx.Tx, runID worlds.RunID) error {
+	if _, err := tx.Exec(ctx, w.q(`UPDATE workflow.workflow_runs SET expired_at = CASE WHEN expired_at <= now() THEN expired_at ELSE now() END, data_purged = true WHERE id = $1`), runID); err != nil {
+		return err
+	}
+	// Event data is CBOR, so its payloads are scrubbed here rather than in
+	// SQL, keeping the metadata worlds.ScrubEventData keeps.
 	fields := worlds.EventPayloadFields()
 	types := make([]string, 0, len(fields))
 	for eventType := range fields {
 		types = append(types, string(eventType))
 	}
 	slices.Sort(types)
-	var field strings.Builder
-	field.WriteString("CASE type")
-	for _, eventType := range types {
-		field.WriteString(" WHEN '" + eventType + "' THEN '" + fields[worlds.EventType(eventType)] + "'")
-	}
-	field.WriteString(" END")
-	return `WITH events AS (
-	SELECT slot, type, convert_from(data, 'UTF8')::jsonb AS data
-	FROM go_workflow_events
-	WHERE run_id = $1 AND data IS NOT NULL AND type IN ('` + strings.Join(types, "', '") + `')
-),
-scrubbed AS (
-	SELECT slot, (data - (` + field.String() + `)) #- '{startHook,metadata}' AS data
-	FROM events
-	WHERE data ? (` + field.String() + `) OR (type = '` + string(worlds.EventTypeRunCreated) + `' AND data #> '{startHook,metadata}' IS NOT NULL)
-)
-UPDATE go_workflow_events e
-SET data = CASE WHEN s.data = '{}'::jsonb THEN NULL ELSE convert_to(s.data::text, 'UTF8') END
-FROM scrubbed s WHERE e.run_id = $1 AND e.slot = s.slot`
-}()
-
-// purgeRunData deletes a run's data in tx, which holds the run's row lock:
-// the payloads in its events, which are also its run, step, and hook
-// payloads, and its streams' chunks, leaving each stream empty and closed.
-// It sets the run's expired_at unless it has already passed. A stream write
-// takes the run's row lock to read expired_at, so it waits for the purge.
-func purgeRunData(ctx context.Context, tx pgx.Tx, runID worlds.RunID) error {
-	if _, err := tx.Exec(ctx, `UPDATE go_workflow_runs SET expired_at = CASE WHEN expired_at <= now() THEN expired_at ELSE now() END, data_purged = true WHERE run_id = $1`, runID); err != nil {
+	rows, err := tx.Query(ctx, w.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 AND payload_cbor IS NOT NULL AND type = ANY($2) FOR UPDATE`), runID, types)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, scrubEventsSQL, runID); err != nil {
+	events, err := collect(rows, scanEvent)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM go_workflow_stream_chunks WHERE run_id = $1`, runID); err != nil {
-		return err
+	for _, event := range events {
+		scrubbed := worlds.ScrubEventData(event.EventType, event.Data)
+		if bytes.Equal(scrubbed, event.Data) {
+			continue
+		}
+		data, err := worlds.EncodeEventData(event.EventType, scrubbed)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, w.q(`UPDATE workflow.workflow_events SET payload_cbor = $3, resume_payload_digest = NULL WHERE run_id = $1 AND id = $2`), runID, event.EventID, data); err != nil {
+			return err
+		}
 	}
-	_, err := tx.Exec(ctx, `UPDATE go_workflow_streams SET chunk_count = 0, closed = true WHERE run_id = $1`, runID)
-	return err
+	return w.purgeStreams(ctx, tx, runID)
 }
 
 // runDataExpired reports whether a run's data is gone: its expired_at has
 // passed. A run that does not exist has no data to hide.
 func (w *World) runDataExpired(ctx context.Context, runID worlds.RunID) (bool, error) {
 	var expired bool
-	err := w.pool.QueryRow(ctx, `SELECT coalesce(expired_at <= now(), false) FROM go_workflow_runs WHERE run_id = $1`, runID).Scan(&expired)
+	err := w.pool.QueryRow(ctx, w.q(`SELECT coalesce(expired_at <= now(), false) FROM workflow.workflow_runs WHERE id = $1`), runID).Scan(&expired)
 	if err == pgx.ErrNoRows {
 		return false, nil
 	}
@@ -151,5 +143,5 @@ func (w *World) runDataExpired(ctx context.Context, runID worlds.RunID) (bool, e
 // its data, so payloads joined under it read as NULL once the run's
 // expired_at has passed.
 func runLive(column string) string {
-	return " AND NOT EXISTS (SELECT 1 FROM go_workflow_runs xr WHERE xr.run_id = " + column + " AND xr.expired_at <= now())"
+	return " AND NOT EXISTS (SELECT 1 FROM workflow.workflow_runs xr WHERE xr.id = " + column + " AND xr.expired_at <= now())"
 }

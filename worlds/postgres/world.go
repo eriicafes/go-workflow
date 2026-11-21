@@ -6,10 +6,13 @@ package postgresworld
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -23,9 +26,15 @@ type Config struct {
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// It is required.
 	BaseURL string
-	// URL is the PostgreSQL connection string. It is required by Open and
-	// ignored by New.
+	// URL is the PostgreSQL connection string, used by Open and ignored by
+	// New. Empty uses WORKFLOW_POSTGRES_URL, or DATABASE_URL.
 	URL string
+	// Schema is the schema the World's tables live in, created when missing.
+	// Empty uses workflow, as world-postgres does.
+	Schema string
+	// HookRetentionLimit caps a hook's token retention. Zero uses
+	// WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS, or 30 days.
+	HookRetentionLimit time.Duration
 	// PollInterval bounds how long Worker loops and waiting reads sleep when
 	// no notification arrives. Zero uses 250ms.
 	PollInterval time.Duration
@@ -64,6 +73,7 @@ const DefaultQueue = ""
 // World is the Postgres World. It is safe for concurrent use, and any number
 // of Worlds in any number of processes may share one database.
 type World struct {
+	qualifier
 	pool     *pgxpool.Pool
 	ownsPool bool
 	baseURL  string
@@ -76,11 +86,16 @@ type World struct {
 	routes        map[string]string
 	retention     time.Duration
 	retentions    map[string]time.Duration
+	// hookRetentionLimit is Config.HookRetentionLimit.
+	hookRetentionLimit time.Duration
 }
 
 // Open connects to config.URL, migrates the schema, and returns a World that
 // owns the connection pool and closes it on Close.
 func Open(ctx context.Context, config Config) (*World, error) {
+	if config.URL == "" {
+		config.URL = cmp.Or(os.Getenv("WORKFLOW_POSTGRES_URL"), os.Getenv("DATABASE_URL"))
+	}
 	if config.URL == "" {
 		return nil, errors.New("workflow/postgres: URL is required")
 	}
@@ -125,20 +140,27 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 	if _, negative := worlds.MaxRetention(config.Retention, config.Retentions); negative {
 		return nil, errors.New("workflow/postgres: retention cannot be negative")
 	}
-	if err := migrate(ctx, pool); err != nil {
+	limit, err := hookRetentionLimit(config.HookRetentionLimit)
+	if err != nil {
+		return nil, err
+	}
+	schema := newQualifier(cmp.Or(config.Schema, defaultSchema))
+	if err := migrate(ctx, pool, schema); err != nil {
 		return nil, err
 	}
 	return &World{
-		pool:          pool,
-		baseURL:       baseURL,
-		encryptionKey: bytes.Clone(config.EncryptionKey),
-		interval:      config.PollInterval,
-		concurrency:   config.Concurrency,
-		lease:         config.LeaseDuration,
-		notifier:      newNotifier(pool),
-		routes:        config.Routes,
-		retention:     config.Retention,
-		retentions:    config.Retentions,
+		qualifier:          schema,
+		hookRetentionLimit: limit,
+		pool:               pool,
+		baseURL:            baseURL,
+		encryptionKey:      bytes.Clone(config.EncryptionKey),
+		interval:           config.PollInterval,
+		concurrency:        config.Concurrency,
+		lease:              config.LeaseDuration,
+		notifier:           newNotifier(pool),
+		routes:             config.Routes,
+		retention:          config.Retention,
+		retentions:         config.Retentions,
 	}, nil
 }
 
@@ -220,4 +242,20 @@ func Worker(ctx context.Context, world *World, runners core.RunnerSet, options .
 // Config.EncryptionKey, or nil when the World has none.
 func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
 	return worlds.ConfiguredRunKey(w.encryptionKey, runID)
+}
+
+// hookRetentionLimit returns the cap on a hook's token retention:
+// configured, WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS, or 30 days.
+func hookRetentionLimit(configured time.Duration) (time.Duration, error) {
+	if configured > 0 {
+		return configured, nil
+	}
+	if raw := os.Getenv("WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS"); raw != "" {
+		days, err := strconv.ParseFloat(raw, 64)
+		if err != nil || days <= 0 {
+			return 0, errors.New("workflow/postgres: WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS must be a positive number")
+		}
+		return time.Duration(days * float64(24*time.Hour)), nil
+	}
+	return 30 * 24 * time.Hour, nil
 }
