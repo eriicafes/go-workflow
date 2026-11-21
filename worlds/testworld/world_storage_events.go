@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"sort"
 	"time"
@@ -37,13 +38,22 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 		return result, err
 	}
-	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: time.Now().UTC()}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: createdAt(input.Event, input.Options.InBandCount)}
 	before := worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
 	m.materializeLocked(event)
 	result := m.eventResultLocked(event, before, true)
 	result.InBandCount = m.advanceLocked(input.RunID, input.Options.InBandCount, 1)
 	return result, nil
+}
+
+// createdAt returns the creation time of event: its OccurredAt for an
+// in-band write that sets one, and now otherwise.
+func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
+	if inBand != nil && !event.OccurredAt.IsZero() {
+		return event.OccurredAt.UTC()
+	}
+	return time.Now().UTC()
 }
 
 // fenceLocked returns ErrInBandSuperseded when an in-band write's count is
@@ -99,7 +109,8 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}
+	// run_created takes the first position, which counts as in-band.
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
@@ -110,12 +121,17 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}
 		m.tokens[hook.Token] = id
 	}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1}, nil
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
-	if len(input.Events) == 0 {
-		return worlds.EventBatchResult{}, nil
+	if err := ctx.Err(); err != nil {
+		return worlds.EventBatchResult{}, err
+	}
+	for _, value := range input.Events {
+		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeHookCreated || !value.EventType.Valid() {
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
 	}
 	defer m.notify()
 	m.mu.Lock()
@@ -126,26 +142,34 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	if err := m.fenceLocked(input.RunID, input.InBandCount); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	checkpoint := m.checkpointLocked()
-	result := worlds.EventBatchResult{Events: make([]worlds.EventResult, 0, len(input.Events))}
-	for _, value := range input.Events {
-		if value.EventType == worlds.EventTypeRunCreated || !value.EventType.Valid() {
-			m.restoreLocked(checkpoint)
-			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+	result := worlds.EventBatchResult{Results: make([]worlds.EventBatchItem, len(input.Events))}
+	if input.EventCount != nil {
+		result.Events = worlds.ResolveEvents(m.deltaLocked(input.RunID, input.EventCount, ""), "")
+	}
+	refused := map[string]bool{}
+	for index, value := range input.Events {
+		if value.CorrelationID != "" && refused[value.CorrelationID] {
+			result.Results[index].Err = fmt.Errorf("%w: an earlier event of %s was refused", worlds.ErrStepNotStartable, value.CorrelationID)
+			continue
 		}
 		if _, duplicate, err := m.admitLocked(input.RunID, value); err != nil || duplicate {
-			m.restoreLocked(checkpoint)
-			if err != nil {
-				return worlds.EventBatchResult{}, err
+			if err == nil {
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
 			}
-			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+			result.Results[index].Err = err
+			refused[value.CorrelationID] = value.CorrelationID != ""
+			continue
 		}
-		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: time.Now().UTC()}
+		event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: bytes.Clone(value.Data), CreatedAt: createdAt(value, input.InBandCount)}
 		m.events[input.RunID] = append(m.events[input.RunID], event)
 		m.materializeLocked(event)
-		result.Events = append(result.Events, m.eventResultLocked(event, nil, true))
+		result.Results[index].EventResult = m.eventResultLocked(event, nil, true)
+		result.AllocatedEventCount++
 	}
-	result.InBandCount = m.advanceLocked(input.RunID, input.InBandCount, len(input.Events))
+	result.InBandCount = m.advanceLocked(input.RunID, input.InBandCount, result.AllocatedEventCount)
+	for index := range result.Results {
+		result.Results[index].InBandCount = result.InBandCount
+	}
 	return result, nil
 }
 
@@ -227,59 +251,17 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	return result, nil
 }
 
-type memoryCheckpoint struct {
-	// streams holds each stream's state, which a purge of a run the batch
-	// finished changes.
-	streams map[*memoryStream]memoryStream
-	runs    map[worlds.RunID]worlds.Run
-	events  map[worlds.RunID][]worlds.Event
-	steps   map[worlds.RunID]map[worlds.StepID]worlds.Step
-	hooks   map[worlds.HookID]worlds.Hook
-	tokens  map[string]worlds.HookID
-}
-
-func (m *World) checkpointLocked() memoryCheckpoint {
-	checkpoint := memoryCheckpoint{runs: make(map[worlds.RunID]worlds.Run, len(m.runs)), events: make(map[worlds.RunID][]worlds.Event, len(m.events)), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step, len(m.steps)), hooks: make(map[worlds.HookID]worlds.Hook, len(m.hooks)), tokens: make(map[string]worlds.HookID, len(m.tokens))}
-	for id, run := range m.runs {
-		checkpoint.runs[id] = cloneRun(run)
-	}
-	for id, events := range m.events {
-		checkpoint.events[id] = append([]worlds.Event(nil), events...)
-	}
-	for runID, steps := range m.steps {
-		checkpoint.steps[runID] = make(map[worlds.StepID]worlds.Step, len(steps))
-		for id, step := range steps {
-			checkpoint.steps[runID][id] = step
-		}
-	}
-	for id, hook := range m.hooks {
-		checkpoint.hooks[id] = hook
-	}
-	for token, id := range m.tokens {
-		checkpoint.tokens[token] = id
-	}
-	checkpoint.streams = map[*memoryStream]memoryStream{}
-	for _, streams := range m.streams {
-		for _, stream := range streams {
-			checkpoint.streams[stream] = *stream
-		}
-	}
-	return checkpoint
-}
-
-func (m *World) restoreLocked(checkpoint memoryCheckpoint) {
-	m.runs, m.events, m.steps, m.hooks, m.tokens = checkpoint.runs, checkpoint.events, checkpoint.steps, checkpoint.hooks, checkpoint.tokens
-	for stream, state := range checkpoint.streams {
-		*stream = state
-	}
-}
-
 // admitLocked implements the state-based queue fence. A duplicate start is
 // inert and returns the previously committed lifecycle event instead of
 // granting another execution.
 func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEvent) (worlds.EventResult, bool, error) {
 	run := m.runs[runID]
-	if run.Status.Terminal() && !((requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed) && m.steps[runID][worlds.StepID(requested.CorrelationID)].Status == worlds.StatusRunning) {
+	step, stepExists := m.steps[runID][worlds.StepID(requested.CorrelationID)]
+	// A finished run still records what was running when it finished: a
+	// step's final result, and a wait's completion.
+	finishing := (requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed) && stepExists && !step.Status.Terminal() ||
+		requested.EventType == worlds.EventTypeWaitCompleted
+	if run.Status.Terminal() && !finishing {
 		if requested.EventType == worlds.EventTypeRunCancelled && run.Status == worlds.StatusCancelled {
 			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
 		}
@@ -289,13 +271,16 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		return m.lastResultLocked(runID, requested.EventType, ""), true, nil
 	}
 	if requested.EventType == worlds.EventTypeStepStarted {
-		step := m.steps[runID][worlds.StepID(requested.CorrelationID)]
-		if step.StepID == "" {
+		creates := worlds.StartCreatesStep(requested.Data)
+		switch {
+		case creates && stepExists:
+			// An inline step is created once.
+			return m.firstResultLocked(runID, worlds.EventTypeStepStarted, requested.CorrelationID), true, nil
+		case !stepExists && !creates:
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
-		}
-		// A running step may be started again, because its previous attempt's
-		// delivery may have died, and each start records a new attempt.
-		if step.Status != worlds.StatusPending && step.Status != worlds.StatusRunning {
+		case stepExists && step.Status.Terminal():
+			// A started step may be started again, and each start records a
+			// new attempt.
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	}
@@ -306,7 +291,8 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return m.lastResultLocked(runID, requested.EventType, requested.CorrelationID), true, nil
 		}
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		if m.steps[runID][worlds.StepID(requested.CorrelationID)].Status != worlds.StatusRunning {
+		// A step's result is recorded while the step is not finished.
+		if !stepExists || step.Status.Terminal() {
 			return worlds.EventResult{}, false, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeHookDisposed:
@@ -349,6 +335,15 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		}
 	}
 	return worlds.EventResult{}, false, nil
+}
+
+func (m *World) firstResultLocked(runID worlds.RunID, eventType worlds.EventType, correlation string) worlds.EventResult {
+	for _, event := range m.events[runID] {
+		if event.EventType == eventType && event.CorrelationID == correlation {
+			return m.eventResultLocked(event, nil, false)
+		}
+	}
+	return worlds.EventResult{}
 }
 
 func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType, correlation string) worlds.EventResult {
@@ -439,6 +434,15 @@ func (m *World) materializeLocked(event worlds.Event) {
 		id := worlds.StepID(event.CorrelationID)
 		m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}
 	case worlds.EventTypeStepStarted:
+		if worlds.StartCreatesStep(event.Data) {
+			var value worlds.DataStepStarted
+			_ = json.Unmarshal(event.Data, &value)
+			if m.steps[event.RunID] == nil {
+				m.steps[event.RunID] = make(map[worlds.StepID]worlds.Step)
+			}
+			id := worlds.StepID(event.CorrelationID)
+			m.steps[event.RunID][id] = worlds.Step{RunID: event.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}
+		}
 		m.updateStepLocked(event, worlds.StatusRunning)
 	case worlds.EventTypeStepCompleted:
 		m.updateStepLocked(event, worlds.StatusCompleted)
@@ -530,16 +534,17 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 	m.steps[event.RunID][step.StepID] = step
 }
 
-func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
+func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
 	if err := ctx.Err(); err != nil {
-		return worlds.Page[worlds.Event]{}, err
+		return worlds.EventsPage{}, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	log, ok := m.events[input.RunID]
 	if !ok {
-		return worlds.Page[worlds.Event]{}, worlds.ErrRunNotFound
+		return worlds.EventsPage{}, worlds.ErrRunNotFound
 	}
+	snapshot := worlds.EventsSnapshot{EventCount: len(log), InBandCount: m.runs[input.RunID].InBandCount}
 	values := make([]worlds.Event, len(log))
 	for i := range log {
 		values[i] = cloneEvent(log[i])
@@ -550,7 +555,7 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		}
 	}
 	values = worlds.ResolveEvents(values, input.ResolveData)
-	return eventPage(values, input.Pagination), nil
+	return worlds.EventsPage{Page: eventPage(values, input.Pagination), Snapshot: snapshot}, nil
 }
 
 func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {

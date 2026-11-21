@@ -213,6 +213,9 @@ func (r *Runtime) loadRun(ctx context.Context, runID worlds.RunID) (worlds.Run, 
 	if err != nil {
 		return worlds.Run{}, nil, err
 	}
+	// The flow fences its writes with the in-band count of the snapshot the
+	// listing was read under, which covers every event it returns.
+	run.InBandCount = page.Snapshot.InBandCount
 	events := page.Data
 	for page.HasMore {
 		page, err = r.world.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Cursor: page.Cursor}})

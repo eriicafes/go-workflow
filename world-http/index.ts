@@ -137,6 +137,7 @@ export class HTTPWorld implements World {
 		return {
 			hookRetention: { active: true },
 			hookForceClaim: true,
+			inBandFence: true,
 			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
 			...(capabilities.startHook ? { atomicStartHook: { active: true } } : {}),
 		};
@@ -254,6 +255,7 @@ export class HTTPWorld implements World {
 							eventType: event.eventType,
 							correlationId: event.correlationId ?? "",
 							data: jsonEncoded(event.eventData),
+							...(options?.inBand && options.occurredAt ? { occurredAt: options.occurredAt } : {}),
 						},
 						options: createOptions(options),
 					})
@@ -262,12 +264,14 @@ export class HTTPWorld implements World {
 			createBatch: async (runId, events, options) => {
 				const result = await client.call<RPC.EventBatchResult>("events.createBatch", {
 					runId,
-					events: events.map(({ event }) => ({
+					events: events.map(({ event, occurredAt }) => ({
 						eventType: event.eventType,
 						correlationId: event.correlationId ?? "",
 						data: jsonEncoded(event.eventData),
+						...(occurredAt ? { occurredAt } : {}),
 					})),
 					...(options?.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
+					...(options?.eventCount !== undefined ? { eventCount: options.eventCount } : {}),
 				});
 				return {
 					results: result.results.map((item) =>
@@ -275,10 +279,16 @@ export class HTTPWorld implements World {
 							? { status: 200 as const, event: withEventData(item.event), run: item.run && toRun(item.run), step: item.step && toStep(item.step) }
 							: { status: item.status, error: item.error ?? "internal", message: item.message ?? "" },
 					),
+					allocated: result.allocated,
+					...(result.events ? { events: result.events.map(withEventData), hasMore: result.hasMore ?? false } : {}),
 				} as EventBatchResult;
 			},
 			get: async (runId, eventId, params) => withEventData(await client.call<RPC.Event>("events.get", { runId, eventId, ...params })),
-			list: async (input) => withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.list", input)),
+			list: async (input) => {
+				const page = await client.call<RPC.EventsPage>("events.list", input);
+				const { snapshot, ...rest } = page;
+				return { ...withEventDataPage(rest), snapshot: { seq: snapshot.eventCount, seqInBand: snapshot.inBandCount } };
+			},
 			listByCorrelationId: async (input) =>
 				withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.listByCorrelationID", input)),
 		};

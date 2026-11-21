@@ -64,7 +64,7 @@ func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveDat
 // EventPayload returns the payload a run, step, or hook view exposes from the
 // event that recorded it: a run's Input from run_created, Output from
 // run_completed, and Error from run_failed; a step's Input from step_created,
-// Output from step_completed, and Error from step_failed or step_retrying; and
+// or from the step_started that created an inline step, Output from step_completed, and Error from step_failed or step_retrying; and
 // a hook's Metadata from hook_created. It returns nil for other events.
 //
 // The event log is the only copy of these payloads. A World's views record
@@ -81,6 +81,10 @@ func EventPayload(event Event) []byte {
 		return DecodeRunFailed(event.Data)
 	case EventTypeStepCreated:
 		var data DataStepCreated
+		_ = json.Unmarshal(event.Data, &data)
+		return data.Input
+	case EventTypeStepStarted:
+		var data DataStepStarted
 		_ = json.Unmarshal(event.Data, &data)
 		return data.Input
 	case EventTypeStepCompleted:
@@ -137,6 +141,8 @@ type DataRunCreated struct {
 	ExecutionContext map[string]any `json:"executionContext,omitempty"`
 	// StartHook is the hook created with the run. See StartHook.
 	StartHook *StartHook `json:"startHook,omitempty"`
+	// SpecVersion is the spec version the World created the run under.
+	SpecVersion int `json:"specVersion,omitempty"`
 }
 
 // StartHook is a hook a World creates in the same write as its run, so a
@@ -184,6 +190,7 @@ func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
 		EncryptionPublicKey: input.EncryptionPublicKey,
 		ExecutionContext:    input.ExecutionContext,
 		StartHook:           startHookOf(input),
+		SpecVersion:         SpecVersion,
 	})
 }
 
@@ -272,31 +279,68 @@ func runErrorCode(err error) string {
 // DataStepCreated is the Data of a step_created event. The step's options
 // and cancellation contexts come from the replay that declares it.
 type DataStepCreated struct {
-	StepName string `json:"stepName"`
+	StepName     string `json:"stepName"`
+	WorkflowName string `json:"workflowName,omitempty"`
 	// Input is the step's arguments, {args: [input]}, as a payload.
 	Input []byte `json:"input"`
+	// Inline reports that the flow runs the step itself. A step_created
+	// records a step queued as a step delivery, or one that failed before
+	// it started, and an inline step is created by its first step_started.
+	Inline bool `json:"inline"`
+	// CreatorMessageID is the queued message of the flow that created the
+	// step.
+	CreatorMessageID string `json:"creatorMessageId,omitempty"`
 }
 
-// DataStepStarted is the JSON payload of a step_started event.
+// DataStepStarted is the Data of a step_started event.
 type DataStepStarted struct {
+	StepName string `json:"stepName,omitempty"`
+	// Attempt is the attempt the event starts, counting from 1.
+	Attempt int `json:"attempt,omitempty"`
+	// WorkflowName, Input, and Inline are set on the step_started that
+	// creates an inline step, which no step_created precedes. Input is the
+	// step's arguments, {args: [input]}, as a payload.
+	WorkflowName string `json:"workflowName,omitempty"`
+	Input        []byte `json:"input,omitempty"`
+	Inline       bool   `json:"inline,omitempty"`
 	// OwnerMessageID is the queued message of the flow that started the
 	// attempt inline, which owns it until inlineStepLease passes. It is
 	// empty for an attempt a step delivery started.
 	OwnerMessageID string `json:"ownerMessageId,omitempty"`
 }
 
-// DataStepResult is the JSON payload of a step_completed, step_retrying, or
+// StartCreatesStep reports whether a step_started event's data creates the
+// step it starts: an inline step's first step_started, which carries the
+// step's name and input with Inline set, and which no step_created precedes.
+func StartCreatesStep(data []byte) bool {
+	var started DataStepStarted
+	return len(data) != 0 && json.Unmarshal(data, &started) == nil && started.Inline && started.StepName != ""
+}
+
+// DataStepResult is the Data of a step_completed, step_retrying, or
 // step_failed event.
 type DataStepResult struct {
+	StepName string `json:"stepName,omitempty"`
+	// WorkflowName is set on step_completed.
+	WorkflowName string `json:"workflowName,omitempty"`
+	// Attempt is the attempt that failed, on step_failed and step_retrying.
+	Attempt    int        `json:"attempt,omitempty"`
 	Result     []byte     `json:"result,omitempty"`
 	Error      []byte     `json:"error,omitempty"`
 	RetryAfter *time.Time `json:"retryAfter,omitempty"`
+	// CreatorMessageID is set on the step_retrying of an inline step whose
+	// next attempt runs as a step delivery: the queued message of the flow
+	// that hands it over.
+	CreatorMessageID string `json:"creatorMessageId,omitempty"`
 }
 
 // DataWaitCreated is the Data of a wait_created event. The wait's
 // cancellation contexts come from the replay.
 type DataWaitCreated struct {
 	ResumeAt time.Time `json:"resumeAt"`
+	// CreatorMessageID is the queued message of the flow that created the
+	// wait, whose chain of timer messages arms it.
+	CreatorMessageID string `json:"creatorMessageId,omitempty"`
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.
@@ -318,6 +362,8 @@ type DataHookReceived struct {
 	// Payload is the value sent to the hook as a payload. A webhook
 	// receives a WebhookRequest.
 	Payload []byte `json:"payload,omitempty"`
+	// WorkflowName is the workflow of the hook's run.
+	WorkflowName string `json:"workflowName,omitempty"`
 }
 
 // EncodeHookReceived returns the Data of a hook_received event carrying

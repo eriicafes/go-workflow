@@ -118,9 +118,9 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	}
 	// A takeover within one run returns the induced disposal in the delta and
 	// counts both writes, so replay cannot omit a slot or reuse a stale fence.
-	seen, fence := 2, 0
+	seen, fence := 2, 1
 	self, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: claimant, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_self", worlds.DataHookCreated{Token: token, Force: true}), Options: worlds.EventsCreateOptions{EventCount: &seen, InBandCount: &fence}})
-	if err != nil || self.AllocatedEventCount != 2 || self.InBandCount != 2 || len(self.Events) != 1 || self.Events[0].EventType != worlds.EventTypeHookDisposed || self.Events[0].CorrelationID != "hook_claimant" {
+	if err != nil || self.AllocatedEventCount != 2 || self.InBandCount != 3 || len(self.Events) != 1 || self.Events[0].EventType != worlds.EventTypeHookDisposed || self.Events[0].CorrelationID != "hook_claimant" {
 		t.Fatalf("same-run takeover = %#v err=%v", self, err)
 	}
 

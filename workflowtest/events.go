@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -95,10 +96,11 @@ func conformRunDeployment(t *testing.T, world worlds.World) {
 	}
 }
 
-// conformInBandFence checks the in-band writer fence: an in-band write is
-// accepted only at the run's current InBandCount and advances it by the events
-// it appends, a stale one appends nothing, and an out-of-band write is never
-// refused and leaves the count alone.
+// conformInBandFence checks the in-band writer fence: run_created counts as
+// one in-band position, an in-band write is accepted only at the run's
+// current InBandCount and advances it by the positions it allocates, a stale
+// one appends nothing, and an out-of-band write is never refused and leaves
+// the count alone.
 func conformInBandFence(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "fence")
@@ -108,54 +110,151 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		snapshot := conformSnapshot(t, world, runID)
+		if snapshot.InBandCount != run.InBandCount {
+			t.Fatalf("snapshot InBandCount %d, run InBandCount %d", snapshot.InBandCount, run.InBandCount)
+		}
 		return run.InBandCount
 	}
 	eventCount := func() int {
 		t.Helper()
-		page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return len(page.Data)
+		return conformSnapshot(t, world, runID).EventCount
 	}
-	if count := inBandCount(); count != 0 {
-		t.Fatalf("new run InBandCount = %d", count)
+	if count := inBandCount(); count != 1 {
+		t.Fatalf("new run InBandCount = %d, want 1", count)
 	}
 
-	zero, one, three := 0, 1, 3
-	first, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_a"}, Options: worlds.EventsCreateOptions{InBandCount: &zero}})
-	if err != nil || first.InBandCount != 1 || inBandCount() != 1 {
+	zero, one, two, four := 0, 1, 2, 4
+	first, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_a"}, Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	if err != nil || first.InBandCount != 2 || first.AllocatedEventCount != 1 || inBandCount() != 2 {
 		t.Fatalf("fenced append = %#v err=%v, run InBandCount %d", first, err, inBandCount())
 	}
 
 	before := eventCount()
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_stale"}, Options: worlds.EventsCreateOptions{InBandCount: &zero}})
-	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band append")
-	if eventCount() != before || inBandCount() != 1 {
+	for _, stale := range []int{zero, one} {
+		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_stale"}, Options: worlds.EventsCreateOptions{InBandCount: &stale}})
+		conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band append")
+	}
+	if eventCount() != before || inBandCount() != 2 {
 		t.Fatalf("stale in-band append wrote events %d -> %d, InBandCount %d", before, eventCount(), inBandCount())
 	}
 
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_out"}}); err != nil || inBandCount() != 1 {
-		t.Fatalf("out-of-band append err=%v, InBandCount %d", err, inBandCount())
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_out"}}); err != nil || inBandCount() != 2 || eventCount() != before+1 {
+		t.Fatalf("out-of-band append err=%v, InBandCount %d, events %d", err, inBandCount(), eventCount())
 	}
 
-	batch, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &one, Events: []worlds.EventsCreateEvent{
+	batch, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &two, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_b"},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_c"},
 	}})
-	if err != nil || batch.InBandCount != 3 || inBandCount() != 3 {
+	if err != nil || batch.InBandCount != 4 || batch.AllocatedEventCount != 2 || inBandCount() != 4 {
 		t.Fatalf("fenced batch = %#v err=%v, run InBandCount %d", batch, err, inBandCount())
 	}
 
-	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &one, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_d"}}})
+	before = eventCount()
+	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &two, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_d"}}})
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
+	if eventCount() != before {
+		t.Fatalf("stale in-band batch wrote events %d -> %d", before, eventCount())
+	}
 
 	token := "fence:" + string(runID)
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &two}})
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
-	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
-	if err != nil || claimed.InBandCount != 4 || inBandCount() != 4 {
+	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &four}})
+	if err != nil || claimed.InBandCount != 5 || inBandCount() != 5 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
+	}
+	// A repeat allocates nothing, so the count stays.
+	five := 5
+	repeat, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &five}})
+	if err != nil || repeat.AllocatedEventCount != 1 || inBandCount() != 6 {
+		t.Fatalf("fenced disposal = %#v err=%v, run InBandCount %d", repeat, err, inBandCount())
+	}
+	six := 6
+	repeat, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &six}})
+	if err != nil || repeat.AllocatedEventCount != 0 || repeat.InBandCount != 6 || inBandCount() != 6 {
+		t.Fatalf("repeated fenced disposal = %#v err=%v, run InBandCount %d", repeat, err, inBandCount())
+	}
+}
+
+// conformSnapshot returns the snapshot of a listing of runID's log, after
+// checking that every page of it carries the same one.
+func conformSnapshot(t *testing.T, world worlds.World, runID worlds.RunID) worlds.EventsSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	first, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Snapshot.EventCount != len(first.Data) || first.Snapshot.InBandCount < 1 || first.Snapshot.InBandCount > first.Snapshot.EventCount {
+		t.Fatalf("snapshot %+v over %d events", first.Snapshot, len(first.Data))
+	}
+	paged, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1}})
+	for err == nil {
+		if paged.Snapshot != first.Snapshot {
+			t.Fatalf("page snapshot %+v, want %+v", paged.Snapshot, first.Snapshot)
+		}
+		if !paged.HasMore {
+			break
+		}
+		paged, err = world.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1, Cursor: paged.Cursor}})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return first.Snapshot
+}
+
+// conformSkippedSlots checks an in-band write's skipped-slot report: the
+// events between the position it was decided from and its own, and that
+// in-band writes are stored at the time they occurred.
+func conformSkippedSlots(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "skipped")
+	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || run.SpecVersion != worlds.SpecVersion {
+		t.Fatalf("run SpecVersion = %d err=%v, want %d", run.SpecVersion, err, worlds.SpecVersion)
+	}
+	held := 1
+	// Two out-of-band writes land after the position the writer holds.
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_skipped_a", nil)
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_skipped_b", nil)
+	occurred := time.Now().Add(-time.Hour).Truncate(time.Millisecond).UTC()
+	one := 1
+	written, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_skipped_c", OccurredAt: occurred}, Options: worlds.EventsCreateOptions{InBandCount: &one, EventCount: &held}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.EventID != worlds.EventIDForSlot(4) || written.MoreEvents || len(written.Events) != 2 || written.Events[0].CorrelationID != "wait_skipped_a" || written.Events[1].CorrelationID != "wait_skipped_b" {
+		t.Fatalf("skipped-slot report = %#v", written)
+	}
+	if !written.CreatedAt.Equal(occurred) {
+		t.Fatalf("in-band CreatedAt = %v, want its OccurredAt %v", written.CreatedAt, occurred)
+	}
+	stored, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: written.EventID})
+	if err != nil || !stored.CreatedAt.Equal(occurred) {
+		t.Fatalf("stored in-band CreatedAt = %v err=%v, want %v", stored.CreatedAt, err, occurred)
+	}
+	// An out-of-band write takes the World's clock.
+	out := conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_skipped_d", nil)
+	if time.Since(out.CreatedAt) > time.Minute {
+		t.Fatalf("out-of-band CreatedAt = %v", out.CreatedAt)
+	}
+
+	// A batch decided from position 4 reports the out-of-band write after it,
+	// and stores each item at its own OccurredAt.
+	four, two := 4, 2
+	batch, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &two, EventCount: &four, Events: []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_skipped_e", OccurredAt: occurred},
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_skipped_f", OccurredAt: occurred.Add(time.Millisecond)},
+	}})
+	if err != nil || len(batch.Results) != 2 || batch.MoreEvents || len(batch.Events) != 1 || batch.Events[0].CorrelationID != "wait_skipped_d" {
+		t.Fatalf("batch report = %#v err=%v", batch, err)
+	}
+	for index, item := range batch.Results {
+		if item.Err != nil || !item.CreatedAt.Equal(occurred.Add(time.Duration(index)*time.Millisecond)) {
+			t.Fatalf("batch item %d = %#v", index, item)
+		}
 	}
 }
 
@@ -163,59 +262,77 @@ func conformBatch(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "batch")
 	empty, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID})
-	if err != nil || len(empty.Events) != 0 {
+	if err != nil || len(empty.Results) != 0 {
 		t.Fatalf("empty batch = %#v err=%v", empty, err)
 	}
 	result, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeRunStarted},
 		conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "a"}),
-		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a"},
+		conformEvent(t, worlds.EventTypeStepStarted, "step_a", worlds.DataStepStarted{StepName: "a", Attempt: 1}),
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Events) != 3 || result.Events[0].EventID != worlds.EventIDForSlot(2) || result.Events[2].EventID != worlds.EventIDForSlot(4) || result.Events[2].EventType != worlds.EventTypeStepStarted {
+	if len(result.Results) != 3 || result.AllocatedEventCount != 3 || result.Results[0].EventID != worlds.EventIDForSlot(2) || result.Results[2].EventID != worlds.EventIDForSlot(4) || result.Results[2].EventType != worlds.EventTypeStepStarted {
 		t.Fatalf("batch result = %#v", result)
 	}
-	for _, item := range result.Events {
-		if item.AllocatedEventCount != 1 {
-			t.Fatalf("batch item AllocatedEventCount = %d", item.AllocatedEventCount)
+	for _, item := range result.Results {
+		if item.Err != nil || item.AllocatedEventCount != 1 {
+			t.Fatalf("batch item = %#v", item)
 		}
 	}
-	if result.Events[1].Step == nil || !result.Events[1].StepCreated {
-		t.Fatalf("batch step_created result = %#v", result.Events[1])
+	if result.Results[1].Step == nil || !result.Results[1].StepCreated {
+		t.Fatalf("batch step_created result = %#v", result.Results[1])
 	}
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
 	if err != nil || step.Status != worlds.StatusRunning {
 		t.Fatalf("batch step = %#v err=%v", step, err)
 	}
 
-	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
-		conformEvent(t, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "b"}),
-		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_missing"},
-	}})
-	conformExpect(t, err, worlds.ErrStepNotStartable, "batch with rejected event")
-	// A refused event may leave the others appended, but an invalid batch
-	// appends nothing.
+	// An invalid batch appends nothing.
 	before := len(conformAllEvents(t, world, runID))
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunCreated}}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "batch with run_created")
 	if events := conformAllEvents(t, world, runID); len(events) != before {
 		t.Fatalf("events after invalid batch = %d, want %d", len(events), before)
 	}
-	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunStarted}}})
-	conformExpect(t, err, worlds.ErrEventInvalid, "batch with replayed event")
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: "wrun_missing", Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeRunStarted}}})
 	conformExpect(t, err, worlds.ErrRunNotFound, "batch for missing run")
+
+	// A refused event refuses the later events of its correlation ID, and
+	// leaves the others to their own outcomes.
+	mixed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_batch"},
+		{EventType: worlds.EventTypeRunStarted},
+		conformEvent(t, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{StepName: "a", Result: []byte(`"out"`)}),
+		{EventType: worlds.EventTypeRunStarted},
+	}})
+	if err != nil || len(mixed.Results) != 4 || mixed.AllocatedEventCount != 2 {
+		t.Fatalf("mixed batch = %#v err=%v", mixed, err)
+	}
+	if mixed.Results[0].Err != nil || !errors.Is(mixed.Results[1].Err, worlds.ErrEventInvalid) || mixed.Results[2].Err != nil || mixed.Results[3].Err == nil {
+		t.Fatalf("mixed batch outcomes = %v, %v, %v, %v", mixed.Results[0].Err, mixed.Results[1].Err, mixed.Results[2].Err, mixed.Results[3].Err)
+	}
+
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_x", worlds.DataStepCreated{StepName: "x"})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_x", worlds.DataStepStarted{StepName: "x", Attempt: 1})
 	completed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
-		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a"},
 		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"Im91dCI="}`)},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "late"},
 	}})
-	conformExpect(t, err, worlds.ErrRunTerminal, "batch appending after its own terminal event")
-	if completed.Events != nil {
-		t.Fatalf("failed batch returned results: %#v", completed)
+	if err != nil || completed.Results[0].Err != nil || !errors.Is(completed.Results[1].Err, worlds.ErrRunTerminal) {
+		t.Fatalf("batch appending after its own terminal event = %#v err=%v", completed, err)
 	}
+	// The finished run refuses the retry, and so the failure behind it,
+	// which alone it accepts.
+	ordered, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
+		conformEvent(t, worlds.EventTypeStepRetrying, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
+		conformEvent(t, worlds.EventTypeStepFailed, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
+	}})
+	if err != nil || !errors.Is(ordered.Results[0].Err, worlds.ErrRunTerminal) || ordered.Results[1].Err == nil || ordered.AllocatedEventCount != 0 {
+		t.Fatalf("batch after a refused event of the same step = %#v err=%v", ordered, err)
+	}
+	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)})
 }
 
 func conformEventsList(t *testing.T, world worlds.World) {

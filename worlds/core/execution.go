@@ -555,6 +555,11 @@ func (e *Execution) startSteps() {
 	}
 	// The events are added to the log with the next write's delta.
 	result, err := e.world.EventsCreateBatch(e.ctx, worlds.EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), Events: events})
+	for _, item := range result.Results {
+		if err == nil && item.Err != nil {
+			err = item.Err
+		}
+	}
 	if err != nil {
 		// The attempts did not start, so a later delivery may run them.
 		for _, key := range claimed {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 )
 
 // The workflow API's event routes exchange frames:
@@ -93,9 +94,9 @@ type eventPage struct {
 	Events  []wireEvent
 	Cursor  string
 	HasMore bool
-	// SeqInBand is the run's in-band count the backend read before the
-	// listing, when it reports one.
-	SeqInBand *int
+	// Seq and SeqInBand are the run's position counters the backend read
+	// before the listing, when it reports them.
+	Seq, SeqInBand *int
 }
 
 // readEventPage reads event frames until the end frame. Each event frame's
@@ -115,7 +116,7 @@ func readEventPage(body io.Reader, header interface{ Get(string) string }) (even
 		if isControl(next.Meta, "_end") {
 			page.Cursor, _ = next.Meta["next"].(string)
 			page.HasMore, _ = next.Meta["hasMore"].(bool)
-			page.SeqInBand = snapshotSeqInBand(next.Meta["snapshot"], header)
+			page.Seq, page.SeqInBand = snapshotCounters(next.Meta["snapshot"], header)
 			return page, nil
 		}
 		if isControl(next.Meta, "_error") {
@@ -153,23 +154,30 @@ func isControl(meta map[string]any, key string) bool {
 	return ok && value == 1
 }
 
-// snapshotSeqInBand reads the in-band count from an end frame's snapshot, or
-// from the response headers that carry it otherwise.
-func snapshotSeqInBand(snapshot any, header interface{ Get(string) string }) *int {
+// snapshotCounters reads the position counters, seq and seqInBand, from an
+// end frame's snapshot, or from the response headers that carry them
+// otherwise. Each is nil when the response reports none.
+func snapshotCounters(snapshot any, header interface{ Get(string) string }) (*int, *int) {
 	if values, ok := snapshot.(map[string]any); ok {
-		if count, ok := asInt(values["seqInBand"]); ok {
-			return &count
+		seq, seqOK := asInt(values["seq"])
+		seqInBand, inBandOK := asInt(values["seqInBand"])
+		if seqOK && inBandOK {
+			return &seq, &seqInBand
 		}
 	}
 	if header == nil {
-		return nil
+		return nil, nil
 	}
-	raw := header.Get("X-Wf-Snapshot-Seq-In-Band")
+	return headerCounter(header.Get("X-Wf-Snapshot-Seq")), headerCounter(header.Get("X-Wf-Snapshot-Seq-In-Band"))
+}
+
+// headerCounter reads a decimal counter header.
+func headerCounter(raw string) *int {
 	if raw == "" {
 		return nil
 	}
-	var count int
-	if _, err := fmt.Sscanf(raw, "%d", &count); err != nil || count < 0 {
+	count, err := strconv.Atoi(raw)
+	if err != nil || count < 0 {
 		return nil
 	}
 	return &count

@@ -139,7 +139,8 @@ Events are the only copy of payloads. Run, step and hook items hold no
 input, output, error or metadata; they name the events that recorded them. A
 run's input is its `run_created` event (slot 1) and `resultEventId` names its
 `run_completed` or `run_failed` event. A step's `createdEventId` names its
-`step_created` event and `resultEventId` its latest `step_completed`,
+`step_created` event, or the `step_started` that created an inline step, and
+`resultEventId` its latest `step_completed`,
 `step_failed` or `step_retrying` event. A hook's `createdEventId` names its
 `hook_created` event. Reads load these events with one consistent
 `BatchGetItem` per page; `ResolveDataNone` skips all but a failure's error.
@@ -227,8 +228,8 @@ and `GetQueueAttributes` (for the event source mapping), and, with
   pass references.
 - **100 actions per transaction (4 MB total).** One append writes the run
   view, each event, and each changed step, hook, token and wait marker in one
-  transaction. A batch that needs more than 100 actions returns
-  `worlds.ErrEventInvalid`. A stream write holds at most 99 chunks.
+  transaction. A batch that needs more than 100 actions for its admitted
+  events returns `worlds.ErrEventInvalid` and appends none of them. A stream write holds at most 99 chunks.
 - **15-minute SQS delay.** Longer delays need `Scheduler`.
 - **Hot keys.** Appends to one run are serialized by its event count and
   retried with jittered backoff (up to 64 attempts), so heavy concurrent

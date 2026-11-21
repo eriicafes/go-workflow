@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -37,9 +38,10 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, at)
+		// run_created takes the first position, which counts as in-band.
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, in_band_count, spec_version, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $9, $9) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, worlds.SpecVersion, at)
 		if err != nil {
 			return err
 		}
@@ -56,7 +58,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, AllocatedEventCount: 1}, nil
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: at, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -109,17 +111,22 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	return result, nil
 }
 
+// EventsCreateBatch appends a batch's events in one transaction. Each event
+// is admitted against the log as the earlier events of the batch left it,
+// before it is inserted, so a refused event appends nothing and the others
+// are still appended.
 func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	if len(input.Events) == 0 {
-		return worlds.EventBatchResult{}, nil
+	for _, value := range input.Events {
+		if !validEvent(value) || value.EventType == worlds.EventTypeHookCreated {
+			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
+		}
 	}
-	var results []worlds.EventResult
-	var inBandCount int
+	var result worlds.EventBatchResult
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		results = make([]worlds.EventResult, 0, len(input.Events))
+		result = worlds.EventBatchResult{Results: make([]worlds.EventBatchItem, len(input.Events))}
 		a, err := w.lockRun(ctx, tx, input.RunID)
 		if err != nil {
 			return err
@@ -127,35 +134,61 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err := a.fence(input.InBandCount); err != nil {
 			return err
 		}
-		for _, value := range input.Events {
-			if !validEvent(value) {
-				return worlds.ErrEventInvalid
-			}
-			replay, err := a.admit(ctx, value)
-			if err != nil {
+		if input.EventCount != nil {
+			if result.Events, err = a.delta(ctx, worlds.EventsCreateOptions{EventCount: input.EventCount}); err != nil {
 				return err
 			}
-			if replay != nil {
-				return worlds.ErrEventInvalid
+		}
+		refused := map[string]bool{}
+		for index, value := range input.Events {
+			item := &result.Results[index]
+			if value.CorrelationID != "" && refused[value.CorrelationID] {
+				item.Err = fmt.Errorf("%w: an earlier event of %s was refused", worlds.ErrStepNotStartable, value.CorrelationID)
+				continue
+			}
+			replay, err := a.admit(ctx, value)
+			if err != nil && !refusal(err) {
+				return err
+			}
+			if err == nil && replay != nil {
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventInvalid, value.EventType, value.CorrelationID)
+			}
+			if err != nil {
+				item.Err = err
+				refused[value.CorrelationID] = value.CorrelationID != ""
+				continue
 			}
 			event, err := a.append(ctx, value)
 			if err != nil {
 				return err
 			}
-			result, err := a.result(ctx, event, true)
-			if err != nil {
+			if item.EventResult, err = a.result(ctx, event, true); err != nil {
 				return err
 			}
-			results = append(results, result)
+			result.AllocatedEventCount++
 		}
-		a.advance(input.InBandCount, len(input.Events))
-		inBandCount = a.run.InBandCount
+		a.advance(input.InBandCount, result.AllocatedEventCount)
+		result.InBandCount = a.run.InBandCount
+		for index := range result.Results {
+			result.Results[index].InBandCount = result.InBandCount
+		}
 		return a.flush(ctx)
 	})
 	if err != nil {
 		return worlds.EventBatchResult{}, err
 	}
-	return worlds.EventBatchResult{Events: results, InBandCount: inBandCount}, nil
+	return result, nil
+}
+
+// refusal reports whether err is an admission refusal, as opposed to a
+// storage failure.
+func refusal(err error) bool {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
@@ -194,8 +227,22 @@ func (w *World) runExists(ctx context.Context, runID worlds.RunID) error {
 	return nil
 }
 
-func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.Page[worlds.Event], error) {
-	return w.listEvents(ctx, input.RunID, nil, input.Pagination, input.ResolveData)
+// EventsList reads the run's counters before its page, so the page covers
+// every position the snapshot counts.
+func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	var eventCount, inBandCount int64
+	err := w.pool.QueryRow(ctx, `SELECT event_count, in_band_count FROM go_workflow_runs WHERE run_id = $1`, input.RunID).Scan(&eventCount, &inBandCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return worlds.EventsPage{}, worlds.ErrRunNotFound
+	}
+	if err != nil {
+		return worlds.EventsPage{}, err
+	}
+	page, err := w.listEvents(ctx, input.RunID, nil, input.Pagination, input.ResolveData)
+	if err != nil {
+		return worlds.EventsPage{}, err
+	}
+	return worlds.EventsPage{Page: page, Snapshot: worlds.EventsSnapshot{EventCount: int(eventCount), InBandCount: int(inBandCount)}}, nil
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
@@ -261,6 +308,9 @@ type appender struct {
 	run         worlds.Run
 	count       uint64
 	wasTerminal bool
+	// inBand reports that the write passed the in-band fence, so its events
+	// take their OccurredAt as their creation time.
+	inBand bool
 	// resultSlot is the run's run_completed or run_failed slot, which flush
 	// writes.
 	resultSlot *int64
@@ -269,16 +319,22 @@ type appender struct {
 // admit applies the transition rules. It returns a non-nil result when the
 // event is an idempotent replay of an earlier one.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
-	if a.run.Status.Terminal() {
-		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
-			step, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
-			if err != nil && !errors.Is(err, worlds.ErrStepNotFound) {
-				return nil, err
-			}
-			if err == nil && step.Status == worlds.StatusRunning {
-				return nil, nil
-			}
+	var step *worlds.Step
+	switch event.EventType {
+	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		found, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
+		if err != nil && !errors.Is(err, worlds.ErrStepNotFound) {
+			return nil, err
 		}
+		if err == nil {
+			step = &found
+		}
+	}
+	// A finished run still records what was running when it finished: a
+	// step's final result, and a wait's completion.
+	finishing := (event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed) && step != nil && !step.Status.Terminal() ||
+		event.EventType == worlds.EventTypeWaitCompleted
+	if a.run.Status.Terminal() && !finishing {
 		if event.EventType == worlds.EventTypeRunCancelled && a.run.Status == worlds.StatusCancelled {
 			return a.replay(ctx, event.EventType, event.CorrelationID, true)
 		}
@@ -290,34 +346,30 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return a.replay(ctx, event.EventType, "", true)
 		}
 	case worlds.EventTypeStepCreated:
-		step, err := getStep(ctx, a.tx, a.run.RunID, worlds.StepID(event.CorrelationID))
-		if errors.Is(err, worlds.ErrStepNotFound) {
+		if step == nil {
 			return nil, nil
-		}
-		if err != nil {
-			return nil, err
 		}
 		result, err := a.replay(ctx, event.EventType, event.CorrelationID, false)
 		if err == nil {
-			result.Step = &step
+			result.Step = step
 		}
 		return result, err
-	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		var status worlds.Status
-		err := a.tx.QueryRow(ctx, `SELECT status FROM go_workflow_steps WHERE run_id = $1 AND step_id = $2`, a.run.RunID, event.CorrelationID).Scan(&status)
-		if errors.Is(err, pgx.ErrNoRows) {
+	case worlds.EventTypeStepStarted:
+		creates := worlds.StartCreatesStep(event.Data)
+		switch {
+		case creates && step != nil:
+			// An inline step is created once.
+			return a.replay(ctx, event.EventType, event.CorrelationID, false)
+		case step == nil && !creates:
+			return nil, worlds.ErrStepNotStartable
+		case step != nil && step.Status.Terminal():
+			// A started step may be started again, and each start records a
+			// new attempt.
 			return nil, worlds.ErrStepNotStartable
 		}
-		if err != nil {
-			return nil, err
-		}
-		if event.EventType == worlds.EventTypeStepStarted {
-			// A running step may be started again, because its previous attempt's
-			// delivery may have died, and each start records a new attempt.
-			if status != worlds.StatusPending && status != worlds.StatusRunning {
-				return nil, worlds.ErrStepNotStartable
-			}
-		} else if status != worlds.StatusRunning {
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		// A step's result is recorded while the step is not finished.
+		if step == nil || step.Status.Terminal() {
 			return nil, worlds.ErrStepNotStartable
 		}
 	case worlds.EventTypeWaitCompleted:
@@ -417,9 +469,18 @@ func (a *appender) delta(ctx context.Context, options worlds.EventsCreateOptions
 	return worlds.ResolveEvents(events, options.ResolveData), err
 }
 
+// createdAt returns the creation time of value: its OccurredAt for an
+// in-band write that sets one, and now otherwise.
+func (a *appender) createdAt(value worlds.EventsCreateEvent) time.Time {
+	if a.inBand && !value.OccurredAt.IsZero() {
+		return value.OccurredAt.UTC().Truncate(time.Microsecond)
+	}
+	return now()
+}
+
 func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (worlds.Event, error) {
 	a.count++
-	event := worlds.Event{RunID: a.run.RunID, EventID: worlds.EventIDForSlot(a.count), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: value.Data, CreatedAt: now()}
+	event := worlds.Event{RunID: a.run.RunID, EventID: worlds.EventIDForSlot(a.count), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: value.Data, CreatedAt: a.createdAt(value)}
 	if worlds.RunDataExpired(a.run, event.CreatedAt) {
 		// A step still running when its run's data was deleted settles after
 		// it. What it brought is deleted as it lands.
@@ -468,6 +529,17 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 			event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, slot, at)
 		return err
 	case worlds.EventTypeStepStarted:
+		if worlds.StartCreatesStep(event.Data) {
+			// An inline step's first step_started creates it and holds its
+			// input, as a step_created would.
+			var value worlds.DataStepStarted
+			_ = json.Unmarshal(event.Data, &value)
+			if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_steps (run_id, step_id, step_name, status, created_slot, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+				event.RunID, event.CorrelationID, value.StepName, worlds.StatusPending, slot, at); err != nil {
+				return err
+			}
+		}
 		return a.updateStep(ctx, event, worlds.StatusRunning, slot)
 	case worlds.EventTypeStepCompleted:
 		return a.updateStep(ctx, event, worlds.StatusCompleted, slot)
@@ -557,6 +629,7 @@ func (a *appender) fence(count *int) error {
 	if count != nil && *count != a.run.InBandCount {
 		return worlds.ErrInBandSuperseded
 	}
+	a.inBand = count != nil
 	return nil
 }
 

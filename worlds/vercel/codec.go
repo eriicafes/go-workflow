@@ -137,21 +137,35 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		if err := decode(&data); err != nil {
 			return nil, nil, err
 		}
-		meta["stepName"] = data.StepName
+		meta["stepName"], meta["inline"] = data.StepName, data.Inline
+		setString(meta, "workflowName", data.WorkflowName)
+		setString(meta, "creatorMessageId", data.CreatorMessageID)
 		return meta, data.Input, nil
 	case worlds.EventTypeStepStarted:
 		var data worlds.DataStepStarted
 		if err := decode(&data); err != nil {
 			return nil, nil, err
 		}
-		if data.OwnerMessageID != "" {
-			meta["ownerMessageId"] = data.OwnerMessageID
+		setString(meta, "stepName", data.StepName)
+		setString(meta, "workflowName", data.WorkflowName)
+		setString(meta, "ownerMessageId", data.OwnerMessageID)
+		if data.Attempt > 0 {
+			meta["attempt"] = data.Attempt
 		}
-		return meta, nil, nil
+		if data.Inline {
+			meta["inline"] = true
+		}
+		return meta, data.Input, nil
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		var data worlds.DataStepResult
 		if err := decode(&data); err != nil {
 			return nil, nil, err
+		}
+		setString(meta, "stepName", data.StepName)
+		setString(meta, "workflowName", data.WorkflowName)
+		setString(meta, "creatorMessageId", data.CreatorMessageID)
+		if data.Attempt > 0 {
+			meta["attempt"] = data.Attempt
 		}
 		if data.RetryAfter != nil {
 			meta["retryAfter"] = data.RetryAfter.UTC()
@@ -180,7 +194,12 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		}
 		return meta, data.Metadata, nil
 	case worlds.EventTypeHookReceived:
-		return meta, worlds.DecodeHookReceived(event.Data), nil
+		var data worlds.DataHookReceived
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		setString(meta, "workflowName", data.WorkflowName)
+		return meta, data.Payload, nil
 	case worlds.EventTypeWaitCreated:
 		var data worlds.DataWaitCreated
 		if err := decode(&data); err != nil {
@@ -189,9 +208,17 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		if !data.ResumeAt.IsZero() {
 			meta["resumeAt"] = data.ResumeAt.UTC()
 		}
+		setString(meta, "creatorMessageId", data.CreatorMessageID)
 		return meta, nil, nil
 	}
 	return nil, nil, fmt.Errorf("%w: %s cannot be written", worlds.ErrEventInvalid, event.EventType)
+}
+
+// setString sets meta[key] to value when value is not empty.
+func setString(meta map[string]any, key, value string) {
+	if value != "" {
+		meta[key] = value
+	}
 }
 
 func hasReservedKey(changes []worlds.RunsAttributeChange) bool {
@@ -245,19 +272,24 @@ func eventData(wire wireEvent) ([]byte, error) {
 		allowReserved, _ := d["allowReservedAttributes"].(bool)
 		return json.Marshal(worlds.DataAttrSet{Changes: attributeChanges(d["changes"]), Writer: attributeWriter(d["writer"]), AllowReservedAttributes: allowReserved})
 	case worlds.EventTypeStepCreated:
-		return json.Marshal(worlds.DataStepCreated{StepName: str(d, "stepName"), Input: payload("input")})
+		inline, _ := d["inline"].(bool)
+		return json.Marshal(worlds.DataStepCreated{StepName: str(d, "stepName"), WorkflowName: str(d, "workflowName"), Input: payload("input"), Inline: inline, CreatorMessageID: str(d, "creatorMessageId")})
 	case worlds.EventTypeStepStarted:
-		return json.Marshal(worlds.DataStepStarted{OwnerMessageID: str(d, "ownerMessageId")})
-	case worlds.EventTypeStepCompleted:
-		return json.Marshal(worlds.DataStepResult{Result: payload("result")})
-	case worlds.EventTypeStepFailed:
-		return json.Marshal(worlds.DataStepResult{Error: payload("error")})
-	case worlds.EventTypeStepRetrying:
-		var retryAfter *time.Time
-		if value, ok := asTime(d["retryAfter"]); ok {
-			retryAfter = &value
+		attempt, _ := asInt(d["attempt"])
+		inline, _ := d["inline"].(bool)
+		return json.Marshal(worlds.DataStepStarted{StepName: str(d, "stepName"), Attempt: attempt, WorkflowName: str(d, "workflowName"), Input: payload("input"), Inline: inline, OwnerMessageID: str(d, "ownerMessageId")})
+	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		attempt, _ := asInt(d["attempt"])
+		result := worlds.DataStepResult{StepName: str(d, "stepName"), WorkflowName: str(d, "workflowName"), Attempt: attempt, CreatorMessageID: str(d, "creatorMessageId")}
+		if wire.EventType == string(worlds.EventTypeStepCompleted) {
+			result.Result = payload("result")
+		} else {
+			result.Error = payload("error")
 		}
-		return json.Marshal(worlds.DataStepResult{Error: payload("error"), RetryAfter: retryAfter})
+		if value, ok := asTime(d["retryAfter"]); ok && wire.EventType == string(worlds.EventTypeStepRetrying) {
+			result.RetryAfter = &value
+		}
+		return json.Marshal(result)
 	case worlds.EventTypeHookCreated, worlds.EventTypeHookConflict:
 		data := worlds.DataHookCreated{Token: str(d, "token"), Metadata: payload("metadata")}
 		data.IsWebhook, _ = d["isWebhook"].(bool)
@@ -277,7 +309,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 		}
 		return json.Marshal(data)
 	case worlds.EventTypeHookReceived:
-		return json.Marshal(worlds.DataHookReceived{Payload: payload("payload")})
+		return json.Marshal(worlds.DataHookReceived{Payload: payload("payload"), WorkflowName: str(d, "workflowName")})
 	case worlds.EventTypeHookDisposed:
 		claim := hookClaim(d["forceClaimedBy"])
 		if claim == nil {
@@ -290,7 +322,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 			// Written without Data.
 			return nil, nil
 		}
-		return json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt})
+		return json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt, CreatorMessageID: str(d, "creatorMessageId")})
 	}
 	// run_started, run_cancelled, wait_completed, and the backend's own
 	// events, such as noop slot fillers, carry no Data.

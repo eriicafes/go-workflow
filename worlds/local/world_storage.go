@@ -36,7 +36,8 @@ type runRecord struct {
 	DataPurged bool `json:"dataPurged,omitempty"`
 }
 
-// stepRecord is the materialized step. InputSlot is its step_created event.
+// stepRecord is the materialized step. InputSlot is its step_created event,
+// or the step_started that created an inline step.
 // OutputSlot or ErrorSlot is its latest result: step_completed, or
 // step_failed or step_retrying. A later result replaces the earlier one.
 type stepRecord struct {

@@ -736,6 +736,12 @@ type RPCEventResult struct {
 type RPCEventBatchResult struct {
 	Results     []RPCBatchEventResult
 	InBandCount int
+	// Allocated is the number of positions the batch allocated.
+	Allocated int
+	// Events is the skipped-slot report of an in-band batch, and HasMore
+	// reports that it is incomplete.
+	Events  []Event `cbor:",omitempty"`
+	HasMore *bool   `cbor:",omitempty"`
 }
 
 // RPCBatchEventResult is one event's outcome in an RPCEventBatchResult: Status
@@ -763,7 +769,7 @@ func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID
 		return RPCEventResult{}, err
 	}
 	if result.Events != nil {
-		hasMore := false
+		hasMore := result.MoreEvents
 		value.Events, value.HasMore = result.Events, &hasMore
 	}
 	return value, nil
@@ -792,41 +798,30 @@ func eventEntity(ctx context.Context, world World, event Event, correlationID st
 	return nil, nil, nil
 }
 
-// rpcEventBatch appends a batch and reports each event's outcome. When the
-// World refuses the batch, which appends none of it, and the batch is not
-// fenced in-band, its events are appended one at a time instead, so each
-// reports the outcome its own events.create would have had. Any other failure
-// may have committed the batch and is returned.
+// rpcEventBatch appends a batch and reports each event's outcome: the
+// committed event and the entity it changed, or the status and error code a
+// single events.create would have failed with.
 func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInput) (RPCEventBatchResult, error) {
 	batch, err := world.EventsCreateBatch(ctx, input)
-	if err == nil {
-		value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(batch.Events)), InBandCount: batch.InBandCount}
-		for index, result := range batch.Events {
-			event, err := rpcEventResult(ctx, world, input.RunID, input.Events[index].CorrelationID, result)
-			if err != nil {
-				return RPCEventBatchResult{}, err
-			}
-			value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: event.Event, Run: event.Run, Step: event.Step}
-		}
-		return value, nil
-	}
-	if code := newRPCError(err).Code; input.InBandCount != nil || code != "conflict" && code != "invalid_argument" {
+	if err != nil {
 		return RPCEventBatchResult{}, err
 	}
-	value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(input.Events))}
-	for index, event := range input.Events {
-		created, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: event})
-		if err == nil {
-			var result RPCEventResult
-			result, err = rpcEventResult(ctx, world, input.RunID, event.CorrelationID, created)
-			if err == nil {
-				value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: result.Event, Run: result.Run, Step: result.Step}
-				value.InBandCount = created.InBandCount
-				continue
-			}
+	value := RPCEventBatchResult{Results: make([]RPCBatchEventResult, len(batch.Results)), InBandCount: batch.InBandCount, Allocated: batch.AllocatedEventCount}
+	if batch.Events != nil {
+		more := batch.MoreEvents
+		value.Events, value.HasMore = batch.Events, &more
+	}
+	for index, item := range batch.Results {
+		if item.Err != nil {
+			failure := newRPCError(item.Err)
+			value.Results[index] = RPCBatchEventResult{Status: rpcErrorStatus(failure.Code), Error: failure.Code, Message: failure.Message}
+			continue
 		}
-		failure := newRPCError(err)
-		value.Results[index] = RPCBatchEventResult{Status: rpcErrorStatus(failure.Code), Error: failure.Code, Message: failure.Message}
+		event, err := rpcEventResult(ctx, world, input.RunID, input.Events[index].CorrelationID, item.EventResult)
+		if err != nil {
+			return RPCEventBatchResult{}, err
+		}
+		value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: event.Event, Run: event.Run, Step: event.Step}
 	}
 	return value, nil
 }

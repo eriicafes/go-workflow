@@ -27,11 +27,14 @@ const (
 	// API, which accepts a Vercel access token from outside a deployment.
 	DefaultProxyURL = "https://api.vercel.com/v1/workflow"
 
-	// specVersion is the spec version of every run this World creates:
-	// slot-numbered event IDs, a sealed log whose in-band writes are fenced,
-	// hook token retention, and forced hook claims. Later versions change the
-	// orchestration model, so runs stay on it.
-	specVersion = 8
+	// specVersion is the spec version of every run this World creates,
+	// worlds.SpecVersion: one orchestrator per run, whose in-band writes the
+	// backend fences, over slot-numbered event IDs in a sealed log. The
+	// backend serves such runs only on its /v5 event routes.
+	specVersion = worlds.SpecVersion
+
+	// eventsRoute is the version of the run-scoped event routes.
+	eventsRoute = "/v5"
 
 	cborContentType  = "application/cbor"
 	frameContentType = "application/vnd.workflow.v4-frames"

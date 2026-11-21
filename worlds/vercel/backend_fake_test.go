@@ -63,6 +63,9 @@ var storedKeys = map[string]string{
 	"hookForce":               "force",
 	"encryptionPublicKey":     "encryptionPublicKey",
 	"ownerMessageId":          "ownerMessageId",
+	"attempt":                 "attempt",
+	"inline":                  "inline",
+	"creatorMessageId":        "creatorMessageId",
 	"changes":                 "changes",
 	"writer":                  "writer",
 	"errorCode":               "errorCode",
@@ -101,13 +104,13 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		mux.ServeHTTP(writer, request)
 	case len(parts) == 3 && parts[0] == "v4" && parts[1] == "runs" && parts[2] == "purge" && request.Method == http.MethodPost:
 		f.purge(ctx, writer, request)
-	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && parts[4] == "batch" && request.Method == http.MethodPost:
+	case len(parts) == 5 && eventsVersion(parts[0]) && parts[1] == "runs" && parts[3] == "events" && parts[4] == "batch" && request.Method == http.MethodPost:
 		f.createBatch(ctx, writer, request, worlds.RunID(parts[2]), parts[0])
-	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodPost:
+	case len(parts) == 5 && eventsVersion(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodPost:
 		f.createEvent(ctx, writer, request, worlds.RunID(parts[2]), parts[0])
-	case len(parts) == 4 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
+	case len(parts) == 4 && eventsVersion(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
 		f.listEvents(ctx, writer, worlds.RunID(parts[2]), query, parts[0])
-	case len(parts) == 5 && eventsRoute(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
+	case len(parts) == 5 && eventsVersion(parts[0]) && parts[1] == "runs" && parts[3] == "events" && request.Method == http.MethodGet:
 		event, err := f.store.EventsGet(ctx, worlds.EventsGetInput{RunID: worlds.RunID(parts[2]), EventID: worlds.EventID(parts[4])})
 		if err != nil {
 			writeGoError(writer, err)
@@ -223,11 +226,11 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 	}
 }
 
-// eventsRoute reports whether version serves the run-scoped event routes.
+// eventsVersion reports whether version serves the run-scoped event routes.
 // /v5 serves the runs of every spec version, and is the only route that
 // writes to a spec 9 run and enforces the in-band fence. /v4 serves the runs
 // below spec 9 and ignores the fence.
-func eventsRoute(version string) bool { return version == "v4" || version == "v5" }
+func eventsVersion(version string) bool { return version == "v4" || version == "v5" }
 
 func routeName(parts []string) string {
 	var names []string
@@ -308,11 +311,8 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 // fence returns the in-band count a write on route version is fenced with,
 // and the slot it reports skipped events after. /v5 fences a frame with
 // inBand, refuses one without expectedSeqInBand, and reports the events after
-// its maxSlot. /v4 refuses a write to a spec 9 run and reports nothing.
-//
-// The real backend most likely enforces the fence only on /v5. Until the
-// World writes through /v5, the fake still fences a /v4 frame with inBand, as
-// the World's tests expect.
+// its maxSlot. /v4 refuses a write to a spec 9 run, and fences and reports
+// nothing.
 func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version string, in frame) (*int, *int, *outcome) {
 	spec, _ := asInt(in.Meta["specVersion"])
 	if worlds.EventType(str(in.Meta, "eventType")) != worlds.EventTypeRunCreated {
@@ -321,10 +321,6 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 	if version == "v4" {
 		if spec >= 9 {
 			return nil, nil, &outcome{status: http.StatusBadRequest, code: "spec-version", message: "a spec 9 run is written through /v5"}
-		}
-		if inBand, _ := in.Meta["inBand"].(bool); inBand {
-			count, _ := asInt(in.Meta["expectedSeqInBand"])
-			return &count, nil, nil
 		}
 		return nil, nil, nil
 	}
@@ -344,11 +340,10 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 }
 
 // specVersion returns the spec version run_created stamped on runID.
-func (f *fakeBackend) specVersion(ctx context.Context, runID worlds.RunID) int {
-	page, err := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1}})
-	if err != nil || len(page.Data) == 0 {
-		return 0
-	}
+func (f *fakeBackend) specVersion(_ context.Context, runID worlds.RunID) int { return f.spec(runID) }
+
+// spec returns the spec version run_created stamped on runID.
+func (f *fakeBackend) spec(runID worlds.RunID) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.specs[runID]
@@ -467,6 +462,8 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		stored[field] = in.Body
 	}
 	wire := wireEvent{EventType: string(eventType), CorrelationID: str(in.Meta, "correlationId"), Data: stored}
+	// An in-band write is stored at the time it occurred.
+	occurred, _ := asTime(in.Meta["occurredAt"])
 	data, err := eventData(wire)
 	if err != nil {
 		return outcome{status: http.StatusBadRequest, code: "invalid", message: err.Error()}
@@ -484,7 +481,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		events, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 		return outcome{status: http.StatusOK, answer: map[string]any{"event": f.wireEvent(events.Data[0], true), "run": f.wireRun(run, nil), "allocated": 1}}
 	}
-	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
+	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
 	if err != nil {
 		if errors.Is(err, worlds.ErrInBandSuperseded) {
 			seq, seqInBand := f.counters(ctx, runID)
@@ -537,10 +534,9 @@ func (f *fakeBackend) listEvents(ctx context.Context, writer http.ResponseWriter
 		return
 	}
 	events, cursor, hasMore := pageEvents(page.Data, query)
-	// The World still reads the in-band count from a /v4 listing's end
-	// frame until it reads /v5.
-	snapshot := map[string]any{"seq": seq, "seqInBand": seqInBand}
+	var snapshot map[string]any
 	if version == "v5" {
+		snapshot = map[string]any{"seq": seq, "seqInBand": seqInBand}
 		writer.Header().Set("X-Wf-Snapshot-Seq", strconv.Itoa(seq))
 		writer.Header().Set("X-Wf-Snapshot-Seq-In-Band", strconv.Itoa(seqInBand))
 	}
@@ -687,7 +683,7 @@ func lazy(query map[string][]string) bool {
 }
 
 func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[string]any {
-	wire := map[string]any{"runId": string(run.RunID), "workflowName": run.WorkflowName, "status": string(run.Status), "deploymentId": run.DeploymentID, "attributes": run.Attributes, "createdAt": run.CreatedAt, "updatedAt": run.UpdatedAt, "specVersion": specVersion}
+	wire := map[string]any{"runId": string(run.RunID), "workflowName": run.WorkflowName, "status": string(run.Status), "deploymentId": run.DeploymentID, "attributes": run.Attributes, "createdAt": run.CreatedAt, "updatedAt": run.UpdatedAt, "specVersion": f.spec(run.RunID)}
 	if run.EncryptionPublicKey != "" {
 		wire["encryptionPublicKey"] = run.EncryptionPublicKey
 	}

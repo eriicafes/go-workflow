@@ -83,7 +83,7 @@ func deliverAll(ctx context.Context, t *testing.T, queue *fakeVQS, consumer http
 func TestWorkflowsRunEndToEnd(t *testing.T) {
 	all, queue, backend := newWorlds(t, 1)
 	runEndToEnd(t, all[0], queue)
-	if backend.count("POST v4/runs/:id/events/batch") == 0 {
+	if backend.count("POST v5/runs/:id/events/batch") == 0 {
 		t.Fatal("inline steps were not written as a batch")
 	}
 }
