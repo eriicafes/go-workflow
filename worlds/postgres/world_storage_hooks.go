@@ -123,7 +123,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		claimant := runs[input.RunID]
 		before := claimant.count
 		if claimant.run.Status.Terminal() {
-			return worlds.ErrRunTerminal
+			return worlds.FinishedRunRefusal(claimant.run.Status, input.Event, "")
 		}
 		if err := claimant.fence(input.Options.InBandCount); err != nil {
 			return err

@@ -338,6 +338,12 @@ func classify(err error, eventType worlds.EventType) error {
 		switch eventType {
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			return fmt.Errorf("%w: %v", worlds.ErrHookNotFound, err)
+		case worlds.EventTypeWaitCompleted:
+			// A wait that was never created, as world-vercel's backend
+			// refuses it.
+			if api.Code != "run-not-found" {
+				return fmt.Errorf("%w: %v", worlds.ErrEventNotFound, err)
+			}
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunNotFound, err)
 	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":
@@ -359,17 +365,23 @@ func classify(err error, eventType worlds.EventType) error {
 		// an EntityConflictError: a run_started of a running run, or a
 		// second creation.
 		return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
-	case api.Status == http.StatusConflict, api.Status == http.StatusGone:
+	case api.Status == http.StatusGone:
+		// world-vercel's RunExpiredError: the run finished.
+		return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+	case api.Status == http.StatusConflict:
 		if strings.Contains(api.Code, "run") {
 			if eventType == worlds.EventTypeRunCreated {
 				return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
 			}
-			return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+			// A transition from, or a creation on, a finished run: a 409,
+			// which world-vercel reports as an EntityConflictError, where a
+			// finished run's other refusals are a 410's RunExpiredError.
+			return fmt.Errorf("%w: %w: %v", worlds.ErrEventConflict, worlds.ErrRunTerminal, err)
 		}
 		switch eventType {
 		case worlds.EventTypeRunCreated:
 			return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
-		case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet, worlds.EventTypeHookCreated:
+		case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed, worlds.EventTypeRunCancelled, worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet, worlds.EventTypeHookCreated:
 			// The backend refuses a second creation, as world-vercel's
 			// EntityConflictError reports it.
 			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)

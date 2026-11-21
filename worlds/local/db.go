@@ -30,8 +30,7 @@ const busyTimeout = 30 * time.Second
 const schemaVersion = 1
 
 // schema is world-local's schema (db/schema.js), without the snapshots
-// table, which only dynamic workflow code uses. A stream's chunks are keyed by
-// their run as well, since a stream's name is unique only within its run.
+// table, which holds QuickJS virtual machine images Go does not take.
 const schema = `
 CREATE TABLE runs (
   run_id TEXT PRIMARY KEY,
@@ -121,8 +120,9 @@ CREATE TABLE stream_chunks (
   tag TEXT,
   data BLOB,
   eof INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (run_id, name, idx)
+  PRIMARY KEY (name, idx)
 ) WITHOUT ROWID;
+CREATE INDEX stream_chunks_by_run ON stream_chunks (run_id);
 `
 
 // database is the World's SQLite database: one connection for writes, which

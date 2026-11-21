@@ -90,8 +90,6 @@ It differs from world-local's in these ways:
   payloads as raw bytes. The encoding is Go's own, not cbor-x.
 - The run, step, and hook views hold no payloads. Each records the slot of the
   event that holds its payload, and reads load it from there.
-- Stream chunks are keyed by run as well as name, since a stream name is
-  unique only within its run.
 
 The database runs in WAL mode with `synchronous=NORMAL`, `secure_delete`, and
 incremental vacuum. Every write is one `BEGIN IMMEDIATE` transaction, which

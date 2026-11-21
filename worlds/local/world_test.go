@@ -297,7 +297,8 @@ func TestTagIsolation(t *testing.T) {
 		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "tags"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: id, Name: "out", Chunk: []byte("x")}); err != nil {
+		// A stream name carries its run, as the Workflow SDK names streams.
+		if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: id, Name: worlds.UserStreamName(id, "out"), Chunk: []byte("x")}); err != nil {
 			t.Fatal(err)
 		}
 	}

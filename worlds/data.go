@@ -525,3 +525,48 @@ const (
 	AttributeWriterWorkflow = "workflow"
 	AttributeWriterStep     = "step"
 )
+
+// FinishedRunRefusal returns the error a World refuses event with on a
+// finished run, the run's status, as the Workflow SDK's Worlds refuse it, or
+// nil when the event is checked as on a running run. stepStatus is the
+// status of the event's step, or empty.
+//
+//   - A run_cancelled of a cancelled run is recorded: nil.
+//   - A terminal transition, a step, wait, or hook creation, an inline
+//     step's creating step_started, and an attr_set are refused with
+//     ErrEventConflict, the SDK's EntityConflictError. The error also
+//     matches ErrRunTerminal, which says why.
+//   - A run_started, a step_started, a hook_received, and a step's result
+//     while the step is not running are refused with ErrRunTerminal, the
+//     SDK's RunExpiredError.
+//   - A wait_completed is refused with ErrEventNotFound, since a run's waits
+//     end with it.
+//   - A step's result while it runs, a result of a step a World refuses
+//     anyway, and a hook_disposed, which needs a hook its token retention
+//     kept, are checked further: nil.
+func FinishedRunRefusal(status Status, event EventsCreateEvent, stepStatus Status) error {
+	switch event.EventType {
+	case EventTypeRunCancelled:
+		if status == StatusCancelled {
+			return nil
+		}
+		return fmt.Errorf("%w: %w: cannot transition a run from terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+	case EventTypeRunCompleted, EventTypeRunFailed:
+		return fmt.Errorf("%w: %w: cannot transition a run from terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeAttrSet:
+		return fmt.Errorf("%w: %w: cannot record %s on a run in terminal status %s", ErrEventConflict, ErrRunTerminal, event.EventType, status)
+	case EventTypeStepStarted:
+		if StartCreatesStep(event.Data) {
+			return fmt.Errorf("%w: %w: cannot create a step on a run in terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+		}
+	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying:
+		if stepStatus == StatusRunning || stepStatus == "" || stepStatus.Terminal() {
+			return nil
+		}
+	case EventTypeWaitCompleted:
+		return fmt.Errorf("%w: wait %s ended with its run", ErrEventNotFound, event.CorrelationID)
+	case EventTypeHookDisposed:
+		return nil
+	}
+	return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+}

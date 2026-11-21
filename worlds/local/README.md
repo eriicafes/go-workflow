@@ -44,8 +44,6 @@ JavaScript or for data written by older releases:
 - **Event data is Go's own CBOR**, with payloads as raw bytes rather than
   cbor-x, and view docs are plain JSON without world-local's `__type` tags,
   since no JavaScript reads them.
-- **Stream chunks are keyed by run as well as name.** An SDK stream name
-  carries its run's ID, but a Go stream name is unique only within its run.
 - **There is one schema version and no legacy data**, so the World writes no
   `version.txt` and prints no legacy notice.
 - **It serves analytics,** which world-local does not: runs and attributes

@@ -64,9 +64,8 @@ releases:
   writes, so a resume queues its delivery without reading the run. The empty
   `owner_id`, `project_id`, and `environment` columns, which world-postgres
   keeps for Vercel's accounts, are gone.
-- **Steps and stream chunks are keyed by run** as well as by step and stream,
-  as world-local keys steps, since a Go step or stream name is unique only
-  within its run.
+- **Steps are keyed by run** as well as by step, as world-local keys them,
+  since a step ID is unique only within its run.
 - **A purge removes the payloads from each event's CBOR** and keeps the rest
   of its data, where world-postgres clears the whole column. It cuts each
   stream to an `eof` row, as world-local does, where world-postgres keeps the

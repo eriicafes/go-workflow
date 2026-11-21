@@ -291,7 +291,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an event's refusal by the transition rules,
 // rather than a failure to read or write.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -358,7 +358,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			return err
 		}
 		if claimant.view.Status.Terminal() {
-			return worlds.ErrRunTerminal
+			return worlds.FinishedRunRefusal(claimant.view.Status, input.Event, "")
 		}
 		if err := fence(claimant, input.Options.InBandCount); err != nil {
 			return err
@@ -870,22 +870,18 @@ func (tx *appendTx) owns(ctx context.Context, hook *worlds.Hook) (*tokenEntry, b
 // run_started of a run that started before, which appends nothing.
 func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) (*worlds.EventResult, error) {
 	if run.view.Status.Terminal() {
-		// A finished run still records what was running when it finished: a
-		// step's final result, and a wait's completion.
-		finishing := requested.EventType == worlds.EventTypeWaitCompleted
-		if requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed {
+		var stepStatus worlds.Status
+		if requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed || requested.EventType == worlds.EventTypeStepRetrying {
 			entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
 			if err != nil {
 				return nil, err
 			}
-			finishing = entry.view != nil && !entry.view.Status.Terminal()
-		}
-		if !finishing {
-			if requested.EventType == worlds.EventTypeRunCancelled && run.view.Status == worlds.StatusCancelled {
-				// Cancelling a cancelled run records the request.
-				return nil, nil
+			if entry.view != nil {
+				stepStatus = entry.view.Status
 			}
-			return nil, worlds.ErrRunTerminal
+		}
+		if err := worlds.FinishedRunRefusal(run.view.Status, requested, stepStatus); err != nil {
+			return nil, err
 		}
 	}
 	switch requested.EventType {
@@ -935,6 +931,14 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		}
 		if entry.eventID != "" {
 			return nil, fmt.Errorf("%w: wait %s already completed", worlds.ErrEventConflict, requested.CorrelationID)
+		}
+		// A wait completes once it was created.
+		created, err := tx.logged(ctx, run, worlds.EventTypeWaitCreated, requested.CorrelationID)
+		if err != nil {
+			return nil, err
+		}
+		if !created {
+			return nil, fmt.Errorf("%w: wait %s not found", worlds.ErrEventNotFound, requested.CorrelationID)
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeAttrSet:
 		// A wait is created once, and an attribute write of the workflow is
@@ -1006,25 +1010,35 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 // as of the slot the transaction conditions its write on, holds an event of
 // its type and correlation ID, or the transaction appended one.
 func (tx *appendTx) refuseRepeat(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) error {
-	conflict := fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
+	logged, err := tx.logged(ctx, run, requested.EventType, requested.CorrelationID)
+	if err != nil || !logged {
+		return err
+	}
+	return fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
+}
+
+// logged reports whether the run's log, as of the slot the transaction
+// conditions its write on, holds an eventType event of correlationID, or the
+// transaction appended one.
+func (tx *appendTx) logged(ctx context.Context, run *runEntry, eventType worlds.EventType, correlationID string) (bool, error) {
 	for _, event := range run.events {
-		if event.EventType == requested.EventType && event.CorrelationID == requested.CorrelationID {
-			return conflict
+		if event.EventType == eventType && event.CorrelationID == correlationID {
+			return true, nil
 		}
 	}
 	pagination := worlds.Pagination{}
 	for {
-		page, err := tx.world.eventsPage(ctx, run.view.RunID, requested.CorrelationID, pagination, worlds.EventsResolveDataNone)
+		page, err := tx.world.eventsPage(ctx, run.view.RunID, correlationID, pagination, worlds.EventsResolveDataNone)
 		if err != nil {
-			return err
+			return false, err
 		}
 		for _, event := range page.Data {
-			if event.EventType == requested.EventType {
-				return conflict
+			if event.EventType == eventType {
+				return true, nil
 			}
 		}
 		if !page.HasMore {
-			return nil
+			return false, nil
 		}
 		pagination.Cursor = page.Cursor
 	}

@@ -135,9 +135,12 @@ when it occurred, which the World stores as its `CreatedAt`.
 
 ## Admission rules
 
-- A finished run refuses `step_created`, `step_started`, `step_retrying`,
-  `wait_created`, and other new work (`ErrRunTerminal`), and still records a
-  step's `step_completed` or `step_failed` and a `wait_completed`.
+- A finished run refuses a transition or a new step, wait, hook, or
+  attribute with `ErrEventConflict` (also matching `ErrRunTerminal`), another
+  attempt or the result of a step that is not running with `ErrRunTerminal`,
+  and a `wait_completed` with `ErrEventNotFound`, as the Workflow SDK's Worlds
+  do. It still records a running step's result or retry.
+- A `wait_completed` needs its `wait_created` (`ErrEventNotFound`).
 - Other checks of a step or wait against the events before it are optional
   (`ErrStepNotStartable`): the runtime decides from the log alone. Replay
   ignores any event of a step, hook, or wait after its final one, so the
