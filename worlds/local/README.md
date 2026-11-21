@@ -29,3 +29,23 @@ serializes their writes.
 See [Local World](https://go-workflow.vercel.app/worlds/local) for the
 configuration, the schema and how it differs from world-local's, tags, the
 queue, and restart recovery.
+
+## Differences from world-local
+
+Go never shares a data directory with a JavaScript World, so the World keeps
+world-local's tables and behavior except where they exist only for
+JavaScript or for data written by older releases:
+
+- **No `snapshots` table.** Go has no dynamic workflow code to snapshot.
+- **Payloads are stored once, in the events.** The run, step, and hook views
+  record the slot of the event holding each payload, where world-local copies
+  the payload into every view.
+- **Event data is Go's own CBOR**, with payloads as raw bytes rather than
+  cbor-x, and view docs are plain JSON without world-local's `__type` tags,
+  since no JavaScript reads them.
+- **Stream chunks are keyed by run as well as name.** An SDK stream name
+  carries its run's ID, but a Go stream name is unique only within its run.
+- **Restart recovery's backstop wake is a flow** with a `NotBefore`, since Go
+  has no plain wake message.
+- **There is one schema version and no legacy data**, so the World writes no
+  `version.txt` and prints no legacy notice.
