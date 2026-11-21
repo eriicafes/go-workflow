@@ -111,3 +111,17 @@ func TestHandoffArmsTheEarliestOpenWaitOfItsOwnChain(t *testing.T) {
 		t.Fatalf("queued %+v, want the timer of wait_first", world.queued)
 	}
 }
+
+func TestTimerDeliveryArmsItsWaitAgainWhenItFellDueAfterTheReplay(t *testing.T) {
+	data, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: time.Now().Add(-time.Millisecond), CreatorMessageID: "msg"})
+	world := &queueRecorder{}
+	e := &Execution{ctx: context.Background(), world: world, completedChains: map[string]bool{},
+		events:   []worlds.Event{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_a", Data: data}},
+		delivery: worlds.QueueInput{MessageID: "timer", DeliveryCount: 1, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_a"}}}
+	// The replay found the wait not yet due, and it is due now: the
+	// delivery left it open, so it arms it again under the next attempt.
+	e.armTimers()
+	if len(world.queued) != 1 || world.queued[0].WaitContinuation.Attempt != 1 {
+		t.Fatalf("queued %+v, want the wait's timer with attempt 1", world.queued)
+	}
+}
