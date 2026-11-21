@@ -179,6 +179,7 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 | Function | Context | Description |
 | --- | --- | --- |
 | `Now` | W | Recorded current time in UTC. |
+| `RandReader` | W | Reader of random bytes drawn from the run's seed. Its `Read` returns `ErrNoWorkflow` outside workflow context. |
 | `Sleep` | W | Suspends the run for `duration`. |
 | `Timer` | W | Promise that settles after `duration`. |
 

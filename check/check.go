@@ -7,6 +7,7 @@ package check
 import (
 	"go/ast"
 	"go/types"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -18,7 +19,8 @@ const workflowPackage = "github.com/eriicafes/go-workflow"
 // function or method whose input type is a workflow.
 //
 // In runners, it reports operations that break replay, such as goroutines,
-// select, ranging over maps, time.Now, and I/O or randomness outside steps. It
+// select, ranging over maps, time.Now, and I/O or randomness outside steps,
+// allowing calls that read from workflow.RandReader. It
 // also reports stream access outside steps, and steps that are not named
 // functions or that capture variables instead of taking them as input.
 var Analyzer = &analysis.Analyzer{Name: "workflowcheck", Doc: "reports invalid or non-deterministic workflows", Run: run}
@@ -138,6 +140,7 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 	// perform step-only operations. Every other function literal in a runner,
 	// such as a Then callback or a local helper, runs in workflow context.
 	steps := map[*ast.FuncLit]bool{}
+	readers := seedReaders(pass, body)
 	ast.Inspect(body, func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.FuncLit:
@@ -158,13 +161,15 @@ func checkBody(pass *analysis.Pass, body *ast.BlockStmt) {
 				isSDKMethod(pass, node, "RespondWith") {
 				pass.Reportf(node.Pos(), "workflow stream access and webhook responses require a durable step")
 			}
-			if banned, ok := bannedCall(pass, node); ok {
+			if banned, ok := bannedCall(pass, node); ok && !readsSeed(pass, node, readers) {
 				if strings.HasPrefix(banned, "context.With") {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.WithCancel/WithCancelCause and durable timers instead", banned)
 				} else if banned == "time.Now" || banned == "time.Since" || banned == "time.Until" {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Now instead", banned)
 				} else if strings.HasPrefix(banned, "time.") {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Sleep instead", banned)
+				} else if strings.HasPrefix(banned, "crypto/rand.") || strings.HasPrefix(banned, "math/rand") {
+					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.RandReader instead", banned)
 				} else {
 					pass.Reportf(node.Pos(), "workflow body calls %s, use workflow.Step or workflow.Background instead", banned)
 				}
@@ -236,6 +241,59 @@ func validateClosure(pass *analysis.Pass, closure *ast.FuncLit) {
 		pass.Reportf(identifier.Pos(), "durable closure captures %s, pass workflow-relevant state through its explicit input instead", identifier.Name)
 		return true
 	})
+}
+
+// seedReaders returns the variables in body assigned a workflow.RandReader.
+func seedReaders(pass *analysis.Pass, body *ast.BlockStmt) map[types.Object]bool {
+	readers := map[types.Object]bool{}
+	mark := func(names []*ast.Ident, values []ast.Expr) {
+		if len(names) != len(values) {
+			return
+		}
+		for index, value := range values {
+			if call, ok := value.(*ast.CallExpr); ok && isSDKCall(pass, call, "RandReader") {
+				if object := pass.TypesInfo.ObjectOf(names[index]); object != nil {
+					readers[object] = true
+				}
+			}
+		}
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			var names []*ast.Ident
+			for _, left := range node.Lhs {
+				identifier, _ := left.(*ast.Ident)
+				names = append(names, identifier)
+			}
+			if !slices.Contains(names, nil) {
+				mark(names, node.Rhs)
+			}
+		case *ast.ValueSpec:
+			mark(node.Names, node.Values)
+		}
+		return true
+	})
+	return readers
+}
+
+// readsSeed reports whether call reads from workflow.RandReader: one of its
+// arguments is a call to it or a variable assigned one, as in
+// io.ReadFull(workflow.RandReader(ctx), buffer).
+func readsSeed(pass *analysis.Pass, call *ast.CallExpr, readers map[types.Object]bool) bool {
+	for _, argument := range call.Args {
+		switch argument := argument.(type) {
+		case *ast.CallExpr:
+			if isSDKCall(pass, argument, "RandReader") {
+				return true
+			}
+		case *ast.Ident:
+			if readers[pass.TypesInfo.ObjectOf(argument)] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isSDKCall(pass *analysis.Pass, call *ast.CallExpr, name string) bool {

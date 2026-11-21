@@ -1,10 +1,12 @@
 package workflow_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -1138,5 +1140,49 @@ func TestInlineBackgroundRunsInlineWithoutStepDeliveries(t *testing.T) {
 		if err != nil || output.Sum != 12 || calls.Load() != want {
 			t.Fatalf("fail=%v output=%#v err=%v calls=%d", fail, output, err, calls.Load())
 		}
+	}
+}
+
+type randInput struct{}
+type randOutput struct{ Before, Echoed, After []byte }
+
+func (randInput) Workflow(randOutput) {}
+
+func echoBytes(_ context.Context, value []byte) ([]byte, error) { return value, nil }
+
+func TestRandReaderReplaysTheSameBytes(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ randInput) (randOutput, error) {
+		var output randOutput
+		output.Before = make([]byte, 8)
+		if _, err := io.ReadFull(workflow.RandReader(ctx), output.Before); err != nil {
+			return output, err
+		}
+		// The step's input is recorded on first execution, and the output is
+		// built by the last replay, so equal bytes mean every replay drew them.
+		echoed, err := workflow.Step(ctx, echoBytes, output.Before)
+		if err != nil {
+			return output, err
+		}
+		output.Echoed = echoed
+		output.After = make([]byte, 8)
+		_, err = io.ReadFull(workflow.RandReader(ctx), output.After)
+		return output, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, randInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Before, output.Echoed) || bytes.Equal(output.Before, output.After) {
+		t.Fatalf("output = %+v, want Before replayed and After drawn after it", output)
+	}
+	if _, err := workflow.RandReader(ctx).Read(make([]byte, 1)); !errors.Is(err, workflow.ErrNoWorkflow) {
+		t.Fatalf("RandReader outside workflow = %v, want ErrNoWorkflow", err)
 	}
 }
