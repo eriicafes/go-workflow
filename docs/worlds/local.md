@@ -52,10 +52,10 @@ client := workflow.NewClient(world)
 - **`Close()`** stops delivery, waits for in-flight deliveries, and closes the
   database. Queued messages are lost, and the next `Prepare` queues the
   active runs again.
-- **`Clear(ctx)`** requires a prepared World. It stops delivery, deletes the
-  World's data, and closes the World: a tagged World's runs, everything they
-  own, and its hooks and streams; an untagged World's whole database. Open a
-  new World to continue.
+- **`Clear(ctx)`** requires a prepared World. It cancels the deliveries in
+  flight and deletes the World's data: a tagged World's runs, everything they
+  own, and its hooks and streams; an untagged World's whole database. The
+  World stays open, as world-local's `clear()` leaves it.
 
 Several processes may share a data directory, such as an application and a
 script that starts runs. The database serializes their writes. Restart
