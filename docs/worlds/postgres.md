@@ -209,9 +209,11 @@ write), `workflow_run_status` (sent when a run ends), and
 `RunsWaitForTerminalStatus`, and `StreamsGetChunks` wake on these
 notifications and also re-check every `PollInterval`, so a lost notification
 only adds latency. As in world-postgres, a write sends its notifications after
-its transaction commits, without waiting for them: a `NOTIFY` inside the
-transaction could fail the write, and Postgres serializes the commits of
-notifying transactions.
+its transaction commits, since a `NOTIFY` inside the transaction could fail
+the write and Postgres serializes the commits of notifying transactions. A
+write that ends a run or writes a stream chunk returns once its notifications
+are sent. Other writes don't wait for them. A failed notification never fails
+the write.
 
 ::: warning Connection poolers
 Poolers in transaction mode, such as PgBouncer, do not support `LISTEN`. Point
