@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -40,14 +41,14 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	var executionContext []byte
 	if len(input.ExecutionContext) > 0 {
-		if executionContext, err = json.Marshal(input.ExecutionContext); err != nil {
+		if executionContext, err = encodeJSONValue(input.ExecutionContext); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
 	at := now()
 	var startHook []byte
 	if echo := worlds.RunEchoStartHook(payload); echo != nil {
-		if startHook, err = json.Marshal(echo); err != nil {
+		if startHook, err = cbor.Marshal(echo); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
@@ -71,7 +72,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	var repeat *worlds.EventResult
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
 		repeat = nil
-		tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_runs (id, name, status, attributes, deployment_id, encryption_public_key, execution_context, spec_version, created_at, updated_at, start_hook)
+		tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_runs (id, name, status, attributes, deployment_id, encryption_public_key, execution_context_cbor, spec_version, created_at, updated_at, start_hook_cbor)
 			VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $8, $9) ON CONFLICT (id) DO NOTHING`),
 			input.RunID, input.WorkflowName, encodedAttributes, input.DeploymentID, nullable(input.EncryptionPublicKey), executionContext, worlds.SpecVersion, at, startHook)
 		if err != nil {

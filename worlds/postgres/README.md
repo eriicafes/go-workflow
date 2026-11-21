@@ -50,14 +50,16 @@ releases:
   bytes, not cbor-x, and the deprecated `jsonb` columns are gone.
 - **The queue is Go's own `workflow_queue`.** There is no graphile-worker,
   `workflow_run_delivery_leases`, `workflow_job_lock_holders`, `wake_pending`,
-  or `job_prefix`, and no invocation or snapshot tables, since Go has neither
-  feature.
+  or `job_prefix`. There are no invocation or snapshot tables and no
+  `dynamic_workflow_code_cbor` column, since Go has no request/response
+  invocations, QuickJS snapshots, or dynamic workflow code.
 - **The schema name is configurable** with `Config.Schema`, which
   world-postgres hardcodes, so tests can each use their own.
 - **`workflow_runs.spec_version` is an `integer`**, as world-postgres's model
   declares it. Its migrations still create the column as `varchar`.
-- **There is no `input_slot`:** a run's input is always its first event.
-  `data_purged` records that `Config.Retention` deleted a run's data.
+- **`workflow_runs` has a `data_purged` column,** which world-postgres does
+  not: `Config.Retention`'s background deletion finds the expired runs whose
+  data is still there by it.
 - **Hooks fill in `resume_context`,** which world-postgres declares but never
   writes, so a resume queues its delivery without reading the run. The empty
   `owner_id`, `project_id`, and `environment` columns, which world-postgres
@@ -72,6 +74,9 @@ releases:
 - **A `workflow_event_chunk` notification names its stream by a hash** of its
   run and name. Postgres refuses a notification of 8000 bytes or more, and a
   stream name has no length limit.
+- **It serves analytics,** which world-postgres does not: runs and
+  attributes from its tables, and steps, events, hooks, and waits from the
+  event log.
 - **A failed chunk notification is ignored.** world-postgres fails the stream
   write after the chunk committed, so a writer that retries writes it twice.
   Readers also poll, so a lost notification only delays them.
