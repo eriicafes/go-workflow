@@ -120,7 +120,7 @@ func TestRetentionDynamo(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	runID := worlds.RunID("wrun_retention")
+	runID := worlds.NewRunID()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "retention", Input: []byte(`"input"`)}); err != nil {
 		t.Fatal(err)
 	}

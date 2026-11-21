@@ -226,6 +226,8 @@ export namespace RPC {
 // runtime checks for, by that class's name.
 const sdkErrorNames: Record<string, string> = {
 	throttled: "ThrottleError",
+	too_early: "TooEarlyError",
+	attribute_invalid: "AttributeValidationError",
 	event_conflict: "EntityConflictError",
 	run_already_exists: "EntityConflictError",
 	run_terminal: "RunExpiredError",
@@ -265,6 +267,7 @@ const rpcErrorStatus: Record<string, number> = {
 	conflict: 409,
 	unimplemented: 501,
 	resource_exhausted: 429,
+	too_early: 425,
 	cancelled: 499,
 	deadline_exceeded: 504,
 };

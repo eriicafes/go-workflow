@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -63,6 +64,7 @@ var storedKeys = map[string]string{
 	"workflowName":            "workflowName",
 	"deploymentId":            "deploymentId",
 	"attributes":              "attributes",
+	"allowReservedAttributes": "allowReservedAttributes",
 	"stepName":                "stepName",
 	"resumeAt":                "resumeAt",
 	"retryAfter":              "retryAfter",
@@ -287,6 +289,9 @@ type outcome struct {
 	// seq and seqInBand are the run's position counters, for an in-band
 	// refusal.
 	seq, seqInBand int
+	// retryAfter is the Retry-After of a 425, a step started before its
+	// retry is due.
+	retryAfter time.Duration
 	// details is the structured body of a refusal, such as the owner of a
 	// start hook's token.
 	details map[string]any
@@ -315,6 +320,9 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 		writer.WriteHeader(result.status)
 		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "details": result.details})
 	case result.status != http.StatusOK:
+		if result.retryAfter > 0 {
+			writer.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(result.retryAfter.Seconds()))))
+		}
 		writeError(writer, result.status, result.code, result.message)
 	default:
 		writeCBOR(writer, result.answer)
@@ -452,7 +460,12 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 			return outcome{status: http.StatusConflict, code: "start-hook-conflict", message: err.Error(), details: map[string]any{"conflictingRunId": string(conflict.RunID)}}
 		}
 		status, code := goErrorStatus(err)
-		return outcome{status: status, code: code, message: err.Error()}
+		refused := outcome{status: status, code: code, message: err.Error()}
+		var early *worlds.TooEarlyError
+		if errors.As(err, &early) {
+			refused.retryAfter = early.RetryAfter
+		}
+		return refused
 	}
 	eventType := worlds.EventType(str(in.Meta, "eventType"))
 	if id := str(in.Meta, "vercelId"); id != "" {
@@ -498,7 +511,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	if eventType == worlds.EventTypeRunCreated {
 		var created worlds.DataRunCreated
 		_ = json.Unmarshal(data, &created)
-		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}); err != nil {
+		if _, err := f.store.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook, AllowReservedAttributes: created.AllowReservedAttributes}); err != nil {
 			return refuse(err)
 		}
 		f.mu.Lock()
@@ -864,6 +877,10 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusNotFound, "not-found"
 	case errors.Is(err, worlds.ErrHookNotFound), errors.Is(err, worlds.ErrHookNotActive):
 		return http.StatusNotFound, "hook-not-found"
+	case errors.Is(err, worlds.ErrTooEarly):
+		return http.StatusTooEarly, "too-early"
+	case errors.Is(err, worlds.ErrAttributeInvalid):
+		return http.StatusBadRequest, "validation-error"
 	case errors.Is(err, worlds.ErrEventConflict) && errors.Is(err, worlds.ErrRunTerminal):
 		// A transition from, or a creation on, a finished run.
 		return http.StatusConflict, "run-terminal"

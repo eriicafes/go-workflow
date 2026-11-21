@@ -2019,23 +2019,25 @@ func TestStepDeliveryPastTheCapFailsAStepWithNoActivityForAnHour(t *testing.T) {
 		world := testworld.NewManual()
 		defer world.Close()
 		runtime := core.NewRuntime(world, core.Runners())
-		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stalled", WorkflowName: "w"}); err != nil {
+		// Minted in the bubble, whose clock the World checks it against.
+		runStalled := worlds.NewRunID()
+		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStalled, WorkflowName: "w"}); err != nil {
 			t.Fatal(err)
 		}
 		for _, event := range []worlds.EventsCreateEvent{
 			{EventType: worlds.EventTypeRunStarted},
 			{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
 		} {
-			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_stalled", Event: event}); err != nil {
+			if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runStalled, Event: event}); err != nil {
 				t.Fatal(err)
 			}
 		}
 		time.Sleep(time.Hour + time.Minute)
 		stepID := worlds.StepID("step_a")
-		if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_stalled", StepID: &stepID, Attempt: core.MaxDeliveries + 1}); err != nil {
+		if err := runtime.Execute(ctx, worlds.QueueInput{RunID: runStalled, StepID: &stepID, Attempt: core.MaxDeliveries + 1}); err != nil {
 			t.Fatal(err)
 		}
-		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_stalled", StepID: stepID})
+		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runStalled, StepID: stepID})
 		if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
 			t.Fatalf("stalled step past the cap = %#v err=%v", step, err)
 		}
@@ -2060,7 +2062,7 @@ func TestStepRedeliveryWaitsForAPendingRetryFromTheStepsLatestEvent(t *testing.T
 	defer base.Close()
 	world := &runReads{World: base}
 	runtime := core.NewRuntime(world, core.Runners())
-	if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_retry", WorkflowName: "w"}); err != nil {
+	if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runRetry, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
 	due := time.Now().Add(time.Minute)
@@ -2071,12 +2073,12 @@ func TestStepRedeliveryWaitsForAPendingRetryFromTheStepsLatestEvent(t *testing.T
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_a", Data: []byte(`{"attempt":1}`)},
 		{EventType: worlds.EventTypeStepRetrying, CorrelationID: "step_a", Data: retryAfter},
 	} {
-		if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_retry", Event: event}); err != nil {
+		if _, err := base.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runRetry, Event: event}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	stepID := worlds.StepID("step_a")
-	err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_retry", StepID: &stepID, DeliveryCount: 2, Attempt: 2})
+	err := runtime.Execute(ctx, worlds.QueueInput{RunID: runRetry, StepID: &stepID, DeliveryCount: 2, Attempt: 2})
 	redelivery, ok := worlds.RedeliveryOf(err)
 	if !ok || redelivery.After <= 0 || redelivery.After > time.Minute {
 		t.Fatalf("err = %v, want a redelivery when the retry is due", err)
@@ -2169,3 +2171,7 @@ func turboResult(t *testing.T, ctx context.Context, world worlds.World, runID wo
 	}
 	return run.Value(ctx)
 }
+
+// runRetry is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRetry = worlds.NewRunID()

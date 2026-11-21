@@ -143,7 +143,7 @@ func retentionRun(t *testing.T, world *World, name string) worlds.RunID {
 
 func retentionRunOf(t *testing.T, world *World, name, workflow string) worlds.RunID {
 	t.Helper()
-	runID := worlds.RunID("wrun_retention_" + name)
+	runID := worlds.NewRunID()
 	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runID, WorkflowName: workflow, Input: []byte(`"input"`)}); err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +196,8 @@ func TestPurgeDeletesStartHookMetadata(t *testing.T) {
 	url, schema := testSchema(t)
 	world := testWorld(t, testPool(t, url, schema), Config{})
 	ctx := context.Background()
-	runID := worlds.RunID("wrun_retention_start_hook")
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "retention", StartHook: &worlds.StartHook{Token: "purged-start", Metadata: []byte(`"metadata"`)}, Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}}); err != nil {
+	runID := runRetentionStartHook
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "retention", StartHook: &worlds.StartHook{Token: "purged-start", Metadata: []byte(`"metadata"`)}, Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}, AllowReservedAttributes: true}); err != nil {
 		t.Fatal(err)
 	}
 	writeEvent(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
@@ -222,3 +222,7 @@ func storedEvents(t *testing.T, world *World, runID worlds.RunID) []worlds.Event
 	}
 	return events
 }
+
+// runRetentionStartHook is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRetentionStartHook = worlds.NewRunID()

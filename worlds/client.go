@@ -615,6 +615,9 @@ func newRPCClientError(failure RPCError) error {
 	if failure.Sentinel == "throttled" {
 		return &ThrottleError{Cause: rpcClientError{RPCError: failure}, After: failure.RetryAfter}
 	}
+	if failure.Sentinel == "too_early" {
+		return &TooEarlyError{RetryAfter: failure.RetryAfter}
+	}
 	err := rpcClientError{RPCError: failure}
 	for _, sentinel := range rpcSentinels {
 		if sentinel.name == failure.Sentinel {

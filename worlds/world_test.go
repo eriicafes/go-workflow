@@ -49,7 +49,7 @@ func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
 	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{
-		RunID:        "wrun_test",
+		RunID:        runTest,
 		WorkflowName: "test",
 	})
 	if err != nil {
@@ -58,34 +58,34 @@ func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
 	if created.EventID != worlds.EventIDForSlot(1) || created.EventType != worlds.EventTypeRunCreated || len(created.Events) != 0 {
 		t.Fatalf("unexpected creation result: %#v", created)
 	}
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_test", WorkflowName: "test"}); !errors.Is(err, worlds.ErrRunAlreadyExists) {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTest, WorkflowName: "test"}); !errors.Is(err, worlds.ErrRunAlreadyExists) {
 		t.Fatalf("duplicate run error = %v, want ErrRunAlreadyExists", err)
 	}
-	started, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_test", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}, Options: worlds.EventsCreateOptions{EventCount: ptr(0)}})
+	started, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runTest, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}, Options: worlds.EventsCreateOptions{EventCount: ptr(0)}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if started.EventID != worlds.EventIDForSlot(2) || len(started.Events) != 1 || started.Events[0].EventType != worlds.EventTypeRunCreated {
 		t.Fatalf("unexpected stale writer result: %#v", started)
 	}
-	firstPage, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_test", Pagination: worlds.Pagination{Limit: 1}})
+	firstPage, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runTest, Pagination: worlds.Pagination{Limit: 1}})
 	if err != nil || firstPage.Cursor != string(worlds.EventIDForSlot(1)) || !firstPage.HasMore {
 		t.Fatalf("first event page: %#v err=%v", firstPage, err)
 	}
-	secondPage, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_test", Pagination: worlds.Pagination{Cursor: firstPage.Cursor}})
+	secondPage, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runTest, Pagination: worlds.Pagination{Cursor: firstPage.Cursor}})
 	if err != nil || len(secondPage.Data) != 1 || secondPage.Data[0].EventID != worlds.EventIDForSlot(2) {
 		t.Fatalf("second event page: %#v err=%v", secondPage, err)
 	}
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_test", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated}}); err == nil {
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runTest, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCreated}}); err == nil {
 		t.Fatal("expected EventsCreate to reject run_created")
 	}
 
 	value := "region"
-	err = world.RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{RunID: "wrun_test", Changes: []worlds.RunsAttributeChange{{Key: "zone", Value: &value}}})
+	err = world.RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{RunID: runTest, Changes: []worlds.RunsAttributeChange{{Key: "zone", Value: &value}}})
 	if err != nil {
 		t.Fatalf("attributes: %v", err)
 	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_test"})
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runTest})
 	if err != nil || run.Attributes["zone"] != "region" {
 		t.Fatalf("run: %#v err=%v", run, err)
 	}
@@ -99,18 +99,18 @@ func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
 func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream", WorkflowName: "test"})
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStream, WorkflowName: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_stream", Name: "output", Chunk: []byte("one")}); err != nil {
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runStream, Name: "output", Chunk: []byte("one")}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_stream", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}})
+	result, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runStream, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}})
 	if err != nil || result.EventID != worlds.EventIDForSlot(2) {
 		t.Fatalf("event result=%#v err=%v", result, err)
 	}
-	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_stream", Name: "output"})
+	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runStream, Name: "output"})
 	if err != nil || len(chunks.Data) != 1 || string(chunks.Data[0].Data) != "one" {
 		t.Fatalf("chunks=%#v err=%v", chunks, err)
 	}
@@ -119,10 +119,10 @@ func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_stream_writer", WorkflowName: "test"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStreamWriter, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	input := worlds.StreamsOpenWriterInput{RunID: "wrun_stream_writer", Name: "audit", WriterID: worlds.NewWriterID()}
+	input := worlds.StreamsOpenWriterInput{RunID: runStreamWriter, Name: "audit", WriterID: worlds.NewWriterID()}
 	first, err := worlds.OpenStreamWriter(ctx, world, input)
 	if err != nil {
 		t.Fatal(err)
@@ -165,12 +165,12 @@ func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 func TestEventResultReportsMaterializedStep(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_result", WorkflowName: "test"})
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStepResult, WorkflowName: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{
-		RunID: "wrun_step_result",
+		RunID: runStepResult,
 		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_result", Data: []byte(`{"stepName":"result"}`)},
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func TestEventResultReportsMaterializedStep(t *testing.T) {
 func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_wait_analytics", WorkflowName: "test"})
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runWaitAnalytics, WorkflowName: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,20 +193,20 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_wait_analytics", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_1", Data: payload}})
+	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runWaitAnalytics, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_1", Data: payload}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: "wrun_wait_analytics", EventID: created.EventID})
+	event, err := world.EventsGet(ctx, worlds.EventsGetInput{RunID: runWaitAnalytics, EventID: created.EventID})
 	if err != nil || event.CorrelationID != "wait_1" {
 		t.Fatalf("event = %#v, %v", event, err)
 	}
 	analytics := world.Analytics()
-	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: "wrun_wait_analytics", WaitID: "wait_1"})
+	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: runWaitAnalytics, WaitID: "wait_1"})
 	if err != nil || wait.ResumeAt == nil || !wait.ResumeAt.Equal(dueAt) || wait.Status != worlds.WaitStatusWaiting {
 		t.Fatalf("wait = %#v, %v", wait, err)
 	}
-	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: "wrun_wait_analytics"})
+	page, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: runWaitAnalytics})
 	if err != nil || len(page.Data) != 1 || page.Data[0].WaitID != "wait_1" {
 		t.Fatalf("wait page = %#v, %v", page, err)
 	}
@@ -215,10 +215,10 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
 	world := testworld.New()
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cancel", WorkflowName: "test"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStepCancel, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_step_cancel", Event: worlds.EventsCreateEvent{EventType: "step_cancelled", CorrelationID: "step_target"}})
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runStepCancel, Event: worlds.EventsCreateEvent{EventType: "step_cancelled", CorrelationID: "step_target"}})
 	if !errors.Is(err, worlds.ErrEventInvalid) {
 		t.Fatalf("removed event = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_webhook", WorkflowName: "webhook"})
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runWebhook, WorkflowName: "webhook"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{
-			RunID: "wrun_webhook",
+			RunID: runWebhook,
 			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: id, Data: data},
 		})
 		if err != nil {
@@ -275,7 +275,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 
 	// Each request resumed the hook with the SDK's Request, its body written
 	// to a byte stream of the run.
-	events, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: "wrun_webhook", CorrelationID: "hook_public"})
+	events, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runWebhook, CorrelationID: "hook_public"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 		if err := worlds.DecodePayload(worlds.DecodeHookReceived(event.Data), nil, &request); err != nil || request.Method != http.MethodPatch || request.Body == nil {
 			t.Fatalf("request = %+v err=%v", request, err)
 		}
-		body, err := worlds.ReadByteStream(ctx, world, "wrun_webhook", *request.Body)
+		body, err := worlds.ReadByteStream(ctx, world, runWebhook, *request.Body)
 		if err != nil || string(body) != "payload" {
 			t.Fatalf("body = %q err=%v", body, err)
 		}
@@ -353,7 +353,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	world := testworld.New()
 	handler := worlds.HTTPHandler(world, "")
-	input, err := cbor.Marshal(worlds.EventsCreateRunInput{RunID: "wrun_rpc", WorkflowName: "rpc"})
+	input, err := cbor.Marshal(worlds.EventsCreateRunInput{RunID: runRpc, WorkflowName: "rpc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	if err := cbor.Unmarshal(envelope.Output, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Event == nil || result.Event.EventID != worlds.EventIDForSlot(1) || result.Run == nil || result.Run.RunID != "wrun_rpc" {
+	if result.Event == nil || result.Event.EventID != worlds.EventIDForSlot(1) || result.Run == nil || result.Run.RunID != runRpc {
 		t.Fatalf("result=%#v", result)
 	}
 
@@ -423,3 +423,31 @@ func TestHookTokensUseNanoIDsAlphabet(t *testing.T) {
 		t.Errorf("token %q is not 21 characters of Nano ID's alphabet", token)
 	}
 }
+
+// runRpc is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRpc = worlds.NewRunID()
+
+// runStepCancel is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runStepCancel = worlds.NewRunID()
+
+// runStepResult is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runStepResult = worlds.NewRunID()
+
+// runStreamWriter is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runStreamWriter = worlds.NewRunID()
+
+// runTest is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runTest = worlds.NewRunID()
+
+// runWaitAnalytics is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runWaitAnalytics = worlds.NewRunID()
+
+// runWebhook is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runWebhook = worlds.NewRunID()

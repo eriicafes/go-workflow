@@ -74,7 +74,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 	world := testworld.New()
 	defer world.Close()
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_rpc_interfaces", WorkflowName: "test"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runRpcInterfaces, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
@@ -82,7 +82,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_rpc_interfaces", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_rpc", Data: payload}})
+	created, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runRpcInterfaces, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_rpc", Data: payload}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,12 +118,12 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 	}
 
 	var event worlds.Event
-	call("events.get", worlds.EventsGetInput{RunID: "wrun_rpc_interfaces", EventID: created.EventID}, &event)
+	call("events.get", worlds.EventsGetInput{RunID: runRpcInterfaces, EventID: created.EventID}, &event)
 	if event.EventID != created.EventID {
 		t.Fatalf("event = %#v", event)
 	}
 	var waits worlds.Page[worlds.AnalyticsWait]
-	call("analytics.waits.list", worlds.AnalyticsWaitsListInput{RunID: "wrun_rpc_interfaces"}, &waits)
+	call("analytics.waits.list", worlds.AnalyticsWaitsListInput{RunID: runRpcInterfaces}, &waits)
 	if len(waits.Data) != 1 || waits.Data[0].WaitID != "wait_rpc" {
 		t.Fatalf("waits = %#v", waits)
 	}
@@ -146,15 +146,15 @@ func assertRPCError(t *testing.T, response *httptest.ResponseRecorder, code stri
 func TestRPCEncodesTimesAsTaggedRFC3339(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.New()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_time", WorkflowName: "time"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTime, WorkflowName: "time"}); err != nil {
 		t.Fatal(err)
 	}
-	want, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_time"})
+	want, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runTime})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	input, err := cbor.Marshal(worlds.RunsGetInput{RunID: "wrun_time"})
+	input, err := cbor.Marshal(worlds.RunsGetInput{RunID: runTime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,18 +293,18 @@ func TestRPCBatchDoesNotReappendAfterAnInternalError(t *testing.T) {
 	world := testworld.New()
 	defer world.Close()
 	ctx := context.Background()
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_batch", WorkflowName: "rpc"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runBatch, WorkflowName: "rpc"}); err != nil {
 		t.Fatal(err)
 	}
 	handler := worlds.HTTPHandler(failingBatchWorld{world}, "")
-	encoded, _ := cbor.Marshal(worlds.EventsCreateBatchInput{RunID: "wrun_batch", Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeAttrSet, Data: []byte(`{"changes":[]}`)}}})
+	encoded, _ := cbor.Marshal(worlds.EventsCreateBatchInput{RunID: runBatch, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeAttrSet, Data: []byte(`{"changes":[]}`)}}})
 	body, _ := cbor.Marshal(rpcRequest{Method: "events.createBatch", Input: encoded})
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	assertRPCError(t, response, "internal")
-	page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_batch"})
+	page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runBatch})
 	if err != nil || len(page.Data) != 2 {
 		t.Fatalf("events = %d, err = %v, want run_created and one attr_set", len(page.Data), err)
 	}
@@ -345,12 +345,12 @@ func (w *recordingWaitWorld) StreamsGetChunks(ctx context.Context, input worlds.
 func TestRPCCapsWaits(t *testing.T) {
 	world := &recordingWaitWorld{World: testworld.New()}
 	defer world.Close()
-	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: "wrun_wait", WorkflowName: "rpc"}); err != nil {
+	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runWait, WorkflowName: "rpc"}); err != nil {
 		t.Fatal(err)
 	}
 	handler := worlds.HTTPHandler(world, "")
-	callRPC(t, handler, "runs.waitForTerminalStatus", worlds.RunsWaitForTerminalStatusInput{RunID: "wrun_wait", Timeout: time.Hour})
-	callRPC(t, handler, "streams.getChunks", worlds.StreamsGetChunksInput{RunID: "wrun_wait", Name: "s", Wait: time.Hour})
+	callRPC(t, handler, "runs.waitForTerminalStatus", worlds.RunsWaitForTerminalStatusInput{RunID: runWait, Timeout: time.Hour})
+	callRPC(t, handler, "streams.getChunks", worlds.StreamsGetChunksInput{RunID: runWait, Name: "s", Wait: time.Hour})
 	if world.timeout != 30*time.Second || world.wait != 30*time.Second {
 		t.Fatalf("timeout = %s, wait = %s, want 30s each", world.timeout, world.wait)
 	}
@@ -428,23 +428,23 @@ func TestRPCDeletesRunData(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_delete", WorkflowName: "wf", Input: []byte(`"input"`)}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runDelete, WorkflowName: "wf", Input: []byte(`"input"`)}); err != nil {
 		t.Fatal(err)
 	}
 	for _, eventType := range []worlds.EventType{worlds.EventTypeRunStarted, worlds.EventTypeRunCancelled} {
-		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_delete", Event: worlds.EventsCreateEvent{EventType: eventType}}); err != nil {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runDelete, Event: worlds.EventsCreateEvent{EventType: eventType}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete", "wrun_missing"}})
+	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{runDelete, "wrun_missing"}})
 	want := worlds.RunsDeleteDataManyResult{
 		Summary: worlds.DeleteDataSummary{Requested: 2, Deleted: 1, NotFound: 1},
-		Results: []worlds.DeleteDataResult{{RunID: "wrun_delete", Outcome: worlds.DeleteDataDeleted}, {RunID: "wrun_missing", Outcome: worlds.DeleteDataNotFound}},
+		Results: []worlds.DeleteDataResult{{RunID: runDelete, Outcome: worlds.DeleteDataDeleted}, {RunID: "wrun_missing", Outcome: worlds.DeleteDataNotFound}},
 	}
 	if err != nil || result.Summary != want.Summary || len(result.Results) != 2 || result.Results[0] != want.Results[0] || result.Results[1] != want.Results[1] {
 		t.Fatalf("delete = %+v, %v", result, err)
 	}
-	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_delete"})
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runDelete})
 	if err != nil || run.ExpiredAt == nil || run.Input != nil {
 		t.Fatalf("deleted run = %+v, %v", run, err)
 	}
@@ -452,7 +452,7 @@ func TestRPCDeletesRunData(t *testing.T) {
 		t.Fatalf("empty delete error = %v", err)
 	}
 	unsupported := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(noDeleteWorld{world}, "")))
-	if _, err := unsupported.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete"}}); !errors.Is(err, errors.ErrUnsupported) {
+	if _, err := unsupported.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{runDelete}}); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("unsupported delete error = %v", err)
 	}
 }
@@ -472,3 +472,23 @@ func TestRPCCarriesThrottling(t *testing.T) {
 		t.Fatalf("throttled error = %v", err)
 	}
 }
+
+// runBatch is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runBatch = worlds.NewRunID()
+
+// runDelete is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runDelete = worlds.NewRunID()
+
+// runRpcInterfaces is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runRpcInterfaces = worlds.NewRunID()
+
+// runTime is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runTime = worlds.NewRunID()
+
+// runWait is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runWait = worlds.NewRunID()

@@ -23,6 +23,11 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	// The run ID and attributes are checked as the Workflow SDK's Worlds
+	// check them.
+	if err := worlds.CheckRunCreation(input, time.Now()); err != nil {
+		return worlds.EventResult{}, err
+	}
 	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
@@ -135,6 +140,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	if !validEvent(input.Event) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
+	}
+	// A resume's digest must be its payload's, as world-postgres checks it.
+	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
+		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
 		// A first flow's run_started creates a run whose run_created never
@@ -272,7 +281,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an admission refusal, as opposed to a
 // storage failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -438,29 +447,24 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			// A run that started before is not started again.
 			return &worlds.EventResult{}, nil
 		}
-	case worlds.EventTypeStepCreated:
+	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+		// A step is created once, and its other events need it unfinished,
+		// as in world-postgres. A started step may be started again, and
+		// each start records a new attempt.
+		var status worlds.Status
+		var retryAfter *time.Time
 		if step != nil {
-			return nil, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
+			status, retryAfter = step.Status, step.RetryAfter
 		}
-	case worlds.EventTypeStepStarted:
-		creates := worlds.StartCreatesStep(event.Data)
-		switch {
-		case creates && step != nil:
-			// An inline step is created once.
-			return nil, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, event.CorrelationID)
-		case step == nil && !creates:
-			return nil, worlds.ErrStepNotStartable
-		case step != nil && step.Status.Terminal():
-			// A started step may be started again, and each start records a
-			// new attempt.
-			return nil, worlds.ErrStepNotStartable
-		}
-	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		// A step's result is recorded while the step is not finished.
-		if step == nil || step.Status.Terminal() {
-			return nil, worlds.ErrStepNotStartable
+		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, now()); err != nil {
+			return nil, err
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		if event.EventType == worlds.EventTypeAttrSet {
+			if err := worlds.CheckAttrSet(a.run.Attributes, event.Data); err != nil {
+				return nil, err
+			}
+		}
 		// A wait is created and completed once, and an attribute write of
 		// the workflow is recorded once.
 		if event.CorrelationID == "" || event.EventType == worlds.EventTypeAttrSet && !worlds.WorkflowAttrSet(event.Data) {

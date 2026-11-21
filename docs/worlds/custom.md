@@ -41,12 +41,14 @@ type World interface {
   (also matching `ErrRunTerminal`), another attempt or the result of a step
   that is not running with `ErrRunTerminal`, and a `wait_completed` with
   `ErrEventNotFound`. It still records a running step's result or retry. A
-  `wait_completed` needs its `wait_created`. Other checks of a step or wait are
-  optional: the runtime decides from the log alone, so a World that appends
-  every such event is correct. A World that checks steps accepts a step's
-  result while the step is not finished, and a `step_started` that creates
-  the step it starts (`worlds.StartCreatesStep`): an inline step's first
-  attempt, which no `step_created` precedes.
+  `wait_completed` needs its `wait_created`. Check step events with
+  `worlds.CheckStepEvent`: a step event needs its unfinished step, except an
+  inline step's first `step_started` (`worlds.StartCreatesStep`), and a
+  `step_started` before its retry is due gets a `*worlds.TooEarlyError`.
+  Check a new run with `worlds.CheckRunCreation` (its ID's ULID and time, and
+  its attributes), an `attr_set` with `worlds.CheckAttrSet`, and a resume's
+  digest with `worlds.CheckResumeDigest`, as the Workflow SDK's Worlds check
+  them.
 - **Batches.** `EventsCreateBatch` refuses the whole batch only for an
   invalid event, a missing run, or a stale fence. Otherwise each event gets
   its own outcome in `Results`, and once one is refused, every later event

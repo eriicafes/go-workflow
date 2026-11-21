@@ -64,7 +64,9 @@ type queueRunInput struct {
 	ExecutionContext    map[string]any    `json:"executionContext,omitempty"`
 	EncryptionPublicKey string            `json:"encryptionPublicKey,omitempty"`
 	StartHook           *worlds.StartHook `json:"startHook,omitempty"`
-	SpecVersion         int               `json:"specVersion"`
+	// AllowReservedAttributes is EventsCreateRunInput.AllowReservedAttributes.
+	AllowReservedAttributes bool `json:"allowReservedAttributes,omitempty"`
+	SpecVersion             int  `json:"specVersion"`
 }
 
 // queueWaitContinuation is worlds.WaitContinuation in a queueMessage.
@@ -416,12 +418,12 @@ func toQueueRunInput(input *worlds.EventsCreateRunInput) *queueRunInput {
 	if input == nil {
 		return nil
 	}
-	return &queueRunInput{WorkflowName: input.WorkflowName, DeploymentID: input.DeploymentID, Input: input.Input, Attributes: input.Attributes, ExecutionContext: input.ExecutionContext, EncryptionPublicKey: input.EncryptionPublicKey, StartHook: input.StartHook, SpecVersion: worlds.SpecVersion}
+	return &queueRunInput{WorkflowName: input.WorkflowName, DeploymentID: input.DeploymentID, Input: input.Input, Attributes: input.Attributes, ExecutionContext: input.ExecutionContext, EncryptionPublicKey: input.EncryptionPublicKey, StartHook: input.StartHook, AllowReservedAttributes: input.AllowReservedAttributes, SpecVersion: worlds.SpecVersion}
 }
 
 func (run *queueRunInput) input(runID worlds.RunID) *worlds.EventsCreateRunInput {
 	if run == nil {
 		return nil
 	}
-	return &worlds.EventsCreateRunInput{RunID: runID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, Input: run.Input, Attributes: run.Attributes, ExecutionContext: run.ExecutionContext, EncryptionPublicKey: run.EncryptionPublicKey, StartHook: run.StartHook}
+	return &worlds.EventsCreateRunInput{RunID: runID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, Input: run.Input, Attributes: run.Attributes, ExecutionContext: run.ExecutionContext, EncryptionPublicKey: run.EncryptionPublicKey, StartHook: run.StartHook, AllowReservedAttributes: run.AllowReservedAttributes}
 }

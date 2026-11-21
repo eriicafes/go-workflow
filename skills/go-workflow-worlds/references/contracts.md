@@ -23,10 +23,13 @@ transition or a new step, wait, hook, or attribute with `ErrEventConflict`
 (also matching `ErrRunTerminal`), another attempt or a result of a step that
 is not running with `ErrRunTerminal`, and a `wait_completed` with
 `ErrEventNotFound`. It records a running step's result or retry. A
-`wait_completed` needs its `wait_created` (`ErrEventNotFound`). Other step
-and wait checks are optional, and a World
-that checks accepts a step's result while the step is not finished and a
-`step_started` that creates its step. `hook_disposed` and `hook_received` need
+`wait_completed` needs its `wait_created` (`ErrEventNotFound`). Step events
+follow `worlds.CheckStepEvent` (`ErrStepNotFound`, `ErrEventConflict` for a
+finished step, `*worlds.TooEarlyError` before a retry is due). A new run
+follows `worlds.CheckRunCreation` (a ULID run ID minted within a day before
+and five minutes after now, and attribute limits), an `attr_set` follows
+`worlds.CheckAttrSet` (`ErrAttributeInvalid`), and a resume's digest
+`worlds.CheckResumeDigest`. `hook_disposed` and `hook_received` need
 a hook of the same run (`ErrHookNotFound`), so a repeated disposal is refused.
 
 Preserve event order, correlation IDs, timestamps, pagination, ResolveData,

@@ -165,7 +165,7 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 		_, err = w.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepRetrying, CorrelationID: string(id), Data: data, SpecVersion: run.SpecVersion}})
 		// The step finished between the read and this write: nothing to
 		// release.
-		if err != nil && !errors.Is(err, worlds.ErrStepNotStartable) && !errors.Is(err, worlds.ErrRunTerminal) {
+		if err != nil && !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrStepNotFound) && !errors.Is(err, worlds.ErrRunTerminal) {
 			return err
 		}
 	}

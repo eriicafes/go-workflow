@@ -29,7 +29,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	due := time.Now().Add(-time.Second).UTC().Round(time.Millisecond)
 	resumeAt, hopAt := due.Add(time.Hour), due
 	want := worlds.QueueInput{
-		RunID: "wrun_a", QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &due,
+		RunID: runA, QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &due,
 		IdempotencyKey: "key", DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3, ReplayDivergenceCount: 2,
 		StepName: "step", StepAttempt: 4, StepResent: true, RunSpecVersion: worlds.SpecVersion,
 		CompleteWaits:    []string{"wait_a", "wait_b"},
@@ -55,15 +55,15 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"})
+	first, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"})
+	again, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"})
 	if err != nil || again.MessageID != first.MessageID {
 		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
 	}
-	batch, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: "wrun_a", IdempotencyKey: "key"}, {RunID: "wrun_a", IdempotencyKey: "other"}}})
+	batch, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: runA, IdempotencyKey: "key"}, {RunID: runA, IdempotencyKey: "other"}}})
 	if err != nil || len(batch) != 2 || batch[0].MessageID != first.MessageID || batch[1].MessageID == first.MessageID {
 		t.Fatalf("batch = %#v err=%v", batch, err)
 	}
@@ -72,8 +72,8 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 		t.Fatalf("same key in another run = %#v err=%v", other, err)
 	}
 	// Without a key nothing is deduplicated.
-	a, errA := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
-	b, errB := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
+	a, errA := world.Queue(ctx, worlds.QueueInput{RunID: runA})
+	b, errB := world.Queue(ctx, worlds.QueueInput{RunID: runA})
 	if errA != nil || errB != nil || a.MessageID == b.MessageID {
 		t.Fatalf("unkeyed = %s, %s err=%v %v", a.MessageID, b.MessageID, errA, errB)
 	}
@@ -82,14 +82,14 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	if err != nil || !slices.ContainsFunc(claimed, func(item delivery) bool { return item.id == first.MessageID }) {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
 	}
-	if again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"}); err != nil || again.MessageID != first.MessageID {
+	if again, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"}); err != nil || again.MessageID != first.MessageID {
 		t.Fatalf("key while executing = %#v err=%v", again, err)
 	}
 	// Once the message is gone, the key queues a new one.
 	if _, err := world.pool.Exec(ctx, `DELETE FROM workflow_queue WHERE id = $1`, first.MessageID); err != nil {
 		t.Fatal(err)
 	}
-	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"}); err != nil || fresh.MessageID == first.MessageID {
+	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"}); err != nil || fresh.MessageID == first.MessageID {
 		t.Fatalf("key after delete = %#v err=%v", fresh, err)
 	}
 }
@@ -98,7 +98,7 @@ func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	expired, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key", Retention: time.Millisecond})
+	expired, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key", Retention: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
 	if claimed, err := world.claim(ctx, 10, nil); err != nil || len(claimed) != 0 {
 		t.Fatalf("claimed expired = %#v err=%v", claimed, err)
 	}
-	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"}); err != nil || fresh.MessageID == expired.MessageID {
+	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"}); err != nil || fresh.MessageID == expired.MessageID {
 		t.Fatalf("key after expiry = %#v err=%v", fresh, err)
 	}
 }
@@ -122,7 +122,7 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"})
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,10 +171,10 @@ func TestClaimHoldsAFlowWhileAnotherOfItsRunRuns(t *testing.T) {
 	resumeAt, hopAt := time.Now().Add(time.Hour), time.Now()
 	ids := map[string]string{}
 	for name, input := range map[string]worlds.QueueInput{
-		"flowA1": {RunID: "wrun_a", IdempotencyKey: "1"},
-		"flowA2": {RunID: "wrun_a", IdempotencyKey: "2"},
-		"stepA":  {RunID: "wrun_a", StepID: &stepID},
-		"hopA":   {RunID: "wrun_a", WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait", ResumeAt: &resumeAt, HopAt: &hopAt}},
+		"flowA1": {RunID: runA, IdempotencyKey: "1"},
+		"flowA2": {RunID: runA, IdempotencyKey: "2"},
+		"stepA":  {RunID: runA, StepID: &stepID},
+		"hopA":   {RunID: runA, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait", ResumeAt: &resumeAt, HopAt: &hopAt}},
 		"flowB":  {RunID: "wrun_b"},
 	} {
 		queued, err := world.Queue(ctx, input)
@@ -203,7 +203,7 @@ func TestClaimHoldsAFlowWhileAnotherOfItsRunRuns(t *testing.T) {
 	}
 	world.deliver(ctx, executorFunc(func(context.Context, worlds.QueueInput) error { return nil }), flowA)
 	again, err := world.claim(ctx, 10, nil)
-	if err != nil || len(again) != 1 || again[0].id == flowA.id || !again[0].input.SerializedFlow() || again[0].input.RunID != "wrun_a" {
+	if err != nil || len(again) != 1 || again[0].id == flowA.id || !again[0].input.SerializedFlow() || again[0].input.RunID != runA {
 		t.Fatalf("claim after flow finished = %#v err=%v", again, err)
 	}
 }
@@ -218,12 +218,12 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	ctx := context.Background()
 	const flows, steps = 8, 8
 	for i := range flows {
-		if _, err := a.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); err != nil {
+		if _, err := a.Queue(ctx, worlds.QueueInput{RunID: runA}); err != nil {
 			t.Fatal(err)
 		}
 		stepID := worlds.StepID(fmt.Sprintf("step_%d", i))
 		if i < steps {
-			if _, err := a.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID}); err != nil {
+			if _, err := a.Queue(ctx, worlds.QueueInput{RunID: runA, StepID: &stepID}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -271,3 +271,7 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 		t.Fatalf("most flows at once = %d, steps = %d", maxFlows, maxSteps)
 	}
 }
+
+// runA is a run ID minted when the tests start, as a World requires
+// of a new run.
+var runA = worlds.NewRunID()

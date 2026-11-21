@@ -145,7 +145,7 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			writer["stepId"], writer["attempt"] = string(data.Writer.StepID), data.Writer.Attempt
 		}
 		meta["changes"], meta["writer"] = changes, writer
-		if data.AllowReservedAttributes || hasReservedKey(data.Changes) {
+		if data.AllowReservedAttributes {
 			meta["allowReservedAttributes"] = true
 		}
 		return meta, nil, nil
@@ -237,15 +237,6 @@ func setString(meta map[string]any, key, value string) {
 	}
 }
 
-func hasReservedKey(changes []worlds.RunsAttributeChange) bool {
-	for _, change := range changes {
-		if len(change.Key) > 0 && change.Key[0] == '$' {
-			return true
-		}
-	}
-	return false
-}
-
 // toEvent returns the go-workflow event of a backend event.
 func toEvent(runID worlds.RunID, wire wireEvent, resolve worlds.EventsResolveData) (worlds.Event, error) {
 	data, err := eventData(wire)
@@ -282,7 +273,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 	switch worlds.EventType(wire.EventType) {
 	case worlds.EventTypeRunCreated:
 		executionContext, _ := d["executionContext"].(map[string]any)
-		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey"), ExecutionContext: executionContext, StartHook: startHook(d["startHook"])})
+		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey"), ExecutionContext: executionContext, StartHook: startHook(d["startHook"]), AllowReservedAttributes: d["allowReservedAttributes"] == true})
 	case worlds.EventTypeRunCompleted:
 		return json.Marshal(worlds.DataRunCompleted{Output: payload("output")})
 	case worlds.EventTypeRunFailed:

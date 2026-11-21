@@ -146,7 +146,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 		panic(execution.exit(deliveryError{cause: err}))
 	}
 	result := execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(stepID), Data: started}, func(err error) error {
-		if errors.Is(err, worlds.ErrStepNotStartable) {
+		if errors.Is(err, worlds.ErrEventConflict) || errors.Is(err, worlds.ErrStepNotStartable) {
 			// The step already has its result.
 			return nil
 		}

@@ -72,7 +72,7 @@ func conformEventDeltas(t *testing.T, world worlds.World) {
 // with, which the Runtime uses to pin the run to a deployment.
 func conformRunDeployment(t *testing.T, world worlds.World) {
 	ctx := context.Background()
-	runID := worlds.RunID("wrun_conformance_deployment")
+	runID := conformRunID("deployment")
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), DeploymentID: "dpl_conformance"}); err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,8 @@ func conformRepeats(t *testing.T, world worlds.World) {
 	_, err = conformClaim(world, runID, "hook_a", token, false)
 	conformExpect(t, err, worlds.ErrEventConflict, "repeated hook_created")
 
-	attributes := worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "tier", Value: new("gold")}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}}
+	gold := "gold"
+	attributes := worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "tier", Value: &gold}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}}
 	conformAppend(t, world, runID, worlds.EventTypeAttrSet, "attr_a", attributes)
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeAttrSet, "attr_a", attributes)})
 	conformExpect(t, err, worlds.ErrEventConflict, "repeated attr_set")

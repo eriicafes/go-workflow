@@ -386,6 +386,12 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
 			return nil
 		}
+		// A step started before its retry was due, by a clock behind the
+		// World's: deliver it again when the retry is due.
+		var early *worlds.TooEarlyError
+		if errors.As(deliveryErr.cause, &early) {
+			return worlds.Redeliver(early.RetryAfter)
+		}
 		return deliveryErr.cause
 	case err != nil:
 		failure := r.failRun(ctx, input, execution, err)
@@ -650,6 +656,12 @@ func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.
 	case errors.As(err, &deliveryErr):
 		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
 			return nil
+		}
+		// A step started before its retry was due, by a clock behind the
+		// World's: deliver it again when the retry is due.
+		var early *worlds.TooEarlyError
+		if errors.As(deliveryErr.cause, &early) {
+			return worlds.Redeliver(early.RetryAfter)
 		}
 		return deliveryErr.cause
 	case err != nil:
@@ -924,7 +936,7 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 		if errors.Is(err, worlds.ErrRunTerminal) {
 			return nil
 		}
-		if err != nil && !errors.Is(err, worlds.ErrStepNotStartable) {
+		if err != nil && !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrStepNotStartable) {
 			return err
 		}
 	}

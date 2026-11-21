@@ -149,6 +149,11 @@ func (b *backend) request(ctx context.Context, method, path string, query url.Va
 	if response.StatusCode == http.StatusTooManyRequests && response.Header.Get("X-Vercel-Mitigated") != "challenge" {
 		return nil, &worlds.ThrottleError{Cause: err, After: retryAfter(response.Header.Get("Retry-After"))}
 	}
+	// A 425 is a step started before its retry is due, which world-vercel
+	// reports as a TooEarlyError with the Retry-After wait.
+	if response.StatusCode == http.StatusTooEarly {
+		return nil, &worlds.TooEarlyError{RetryAfter: retryAfter(response.Header.Get("Retry-After"))}
+	}
 	return nil, err
 }
 
@@ -344,6 +349,11 @@ func classify(err error, eventType worlds.EventType) error {
 			if api.Code != "run-not-found" {
 				return fmt.Errorf("%w: %v", worlds.ErrEventNotFound, err)
 			}
+		case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
+			// A step that does not exist.
+			if api.Code != "run-not-found" {
+				return fmt.Errorf("%w: %v", worlds.ErrStepNotFound, err)
+			}
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunNotFound, err)
 	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":
@@ -386,10 +396,9 @@ func classify(err error, eventType worlds.EventType) error {
 			// EntityConflictError reports it.
 			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
 		case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-			if strings.Contains(api.Code, "run") {
-				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
-			}
-			return fmt.Errorf("%w: %v", worlds.ErrStepNotStartable, err)
+			// A step that finished, as world-vercel's EntityConflictError
+			// reports it.
+			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			if strings.Contains(api.Code, "run") {
 				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
@@ -397,6 +406,9 @@ func classify(err error, eventType worlds.EventType) error {
 			return fmt.Errorf("%w: %v", worlds.ErrHookNotActive, err)
 		}
 		return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+	case api.Status == http.StatusBadRequest && api.Code == "validation-error" && (eventType == worlds.EventTypeRunCreated || eventType == worlds.EventTypeRunStarted || eventType == worlds.EventTypeAttrSet):
+		// The backend refuses a run's or an attr_set's attributes.
+		return fmt.Errorf("%w: %w: %v", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, err)
 	case api.Status == http.StatusBadRequest || api.Status == http.StatusUnprocessableEntity || api.Status == http.StatusRequestEntityTooLarge:
 		return fmt.Errorf("%w: %v", worlds.ErrEventInvalid, err)
 	}

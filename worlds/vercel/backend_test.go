@@ -69,7 +69,7 @@ func TestClassify(t *testing.T) {
 		{http.StatusNotFound, "hook-not-found", worlds.EventTypeHookReceived, worlds.ErrHookNotFound},
 		{http.StatusConflict, "hook-force-claimed", worlds.EventTypeHookReceived, worlds.ErrHookForceClaimed},
 		{http.StatusConflict, "", worlds.EventTypeRunCreated, worlds.ErrRunAlreadyExists},
-		{http.StatusConflict, "", worlds.EventTypeStepCompleted, worlds.ErrStepNotStartable},
+		{http.StatusConflict, "", worlds.EventTypeStepCompleted, worlds.ErrEventConflict},
 		{http.StatusConflict, "run-terminal", worlds.EventTypeStepStarted, worlds.ErrEventConflict},
 		{http.StatusGone, "run-expired", worlds.EventTypeStepStarted, worlds.ErrRunTerminal},
 		{http.StatusConflict, "", worlds.EventTypeRunCompleted, worlds.ErrEventConflict},

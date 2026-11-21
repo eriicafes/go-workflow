@@ -953,7 +953,7 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, attempt int, result w
 	case errors.Is(err, worlds.ErrInBandSuperseded):
 		e.superseded = true
 		return worlds.Event{}, errReplaySuperseded
-	case errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrStepNotStartable):
+	case errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrEventConflict) || errors.Is(err, worlds.ErrStepNotStartable):
 		// The first writer of a step's result wins.
 		delete(e.ranInline, stepID)
 		return worlds.Event{}, nil

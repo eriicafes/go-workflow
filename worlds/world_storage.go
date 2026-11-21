@@ -82,14 +82,16 @@ type StorageEvents interface {
 	// wait_completed with ErrEventNotFound, since its waits end with it. It
 	// still records a running step's step_completed, step_failed, and
 	// step_retrying. A wait_completed needs its wait_created
-	// (ErrEventNotFound). Other
-	// checks of a step or wait against the events before it, which a World
-	// returns as ErrStepNotStartable, are optional: the runtime decides from
-	// the log alone, and a World that appends every such event is correct. A
-	// World that checks accepts a step's result while the step is not
-	// finished, and a step_started that creates the step it starts: an
-	// inline step's first step_started, whose DataStepStarted has Inline,
-	// StepName, and Input, and which no step_created precedes.
+	// (ErrEventNotFound).
+	//
+	// A step event is checked as CheckStepEvent says, as the Workflow SDK's
+	// Worlds check it: it needs its step (ErrStepNotFound), unfinished
+	// (ErrEventConflict), except an inline step's first step_started, whose
+	// DataStepStarted has Inline, StepName, and Input, and which creates the
+	// step. A step_started before the step's retry is due is refused with a
+	// *TooEarlyError. An attr_set's changes are checked as CheckAttrSet says
+	// (ErrAttributeInvalid), and a hook_received's ResumePayloadDigest as
+	// CheckResumeDigest says (ErrEventInvalid).
 	//
 	// An event that repeats a creation the run's log holds, a second
 	// step_created, wait_created, wait_completed, hook_created, an inline
@@ -517,6 +519,14 @@ type (
 		// When another run holds the token, no run is created and the World
 		// returns a *HookConflictError naming that run.
 		StartHook *StartHook
+		// AllowReservedAttributes permits Attributes keys that start with
+		// ReservedAttributePrefix, which framework code sets, such as a
+		// child run's lineage and a run's retention. run_created records it.
+		AllowReservedAttributes bool
+		// FromRunStarted reports that a first flow's run_started creates the
+		// run, because the start's run_created never landed. The World does
+		// not check the run ID's time then, as world-local does not.
+		FromRunStarted bool
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {

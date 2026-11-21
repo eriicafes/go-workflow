@@ -61,6 +61,16 @@ func conformSteps(t *testing.T, world worlds.World) {
 	if err != nil || step.Status != worlds.StatusPending || step.RetryAfter == nil || !step.RetryAfter.Equal(retryAt) || string(step.Error) != `{"message":"transient"}` {
 		t.Fatalf("retrying step = %#v err=%v", step, err)
 	}
+	// A step is not started before its retry is due, as the Workflow SDK's
+	// Worlds refuse it with TooEarlyError, which says how long to wait.
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_a", nil)})
+	var early *worlds.TooEarlyError
+	if !errors.As(err, &early) || early.RetryAfter <= 0 || early.RetryAfter > time.Minute {
+		t.Fatalf("step started before its retry = %v, want a *TooEarlyError", err)
+	}
+	// Once its retry is due it starts: a retry due now.
+	due := time.Now().Add(-time.Millisecond).UTC()
+	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_a", worlds.DataStepResult{Error: json.RawMessage(`{"message":"transient"}`), RetryAfter: &due})
 	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_a", nil)
 	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Result: json.RawMessage(`"step-out"`)})
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})

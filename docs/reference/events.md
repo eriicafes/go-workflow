@@ -141,10 +141,18 @@ when it occurred, which the World stores as its `CreatedAt`.
   and a `wait_completed` with `ErrEventNotFound`, as the Workflow SDK's Worlds
   do. It still records a running step's result or retry.
 - A `wait_completed` needs its `wait_created` (`ErrEventNotFound`).
-- Other checks of a step or wait against the events before it are optional
-  (`ErrStepNotStartable`): the runtime decides from the log alone. Replay
-  ignores any event of a step, hook, or wait after its final one, so the
-  first writer of a result wins.
+- A step event needs its step (`ErrStepNotFound`), unfinished
+  (`ErrEventConflict`), except an inline step's first `step_started`, which
+  creates it. A `step_started` before the step's retry is due is refused with
+  a `*worlds.TooEarlyError`, which says how long to wait. Replay ignores any
+  event of a step, hook, or wait after its final one.
+- A new run's ID must be `wrun_` and a ULID minted within `RunIDMaxAge`
+  before and `RunIDMaxLead` after the World's clock (`ErrEventInvalid`, or
+  `ErrStartHookRejected` with a start hook), except for a run a first flow's
+  `run_started` creates. Its attributes, and an `attr_set`'s changes, must be
+  within the attribute limits (`ErrAttributeInvalid`), with `$` keys only
+  when `AllowReservedAttributes` is set.
+- A resume's `ResumePayloadDigest` must be its payload's (`ErrEventInvalid`).
 - `hook_disposed` only targets a hook of the same run (`ErrHookNotFound`), so
   a repeated disposal is refused, as in the Workflow SDK's Worlds.
 - `hook_received` only targets an active hook of the same run that still owns
