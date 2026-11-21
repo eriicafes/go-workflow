@@ -214,9 +214,10 @@ func (e *Execution) armTimers() {
 			if e.mayHoldCoalescedTimer() {
 				owned[wait.creator] = true
 			}
-			if time.Now().Before(wait.resumeAt) {
-				e.armWait(timerFor, wait.resumeAt, continuation.Attempt+1, false)
-			}
+			// The timer came before its wait was due, or the wait fell due
+			// after the replay found it was not: either way this delivery
+			// left it open, so it arms it again.
+			e.armWait(timerFor, wait.resumeAt, continuation.Attempt+1, false)
 		}
 	}
 	if e.mayHoldCoalescedTimer() {
