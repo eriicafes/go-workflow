@@ -232,6 +232,8 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(names)
+	case len(parts) >= 3 && parts[0] == "v2" && parts[1] == "analytics":
+		f.analytics(ctx, writer, request, parts[2:], query)
 	default:
 		writeError(writer, http.StatusNotFound, "", "no route "+request.URL.Path)
 	}

@@ -208,11 +208,11 @@ func New(config Config) (*World, error) {
 	return world, nil
 }
 
-func (w *World) BaseURL() string           { return w.config.BaseURL }
-func (w *World) DeploymentID() string      { return w.config.DeploymentID }
-func (*World) Analytics() worlds.Analytics { return nil }
+func (w *World) BaseURL() string             { return w.config.BaseURL }
+func (w *World) DeploymentID() string        { return w.config.DeploymentID }
+func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true, MaxQueueDelay: vqsMaxQueueDelay}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true, MaxQueueDelay: vqsMaxQueueDelay}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the

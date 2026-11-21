@@ -303,6 +303,12 @@ func asTime(value any) (time.Time, bool) {
 		return value.Round(time.Microsecond).UTC(), true
 	case string:
 		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			// Analytics answers carry timezone-naive UTC times, such as
+			// 2026-07-13 17:09:11.593, as @workflow/world's UTCDateSchema
+			// reads them.
+			parsed, err = time.Parse("2006-01-02 15:04:05.999999999", strings.Replace(value, "T", " ", 1))
+		}
 		return parsed.UTC(), err == nil
 	case float64:
 		return time.UnixMicro(int64(value * 1000)).UTC(), true
