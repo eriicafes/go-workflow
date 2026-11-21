@@ -67,6 +67,7 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 			}
 			var data cancellationData
 			if execution.DecodePayload(DecodeHookReceived(event.Data), &data) == nil && data.Cause != nil {
+				execution.AdvanceClock(event.CreatedAt)
 				cancel(data.Cause)
 				return
 			}

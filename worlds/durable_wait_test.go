@@ -106,10 +106,7 @@ func TestCancelledDeadlinesDoNotFireOnReplayAfterExpiry(t *testing.T) {
 					var cancelCtx context.Context
 					var cancel func() error
 					if test.deadline {
-						now, nowErr := workflow.Now(ctx)
-						if nowErr != nil {
-							return durableWaitOutput{}, nowErr
-						}
+						now := workflow.Now(ctx)
 						cancelCtx, cancel, err = workflow.WithDeadline(parent, now.Add(time.Hour))
 					} else {
 						cancelCtx, cancel, err = workflow.WithTimeout(parent, time.Hour)

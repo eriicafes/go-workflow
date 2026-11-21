@@ -25,6 +25,17 @@ func conformEventDeltas(t *testing.T, world worlds.World) {
 	if plain.EventID != worlds.EventIDForSlot(3) || len(plain.Events) != 0 {
 		t.Fatalf("delta without options = %#v", plain)
 	}
+	// Each result carries the appended event's stored creation time.
+	listed, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []worlds.EventResult{started, plain} {
+		slot, _ := worlds.EventSlot(result.EventID)
+		if result.CreatedAt.IsZero() || int(slot) > len(listed.Data) || !result.CreatedAt.Equal(listed.Data[slot-1].CreatedAt) {
+			t.Fatalf("result %s CreatedAt = %v, want the stored event's", result.EventID, result.CreatedAt)
+		}
+	}
 	since, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_b"}, Options: worlds.EventsCreateOptions{SinceCursor: string(worlds.EventIDForSlot(1))}})
 	if err != nil {
 		t.Fatal(err)

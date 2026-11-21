@@ -121,6 +121,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input QueueInput) error {
 		RunID:     input.RunID,
 		EventID:   started.EventID,
 		EventType: startedEvent.EventType,
+		CreatedAt: started.CreatedAt,
 	}
 
 	// Build the replay context and merge the admission append without a
@@ -359,6 +360,7 @@ func (r *Runtime) executeStep(ctx context.Context, input QueueInput) error {
 		EventID:       started.EventID,
 		EventType:     startedEvent.EventType,
 		CorrelationID: startedEvent.CorrelationID,
+		CreatedAt:     started.CreatedAt,
 	}
 
 	// Replay the root workflow with the target selected. DurableStep runs

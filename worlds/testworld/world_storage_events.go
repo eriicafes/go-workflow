@@ -110,7 +110,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}
 		m.tokens[hook.Token] = id
 	}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, AllocatedEventCount: 1}, nil
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1}, nil
 }
 
 func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
@@ -324,7 +324,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	if requested.EventType == worlds.EventTypeWaitCompleted {
 		for _, event := range m.events[runID] {
 			if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == requested.CorrelationID {
-				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType}, true, nil
+				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt}, true, nil
 			}
 		}
 	}
@@ -362,7 +362,7 @@ func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType,
 }
 
 func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, created bool) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: events, Data: bytes.Clone(event.Data)}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Events: events, Data: bytes.Clone(event.Data)}
 	if created {
 		result.AllocatedEventCount = 1
 	}

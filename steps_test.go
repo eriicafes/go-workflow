@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
+	"github.com/oklog/ulid/v2"
 )
 
 type joinedInput struct{}
@@ -24,7 +26,7 @@ type joinedOutput struct{ Values []int }
 type rollbackInput struct{}
 type rollbackOutput struct{}
 type nowInput struct{}
-type nowOutput struct{ Value time.Time }
+type nowOutput struct{ Before, After time.Time }
 type retryInput struct{}
 type retryOutput struct{}
 type stepErrorInput struct{}
@@ -494,10 +496,13 @@ func TestRollbackRegistersAroundDurableSteps(t *testing.T) {
 	}
 }
 
-func TestNowUsesAnImmediatelyCompletedInlineStep(t *testing.T) {
+func TestNowReadsTheReplayClock(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ nowInput) (nowOutput, error) {
-		value, err := workflow.Now(ctx)
-		return nowOutput{Value: value}, err
+		before := workflow.Now(ctx)
+		if _, err := workflow.Step(ctx, echoBytes, []byte("x")); err != nil {
+			return nowOutput{}, err
+		}
+		return nowOutput{Before: before, After: workflow.Now(ctx)}, nil
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -510,32 +515,29 @@ func TestNowUsesAnImmediatelyCompletedInlineStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Value.IsZero() {
-		t.Fatal("durable now returned zero time")
+	// The clock starts at the run's creation time, read from its ID.
+	if created := ulid.MustParseStrict(strings.TrimPrefix(run.ID(), "wrun_")).Time(); output.Before.UnixMilli() != int64(created) {
+		t.Fatalf("Now before the step = %v, want the run ID's time %d", output.Before, created)
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, started, completed := false, 0, false
+	steps := 0
 	for _, event := range events.Data {
 		if event.EventType == worlds.EventTypeStepCreated {
-			var data worlds.DataStepCreated
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				t.Fatal(err)
-			}
-			created = data.StepName == "now"
+			steps++
 		}
-		if event.EventType == worlds.EventTypeStepStarted {
-			started++
-		}
-		if event.EventType == worlds.EventTypeStepCompleted {
-			completed = true
+		// The step's result moves the clock to its creation time.
+		if event.EventType == worlds.EventTypeStepCompleted && !output.After.Equal(event.CreatedAt.Truncate(time.Millisecond)) {
+			t.Fatalf("Now after the step = %v, want its result's time %v", output.After, event.CreatedAt)
 		}
 	}
-	// Now is an inline step: one attempt, run in the flow.
-	if !created || started != 1 || !completed {
-		t.Fatalf("inline now events created=%t started=%d completed=%t", created, started, completed)
+	if steps != 1 {
+		t.Fatalf("steps = %d, want only the echo step: Now records nothing", steps)
+	}
+	if outside := workflow.Now(ctx); time.Since(outside) > time.Second {
+		t.Fatalf("Now outside workflow = %v, want the current time", outside)
 	}
 }
 

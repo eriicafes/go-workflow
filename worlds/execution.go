@@ -62,6 +62,9 @@ type Execution struct {
 	// events, and reached holds the ULIDs this replay has declared.
 	index   map[string]int
 	reached map[string]bool
+	// clock is the replay clock workflow code reads: the run's creation time,
+	// moved forward to the creation time of each outcome delivered to it.
+	clock time.Time
 	// rollbacks holds compensations in registration order.
 	rollbacks []func(context.Context, *Execution) error
 	// horizon is the number of events the walk has passed. A result at a
@@ -111,6 +114,7 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 		return nil, err
 	}
 	execution := &Execution{
+		clock:     time.UnixMilli(int64(seed.time)).UTC(),
 		world:     world,
 		ctx:       ctx,
 		run:       run,
@@ -257,6 +261,21 @@ func (e *Execution) NextHookID() HookID {
 // NextHookToken draws the token of the next hook the runner declares without
 // one.
 func (e *Execution) NextHookToken() string { return e.seed.hookToken() }
+
+// Now returns the replay clock, in whole milliseconds: the run's creation
+// time, read from its ID, moved forward to the creation time of each outcome
+// delivered to workflow code, so every replay reads the same time at the same
+// point.
+func (e *Execution) Now() time.Time { return e.clock }
+
+// AdvanceClock moves the replay clock forward to at, the creation time of an
+// event delivered to workflow code, in whole milliseconds. It never moves the
+// clock back.
+func (e *Execution) AdvanceClock(at time.Time) {
+	if at = at.Truncate(time.Millisecond).UTC(); at.After(e.clock) {
+		e.clock = at
+	}
+}
 
 // RandReader returns a reader of bytes drawn from the run's seed, each the
 // floor of a drawn value times 256.
@@ -410,7 +429,7 @@ func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) er
 	if result.Data != nil {
 		data = result.Data
 	}
-	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data})
+	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data, CreatedAt: result.CreatedAt})
 	return result
 }
 
@@ -438,6 +457,13 @@ func (e *Execution) advance() bool {
 		}
 	}
 	e.horizon++
+	switch event := e.events[e.horizon-1]; event.EventType {
+	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeWaitCompleted, EventTypeHookCreated, EventTypeHookConflict:
+		// The walk delivers a step's result, a timer, and a hook's
+		// registration outcome as it passes them, and a hook's payload when
+		// a consumer takes it.
+		e.AdvanceClock(event.CreatedAt)
+	}
 	for _, fn := range e.continuations {
 		fn()
 	}
@@ -636,7 +662,7 @@ func (e *Execution) recordStepResult(stepID StepID, result DataStepResult) (Even
 	if err != nil {
 		return Event{}, err
 	}
-	event := Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data}
+	event := Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data, CreatedAt: created.CreatedAt}
 	inBand := e.inBand
 	e.merge(created, event)
 	e.inBand = inBand

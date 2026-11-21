@@ -16,9 +16,11 @@ type inlineStepOutput struct{ Captured time.Time }
 
 func (inlineStepInput) Workflow(inlineStepOutput) {}
 
-func TestDurableInlineStepRecordsNowInOneAttempt(t *testing.T) {
+func wallClock(context.Context, struct{}) (time.Time, error) { return time.Now(), nil }
+
+func TestDurableInlineStepRecordsItsResultInOneAttempt(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
-		captured, err := workflow.Now(ctx)
+		captured, err := workflow.InlineStep(ctx, wallClock, struct{}{})
 		return inlineStepOutput{Captured: captured}, err
 	}))
 	defer world.Close()

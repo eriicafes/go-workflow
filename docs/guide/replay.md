@@ -162,8 +162,9 @@ context must make the same decisions every time.
 
 - **Do side effects only in steps.** Network calls, database queries, file
   I/O, and anything that sends a message belong in a step function.
-- **Read time only through `workflow.Now`.** It records the time the first time
-  it runs, so replay returns the same value. `time.Now` is fine inside steps.
+- **Read time only through `workflow.Now`.** It returns the replay clock, which
+  every replay moves to the same times at the same points.
+  `time.Now` is fine inside steps.
 - **Read randomness only through `workflow.RandReader`.** Its bytes are drawn
   from the run's seed, the generator that draws step, timer, and hook IDs, so
   every replay reads the same bytes in the same order. Wrap it for other

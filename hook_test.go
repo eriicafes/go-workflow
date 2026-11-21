@@ -34,7 +34,7 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 		if hook.ID() != "" || hook.Token() != input.Token {
 			return hookResumeOutput{}, errors.New("unclaimed hook identity changed")
 		}
-		if _, err := workflow.Now(ctx); err != nil {
+		if _, err := workflow.InlineStep(ctx, nothing, struct{}{}); err != nil {
 			return hookResumeOutput{}, err
 		}
 		if hook.ID() != "" {
@@ -856,3 +856,5 @@ func TestOnlyTheFirstHookOpensTheStartHook(t *testing.T) {
 		t.Fatalf("hook with MinRetention opening the start hook error = %v", err)
 	}
 }
+
+func nothing(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }

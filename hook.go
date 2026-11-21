@@ -179,12 +179,18 @@ func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 		if execution, ok := workflowExecutionFromContext(ctx); ok && h.executionState == execution && h.err == nil && !h.disposed {
 			if outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received); outcome.Received {
 				h.received = outcome.EventID
+				if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok {
+					h.executionState.AdvanceClock(event.CreatedAt)
+				}
 			}
 		}
 		return zero, err
 	}
 	outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received)
 	h.received = outcome.EventID
+	if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok && outcome.Received {
+		h.executionState.AdvanceClock(event.CreatedAt)
+	}
 	return outcome.Data, outcome.Err
 }
 

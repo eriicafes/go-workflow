@@ -255,10 +255,7 @@ func TestDeadlineCancellationStopsWorkWithoutCancellingRun(t *testing.T) {
 					var cancel func() error
 					var err error
 					if test.deadline {
-						now, nowErr := workflow.Now(ctx)
-						if nowErr != nil {
-							return cancellationOutput{}, nowErr
-						}
+						now := workflow.Now(ctx)
 						if test.withCause {
 							cancelCtx, cancel, err = workflow.WithDeadlineCause(ctx, now.Add(test.duration), test.cause)
 						} else {

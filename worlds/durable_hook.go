@@ -70,7 +70,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if !exists {
 		created := DataHookCreated{Token: options.Token, Metadata: options.Metadata, IsWebhook: options.IsWebhook, IsSystem: options.System, Force: options.Force}
 		if options.MinRetention > 0 {
-			until := time.Now().UTC().Add(options.MinRetention)
+			until := options.Execution.Now().Add(options.MinRetention)
 			created.TokenRetentionUntil = &until
 		}
 		data, err := json.Marshal(created)

@@ -150,7 +150,7 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}] {
 	}
 	wait := worlds.DurableWait(ctx, worlds.DurableWaitOptions{
 		Execution: execution,
-		DueAt:     time.Now().Add(duration),
+		DueAt:     execution.Now().Add(duration),
 	})
 	return &Result[struct{}]{
 		err:     wait.Err,
@@ -191,22 +191,17 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 	})
 }
 
-// Now returns the current time in UTC, recorded the first time it runs so that
-// replay returns the same time. In workflow context, a runner reads time only
-// through Now, never time.Now. Now returns ErrNoWorkflow outside workflow
-// context, including step context, where time.Now is safe to use.
-func Now(ctx context.Context) (time.Time, error) {
-	execution, ok := workflowExecutionFromContext(ctx)
-	if !ok {
-		return time.Time{}, ErrNoWorkflow
+// Now returns the current time. In workflow context it returns the replay
+// clock: the run's creation time, moved forward to the creation time of each
+// step result, timer, hook registration, hook payload, and cancellation as it
+// is delivered to the runner, so every replay reads the same time at the same
+// point and nothing is recorded. A runner reads time only through Now, never
+// time.Now. Elsewhere, including step context, it returns time.Now().
+func Now(ctx context.Context) time.Time {
+	if execution, ok := workflowExecutionFromContext(ctx); ok {
+		return execution.Now()
 	}
-	durable := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
-		Execution: execution,
-		Name:      "now",
-	}, func(context.Context, struct{}) (time.Time, error) {
-		return time.Now().UTC(), nil
-	}, struct{}{})
-	return stepResult(execution, durable).Value(ctx)
+	return time.Now()
 }
 
 // RandReader returns a reader of random bytes for workflow code. Each byte is
