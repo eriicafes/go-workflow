@@ -516,6 +516,7 @@ func TestQueueConsumerCoversCoalescedMessages(t *testing.T) {
 		return nil
 	}}
 	body, _ := json.Marshal(queueMessage{ID: "01MSG", RunID: "wrun_1"})
+	createdAt := ""
 	deliver := func() int {
 		t.Helper()
 		server.mu.Lock()
@@ -523,7 +524,11 @@ func TestQueueConsumerCoversCoalescedMessages(t *testing.T) {
 		server.mu.Unlock()
 		deliveries = nil
 		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, deliveryRequest("msg_1", string(body)))
+		request := deliveryRequest("msg_1", string(body))
+		if createdAt != "" {
+			request.Header.Set("Ce-Vqscreatedat", createdAt)
+		}
+		handler.ServeHTTP(response, request)
 		return response.Code
 	}
 
@@ -551,6 +556,23 @@ func TestQueueConsumerCoversCoalescedMessages(t *testing.T) {
 	if last := requests[len(requests)-1]; status != http.StatusAccepted || len(deliveries) != vqsMaxCoalescedReruns+1 || last.Method != http.MethodPatch || last.Header.Get("Vqs-Experimental-Handoff") != "1" {
 		t.Fatalf("busy delivery: status %d deliveries %d last request %+v", status, len(deliveries), last)
 	}
+
+	// A busy delivery of a message near its expiry continues the run on a
+	// new message on its last run, before the acknowledgment the queue
+	// refuses.
+	createdAt = time.Now().Add(-21 * time.Hour).Format(time.RFC3339Nano)
+	status = deliver()
+	requests = server.all()
+	published := -1
+	for index, request := range requests {
+		if request.Method == http.MethodPost && strings.Contains(request.Body, `"runId":"wrun_1"`) {
+			published = index
+		}
+	}
+	if status != http.StatusAccepted || published < 0 || requests[published+1].Method != http.MethodDelete || requests[len(requests)-1].Header.Get("Vqs-Experimental-Handoff") != "1" {
+		t.Fatalf("busy delivery near expiry: status %d published at %d of %d", status, published, len(requests))
+	}
+	createdAt = ""
 
 	// Without the error code a conflict is an ordinary failure.
 	refusals, coded = 1, false

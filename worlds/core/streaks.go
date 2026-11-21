@@ -6,11 +6,11 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// A streak counts one kind of setback of a run's flow deliveries in a row in
-// this process, so a run that keeps meeting it is reported once it repeats
-// instead of never. One fence refusal or run-ahead stop is expected; many in
-// a row point at a World fault or a pathological write latency, which nothing
-// else surfaces until the delivery cap fails the run.
+// A streak counts the in-band fence refusals of a run's flow deliveries in a
+// row in this process, so a run whose every delivery is refused is reported
+// instead of never. One refusal is expected; many in a row point at a World
+// fault or a pathological write latency, which nothing else surfaces until
+// the delivery cap fails the run.
 type streak struct {
 	mu    sync.Mutex
 	runs  map[worlds.RunID]int
@@ -25,10 +25,7 @@ const (
 	maxStreakRuns = 1_000
 )
 
-var (
-	fenceRefusals = &streak{}
-	runAheadStops = &streak{}
-)
+var fenceRefusals = &streak{}
 
 // note records a setback of runID and reports the run's streak, and whether
 // to report it: at streakWarnThreshold, then at every power of two above it.

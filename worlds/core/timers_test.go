@@ -94,21 +94,52 @@ func testNearDueWaits(t *testing.T) {
 	}
 }
 
-func TestHandoffArmsTheEarliestOpenWaitOfItsOwnChain(t *testing.T) {
+func TestHandoffArmsTheEarliestOpenWaitOfItsOwnChainWhenItCreatedIt(t *testing.T) {
 	waitEvent := func(id, creator string, resumeAt time.Time) worlds.Event {
 		data, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt, CreatorMessageID: creator})
 		return worlds.Event{EventType: worlds.EventTypeWaitCreated, CorrelationID: id, Data: data}
 	}
 	now := time.Now()
-	world := &queueRecorder{}
-	e := &Execution{ctx: context.Background(), world: world, delivery: worlds.QueueInput{MessageID: "msg", DeliveryCount: 1}, events: []worlds.Event{
+	events := []worlds.Event{
 		waitEvent("wait_later", "msg", now.Add(2*time.Hour)),
 		waitEvent("wait_first", "msg", now.Add(time.Hour)),
 		waitEvent("wait_other", "other", now.Add(time.Minute)),
-	}}
-	e.armOwnChain()
-	if len(world.queued) != 1 || world.queued[0].WaitContinuation.CorrelationID != "wait_first" {
-		t.Fatalf("queued %+v, want the timer of wait_first", world.queued)
+	}
+	armed := func(created ...string) []worlds.QueueInput {
+		world := &queueRecorder{}
+		e := &Execution{ctx: context.Background(), world: world, delivery: worlds.QueueInput{MessageID: "msg", DeliveryCount: 1}, events: events, createdWaits: map[string]bool{}}
+		for _, id := range created {
+			e.createdWaits[id] = true
+		}
+		e.armCreatedWaitTimers()
+		return world.queued
+	}
+	if queued := armed("wait_first"); len(queued) != 1 || queued[0].WaitContinuation.CorrelationID != "wait_first" {
+		t.Fatalf("queued %+v, want the timer of wait_first", queued)
+	}
+	// An earlier delivery of the message created it and sent its timer.
+	if queued := armed("wait_later"); len(queued) != 0 {
+		t.Fatalf("queued %+v, want none", queued)
+	}
+}
+
+func TestDeliveryArmsTheWaitItCreatesBeforeItCommitsWhenItIsItsChainsEarliest(t *testing.T) {
+	data, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: time.Now().Add(2 * time.Hour), CreatorMessageID: "msg"})
+	armed := func(dueIn time.Duration) []worlds.QueueInput {
+		world := &queueRecorder{}
+		e := &Execution{ctx: context.Background(), world: world, delivery: worlds.QueueInput{MessageID: "msg", DeliveryCount: 1},
+			events: []worlds.Event{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_open", Data: data}}}
+		e.armWaitsBeforeCreation([]pendingWait{{waitID: "wait_new", dueAt: time.Now().Add(dueIn)}})
+		return world.queued
+	}
+	if queued := armed(time.Hour); len(queued) != 1 || queued[0].WaitContinuation.CorrelationID != "wait_new" {
+		t.Fatalf("queued %+v, want the timer of wait_new", queued)
+	}
+	if queued := armed(3 * time.Hour); len(queued) != 0 {
+		t.Fatalf("queued %+v, want none: the chain's earliest wait is open already", queued)
+	}
+	if queued := armed(-time.Second); len(queued) != 0 {
+		t.Fatalf("queued %+v, want none for a wait already due", queued)
 	}
 }
 

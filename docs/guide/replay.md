@@ -109,20 +109,29 @@ unconfirmed at once.
 A flow that runs ahead decides from the log plus its own writes in flight, and
 another writer's event can land between them, where a later replay reads it.
 So a flow runs ahead only where no such event can change a decision: while the
-runner waits on no hook, has no cancellation context, waits on no step that
-runs in another delivery, and no timer can fall due within the delivery's
-inline window. Every other write of the flow, and its suspension, first waits
-for the writes ahead of it to commit. When an answer reports an event below
-one of its writes, or the flow reads it from the log because the report was
-incomplete, a payload of a hook nobody waits on, a step result nobody waits
-on, an attribute write, or the run's cancellation is folded in after the
-flow's own writes, since a replay that reads it earlier decides the same. Any
-other event ends the delivery, which starts again from a fresh read of the log
-once and then hands its message on, and a run that keeps stopping, or keeps
-having its writes refused by the fence, is logged as a warning. A World that stores
-a write at a time other than the one the flow sent, which the runner's clock
-already read, ends the delivery the same way and is not run ahead of again in
-that process.
+runner waits on no hook, has no cancellation context, no step runs in another
+delivery, and no timer can fall due within the delivery's inline window.
+Every other write of the flow, and its suspension, first waits for the writes
+ahead of it to commit. An event another writer appends below one of its
+writes, reported by the write's answer or read by the live feed, is handled
+by what it is:
+
+- A hook event for a hook nobody waits on, or an attribute write, is folded in
+  after the flow's own writes, since a replay that reads it earlier decides
+  the same.
+- A hook event for a hook the runner waits on or for a cancellation context, a
+  step event of a step this delivery does not run, or a `wait_completed` stops
+  the delivery's decisions. It still writes the results of the steps whose
+  start committed, starts again from a fresh read of the log with run-ahead
+  off, and hands its message on if that stops too.
+- Any other event, an incomplete report, or a write that committed below the
+  position the flow placed it at, makes the delivery replay again from the
+  log once its writes ahead settle.
+
+A World that stores a write at a time other than the one the flow sent, which
+the runner's clock already read, stops the delivery the same way and is not
+run ahead of again in that process. A run whose writes keep being refused by
+the fence is logged as a warning.
 
 ## Identifying operations
 

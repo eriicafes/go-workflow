@@ -99,25 +99,29 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	if input.Intermediate() {
 		return r.continueWaitHop(ctx, input)
 	}
-	err := r.executeFlow(ctx, input)
-	stopped := false
-	for restarts := 0; ; restarts++ {
+	// A pass whose run-ahead stopped starts again from a fresh read of the
+	// log, with run-ahead off for the rest of the delivery, once, and then
+	// hands its message on. A pass that has a repair due replays again from
+	// the log, with run-ahead still on.
+	restarts := 0
+	err := r.executeFlow(ctx, input, true)
+	for {
 		var stop errRunAheadStop
-		if !errors.As(err, &stop) {
-			break
+		if errors.As(err, &stop) {
+			if restarts == maxRunAheadRestarts {
+				// The next delivery decides from the log.
+				log.Printf("workflow: run %s handed off after its run-ahead stopped again after a restart: %s", input.RunID, stop.reason)
+				return worlds.Redeliver(0)
+			}
+			restarts++
+			err = r.executeFlow(ctx, input, false)
+			continue
 		}
-		stopped = true
-		if count, warn := runAheadStops.note(input.RunID); warn {
-			log.Printf("workflow: warning: run %s stopped running ahead %d times in a row: %s", input.RunID, count, stop.reason)
+		if errors.As(err, new(errRunAheadRepair)) {
+			err = r.executeFlow(ctx, input, restarts == 0)
+			continue
 		}
-		if restarts == maxRunAheadRestarts {
-			// The next delivery decides from the log.
-			return worlds.Redeliver(0)
-		}
-		err = r.executeFlow(ctx, input)
-	}
-	if !stopped {
-		runAheadStops.clear(input.RunID)
+		break
 	}
 	if errors.Is(err, errReplaySuperseded) {
 		if count, warn := fenceRefusals.note(input.RunID); warn {
@@ -132,7 +136,7 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 // executeFlow loads the run's log, records run_started on the run's first
 // flow, replays the runner, and turns the runner's result into a terminal run
 // event when it did not suspend.
-func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput) error {
+func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runAhead bool) error {
 	run, events, err := r.loadRun(ctx, input.RunID)
 	if err != nil {
 		return err
@@ -148,7 +152,9 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput) erro
 		return err
 	}
 	execution.delivery = input
-	execution.aheadDepth = r.runAheadDepth
+	if runAhead {
+		execution.aheadDepth = r.runAheadDepth
+	}
 	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
@@ -210,6 +216,12 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	execution.pending, execution.pendingWaits = nil, nil
 	defer func() {
 		if finishErr := execution.finishSteps(); finishErr != nil {
+			if errors.As(finishErr, new(errRunAheadStop)) && !errors.As(err, new(errRunAheadStop)) {
+				// Found while the flow finished its steps.
+				if armErr := r.armCreatedWaitTimers(execution); armErr != nil {
+					finishErr = errors.Join(finishErr, armErr)
+				}
+			}
 			err = errors.Join(err, finishErr)
 		}
 		if execution.superseded && err == nil {
@@ -231,15 +243,17 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	case errors.Is(err, errReplaySuperseded):
 		return errReplaySuperseded
 	case errors.As(err, new(errRunAheadStop)):
-		// The flow writes nothing more, its steps' results included, and
-		// starts again from the log.
-		execution.superseded = true
-		execution.abandonAhead()
-		// The delivery may end in a handoff, which a World may continue on
-		// a new message that does not own this message's chain.
-		if armErr := r.armOwnChain(execution); armErr != nil {
+		// The flow decides nothing more: it writes the results of the steps
+		// whose start committed, and starts again from the log. The delivery
+		// may end in a handoff, which a World may continue on a new message
+		// that does not own this message's chain.
+		if armErr := r.armCreatedWaitTimers(execution); armErr != nil {
 			return armErr
 		}
+		return err
+	case errors.As(err, new(errRunAheadRepair)):
+		// The flow writes the results of the steps it runs, and replays
+		// again from the log.
 		return err
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
@@ -274,15 +288,14 @@ func (r *Runtime) resend(execution *Execution) (err error) {
 	return nil
 }
 
-// armOwnChain arms the earliest timer of the chain of the delivery's own
-// message, before a handoff.
-func (r *Runtime) armOwnChain(execution *Execution) (err error) {
+// armCreatedWaitTimers sends the timers a handoff owes.
+func (r *Runtime) armCreatedWaitTimers(execution *Execution) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = replayExit(recovered)
 		}
 	}()
-	execution.armOwnChain()
+	execution.armCreatedWaitTimers()
 	return nil
 }
 

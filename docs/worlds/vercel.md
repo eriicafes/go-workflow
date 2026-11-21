@@ -305,7 +305,8 @@ The consumer handles each delivery as follows:
    does not count as an attempt. A flow message within 4 hours of its expiry,
    or 100 handoffs of the 10,000 Vercel Queues makes, continues on a new
    message instead, carrying its wait's timer and the waits it completes, and
-   is acknowledged.
+   is acknowledged. So does one on its last coalesced run, before the
+   acknowledgment Vercel may refuse.
 6. On failure sets the visibility to a backoff, a second doubling with each
    delivery up to 15 minutes with 25% jitter, and at least the 5 seconds
    Vercel Queues accepts, or longer when the backend asks for it, and answers

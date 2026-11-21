@@ -105,17 +105,36 @@ type Execution struct {
 	// completedChains holds the chains of the waits this delivery
 	// completed, whose timers it arms.
 	completedChains map[string]bool
-	// armedWaits holds the waits whose timer the delivery queued.
-	armedWaits map[string]bool
+	// armedWaits holds the waits whose timer the delivery queued, and
+	// createdWaits the waits it created.
+	armedWaits   map[string]bool
+	createdWaits map[string]bool
 	// aheadDepth is how many inline steps' results the flow may hand to the
 	// runner ahead of their writes, ahead holds those writes in order, and
 	// writer sends them. See runahead.go.
 	aheadDepth int
 	ahead      []*aheadWrite
 	writer     *aheadWriter
-	// feed pushes the run's events while the flow waits for an inline step,
-	// when the World supports it. See feed.go.
-	feed *feed
+	// speculativeStarts holds the inline steps whose start is in a write
+	// ahead not yet confirmed.
+	speculativeStarts map[worlds.StepID]*aheadWrite
+	// stopped is set when run-ahead stopped: the flow then writes only the
+	// results of steps whose start committed. repairDue is set when another
+	// writer's event displaced a write ahead where the runner's view could
+	// not take it in, and the flow replays again once its writes settle.
+	stopped      bool
+	stopReason   string
+	repairDue    bool
+	repairReason string
+	// finishing is set while finishSteps records the results of the steps
+	// still running, which a stop or repair found meanwhile does not cut
+	// short.
+	finishing bool
+	// feed feeds the run's events to a flow waiting for an inline step,
+	// and feedHeld is set while it leaves them out for the writes ahead to
+	// settle. See feed.go.
+	feed     *liveFeed
+	feedHeld bool
 	// observedHooks holds the hooks the runner has looked for a payload of,
 	// which may change its decisions when one arrives.
 	observedHooks map[worlds.HookID]bool
@@ -128,6 +147,9 @@ type Execution struct {
 	// until their result is recorded or their retry is handed to a step
 	// delivery.
 	ranInline map[worlds.StepID]bool
+	// selfSteps holds the steps this delivery ran inline, whose events are
+	// its own until a retry moves one to a step delivery.
+	selfSteps map[worlds.StepID]bool
 	// startedAt is when the delivery started. A flow stops running new steps
 	// inline after each step's duration.
 	startedAt time.Time
@@ -139,9 +161,6 @@ type Execution struct {
 	// inlineDuration is the longest MaxInlineStepsDuration of the steps the
 	// runner declared.
 	inlineDuration time.Duration
-	// awaited holds the steps, timers, and hooks the runner has looked for
-	// the settlement of and not found, until it is. See runahead.go.
-	awaited map[string]bool
 }
 
 func newExecution(ctx context.Context, world worlds.World, run worlds.Run, events []worlds.Event, target *worlds.StepID) (*Execution, error) {
@@ -161,7 +180,12 @@ func newExecution(ctx context.Context, world worlds.World, run worlds.Run, event
 		reached:   make(map[string]bool),
 		settles:   make(map[string]int),
 		ranInline: make(map[worlds.StepID]bool),
-		openWaits: make(map[worlds.WaitID]pendingWait),
+		selfSteps: make(map[worlds.StepID]bool),
+
+		createdWaits: make(map[string]bool),
+
+		speculativeStarts: make(map[worlds.StepID]*aheadWrite),
+		openWaits:         make(map[worlds.WaitID]pendingWait),
 
 		completedChains: make(map[string]bool),
 		observedHooks:   make(map[worlds.HookID]bool),
@@ -372,18 +396,7 @@ func (e *Execution) InBandCount() *int {
 // answer is the same at the same point of every replay.
 func (e *Execution) Settled(id string) bool {
 	index, ok := e.settles[id]
-	settled := ok && index < e.horizon
-	// A runner that waits on a step another delivery runs may decide
-	// differently once its result arrives.
-	if settled {
-		delete(e.awaited, id)
-	} else {
-		if e.awaited == nil {
-			e.awaited = map[string]bool{}
-		}
-		e.awaited[id] = true
-	}
-	return settled
+	return ok && index < e.horizon
 }
 
 // SettledEvent returns the event that settled id, when Settled reports true.
@@ -437,6 +450,7 @@ func (e *Execution) queue(input worlds.QueueInput) worlds.QueueResult {
 // the Execution holds, skipping latest when it is already among them. It does
 // not read storage.
 func (e *Execution) merge(result worlds.EventResult, latest worlds.Event) {
+	e.noteActivity()
 	e.mergeEvents(result.Events)
 	for _, event := range e.events {
 		if event.EventID == latest.EventID {
@@ -665,6 +679,7 @@ func (e *Execution) createDeclared() {
 		// runs ahead too.
 		committed = e.writeBatchAhead(events)
 	} else {
+		e.armWaitsBeforeCreation(waits)
 		committed = e.writeBatch(events)
 	}
 	for _, step := range background {
@@ -680,6 +695,7 @@ func (e *Execution) createDeclared() {
 		if committed[string(wait.waitID)] {
 			// The flow arms the timers of its chain when it ends.
 			e.openWaits[wait.waitID] = wait
+			e.createdWaits[string(wait.waitID)] = true
 		}
 	}
 	if e.outcomes == nil {
@@ -691,6 +707,7 @@ func (e *Execution) createDeclared() {
 		}
 		e.inline++
 		e.ranInline[step.stepID] = true
+		e.selfSteps[step.stepID] = true
 		go func() {
 			result, err := step.run(step.attempt)
 			e.outcomes <- inlineOutcome{step: step, result: result, err: err}
@@ -757,32 +774,32 @@ func (e *Execution) writeBatch(events []worlds.EventsCreateEvent) map[string]boo
 	return committed
 }
 
-// LogPollInterval is how often a flow that waits for a step it runs inline
-// reads the events others appended to the run's log, so a payload, a
-// cancellation, or another step's result reaches the runner while the step
-// runs, when its World does not push them (see FeedPollInterval).
-var LogPollInterval = 2 * time.Second
-
 // awaitInline waits for a step running inline to finish and records its
-// result. Meanwhile it completes the timers that fall due, and takes what
-// others append to the log from the World's feed or by reading it, returning as soon as either
-// adds an event for the walk to deliver.
+// result. Meanwhile it completes the timers that fall due, and takes in what
+// others append to the log from the live feed (see feed.go), returning as
+// soon as either adds an event for the walk to deliver.
 func (e *Execution) awaitInline() error {
-	e.subscribe()
-	e.catchUp()
+	e.startFeed()
 	held := len(e.events)
+	e.takeFeed()
 	for len(e.events) == held {
-		wait := time.Now().Add(e.pollInterval())
 		var due *pendingWait
+		var timeout <-chan time.Time
 		for _, open := range e.openWaits {
-			if open.dueAt.Before(wait) {
-				wait, due = open.dueAt, &open
+			if due == nil || open.dueAt.Before(due.dueAt) {
+				due = &open
 			}
 		}
-		timer := time.NewTimer(time.Until(wait))
+		var timer *time.Timer
+		if due != nil {
+			timer = time.NewTimer(time.Until(due.dueAt))
+			timeout = timer.C
+		}
 		select {
 		case outcome := <-e.outcomes:
-			timer.Stop()
+			if timer != nil {
+				timer.Stop()
+			}
 			e.inline--
 			if outcome.err != nil {
 				delete(e.ranInline, outcome.step.stepID)
@@ -796,26 +813,18 @@ func (e *Execution) awaitInline() error {
 				return nil
 			}
 			return e.completeInlineStep(outcome.step, outcome.result)
-		case event := <-e.feedEvents():
-			timer.Stop()
-			if !e.superseded {
-				e.accept(event)
+		case <-e.feedSignal():
+			if timer != nil {
+				timer.Stop()
 			}
-			continue
-		case <-timer.C:
+			if !e.superseded {
+				e.takeFeed()
+			}
+		case <-timeout:
+			if !e.superseded {
+				e.completeWait(*due)
+			}
 		}
-		if e.superseded {
-			continue
-		}
-		e.drainAhead()
-		if len(e.events) != held {
-			continue
-		}
-		if due != nil {
-			e.completeWait(*due)
-			continue
-		}
-		e.reload()
 	}
 	return nil
 }
@@ -840,12 +849,18 @@ func (e *Execution) completeInlineStep(step pendingStep, result worlds.DataStepR
 	if e.superseded {
 		return errReplaySuperseded
 	}
+	if e.stopped && e.speculativeStarts[step.stepID] != nil {
+		// Its start was decided from the view ahead and never committed.
+		delete(e.ranInline, step.stepID)
+		return nil
+	}
 	event, err := e.recordStepResult(step.stepID, step.attempt, result, true)
 	if err != nil {
 		return err
 	}
 	if event.EventType == worlds.EventTypeStepRetrying {
 		delete(e.ranInline, step.stepID)
+		delete(e.selfSteps, step.stepID)
 		message := stepMessage(step.stepID, step.name, step.attempt+1, false)
 		message.NotBefore = result.RetryAfter
 		if _, err := e.world.Queue(e.ctx, e.addressed(message)); err != nil {
@@ -992,14 +1007,22 @@ func stepCreation(events []worlds.Event, stepID worlds.StepID) (stepCreationEven
 
 // finishSteps waits for every step the flow runs inline to finish and records
 // their results, once the runner has returned or stopped. A superseded flow
-// records none.
+// records none, and a flow whose run-ahead stopped only those of steps whose
+// start committed. A run-ahead stop or repair found meanwhile is returned once
+// every result is recorded.
 func (e *Execution) finishSteps() (err error) {
-	defer e.unsubscribe()
+	defer e.stopFeed()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = replayExit(recovered)
 		}
+		if err == nil && e.stopReason != "" {
+			err = errRunAheadStop{reason: e.stopReason}
+		} else if err == nil && e.repairDue {
+			err = errRunAheadRepair{reason: e.repairReason}
+		}
 	}()
+	e.finishing = true
 	var errs []error
 	for e.inline > 0 {
 		if err := e.recordNext(); err != nil && !errors.Is(err, errReplaySuperseded) {

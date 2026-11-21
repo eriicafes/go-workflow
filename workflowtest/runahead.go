@@ -2,7 +2,6 @@ package workflowtest
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,9 +19,6 @@ import (
 
 type runAheadInput struct {
 	Timer, Hook bool
-	// Background declares a step the flow does not run, whose result it
-	// adds once its own steps are done.
-	Background bool
 	// Token is the token of the run's hook.
 	Token string
 }
@@ -37,8 +33,7 @@ func (runAheadInput) Workflow(runAheadOutput) {}
 // runAheadWorld slows each in-band step_completed down, so a flow that runs
 // ahead starts its next step before the write commits, and lets a case
 // append another writer's event, or answer with another time, just before
-// one commits. It holds step messages back, so another delivery's step
-// result is one a case appends.
+// one commits.
 type runAheadWorld struct {
 	worlds.World
 	// committed counts the in-band step_completed writes that committed,
@@ -46,8 +41,10 @@ type runAheadWorld struct {
 	// before them committed.
 	committed atomic.Int32
 	overlaps  atomic.Int32
-	loads     atomic.Int32
-	mu        sync.Mutex
+	// bodies counts the step bodies run.
+	bodies atomic.Int32
+	loads  atomic.Int32
+	mu     sync.Mutex
 	// before runs its first function before the next in-band
 	// step_completed commits, and each next one before the one after.
 	before []func(context.Context)
@@ -83,13 +80,6 @@ func (w *runAheadWorld) EventsCreate(ctx context.Context, input worlds.EventsCre
 	return result, err
 }
 
-func (w *runAheadWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
-	if input.StepID != nil {
-		return worlds.QueueResult{MessageID: "held"}, nil
-	}
-	return w.World.Queue(ctx, input)
-}
-
 func (w *runAheadWorld) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
 	w.loads.Add(1)
 	return w.World.RunsGet(ctx, input)
@@ -104,10 +94,6 @@ func runAheadRunner(world *runAheadWorld) core.Runner {
 		if input.Timer {
 			_ = workflow.Timer(ctx, time.Hour)
 		}
-		var background *workflow.Result[int]
-		if input.Background {
-			background = workflow.Background(workflow.SetMaxInlineSteps(ctx, 0), func(context.Context, struct{}) (int, error) { return 10, nil }, struct{}{})
-		}
 		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		if input.Hook {
 			first, err := hook.Next(ctx)
@@ -120,6 +106,7 @@ func runAheadRunner(world *runAheadWorld) core.Runner {
 		for range 4 {
 			var err error
 			value, err = workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
+				world.bodies.Add(1)
 				// value counts the steps before this one.
 				if int(world.committed.Load()) < value {
 					world.overlaps.Add(1)
@@ -131,13 +118,6 @@ func runAheadRunner(world *runAheadWorld) core.Runner {
 			}
 		}
 		output.Sum = value
-		if background != nil {
-			result, err := background.Value(ctx)
-			if err != nil {
-				return output, err
-			}
-			output.Sum += result
-		}
 		if input.Hook {
 			second, err := hook.Next(ctx)
 			if err != nil {
@@ -216,39 +196,6 @@ func (r *runAheadRun) payload(value string) func(context.Context) {
 		data, _ := worlds.EncodeHookReceived(encoded, hook.ResumeContext.WorkflowName)
 		if _, err := r.world.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: r.runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: data}}); err != nil {
 			r.t.Error(err)
-		}
-	}
-}
-
-// stepResult records a result of the run's step that runs from its own
-// message, as its step delivery does.
-func (r *runAheadRun) stepResult(value int) func(context.Context) {
-	return func(ctx context.Context) {
-		page, err := r.world.World.EventsList(ctx, worlds.EventsListInput{RunID: r.runID})
-		if err != nil {
-			r.t.Error(err)
-			return
-		}
-		stepID := ""
-		for _, event := range page.Data {
-			if event.EventType == worlds.EventTypeStepCreated {
-				stepID = event.CorrelationID
-			}
-		}
-		result, err := worlds.EncodePayload(value, worlds.PayloadOptions{})
-		if err != nil || stepID == "" {
-			r.t.Errorf("step = %q err = %v", stepID, err)
-			return
-		}
-		started, _ := json.Marshal(worlds.DataStepStarted{Attempt: 1})
-		completed, _ := json.Marshal(worlds.DataStepResult{WorkflowName: worlds.WorkflowName[runAheadInput](), Result: result})
-		for _, event := range []worlds.EventsCreateEvent{
-			{EventType: worlds.EventTypeStepStarted, CorrelationID: stepID, Data: started},
-			{EventType: worlds.EventTypeStepCompleted, CorrelationID: stepID, Data: completed},
-		} {
-			if _, err := r.world.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: r.runID, Event: event}); err != nil {
-				r.t.Error(err)
-			}
 		}
 	}
 }
@@ -356,26 +303,6 @@ func setAttribute(t *testing.T, world *runAheadWorld, run *runAheadRun, key stri
 	}
 }
 
-func conformRunAheadFoldsUnwatchedStepResults(t *testing.T, base worlds.World) {
-	world := &runAheadWorld{World: base}
-	run := startRunAhead(t, world, runAheadInput{Background: true})
-	// The result of a step another delivery runs lands below a write ahead
-	// while the runner does not wait on it, so the delivery goes on, and the
-	// runner reads it once it waits.
-	world.before = []func(context.Context){func(context.Context) {}, func(ctx context.Context) {
-		if world.overlaps.Load() == 0 {
-			t.Error("no step ran ahead while the runner did not wait on the other step")
-		}
-		run.stepResult(10)(ctx)
-	}}
-	if loads := run.deliver(); loads != 1 {
-		t.Fatalf("the delivery read the run %d times, want once: it went on", loads)
-	}
-	if output := run.output(); output.Sum != 14 {
-		t.Fatalf("output = %+v", output)
-	}
-}
-
 func conformRunAheadRepairsTwiceInARow(t *testing.T, base worlds.World) {
 	world := &runAheadWorld{World: base}
 	run := startRunAhead(t, world, runAheadInput{})
@@ -395,17 +322,18 @@ func conformRunAheadRepairsTwiceInARow(t *testing.T, base worlds.World) {
 	}
 }
 
-func conformRunAheadReadsAnIncompleteReport(t *testing.T, base worlds.World) {
+func conformRunAheadRepairsFromAnIncompleteReport(t *testing.T, base worlds.World) {
 	world := &runAheadWorld{World: base, incomplete: true}
 	run := startRunAhead(t, world, runAheadInput{})
-	// The answer of a write ahead leaves out an inert event below it, which
-	// the flow reads from the log and folds in.
+	// The answer of a write ahead leaves out an event below it, so the
+	// delivery replays again from the log once its writes ahead settle,
+	// and runs no step twice.
 	world.before = []func(context.Context){func(context.Context) {}, setAttribute(t, world, run, "late")}
-	if loads := run.deliver(); loads != 1 {
-		t.Fatalf("the delivery read the run %d times, want once: it went on", loads)
+	if loads := run.deliver(); loads != 2 {
+		t.Fatalf("the delivery read the run %d times, want twice: once more for the repair", loads)
 	}
-	if output := run.output(); output.Sum != 4 {
-		t.Fatalf("output = %+v", output)
+	if output := run.output(); output.Sum != 4 || world.bodies.Load() != 4 {
+		t.Fatalf("output = %+v bodies = %d", output, world.bodies.Load())
 	}
 	if world.Capabilities().SetAttributes {
 		if stored, err := world.World.RunsGet(context.Background(), worlds.RunsGetInput{RunID: run.runID}); err != nil || stored.Attributes["late"] != "set" {
