@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -441,4 +442,52 @@ func conformWaits(t *testing.T, world worlds.World) {
 	if events := conformAllEvents(t, world, runID); len(events) != 3 {
 		t.Fatalf("events = %d, want 3", len(events))
 	}
+}
+
+// conformEventsSubscribe checks a World that pushes a run's events: each
+// event after the slot subscribed from, in slot order and once, and none
+// after unsubscribe returns.
+func conformEventsSubscribe(t *testing.T, world worlds.World) {
+	subscriber, ok := world.(worlds.EventsSubscriber)
+	if !ok {
+		t.Skip("the World does not push events")
+	}
+	ctx := context.Background()
+	runID := conformCreateRun(t, world, "subscribe")
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_before", nil)
+	var mu sync.Mutex
+	var slots []uint64
+	stopped := false
+	pushed := make(chan struct{}, 16)
+	unsubscribe := subscriber.EventsSubscribe(ctx, runID, 2, func(event worlds.Event) {
+		slot, _ := worlds.EventSlot(event.EventID)
+		mu.Lock()
+		if stopped {
+			t.Errorf("event %s pushed after unsubscribe", event.EventID)
+		}
+		slots = append(slots, slot)
+		mu.Unlock()
+		pushed <- struct{}{}
+	}, func(err error) { t.Errorf("feed stopped: %v", err) })
+	for _, id := range []string{"wait_a", "wait_b", "wait_c"} {
+		conformAppend(t, world, runID, worlds.EventTypeWaitCreated, id, nil)
+	}
+	deadline := time.After(10 * time.Second)
+	for range 3 {
+		select {
+		case <-pushed:
+		case <-deadline:
+			mu.Lock()
+			t.Fatalf("pushed slots = %v, want 3, 4, 5", slots)
+			mu.Unlock()
+		}
+	}
+	unsubscribe()
+	mu.Lock()
+	stopped = true
+	if len(slots) != 3 || slots[0] != 3 || slots[1] != 4 || slots[2] != 5 {
+		t.Fatalf("pushed slots = %v, want 3, 4, 5", slots)
+	}
+	mu.Unlock()
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_after", nil)
 }

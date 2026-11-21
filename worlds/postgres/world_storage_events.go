@@ -666,8 +666,9 @@ func (a *appender) result(ctx context.Context, event worlds.Event, created bool)
 	return result, nil
 }
 
-// flush writes the run view and slot counter, notifying waiters when the run
-// became terminal. The notification is delivered on commit.
+// flush writes the run view and slot counter, notifying the run's event
+// subscribers, and its waiters when the run became terminal. Notifications
+// are delivered on commit.
 func (a *appender) flush(ctx context.Context) error {
 	attributes, err := json.Marshal(a.run.Attributes)
 	if err != nil {
@@ -676,6 +677,9 @@ func (a *appender) flush(ctx context.Context) error {
 	if _, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET status = $2, result_slot = $3, attributes = $4, updated_at = $5,
 			started_at = $6, completed_at = $7, event_count = $8, in_band_count = $9 WHERE run_id = $1`,
 		a.run.RunID, a.run.Status, a.resultSlot, attributes, a.run.UpdatedAt, a.run.StartedAt, a.run.CompletedAt, int64(a.count), int64(a.run.InBandCount)); err != nil {
+		return err
+	}
+	if _, err := a.tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelEvents, string(a.run.RunID)); err != nil {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
@@ -781,4 +785,12 @@ func createStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRu
 		return &worlds.HookConflictError{RunID: owner}
 	}
 	return nil
+}
+
+// EventsSubscribe pushes the run's events after afterSlot as they commit,
+// woken by the go_workflow_events notification each write sends.
+func (w *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSlot uint64, onEvent func(worlds.Event), onError func(error)) func() {
+	return worlds.FeedEvents(ctx, w, runID, afterSlot, func() (<-chan struct{}, func()) {
+		return w.notifier.wait(channelEvents, string(runID))
+	}, onEvent, onError)
 }

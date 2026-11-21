@@ -13,9 +13,10 @@ const (
 	channelQueue   = "go_workflow_queue"
 	channelRuns    = "go_workflow_runs"
 	channelStreams = "go_workflow_streams"
+	channelEvents  = "go_workflow_events"
 )
 
-var listenChannels = []string{channelQueue, channelRuns, channelStreams}
+var listenChannels = []string{channelQueue, channelRuns, channelStreams, channelEvents}
 
 // notifier owns one LISTEN connection per World and fans notifications out
 // to waiters keyed by channel and payload. Notifications are only wake-ups,

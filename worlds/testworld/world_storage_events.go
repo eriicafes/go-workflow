@@ -661,3 +661,8 @@ func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[
 	}
 	return result
 }
+
+// EventsSubscribe pushes the run's events after afterSlot as they commit.
+func (m *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSlot uint64, onEvent func(worlds.Event), onError func(error)) func() {
+	return worlds.FeedEvents(ctx, m, runID, afterSlot, func() (<-chan struct{}, func()) { return m.changed(), func() {} }, onEvent, onError)
+}
