@@ -426,18 +426,27 @@ func TestClear(t *testing.T) {
 	if err := world.Clear(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_clear"}); !errors.Is(err, localworld.ErrClosed) {
-		t.Fatalf("read after Clear = %v", err)
-	}
-	if err := world.Clear(ctx); !errors.Is(err, localworld.ErrNotPrepared) {
-		t.Fatalf("second Clear = %v", err)
-	}
 	if count := queryInt(t, dir, "SELECT count(*) FROM runs") + queryInt(t, dir, "SELECT count(*) FROM events"); count != 0 {
 		t.Fatalf("Clear left %d rows", count)
 	}
-	reopened := startWorld(t, localworld.Config{Dir: dir}, nil)
-	if _, err := reopened.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_clear"}); !errors.Is(err, worlds.ErrRunNotFound) {
+	// The World stays open, as world-local's clear() leaves it.
+	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_clear"}); !errors.Is(err, worlds.ErrRunNotFound) {
 		t.Fatalf("run after Clear = %v", err)
+	}
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_after", WorkflowName: "clear"}); err != nil {
+		t.Fatalf("create after Clear: %v", err)
+	}
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_after"}); err != nil {
+		t.Fatalf("queue after Clear: %v", err)
+	}
+	if err := world.Clear(ctx); err != nil {
+		t.Fatalf("second Clear = %v", err)
+	}
+	if err := world.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Clear(ctx); !errors.Is(err, localworld.ErrClosed) {
+		t.Fatalf("Clear after Close = %v", err)
 	}
 
 	unprepared, err := localworld.Open(localworld.Config{Dir: t.TempDir()}, nil)

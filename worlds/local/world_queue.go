@@ -157,10 +157,10 @@ func (w *World) spawn(fn func(context.Context)) bool {
 	if w.closed || !w.prepared {
 		return false
 	}
-	w.workers.Add(1)
-	ctx := w.ctx
+	workers, ctx := w.workers, w.ctx
+	workers.Add(1)
 	go func() {
-		defer w.workers.Done()
+		defer workers.Done()
 		fn(ctx)
 	}()
 	return true

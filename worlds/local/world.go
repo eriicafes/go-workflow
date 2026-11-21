@@ -80,10 +80,14 @@ type World struct {
 	encryptionKey      []byte
 	hookRetentionLimit time.Duration
 	skipRecovery       bool
-	ctx                context.Context
-	cancel             context.CancelFunc
-	runtime            *core.Runtime
-	workers            sync.WaitGroup
+	// parent is Prepare's context, which ends delivery. ctx and cancel are
+	// the current deliveries' context, which Clear replaces, and workers
+	// counts them.
+	parent  context.Context
+	ctx     context.Context
+	cancel  context.CancelFunc
+	workers *sync.WaitGroup
+	runtime *core.Runtime
 
 	changesMu sync.Mutex
 	changes   chan struct{}
@@ -119,7 +123,7 @@ func Open(config Config, runners core.RunnerSet) (*World, error) {
 	if err != nil {
 		return nil, err
 	}
-	world := &World{dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
+	world := &World{workers: &sync.WaitGroup{}, dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
 	world.runtime = core.NewRuntime(world, runners)
 	world.execute = world.runtime.Execute
 	world.queue = newQueue(world, queueConcurrency(config.Concurrency))
@@ -153,6 +157,7 @@ func (w *World) Prepare(ctx context.Context) error {
 		return err
 	}
 	w.db, w.prepared = db, true
+	w.parent = ctx
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	w.mu.Unlock()
 	if w.skipRecovery {
@@ -172,22 +177,32 @@ func (w *World) Close() error {
 	return w.release()
 }
 
-// Clear stops delivery, deletes the World's data, and closes the World: a
-// tagged World's runs, everything they own, and its hooks and streams, and
-// an untagged World's whole database. It returns ErrNotPrepared unless the
-// World is prepared. Open a new World on the directory to continue.
+// Clear deletes the World's data: a tagged World's runs, everything they
+// own, and its hooks and streams, and an untagged World's whole database.
+// Deliveries in flight are cancelled first, and the World stays open for
+// new work, as world-local's clear(). It returns ErrNotPrepared unless the
+// World is prepared.
 func (w *World) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !w.stop(true) {
-		return ErrNotPrepared
+	db, err := w.usable()
+	if err != nil {
+		return err
 	}
-	err := w.db.update(ctx, func(tx *sqlTx) error { return clearTag(ctx, tx, w.tag) })
-	if err == nil {
-		w.db.maintain(ctx)
+	w.mu.Lock()
+	cancel, workers := w.cancel, w.workers
+	w.ctx, w.cancel = context.WithCancel(w.parent)
+	w.workers = &sync.WaitGroup{}
+	w.mu.Unlock()
+	cancel()
+	w.signal()
+	workers.Wait()
+	if err := db.update(ctx, func(tx *sqlTx) error { return clearTag(ctx, tx, w.tag) }); err != nil {
+		return err
 	}
-	return errors.Join(err, w.release())
+	db.maintain(ctx)
+	return nil
 }
 
 // stop rejects new calls, cancels delivery, and waits for workers. It reports
@@ -199,13 +214,13 @@ func (w *World) stop(requireStarted bool) bool {
 		return false
 	}
 	w.closed = true
-	cancel := w.cancel
+	cancel, workers := w.cancel, w.workers
 	w.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	w.signal()
-	w.workers.Wait()
+	workers.Wait()
 	return true
 }
 
