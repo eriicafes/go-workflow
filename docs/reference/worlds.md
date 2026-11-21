@@ -271,9 +271,8 @@ type QueueInput struct {
 	Attempt                      int    // 1-based attempt, excluding handoffs, set by the World before Execute
 	DeliveryCount                int    // 1-based delivery count, set by the World before Execute
 
-	StepName, StepAttempt, StepResent, StepInput // a step delivery's step
+	StepName, StepAttempt, StepResent            // a step delivery's step
 	RunSpecVersion                               // SpecVersion
-	RunInput                                     // set on a run's first flow
 	CompleteWaits                                // waits a WakeUp's flow completes first
 	Recovery                                     // a flow queued after the World lost its messages
 	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt

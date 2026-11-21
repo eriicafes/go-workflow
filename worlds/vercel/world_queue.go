@@ -45,21 +45,12 @@ type queueMessage struct {
 	StepName                     string                 `json:"stepName,omitempty"`
 	StepAttempt                  int                    `json:"stepAttempt,omitempty"`
 	StepResent                   bool                   `json:"stepResent,omitempty"`
-	StepInput                    []byte                 `json:"stepInput,omitempty"`
 	RunSpecVersion               int                    `json:"runSpecVersion,omitempty"`
-	RunInput                     *queueRunInput         `json:"runInput,omitempty"`
 	CompleteWaits                []string               `json:"completeWaits,omitempty"`
 	Recovery                     bool                   `json:"recovery,omitempty"`
 	WaitContinuation             *queueWaitContinuation `json:"waitContinuation,omitempty"`
 	// RetentionMs is the delivery's Retention in milliseconds.
 	RetentionMs int64 `json:"retentionMs,omitempty"`
-}
-
-// queueRunInput is worlds.RunInput in a queueMessage.
-type queueRunInput struct {
-	WorkflowName string `json:"workflowName"`
-	DeploymentID string `json:"deploymentId,omitempty"`
-	SpecVersion  int    `json:"specVersion"`
 }
 
 // queueWaitContinuation is worlds.WaitContinuation in a queueMessage.
@@ -86,14 +77,10 @@ func newQueueMessage(id string, input worlds.QueueInput) queueMessage {
 		StepName:                     input.StepName,
 		StepAttempt:                  input.StepAttempt,
 		StepResent:                   input.StepResent,
-		StepInput:                    input.StepInput,
 		RunSpecVersion:               input.RunSpecVersion,
 		CompleteWaits:                input.CompleteWaits,
 		Recovery:                     input.Recovery,
 		RetentionMs:                  input.Retention.Milliseconds(),
-	}
-	if run := input.RunInput; run != nil {
-		message.RunInput = &queueRunInput{WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, SpecVersion: run.SpecVersion}
 	}
 	if wait := input.WaitContinuation; wait != nil {
 		message.WaitContinuation = &queueWaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
@@ -116,14 +103,10 @@ func (message queueMessage) input() worlds.QueueInput {
 		StepName:                     message.StepName,
 		StepAttempt:                  message.StepAttempt,
 		StepResent:                   message.StepResent,
-		StepInput:                    message.StepInput,
 		RunSpecVersion:               message.RunSpecVersion,
 		CompleteWaits:                message.CompleteWaits,
 		Recovery:                     message.Recovery,
 		Retention:                    time.Duration(message.RetentionMs) * time.Millisecond,
-	}
-	if run := message.RunInput; run != nil {
-		input.RunInput = &worlds.RunInput{WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, SpecVersion: run.SpecVersion}
 	}
 	if wait := message.WaitContinuation; wait != nil {
 		input.WaitContinuation = &worlds.WaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
@@ -382,8 +365,8 @@ func rotation(delivery vqsDelivery, message queueMessage, now time.Time) string 
 // rotate continues the run of a flow message due for rotation on a new
 // message, due after this one is acknowledged, and reports whether it did.
 // The new message carries what the old one is a wake for, its wait's timer
-// and the waits it completes, and none of what marks a first or recovered
-// flow or counts the old one's retries. A step message keeps its own, since
+// and the waits it completes, and none of what marks a recovered flow or
+// counts the old one's retries. A step message keeps its own, since
 // its key would drop a copy.
 func (c *consumer) rotate(ctx context.Context, delivery vqsDelivery, message queueMessage) (bool, error) {
 	if message.StepID != nil {
@@ -399,9 +382,6 @@ func (c *consumer) rotate(ctx context.Context, delivery vqsDelivery, message que
 		QueueName: input.QueueName, RunID: input.RunID, WorkflowName: input.WorkflowName, DeploymentID: input.DeploymentID,
 		RunSpecVersion: input.RunSpecVersion, CompleteWaits: input.CompleteWaits, WaitContinuation: input.WaitContinuation,
 		NotBefore: &due,
-	}
-	if continuation.RunSpecVersion == 0 && input.RunInput != nil {
-		continuation.RunSpecVersion = input.RunInput.SpecVersion
 	}
 	if _, err := c.world.Queue(context.WithoutCancel(ctx), continuation); err != nil {
 		return false, err

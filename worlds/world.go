@@ -298,7 +298,7 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 // FirstFlow returns the delivery that starts run runID of workflowName,
 // pinned to deploymentID, keyed by the run so a retried start queues it once.
 func FirstFlow(runID RunID, workflowName, deploymentID string) QueueInput {
-	return QueueInput{RunID: runID, WorkflowName: workflowName, IdempotencyKey: string(runID), DeploymentID: deploymentID, RunSpecVersion: SpecVersion, RunInput: &RunInput{WorkflowName: workflowName, DeploymentID: deploymentID, SpecVersion: SpecVersion}}
+	return QueueInput{RunID: runID, WorkflowName: workflowName, IdempotencyKey: string(runID), DeploymentID: deploymentID, RunSpecVersion: SpecVersion}
 }
 
 // PendingWaits returns the IDs of run runID's waits that have not completed,

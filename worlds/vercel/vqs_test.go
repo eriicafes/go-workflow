@@ -111,9 +111,9 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	resumeAt, hopAt := due.Add(48*time.Hour), due.Add(25*time.Hour)
 	sent := worlds.QueueInput{
 		RunID: "wrun_1", QueueName: "queue", WorkflowName: "wf", StepID: &stepID, NotBefore: &due, IdempotencyKey: "key", DeploymentID: "dpl_run",
-		ReplayDivergenceCount: 2, DeploymentMismatchRetryCount: 1, StepName: "double", StepAttempt: 3, StepResent: true, StepInput: []byte{0, 1, 2},
-		RunSpecVersion: worlds.SpecVersion, RunInput: &worlds.RunInput{WorkflowName: "wf", DeploymentID: "dpl_run", SpecVersion: worlds.SpecVersion},
-		CompleteWaits: []string{"wait_1"}, Recovery: true, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_2", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
+		ReplayDivergenceCount: 2, DeploymentMismatchRetryCount: 1, StepName: "double", StepAttempt: 3, StepResent: true,
+		RunSpecVersion: worlds.SpecVersion,
+		CompleteWaits:  []string{"wait_1"}, Recovery: true, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_2", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
 		Retention: worlds.StepRetention,
 	}
 	result, err := world.Queue(context.Background(), sent)
@@ -656,7 +656,7 @@ func TestHandoffNearExpiryContinuesTheFlowOnANewMessage(t *testing.T) {
 		return response.Code, server.all()[before:]
 	}
 	flow := queueMessage{ID: "01MSG", RunID: "wrun_1", WorkflowName: "wf", RunSpecVersion: worlds.SpecVersion, ReplayDivergenceCount: 2,
-		RunInput: &queueRunInput{WorkflowName: "wf", SpecVersion: worlds.SpecVersion}, CompleteWaits: []string{"wait_1"}}
+		Recovery: true, CompleteWaits: []string{"wait_1"}}
 	status, requests := deliver(flow)
 	if status != http.StatusOK || len(requests) != 2 || requests[0].Method != http.MethodPost || requests[1].Method != http.MethodDelete {
 		t.Fatalf("status %d requests %+v, want a new message then an acknowledgment", status, requests)
@@ -666,7 +666,7 @@ func TestHandoffNearExpiryContinuesTheFlowOnANewMessage(t *testing.T) {
 	if err := json.Unmarshal([]byte(requests[0].Body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if sent.ID == flow.ID || sent.RunID != "wrun_1" || sent.RunInput != nil || sent.ReplayDivergenceCount != 0 || sent.RunSpecVersion != worlds.SpecVersion || len(sent.CompleteWaits) != 1 || sent.NotBefore == nil {
+	if sent.ID == flow.ID || sent.RunID != "wrun_1" || sent.Recovery || sent.ReplayDivergenceCount != 0 || sent.RunSpecVersion != worlds.SpecVersion || len(sent.CompleteWaits) != 1 || sent.NotBefore == nil {
 		t.Fatalf("continuation = %+v", sent)
 	}
 	// A step message is handed off: its key would drop a copy.

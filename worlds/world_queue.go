@@ -87,14 +87,9 @@ type (
 		// not tell whether the step's first message was sent. Its delivery
 		// reads the log before it runs the step.
 		StepResent bool
-		// StepInput is the step's input payload, carried by a step delivery
-		// when it is at most MaxStepMessageInput bytes.
-		StepInput []byte
 		// RunSpecVersion is the spec version of the run the delivery
 		// belongs to, SpecVersion.
 		RunSpecVersion int
-		// RunInput is set on a run's first flow, which starts it.
-		RunInput *RunInput
 		// CompleteWaits holds the waits a flow that wakes the run completes
 		// first, whether or not they are due. See WakeRun.
 		CompleteWaits []string
@@ -109,12 +104,6 @@ type (
 		// included. A World caps it at what its queue supports, and zero
 		// uses its default.
 		Retention time.Duration
-	}
-	// RunInput is what a run's first flow carries about the run it starts.
-	RunInput struct {
-		WorkflowName string
-		DeploymentID string
-		SpecVersion  int
 	}
 	// WaitContinuation marks a timer of the wait CorrelationID. A wait
 	// further away than the World's MaxQueueDelay is reached in hops,
@@ -154,9 +143,6 @@ func (input QueueInput) SerializedFlow() bool {
 }
 
 const (
-	// MaxStepMessageInput is the largest step input a step delivery
-	// carries.
-	MaxStepMessageInput = 128 << 10
 	// StepRetention is how long the message of a step that may retry
 	// lives, and StepRetentionOnce how long one of a step that does not.
 	StepRetention     = 7 * 24 * time.Hour

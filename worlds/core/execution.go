@@ -652,9 +652,6 @@ func (e *Execution) createDeclared() {
 	for _, step := range background {
 		if committed[string(step.stepID)] {
 			message := stepMessage(step.stepID, step.name, 1, false)
-			if len(step.input) <= worlds.MaxStepMessageInput {
-				message.StepInput = step.input
-			}
 			if step.maxRetries == 0 {
 				message.Retention = worlds.StepRetentionOnce
 			}
