@@ -108,7 +108,7 @@ func TestStartWorkersExecuteOnce(t *testing.T) {
 	// Deliveries may still be settling after the runs turned terminal.
 	var pending int
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_queue`).Scan(&pending); err != nil {
+		if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM workflow_queue`).Scan(&pending); err != nil {
 			t.Fatal(err)
 		}
 		if pending == 0 {
@@ -149,7 +149,7 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 	var notBefore time.Time
 	var leased bool
 	for time.Now().Before(deadline) {
-		if err := world.pool.QueryRow(ctx, `SELECT deliveries, not_before, lease_until IS NOT NULL FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts, &notBefore, &leased); err != nil {
+		if err := world.pool.QueryRow(ctx, `SELECT deliveries, not_before, lease_until IS NOT NULL FROM workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts, &notBefore, &leased); err != nil {
 			t.Fatal(err)
 		}
 		if attempts == 1 && !leased {
@@ -161,7 +161,7 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 		t.Fatalf("after failure attempts=%d leased=%v notBefore in %v", attempts, leased, time.Until(notBefore))
 	}
 	time.Sleep(200 * time.Millisecond)
-	if err := world.pool.QueryRow(ctx, `SELECT deliveries FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts); err != nil || attempts != 1 {
+	if err := world.pool.QueryRow(ctx, `SELECT deliveries FROM workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("redelivered before backoff: attempts=%d err=%v", attempts, err)
 	}
 	stop()
@@ -277,10 +277,10 @@ func TestConcurrentForcedClaims(t *testing.T) {
 		}
 	}
 	var forced, holders int
-	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_events WHERE type = $1`, worlds.EventTypeHookDisposed).Scan(&forced); err != nil {
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM workflow_events WHERE type = $1`, worlds.EventTypeHookDisposed).Scan(&forced); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_hook_tokens WHERE token = 'forced'`).Scan(&holders); err != nil {
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM workflow_hooks WHERE token = 'forced' AND claims_token`).Scan(&holders); err != nil {
 		t.Fatal(err)
 	}
 	if forced != claimants-1 || holders != 1 {
@@ -337,6 +337,10 @@ func testPool(t *testing.T, url, schema string) *pgxpool.Pool {
 func testWorld(t *testing.T, pool *pgxpool.Pool, config Config) *World {
 	t.Helper()
 	config.BaseURL = testBaseURL
+	if config.Schema == "" {
+		// The tests' tables live in the pool's test schema.
+		config.Schema = pool.Config().ConnConfig.RuntimeParams["search_path"]
+	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 50 * time.Millisecond
 	}

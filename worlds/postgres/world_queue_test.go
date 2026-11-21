@@ -86,7 +86,7 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 		t.Fatalf("key while executing = %#v err=%v", again, err)
 	}
 	// Once the message is gone, the key queues a new one.
-	if _, err := world.pool.Exec(ctx, `DELETE FROM go_workflow_queue WHERE id = $1`, first.MessageID); err != nil {
+	if _, err := world.pool.Exec(ctx, `DELETE FROM workflow_queue WHERE id = $1`, first.MessageID); err != nil {
 		t.Fatal(err)
 	}
 	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key"}); err != nil || fresh.MessageID == first.MessageID {
@@ -158,7 +158,7 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 		}
 	}
 	var rows int
-	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM go_workflow_queue`).Scan(&rows); err != nil || rows != 0 {
+	if err := world.pool.QueryRow(ctx, `SELECT count(*) FROM workflow_queue`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("rows after success = %d err=%v", rows, err)
 	}
 }

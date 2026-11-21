@@ -11,7 +11,7 @@ import (
 )
 
 func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
-	run, err := scanRun(w.pool.QueryRow(ctx, runSelect(input.ResolveData)+` WHERE r.run_id = $1`, input.RunID))
+	run, err := scanRun(w.pool.QueryRow(ctx, w.q(runSelect(input.ResolveData)+` WHERE r.id = $1`), input.RunID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Run{}, worlds.ErrRunNotFound
 	}
@@ -21,17 +21,17 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	var q query
 	if input.WorkflowName != "" {
-		q.where("r.workflow_name = " + q.arg(input.WorkflowName))
+		q.where("r.name = " + q.arg(input.WorkflowName))
 	}
 	if len(input.Status) > 0 {
-		q.where("r.status = ANY(" + q.arg(statusStrings(input.Status)) + ")")
+		q.where("r.status::text = ANY(" + q.arg(statusStrings(input.Status)) + ")")
 	}
 	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	if err := q.keyset(input.Pagination.Cursor, "r.created_at", "r.run_id", descending); err != nil {
+	if err := q.keyset(input.Pagination.Cursor, "r.created_at", "r.id", descending); err != nil {
 		return worlds.Page[worlds.Run]{}, err
 	}
-	sql := runSelect(input.ResolveData) + q.clause() + order("r.created_at", "r.run_id", descending) + q.limit(input.Pagination.Limit)
-	rows, err := w.pool.Query(ctx, sql, q.args...)
+	sql := runSelect(input.ResolveData) + q.clause() + order("r.created_at", "r.id", descending) + q.limit(input.Pagination.Limit)
+	rows, err := w.pool.Query(ctx, w.q(sql), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Run]{}, err
 	}
@@ -43,7 +43,7 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 }
 
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
-	// Re-read the run on every go_workflow_runs notification for it and at
+	// Re-read the run on every workflow_run_status notification for it and at
 	// least every PollInterval.
 	deadline := time.Now().Add(input.Timeout)
 	for {
@@ -80,13 +80,18 @@ func (w *World) RunsSetAttributes(ctx context.Context, input worlds.RunsSetAttri
 // result slot. ResolveDataNone joins only a run_failed result, for the error.
 func runSelect(resolve worlds.ResolveData) string {
 	// Payloads read as NULL once the run's expired_at has passed.
-	live := runLive("r.run_id")
-	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = r.run_id AND ie.slot = 1"+live
+	live := runLive("r.id")
+	input, result, join := "ie.payload_cbor", "re.payload_cbor", " LEFT JOIN workflow.workflow_events ie ON ie.run_id = r.id AND ie.id = '"+string(worlds.EventIDForSlot(1))+"'"+live
 	if resolve == worlds.ResolveDataNone {
-		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.data END", ""
+		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.payload_cbor END", ""
 	}
-	return "SELECT r.run_id, r.workflow_name, r.status, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, r.encryption_public_key, r.in_band_count, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
-		" FROM go_workflow_runs r" + join + " LEFT JOIN go_workflow_events re ON re.run_id = r.run_id AND re.slot = r.result_slot" + live
+	return "SELECT r.id, r.name, r.status::text, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, coalesce(r.encryption_public_key, ''), s.seq_in_band, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
+		" FROM workflow.workflow_runs r JOIN workflow.workflow_event_slots s ON s.run_id = r.id" + join + " LEFT JOIN workflow.workflow_events re ON re.run_id = r.id AND re.id = " + slotID("r.result_slot") + live
+}
+
+// slotID is the SQL of the event ID of the slot in column.
+func slotID(column string) string {
+	return "'evnt_' || lpad(" + column + "::text, 26, '0')"
 }
 
 func scanRun(row pgx.Row) (worlds.Run, error) {
@@ -103,10 +108,18 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 		}
 	}
 	if input != nil {
-		run.Input = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeRunCreated, Data: input})
+		data, err := eventData(worlds.EventTypeRunCreated, input)
+		if err != nil {
+			return worlds.Run{}, err
+		}
+		run.Input = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeRunCreated, Data: data})
 	}
 	if resultType != nil && result != nil {
-		payload := worlds.EventPayload(worlds.Event{EventType: *resultType, Data: result})
+		data, err := eventData(*resultType, result)
+		if err != nil {
+			return worlds.Run{}, err
+		}
+		payload := worlds.EventPayload(worlds.Event{EventType: *resultType, Data: data})
 		if *resultType == worlds.EventTypeRunCompleted {
 			run.Output = payload
 		} else {
@@ -154,7 +167,7 @@ func (w *World) deleteRunData(ctx context.Context, id worlds.RunID) worlds.Delet
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
 		var status worlds.Status
 		var expired, purged bool
-		err := tx.QueryRow(ctx, `SELECT status, coalesce(expired_at <= now(), false), data_purged FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, id).Scan(&status, &expired, &purged)
+		err := tx.QueryRow(ctx, w.q(`SELECT status::text, coalesce(expired_at <= now(), false), data_purged FROM workflow.workflow_runs WHERE id = $1 FOR UPDATE`), id).Scan(&status, &expired, &purged)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			result.Outcome = worlds.DeleteDataNotFound
@@ -169,7 +182,7 @@ func (w *World) deleteRunData(ctx context.Context, id worlds.RunID) worlds.Delet
 		if expired {
 			result.Outcome = worlds.DeleteDataAlreadyDeleted
 		}
-		return purgeRunData(ctx, tx, id)
+		return w.purgeRunData(ctx, tx, id)
 	})
 	if err != nil {
 		return worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "storage_error", Retryable: ctx.Err() == nil}
