@@ -95,8 +95,12 @@ type World interface {
 }
 
 type Capabilities struct {
-	Analytics          bool
-	SetAttributes      bool
+	// Analytics: Analytics returns the World's analytics rather than nil.
+	Analytics bool
+	// SetAttributes: attribute writes are stored rather than no-ops.
+	SetAttributes bool
+	// DeploymentAffinity: runs are pinned to World.DeploymentID, and the
+	// Runtime replays a run only on the deployment it is pinned to.
 	DeploymentAffinity bool
 	// DeleteData: the optional RunsDeleteDataMany. Every World deletes a
 	// run's data as it finishes when its $retention attribute is "0".

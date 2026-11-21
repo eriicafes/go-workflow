@@ -195,4 +195,7 @@ func conformIdentity(t *testing.T, world worlds.World) {
 	if world.Capabilities().Analytics != (world.Analytics() != nil) {
 		t.Fatalf("Capabilities().Analytics = %v but Analytics() = %v", world.Capabilities().Analytics, world.Analytics())
 	}
+	if _, regional := world.(worlds.RegionalRunIDs); world.Capabilities().RegionalRunIDs != regional {
+		t.Fatalf("Capabilities().RegionalRunIDs = %v but implements worlds.RegionalRunIDs = %v", world.Capabilities().RegionalRunIDs, regional)
+	}
 }
