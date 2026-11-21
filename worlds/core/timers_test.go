@@ -1,8 +1,15 @@
 package core
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 func TestHopDeadlineAnchorsHopsOnTheWaitsDeadline(t *testing.T) {
@@ -29,3 +36,60 @@ func TestHopDeadlineAnchorsHopsOnTheWaitsDeadline(t *testing.T) {
 }
 
 func ptr[T any](value T) *T { return &value }
+
+// queueRecorder is a World that records what is queued.
+type queueRecorder struct {
+	worlds.World
+	queued []worlds.QueueInput
+}
+
+func (q *queueRecorder) Queue(_ context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	q.queued = append(q.queued, input)
+	return worlds.QueueResult{}, nil
+}
+
+func (*queueRecorder) Capabilities() worlds.Capabilities { return worlds.Capabilities{} }
+
+func TestDeliveryThatMayHoldACoalescedTimerArmsNearDueWaitsByTheSecond(t *testing.T) {
+	synctest.Test(t, testNearDueWaits)
+}
+
+func testNearDueWaits(t *testing.T) {
+	sentNearDue = &sentKeys{limit: 10_000}
+	waitEvent := func(id, creator string, resumeAt time.Time) worlds.Event {
+		data, _ := json.Marshal(worlds.DataWaitCreated{ResumeAt: resumeAt, CreatorMessageID: creator})
+		return worlds.Event{EventType: worlds.EventTypeWaitCreated, CorrelationID: id, Data: data}
+	}
+	now := time.Now()
+	events := []worlds.Event{
+		waitEvent("wait_near", "other", now.Add(2*time.Second)),
+		waitEvent("wait_own", "msg", now.Add(time.Hour)),
+		waitEvent("wait_far", "other", now.Add(time.Hour)),
+	}
+	keys := func(deliveryCount int) map[string]string {
+		world := &queueRecorder{}
+		e := &Execution{ctx: context.Background(), world: world, events: events, completedChains: map[string]bool{}, delivery: worlds.QueueInput{MessageID: "msg", DeliveryCount: deliveryCount}}
+		e.armTimers()
+		armed := map[string]string{}
+		for _, input := range world.queued {
+			armed[input.WaitContinuation.CorrelationID] = input.IdempotencyKey
+		}
+		return armed
+	}
+	second := fmt.Sprintf(":s%d", time.Now().Unix())
+	// A first delivery arms only its own chain, under the hop's key.
+	first := keys(1)
+	if len(first) != 1 || first["wait_own"] != fmt.Sprintf("wait:wait_own:%d:%d", now.Add(time.Hour).UnixMilli(), now.Add(time.Hour).UnixMilli()) {
+		t.Fatalf("first delivery armed %v", first)
+	}
+	// A later one also arms the near-due wait of another chain, and keys
+	// both last hops by its second.
+	later := keys(2)
+	if len(later) != 2 || !strings.HasSuffix(later["wait_near"], second) || !strings.HasSuffix(later["wait_own"], second) {
+		t.Fatalf("later delivery armed %v, want wait_near and wait_own keyed by %s", later, second)
+	}
+	// The process sends each near-due key once.
+	if again := keys(2); len(again) != 0 {
+		t.Fatalf("a delivery in the same second armed %v again", again)
+	}
+}

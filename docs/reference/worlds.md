@@ -275,6 +275,7 @@ type QueueInput struct {
 	RunSpecVersion                               // SpecVersion
 	RunInput                                     // set on a run's first flow
 	CompleteWaits                                // waits a WakeUp's flow completes first
+	Recovery                                     // a flow queued after the World lost its messages
 	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt
 	Retention                                    // how long the message may live
 }

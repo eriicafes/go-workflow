@@ -49,6 +49,7 @@ type queueMessage struct {
 	RunSpecVersion               int                    `json:"runSpecVersion,omitempty"`
 	RunInput                     *queueRunInput         `json:"runInput,omitempty"`
 	CompleteWaits                []string               `json:"completeWaits,omitempty"`
+	Recovery                     bool                   `json:"recovery,omitempty"`
 	WaitContinuation             *queueWaitContinuation `json:"waitContinuation,omitempty"`
 	// RetentionMs is the delivery's Retention in milliseconds.
 	RetentionMs int64 `json:"retentionMs,omitempty"`
@@ -88,6 +89,7 @@ func newQueueMessage(id string, input worlds.QueueInput) queueMessage {
 		StepInput:                    input.StepInput,
 		RunSpecVersion:               input.RunSpecVersion,
 		CompleteWaits:                input.CompleteWaits,
+		Recovery:                     input.Recovery,
 		RetentionMs:                  input.Retention.Milliseconds(),
 	}
 	if run := input.RunInput; run != nil {
@@ -117,6 +119,7 @@ func (message queueMessage) input() worlds.QueueInput {
 		StepInput:                    message.StepInput,
 		RunSpecVersion:               message.RunSpecVersion,
 		CompleteWaits:                message.CompleteWaits,
+		Recovery:                     message.Recovery,
 		Retention:                    time.Duration(message.RetentionMs) * time.Millisecond,
 	}
 	if run := message.RunInput; run != nil {
