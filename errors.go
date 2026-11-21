@@ -28,6 +28,9 @@ var (
 	// ErrRunExpired is returned when awaiting a run whose data was deleted,
 	// such as a run started with RetainNone.
 	ErrRunExpired = worlds.ErrRunExpired
+	// ErrStreamExpired is returned when reading a stream whose data the World
+	// deleted.
+	ErrStreamExpired = worlds.ErrStreamExpired
 	// ErrResumeNotQueued reports that a hook payload was recorded but its run was not queued.
 	ErrResumeNotQueued = worlds.ErrResumeNotQueued
 	// ErrRunNotFinished reports that a run is still waiting or running.

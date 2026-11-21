@@ -30,8 +30,9 @@ func setRequestID(ctx context.Context, meta map[string]any) {
 // queueMessage is the Vercel Queues payload: the whole delivery, so the
 // World keeps no record of queued work.
 type queueMessage struct {
-	// ID is the delivery's message ID, which stays the same across
-	// redeliveries.
+	// ID marks the payload as one this World published. A delivery's
+	// MessageID is Vercel Queues' own message ID, as the Workflow SDK's
+	// World delivers it, not this.
 	ID                           string                 `json:"id"`
 	QueueName                    string                 `json:"queueName,omitempty"`
 	RunID                        worlds.RunID           `json:"runId"`
@@ -116,7 +117,6 @@ func (message queueMessage) input() worlds.QueueInput {
 		DeploymentID:                 message.DeploymentID,
 		DeploymentMismatchRetryCount: message.DeploymentMismatchRetryCount,
 		ReplayDivergenceCount:        message.ReplayDivergenceCount,
-		MessageID:                    message.ID,
 		StepName:                     message.StepName,
 		StepAttempt:                  message.StepAttempt,
 		StepResent:                   message.StepResent,
@@ -141,7 +141,10 @@ func (message queueMessage) input() worlds.QueueInput {
 // Vercel's default 24 hours, and its delay is capped an hour short of that.
 // It publishes to input.DeploymentID, or to Config.DeploymentID when that is
 // empty, and returns an error wrapping worlds.ErrDeploymentUnavailable when
-// Vercel cannot find that deployment's consumer.
+// Vercel cannot find that deployment's consumer. Its result carries the
+// message ID Vercel Queues gave the message, which a delivery of it carries
+// too, and is empty when Vercel Queues failed over to another region that
+// cannot name it, as the Workflow SDK's World returns null.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
@@ -162,10 +165,11 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if input.NotBefore != nil {
 		send.Delay = time.Until(*input.NotBefore)
 	}
-	if err := w.publishVQS(ctx, message, send); err != nil {
+	id, err := w.publishVQS(ctx, message, send)
+	if err != nil {
 		return worlds.QueueResult{}, err
 	}
-	return worlds.QueueResult{MessageID: message.ID}, nil
+	return worlds.QueueResult{MessageID: id}, nil
 }
 
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
@@ -237,6 +241,9 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		}
 	}
 	input := message.input()
+	// The delivery carries Vercel Queues' message ID, which stays the same
+	// across its redeliveries.
+	input.MessageID = delivery.MessageID
 	input.DeliveryCount = delivery.DeliveryCount
 	if delivery.DeliveryCount > 0 {
 		// A handoff is not an attempt.
@@ -249,7 +256,7 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		stop()
 		if errors.Is(err, worlds.ErrRunNotFound) {
 			// Retrying cannot create the run, so drop the delivery.
-			log.Printf("workflow/vercel: queue message %s: %v", message.ID, err)
+			log.Printf("workflow/vercel: queue message %s: %v", delivery.MessageID, err)
 			err = nil
 		}
 		if err != nil {

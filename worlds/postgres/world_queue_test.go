@@ -2,9 +2,11 @@ package postgresworld
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +46,9 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	claimed, err := world.claim(ctx, 10, nil)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claimed = %#v err=%v", claimed, err)
+	}
+	if !strings.HasPrefix(queued.MessageID, "msg_") {
+		t.Fatalf("message ID %q, want msg_<ULID>", queued.MessageID)
 	}
 	want.MessageID, want.Attempt, want.DeliveryCount = queued.MessageID, 1, 1
 	if got := claimed[0].input; !reflect.DeepEqual(got, want) {
@@ -122,11 +127,12 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"})
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key", RunSpecVersion: worlds.SpecVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A handoff, then a delayed redelivery, then a handoff, then success.
+	// A spec 9 flow's handoff, then a delayed redelivery, then a handoff,
+	// then success.
 	results := []error{worlds.Redeliver(0), worlds.Redeliver(50 * time.Millisecond), worlds.Redeliver(0), nil}
 	var mu sync.Mutex
 	var seen []worlds.QueueInput
@@ -270,6 +276,164 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	if maxFlows != 1 || maxSteps < 2 {
 		t.Fatalf("most flows at once = %d, steps = %d", maxFlows, maxSteps)
 	}
+}
+
+// deliverDue makes the message's row due, claims it, and delivers it with
+// result, returning the input its delivery saw, or false when nothing was
+// claimed.
+func deliverDue(t *testing.T, world *World, id string, result error) (worlds.QueueInput, bool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := world.pool.Exec(ctx, `UPDATE workflow_queue SET not_before = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := world.claim(ctx, 10, nil)
+	if err != nil || len(claimed) > 1 {
+		t.Fatalf("claimed = %#v err=%v", claimed, err)
+	}
+	if len(claimed) == 0 {
+		return worlds.QueueInput{}, false
+	}
+	var seen worlds.QueueInput
+	world.deliver(ctx, executorFunc(func(_ context.Context, input worlds.QueueInput) error {
+		seen = input
+		return result
+	}), claimed[0])
+	return seen, true
+}
+
+// queueRows counts the queue's rows.
+func queueRows(t *testing.T, world *World) int {
+	t.Helper()
+	var rows int
+	if err := world.pool.QueryRow(context.Background(), `SELECT count(*) FROM workflow_queue`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// TestRedeliveryCountsAttemptsAsWorldPostgres checks Attempt across
+// redeliveries and failures, as world-postgres counts it: a spec 9 handoff
+// keeps it, a spec 9 flow's delayed redelivery counts, a failure counts, and
+// any other redelivery, as a step's in-place retry, starts it over from where
+// the message's job started it (after a handoff, the attempt it carried).
+// DeliveryCount counts every delivery.
+func TestRedeliveryCountsAttemptsAsWorldPostgres(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("failed")
+	stepID := worlds.StepID("step_a")
+	resumeAt, hopAt := time.Now().Add(time.Hour), time.Now()
+	later := worlds.Redeliver(50 * time.Millisecond)
+	for name, test := range map[string]struct {
+		input    worlds.QueueInput
+		results  []error
+		attempts []int
+	}{
+		"spec 9 flow": {
+			worlds.QueueInput{RunID: runA, RunSpecVersion: worlds.SpecVersion},
+			[]error{failed, worlds.Redeliver(0), later, failed, later, nil},
+			[]int{1, 2, 2, 3, 4, 5},
+		},
+		"spec 9 step": {
+			worlds.QueueInput{RunID: runA, StepID: &stepID, RunSpecVersion: worlds.SpecVersion},
+			[]error{failed, failed, later, failed, worlds.Redeliver(0), later, nil},
+			[]int{1, 2, 3, 1, 2, 2, 2},
+		},
+		"spec 9 wait hop": {
+			worlds.QueueInput{RunID: runA, RunSpecVersion: worlds.SpecVersion, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait", ResumeAt: &resumeAt, HopAt: &hopAt}},
+			[]error{failed, later, nil},
+			[]int{1, 2, 1},
+		},
+		"spec 8 flow": {
+			worlds.QueueInput{RunID: runA, RunSpecVersion: 8},
+			[]error{failed, worlds.Redeliver(0), failed, later, nil},
+			[]int{1, 2, 1, 2, 1},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			world := newTestWorld(t)
+			queued, err := world.Queue(context.Background(), test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, result := range test.results {
+				seen, ok := deliverDue(t, world, queued.MessageID, result)
+				if !ok {
+					t.Fatalf("delivery %d: nothing claimed", index)
+				}
+				if seen.MessageID != queued.MessageID || seen.DeliveryCount != index+1 || seen.Attempt != test.attempts[index] {
+					t.Fatalf("delivery %d: message %s count %d attempt %d, want %s %d %d", index, seen.MessageID, seen.DeliveryCount, seen.Attempt, queued.MessageID, index+1, test.attempts[index])
+				}
+			}
+			if rows := queueRows(t, world); rows != 0 {
+				t.Fatalf("rows after success = %d", rows)
+			}
+		})
+	}
+}
+
+// TestFailedDeliveryIsDroppedAfterTheJobsAttempts checks a message whose job
+// failed maxJobAttempts deliveries is deleted, as Graphile Worker stops
+// retrying a job past its max_attempts, that a crashed delivery counts, and
+// that a Redelivery starts a new job with its own attempts.
+func TestFailedDeliveryIsDroppedAfterTheJobsAttempts(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("failed")
+	t.Run("failure", func(t *testing.T) {
+		t.Parallel()
+		world := newTestWorld(t)
+		queued, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The job has failed all but its last two attempts.
+		if _, err := world.pool.Exec(context.Background(), `UPDATE workflow_queue SET deliveries = $1`, maxJobAttempts-2); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := deliverDue(t, world, queued.MessageID, failed); !ok || queueRows(t, world) != 1 {
+			t.Fatalf("message dropped before its job's last attempt")
+		}
+		if _, ok := deliverDue(t, world, queued.MessageID, failed); !ok || queueRows(t, world) != 0 {
+			t.Fatalf("message kept after its job's last attempt failed: rows %d", queueRows(t, world))
+		}
+	})
+	t.Run("crash", func(t *testing.T) {
+		t.Parallel()
+		world := newTestWorld(t)
+		queued, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A worker crashed during the job's last attempt.
+		if _, err := world.pool.Exec(context.Background(), `UPDATE workflow_queue SET deliveries = $1, lease_until = now() - interval '1 second'`, maxJobAttempts); err != nil {
+			t.Fatal(err)
+		}
+		if seen, ok := deliverDue(t, world, queued.MessageID, nil); ok || queueRows(t, world) != 0 {
+			t.Fatalf("exhausted message delivered = %#v, rows %d", seen, queueRows(t, world))
+		}
+	})
+	t.Run("redelivery", func(t *testing.T) {
+		t.Parallel()
+		world := newTestWorld(t)
+		queued, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA, RunSpecVersion: worlds.SpecVersion})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := world.pool.Exec(context.Background(), `UPDATE workflow_queue SET deliveries = $1`, maxJobAttempts-1); err != nil {
+			t.Fatal(err)
+		}
+		// The job's last attempt redelivers, so the next job has every
+		// attempt.
+		if _, ok := deliverDue(t, world, queued.MessageID, worlds.Redeliver(time.Millisecond)); !ok {
+			t.Fatal("nothing claimed")
+		}
+		for range 2 {
+			if _, ok := deliverDue(t, world, queued.MessageID, failed); !ok || queueRows(t, world) != 1 {
+				t.Fatalf("redelivered message dropped: rows %d", queueRows(t, world))
+			}
+		}
+	})
 }
 
 // runA is a run ID minted when the tests start, as a World requires

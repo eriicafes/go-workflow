@@ -105,10 +105,12 @@ or RPC API rather than reading the database.
 ## Tags
 
 A tagged World writes its tag on the runs, hooks, start hook rejections, and
-stream chunks it creates. It sees its own tag's rows and untagged ones. An
-untagged World sees only untagged rows. A run's steps, waits, and events belong
-to its tag. Tests can share one directory with a tag each, and `Clear` deletes
-only that tag's data.
+stream chunks it creates. It sees its own tag's runs and untagged ones, and
+recovers only its own tag's runs. An untagged World sees only untagged runs.
+As in world-local, only runs are scoped by tag: steps, events, hooks, and
+streams are read by ID whatever their tag, and a run's steps, waits, and
+events belong to its tag. Tests can share one directory with a tag each, and
+`Clear` deletes only that tag's data.
 
 ## Start hooks
 

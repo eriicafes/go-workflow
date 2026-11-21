@@ -65,10 +65,10 @@ func TestPublishVQS(t *testing.T) {
 	world := newQueueWorld(t, server)
 	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
 	world.config.DeploymentID = "dpl_1"
-	if err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{IdempotencyKey: "key", ConcurrencyKey: "wrun_1", Delay: 90*time.Second + time.Millisecond}); err != nil {
-		t.Fatal(err)
+	if id, err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{IdempotencyKey: "key", ConcurrencyKey: "wrun_1", Delay: 90*time.Second + time.Millisecond}); err != nil || id != "msg_1" {
+		t.Fatalf("publish = %q, %v, want Vercel Queues' message ID msg_1", id, err)
 	}
-	if err := world.publishVQS(context.Background(), queueMessage{ID: "02ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_run", Retention: time.Hour}); err != nil {
+	if _, err := world.publishVQS(context.Background(), queueMessage{ID: "02ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_run", Retention: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.all()
@@ -120,6 +120,10 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The result is the message ID Vercel Queues answered with.
+	if result.MessageID != "msg_1" {
+		t.Fatalf("message ID = %q, want msg_1", result.MessageID)
+	}
 	publish := server.all()[0]
 	var message queueMessage
 	if err := json.Unmarshal([]byte(publish.Body), &message); err != nil {
@@ -127,7 +131,6 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	}
 	// Every field of the delivery comes back from the message.
 	got, want := message.input(), sent
-	want.MessageID = result.MessageID
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("published delivery = %+v\nwant %+v", got, want)
 	}
@@ -224,9 +227,115 @@ func TestPublishVQSReportsUnavailableDeployment(t *testing.T) {
 	t.Cleanup(unavailable.Close)
 	world.config.QueueURL = unavailable.URL + "/api/v3"
 
-	err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_gone"})
+	_, err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_gone"})
 	if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 		t.Fatalf("publish error = %v, want ErrDeploymentUnavailable", err)
+	}
+}
+
+func TestPublishVQSRetriesTransientFailures(t *testing.T) {
+	delays := vqsSendRetryDelays
+	vqsSendRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { vqsSendRetryDelays = delays })
+	type answer struct {
+		status int
+		header map[string]string
+	}
+	var answers []answer
+	server := newRecorder(t, func(recorded) (int, string) { return http.StatusCreated, `{"messageId":"msg_1"}` })
+	world := newQueueWorld(t, server)
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		server.mu.Lock()
+		count := len(server.requests)
+		server.requests = append(server.requests, recorded{Method: request.Method})
+		server.mu.Unlock()
+		if count < len(answers) {
+			for key, value := range answers[count].header {
+				writer.Header().Set(key, value)
+			}
+			if answers[count].status == 0 {
+				// A connection the peer closed.
+				connection, _, _ := writer.(http.Hijacker).Hijack()
+				_ = connection.Close()
+				return
+			}
+			writer.WriteHeader(answers[count].status)
+			return
+		}
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte(`{"messageId":"msg_sent"}`))
+	}))
+	t.Cleanup(queue.Close)
+	world.config.QueueURL = queue.URL + "/api/v3"
+	publish := func(sent ...answer) (string, int, error) {
+		t.Helper()
+		server.mu.Lock()
+		server.requests = nil
+		server.mu.Unlock()
+		answers = sent
+		id, err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_1"})
+		return id, len(server.all()), err
+	}
+
+	// A 5xx and a dropped connection are sent again, up to three attempts.
+	if id, attempts, err := publish(answer{status: http.StatusServiceUnavailable}, answer{}); err != nil || id != "msg_sent" || attempts != 3 {
+		t.Fatalf("publish = %q, %v after %d attempts, want msg_sent after 3", id, err, attempts)
+	}
+	if _, attempts, err := publish(answer{status: 500}, answer{status: 500}, answer{status: 500}, answer{}); err == nil || attempts != 3 {
+		t.Fatalf("failing publish = %v after %d attempts, want an error after 3", err, attempts)
+	}
+	// The 502 of a failed consumer discovery is retried, and reported as an
+	// unavailable deployment when the retries run out.
+	discovery := answer{status: http.StatusBadGateway, header: map[string]string{"Vqs-Error-Code": "consumer_discovery_failed"}}
+	if _, attempts, err := publish(discovery, discovery, discovery); !errors.Is(err, worlds.ErrDeploymentUnavailable) || attempts != 3 {
+		t.Fatalf("undiscovered publish = %v after %d attempts, want ErrDeploymentUnavailable after 3", err, attempts)
+	}
+	// A 429 is retried after its Retry-After, unless that is over 5 seconds.
+	started := time.Now()
+	if _, attempts, err := publish(answer{status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "0.3"}}); err != nil || attempts != 2 || time.Since(started) < 300*time.Millisecond {
+		t.Fatalf("throttled publish = %v after %d attempts in %s", err, attempts, time.Since(started))
+	}
+	if _, attempts, err := publish(answer{status: http.StatusTooManyRequests}); err != nil || attempts != 2 {
+		t.Fatalf("throttled publish without Retry-After = %v after %d attempts, want success after 2", err, attempts)
+	}
+	if _, attempts, err := publish(answer{status: http.StatusTooManyRequests, header: map[string]string{"Retry-After": "6"}}); err == nil || attempts != 1 {
+		t.Fatalf("long-throttled publish = %v after %d attempts, want an error after 1", err, attempts)
+	}
+	// A 4xx, and the 503 of an unconfigured consumer registry, are Vercel
+	// Queues' decision.
+	for _, refusal := range []answer{{status: http.StatusBadRequest}, {status: http.StatusUnauthorized}, {status: http.StatusServiceUnavailable, header: map[string]string{"Vqs-Error-Code": "consumer_registry_not_configured"}}} {
+		if _, attempts, err := publish(refusal); err == nil || attempts != 1 {
+			t.Fatalf("publish refused with %d = %v after %d attempts, want an error after 1", refusal.status, err, attempts)
+		}
+	}
+	// A 202 is a send Vercel Queues took in another region, which has no ID.
+	if id, attempts, err := publish(answer{status: http.StatusAccepted}); err != nil || id != "" || attempts != 1 {
+		t.Fatalf("failed-over publish = %q, %v after %d attempts, want no ID after 1", id, err, attempts)
+	}
+}
+
+func TestSendRetryDelay(t *testing.T) {
+	ctx := context.Background()
+	// The queue request deadline is a transport failure.
+	deadline := fmt.Errorf("workflow/vercel: publish queue message: %w", fmt.Errorf("%w after 30s: %w", errQueueRequestDeadline, context.DeadlineExceeded))
+	if delay, ok := sendRetryDelay(ctx, deadline, 0); !ok || delay < 100*time.Millisecond || delay >= 200*time.Millisecond {
+		t.Fatalf("deadline retry = %s, %v, want 100ms plus jitter", delay, ok)
+	}
+	if delay, ok := sendRetryDelay(ctx, &vqsSendError{Status: http.StatusInternalServerError}, 5); !ok || delay < 500*time.Millisecond || delay >= 600*time.Millisecond {
+		t.Fatalf("late retry = %s, %v, want 500ms plus jitter", delay, ok)
+	}
+	if delay, ok := sendRetryDelay(ctx, &vqsSendError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Second}, 0); !ok || delay != 2*time.Second {
+		t.Fatalf("throttled retry = %s, %v, want the Retry-After", delay, ok)
+	}
+	// An error that is not a transport failure, and the caller's own end,
+	// are not retried.
+	if _, ok := sendRetryDelay(ctx, errors.New("token"), 0); ok {
+		t.Fatal("a token failure is retried")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, ok := sendRetryDelay(canceled, context.Canceled, 0); ok {
+		t.Fatal("a canceled send is retried")
 	}
 }
 
@@ -455,10 +564,10 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 		return response.Code, requests[len(requests)-1]
 	}
 
-	// The delivery carries its message's ID, its deliveries, and its
-	// attempts, which leave out handoffs.
+	// The delivery carries Vercel Queues' message ID, its deliveries, and
+	// its attempts, which leave out handoffs.
 	status, settle := deliver(worlds.Redeliver(30 * time.Second))
-	if got.MessageID != "01MSG" || got.DeliveryCount != 5 || got.Attempt != 3 {
+	if got.MessageID != "msg_1" || got.DeliveryCount != 5 || got.Attempt != 3 {
 		t.Fatalf("delivery = %+v", got)
 	}
 	// A redelivery hides the message for its delay, unacknowledged.
@@ -503,6 +612,12 @@ func TestQueueConsumerCoversCoalescedMessages(t *testing.T) {
 			}
 			writer.WriteHeader(http.StatusConflict)
 			_, _ = fmt.Fprintf(writer, `{"coalescedCount":%d}`, pending)
+			return
+		}
+		if request.Method == http.MethodPost {
+			// A send, which Vercel Queues answers with the message's ID.
+			writer.WriteHeader(http.StatusCreated)
+			_, _ = writer.Write([]byte(`{"messageId":"msg_continued"}`))
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
@@ -592,7 +707,7 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	// A message goes to the region its run ID carries, else VERCEL_REGION's.
 	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", RegionSYD1)
 	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1"} {
-		if err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, vqsSend{}); err != nil {
+		if _, err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, vqsSend{}); err != nil {
 			t.Fatal(err)
 		}
 	}

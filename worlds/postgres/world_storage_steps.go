@@ -38,22 +38,25 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 }
 
 // stepSelect selects steps as s with their payloads joined from the event
-// log: the input from the event that created the step and the output or error from the latest
-// result. ResolveDataNone joins only an error result.
+// log: the input from the event that created the step, the output from its
+// step_completed, and the error from its latest step_failed or
+// step_retrying. ResolveDataNone joins only the error.
 func stepSelect(resolve worlds.ResolveData) string {
-	input, result, join := "ie.type, ie.payload_cbor", "re.payload_cbor", " LEFT JOIN workflow.workflow_events ie ON ie.run_id = s.run_id AND ie.id = "+slotID("s.input_slot")+runLive("s.run_id")
+	input, output := "ie.type, ie.payload_cbor", "oe.payload_cbor"
+	join := " LEFT JOIN workflow.workflow_events ie ON ie.run_id = s.run_id AND ie.id = " + slotID("s.input_slot") + runLive("s.run_id") +
+		" LEFT JOIN workflow.workflow_events oe ON oe.run_id = s.run_id AND oe.id = " + slotID("s.output_slot") + runLive("s.run_id")
 	if resolve == worlds.ResolveDataNone {
-		input, result, join = "NULL::varchar, NULL::bytea", "CASE WHEN re.type <> '"+string(worlds.EventTypeStepCompleted)+"' THEN re.payload_cbor END", ""
+		input, output, join = "NULL::varchar, NULL::bytea", "NULL::bytea", ""
 	}
-	return "SELECT s.run_id, s.step_id, s.step_name, s.status::text, " + input + ", re.type, " + result + ", s.attempt, s.created_at, s.updated_at, s.started_at, s.completed_at, s.retry_after, coalesce(s.spec_version, 0)" +
-		" FROM workflow.workflow_steps s" + join + " LEFT JOIN workflow.workflow_events re ON re.run_id = s.run_id AND re.id = " + slotID("s.result_slot") + runLive("s.run_id")
+	return "SELECT s.run_id, s.step_id, s.step_name, s.status::text, " + input + ", " + output + ", ee.type, ee.payload_cbor, s.attempt, s.created_at, s.updated_at, s.started_at, s.completed_at, s.retry_after, coalesce(s.spec_version, 0)" +
+		" FROM workflow.workflow_steps s" + join + " LEFT JOIN workflow.workflow_events ee ON ee.run_id = s.run_id AND ee.id = " + slotID("s.error_slot") + runLive("s.run_id")
 }
 
 func scanStep(row pgx.Row) (worlds.Step, error) {
 	var step worlds.Step
-	var input, result []byte
-	var inputType, resultType *worlds.EventType
-	if err := row.Scan(&step.RunID, &step.StepID, &step.StepName, &step.Status, &inputType, &input, &resultType, &result, &step.Attempt, &step.CreatedAt, &step.UpdatedAt, &step.StartedAt, &step.CompletedAt, &step.RetryAfter, &step.SpecVersion); err != nil {
+	var input, output, failure []byte
+	var inputType, errorType *worlds.EventType
+	if err := row.Scan(&step.RunID, &step.StepID, &step.StepName, &step.Status, &inputType, &input, &output, &errorType, &failure, &step.Attempt, &step.CreatedAt, &step.UpdatedAt, &step.StartedAt, &step.CompletedAt, &step.RetryAfter, &step.SpecVersion); err != nil {
 		return worlds.Step{}, err
 	}
 	if inputType != nil && input != nil {
@@ -65,17 +68,19 @@ func scanStep(row pgx.Row) (worlds.Step, error) {
 		}
 		step.Input = worlds.EventPayload(worlds.Event{EventType: *inputType, Data: data})
 	}
-	if resultType != nil && result != nil {
-		data, err := eventData(*resultType, result)
+	if output != nil {
+		data, err := eventData(worlds.EventTypeStepCompleted, output)
 		if err != nil {
 			return worlds.Step{}, err
 		}
-		payload := worlds.EventPayload(worlds.Event{EventType: *resultType, Data: data})
-		if *resultType == worlds.EventTypeStepCompleted {
-			step.Output = payload
-		} else {
-			step.Error = payload
+		step.Output = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeStepCompleted, Data: data})
+	}
+	if errorType != nil && failure != nil {
+		data, err := eventData(*errorType, failure)
+		if err != nil {
+			return worlds.Step{}, err
 		}
+		step.Error = worlds.EventPayload(worlds.Event{EventType: *errorType, Data: data})
 	}
 	step.CreatedAt, step.UpdatedAt = step.CreatedAt.UTC(), step.UpdatedAt.UTC()
 	step.StartedAt, step.CompletedAt, step.RetryAfter = utc(step.StartedAt), utc(step.CompletedAt), utc(step.RetryAfter)

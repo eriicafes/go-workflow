@@ -130,14 +130,17 @@ func decodeCursor(cursor string) (time.Time, string, error) {
 }
 
 // keysetPage trims the extra row fetched by query.limit and sets the cursor
-// from the last returned row.
+// from the last returned row, on the last page too, as world-postgres does.
 func keysetPage[T any](values []T, limit int, key func(T) (time.Time, string)) worlds.Page[T] {
-	if limit <= 0 || len(values) <= limit {
-		return worlds.Page[T]{Data: values}
+	page := worlds.Page[T]{Data: values}
+	if limit > 0 && len(values) > limit {
+		page.Data, page.HasMore = values[:limit], true
 	}
-	values = values[:limit]
-	at, id := key(values[limit-1])
-	return worlds.Page[T]{Data: values, HasMore: true, Cursor: encodeCursor(at, id)}
+	if len(page.Data) > 0 {
+		at, id := key(page.Data[len(page.Data)-1])
+		page.Cursor = encodeCursor(at, id)
+	}
+	return page
 }
 
 // offsetPage pages an in-memory slice with a decimal offset cursor.
@@ -155,7 +158,7 @@ func offsetPage[T any](values []T, pagination worlds.Pagination) (worlds.Page[T]
 		end = min(start+pagination.Limit, len(values))
 	}
 	result := worlds.Page[T]{Data: values[start:end], HasMore: end < len(values)}
-	if result.HasMore {
+	if end > start {
 		result.Cursor = strconv.Itoa(end)
 	}
 	return result, nil

@@ -2,7 +2,6 @@ package localworld
 
 import (
 	"encoding/base64"
-	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -31,8 +30,8 @@ type runRecord struct {
 
 // stepRecord is the materialized step. InputSlot is its step_created event,
 // or the step_started that created an inline step.
-// OutputSlot or ErrorSlot is its latest result: step_completed, or
-// step_failed or step_retrying. A later result replaces the earlier one.
+// OutputSlot is its step_completed, and ErrorSlot its latest step_failed or
+// step_retrying, which a step_completed keeps.
 type stepRecord struct {
 	worlds.Step
 	InputSlot  int `json:"inputSlot,omitempty"`
@@ -168,16 +167,16 @@ func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string
 	})
 	start := 0
 	if pagination.Cursor != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(pagination.Cursor)
-		if err != nil {
-			return worlds.Page[T]{}, fmt.Errorf("workflow/local: invalid cursor %q", pagination.Cursor)
-		}
-		after := string(raw)
-		start = len(values)
-		for index, value := range values {
-			if compare := strings.Compare(key(value), after); descending && compare < 0 || !descending && compare > 0 {
-				start = index
-				break
+		// A cursor that does not decode starts from the first page, as
+		// world-local's parseEntityCursor reads it.
+		if raw, err := base64.RawURLEncoding.DecodeString(pagination.Cursor); err == nil {
+			after := string(raw)
+			start = len(values)
+			for index, value := range values {
+				if compare := strings.Compare(key(value), after); descending && compare < 0 || !descending && compare > 0 {
+					start = index
+					break
+				}
 			}
 		}
 	}
@@ -189,7 +188,8 @@ func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string
 	if page.Data == nil {
 		page.Data = []T{}
 	}
-	if page.HasMore && end > start {
+	// The last page's cursor resumes after it, as world-local's does.
+	if end > start {
 		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
 	}
 	return page, nil

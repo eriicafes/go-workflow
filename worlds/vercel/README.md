@@ -167,8 +167,9 @@ resume time.
 | --- | --- |
 | Batches | One request and one fenced allocation. As the contract allows, the backend keeps the events it admitted when another is refused, and the runtime replays whatever the log holds. |
 | Repeated transitions | The backend refuses them as conflicts, which the World returns as `ErrEventConflict`, as world-vercel returns `EntityConflictError`. A `run_started` of a running run is one of them (`run-already-started`). |
-| Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. |
-| Stream reads | Cursors are chunk indexes. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. |
+| Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. A close is sent again after a transport failure or a 429, 500, 502, 503, or 504, up to five times, after the `Retry-After` or a backoff from 500ms doubling to at most 30 seconds, as the Workflow SDK's close dispatcher does. |
+| Stream reads | Cursors are chunk indexes, and a cursor that is not one reads from the beginning. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. A `410` is `ErrRunExpired`, and the backend's `stream-expired` is `ErrStreamExpired`. |
+| List cursors | A page carries the backend's cursor, the last page included, as world-vercel returns it: it is where an incremental read resumes. `HasMore` tells whether more follow. |
 | `RunsList` by several statuses | The backend filters by one status, so `RunsList` with several is refused with `ErrEventInvalid`, as world-vercel refuses it. |
 | Hooks | `HooksGet` reads the hook and its `hook_created` event, for its metadata, webhook flag, and forced claim. |
 | Analytics | `Analytics()` reads the backend's `/v2/analytics` endpoints, as world-vercel does. The backend filters analytics runs by one status, so `RunsList` with several is refused with `ErrEventInvalid`, and a time window needs both `StartTime` and `EndTime` or neither, as world-vercel's `assertDateWindow` requires. Larger pages than the backend allows (100, or 1000 for a run's steps, events, and waits) come back with `HasMore`. |
@@ -252,7 +253,14 @@ deployment that starts them.
 ## Queue delivery
 
 `Queue` publishes the whole delivery as the message, `POST
-{QueueURL}/topic/{Topic}`, and stores nothing for it. The request carries:
+{QueueURL}/topic/{Topic}`, and stores nothing for it. Its result is the
+message ID Vercel Queues answers with, or none when it answers `202` after
+failing over to another region. A send that fails with a transport error, its
+30-second request deadline (`WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS`), a 5xx, or a
+429 whose `Retry-After` is at most 5 seconds is sent again, up to three
+attempts, after 100ms and then 500ms plus up to 100ms of jitter, as the
+Workflow SDK's `withQueueSendRetry` does. Other 4xx answers are final. The
+request carries:
 
 | Header | Value |
 | --- | --- |
@@ -269,7 +277,7 @@ The consumer handles each delivery as follows:
 2. If the delivery is not yet due, hides it until it is, for at most 15
    minutes at a time.
 3. Executes the delivery, renewing the lease every minute. The delivery's
-   `MessageID` is the World's ID for the message, the same on every
+   `MessageID` is Vercel Queues' ID for the message, the same on every
    redelivery. Its `DeliveryCount` is Vercel's delivery count, and its
    `Attempt` that count less the message's handoffs.
 4. On success acknowledges the message. When Vercel refuses because messages

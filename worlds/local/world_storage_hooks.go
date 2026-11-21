@@ -20,10 +20,33 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 		if record == nil {
 			return worlds.ErrHookNotFound
 		}
+		if available, err := s.hookAvailable(*record, time.Now()); err != nil || !available {
+			if err == nil {
+				err = worlds.ErrHookNotFound
+			}
+			return err
+		}
 		hook, err = hookView(*record, s.committed(record.RunID), input.ResolveData)
 		return err
 	})
 	return hook, err
+}
+
+// hookAvailable reports whether a hook's row is readable at now, as
+// world-local's isAvailable decides: one that is not disposed, while its
+// run is unfinished or its token retention lasts.
+func (s *store) hookAvailable(record hookRecord, now time.Time) (bool, error) {
+	if disposal, err := s.getDisposal(record.HookID); err != nil || disposal != nil {
+		return false, err
+	}
+	if record.TokenRetentionUntil != nil && record.TokenRetentionUntil.After(now) {
+		return true, nil
+	}
+	run, err := s.getRunAnyTag(record.RunID)
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return false, nil
+	}
+	return err == nil && !run.Status.Terminal(), err
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -61,7 +84,13 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 			return err
 		}
 		hooks := make([]worlds.Hook, 0, len(records))
+		now := time.Now()
 		for _, record := range records {
+			if available, err := s.hookAvailable(record, now); err != nil {
+				return err
+			} else if !available {
+				continue
+			}
 			hook, err := hookView(record, s.committed(record.RunID), input.ResolveData)
 			if err != nil {
 				return err
@@ -103,7 +132,7 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 		return worlds.EventResult{}, err
 	}
 	if claimant.run.Status.Terminal() {
-		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.run.Status, input.Event, "")
+		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.run.Status, input.Event)
 	}
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
@@ -129,7 +158,7 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 		return worlds.EventResult{}, err
 	}
 	if owner.held(now) {
-		previous, err := s.getHookAnyTag(owner.HookID)
+		previous, err := s.getHook(owner.HookID)
 		if err != nil {
 			return worlds.EventResult{}, err
 		}
@@ -140,8 +169,7 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 			created.ConflictingRunID = previous.RunID
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
-			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: previous.RunID, HookID: previous.HookID, WorkflowName: previous.ResumeContext.WorkflowName, DeploymentID: previous.ResumeContext.DeploymentID, RunSpecVersion: previous.ResumeContext.RunSpecVersion}
-			if err := forceRelease(claimant, previous, worlds.HookID(input.Event.CorrelationID), now); err != nil {
+			if created.ForceClaimedFrom, err = forceRelease(claimant, previous, created.Token, worlds.HookID(input.Event.CorrelationID), now); err != nil {
 				return worlds.EventResult{}, err
 			}
 		}
@@ -163,35 +191,45 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	return result, err
 }
 
-// forceRelease records hook_disposed, naming claimantHook in ForceClaimedBy,
-// in a live owner's run. A finished or missing owner is simply replaced by
-// the claim. An owner in the claimant's own run is recorded in the
-// claimant's txn so both events commit together.
-func forceRelease(claimant *txn, hook *hookRecord, claimantHook worlds.HookID, now time.Time) error {
-	data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: claimant.run.RunID, HookID: claimantHook}})
+// forceRelease releases hook, whose token the claimant's claimantHook takes
+// by force, as world-local releases it, and returns the claim's
+// ForceClaimedFrom. A live owner's run records hook_disposed naming
+// claimantHook in ForceClaimedBy, and ForceClaimedFrom names its workflow so
+// the runtime wakes it. A finished or missing owner's hook is disposed of
+// without an event or a wake. An owner in the claimant's own run is recorded
+// in the claimant's txn so both events commit together.
+func forceRelease(claimant *txn, hook *hookRecord, token string, claimantHook worlds.HookID, now time.Time) (*worlds.HookForceClaim, error) {
+	by := &worlds.HookForceClaim{RunID: claimant.run.RunID, HookID: claimantHook}
+	from := &worlds.HookForceClaim{RunID: hook.RunID, HookID: hook.HookID}
+	data, err := json.Marshal(worlds.HookDisposedEventData{Token: token, ForceClaimedBy: by})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hook.HookID), Data: data}
 	if hook.RunID == claimant.run.RunID {
+		from.WorkflowName, from.DeploymentID, from.RunSpecVersion = claimant.run.WorkflowName, claimant.run.DeploymentID, claimant.run.SpecVersion
 		_, err := claimant.append(event, now)
-		return err
+		return from, err
 	}
 	run, err := claimant.s.getRunAnyTag(hook.RunID)
-	if errors.Is(err, worlds.ErrRunNotFound) {
-		return nil
+	if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
+		return nil, err
 	}
 	if err != nil || run.Status.Terminal() {
-		return err
+		if err := claimant.s.putDisposal(hook.HookID, &disposalRecord{RunID: hook.RunID, ForceClaimedBy: by}); err != nil {
+			return nil, err
+		}
+		return from, claimant.s.deleteHook(hook.HookID)
 	}
+	from.WorkflowName, from.DeploymentID, from.RunSpecVersion = run.WorkflowName, run.DeploymentID, run.SpecVersion
 	owner := newTxn(claimant.s, run)
 	if _, err := owner.append(event, now); err != nil {
-		return err
+		return nil, err
 	}
 	if err := owner.commit(); err != nil {
-		return err
+		return nil, err
 	}
 	// The claimant's staged view of the token predates the owner's release.
 	delete(claimant.tokens, hook.Token)
-	return nil
+	return from, nil
 }

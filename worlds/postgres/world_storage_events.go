@@ -59,10 +59,15 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	if start := input.StartHook; start != nil {
 		// A candidate's decision is permanent.
-		var decision, conflicting string
-		err := w.pool.QueryRow(ctx, w.q(`SELECT decision, coalesce(conflicting_run_id, '') FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`), input.RunID).Scan(&decision, &conflicting)
+		var decision, conflicting, token string
+		err := w.pool.QueryRow(ctx, w.q(`SELECT decision, coalesce(conflicting_run_id, ''), token FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`), input.RunID).Scan(&decision, &conflicting, &token)
+		if err == nil && token != start.Token {
+			// A candidate is decided for its token, as world-postgres's
+			// recordedDecision refuses another.
+			return worlds.EventResult{}, fmt.Errorf("%w: run %s was already admitted with a different start hook token", worlds.ErrStartHookRejected, input.RunID)
+		}
 		if err == nil && decision == "rejected" {
-			return worlds.EventResult{}, &worlds.HookConflictError{RunID: worlds.RunID(conflicting)}
+			return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, worlds.StartHookDecision{Token: token, ConflictingRunID: worlds.RunID(conflicting)})
 		}
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return worlds.EventResult{}, err
@@ -86,11 +91,14 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		if tag.RowsAffected() == 0 {
 			// A repeat of an accepted start returns its run_created.
 			created, err := scanEvent(tx.QueryRow(ctx, w.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 AND id = $2`), input.RunID, worlds.EventIDForSlot(1)))
-			if err == nil && worlds.RepeatsAcceptedStart(created.Data, input) {
-				repeat = &worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}
-				return nil
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
 			}
-			return worlds.ErrRunAlreadyExists
+			if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
+				return err
+			}
+			repeat = &worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}
+			return nil
 		}
 		// run_created takes the first position, which counts as in-band.
 		if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_events (run_id, id, type, payload_cbor, created_at, spec_version) VALUES ($1, $2, $3, $4, $5, $6)`),
@@ -166,7 +174,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if input.Event.EventType == worlds.EventTypeHookReceived {
 			resumeID = input.Options.ResumeID
 		}
-		replay, err := a.resumed(ctx, resumeID, input.Options.ResumePayloadDigest)
+		replay, err := a.resumed(ctx, input.Event, resumeID, input.Options.ResumePayloadDigest)
 		if err != nil {
 			return err
 		}
@@ -333,7 +341,8 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	err := w.pool.QueryRow(ctx, w.q(`SELECT s.seq_in_band, (SELECT max(e.id) FROM workflow.workflow_events e WHERE e.run_id = s.run_id)
 		FROM workflow.workflow_event_slots s WHERE s.run_id = $1`), input.RunID).Scan(&inBandCount, &last)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return worlds.EventsPage{}, worlds.ErrRunNotFound
+		// A missing run has no events and no snapshot, as in world-postgres.
+		return worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}}, nil
 	}
 	if err != nil {
 		return worlds.EventsPage{}, err
@@ -389,16 +398,16 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 		resolve = worlds.EventsResolveDataNone
 	}
 	events = worlds.ResolveEvents(events, resolve)
-	if len(events) == 0 {
-		if err := w.runExists(ctx, runID); err != nil {
-			return worlds.Page[worlds.Event]{}, err
-		}
+	// A missing run has no events, as in world-postgres. The last page's
+	// cursor resumes after its last event.
+	page := worlds.Page[worlds.Event]{Data: events}
+	if pagination.Limit > 0 && len(events) > pagination.Limit {
+		page.Data, page.HasMore = events[:pagination.Limit], true
 	}
-	if pagination.Limit <= 0 || len(events) <= pagination.Limit {
-		return worlds.Page[worlds.Event]{Data: events}, nil
+	if len(page.Data) > 0 {
+		page.Cursor = string(page.Data[len(page.Data)-1].EventID)
 	}
-	events = events[:pagination.Limit]
-	return worlds.Page[worlds.Event]{Data: events, HasMore: true, Cursor: string(events[len(events)-1].EventID)}, nil
+	return page, nil
 }
 
 // appender appends events to one run inside a transaction holding that run's
@@ -442,11 +451,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		}
 	}
 	if a.run.Status.Terminal() {
-		var stepStatus worlds.Status
-		if step != nil {
-			stepStatus = step.Status
-		}
-		if err := worlds.FinishedRunRefusal(a.run.Status, event, stepStatus); err != nil {
+		if err := worlds.FinishedRunRefusal(a.run.Status, event); err != nil {
 			return nil, err
 		}
 	}
@@ -465,7 +470,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if step != nil {
 			status, retryAfter = step.Status, step.RetryAfter
 		}
-		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, now()); err != nil {
+		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, a.run.Status, now()); err != nil {
 			return nil, err
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
@@ -523,6 +528,9 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		}
 		if owner != hook.HookID {
 			return nil, worlds.ErrHookNotFound
+		}
+		if err := worlds.FinishedRunHookRefusal(a.run.Status, event); err != nil {
+			return nil, err
 		}
 
 	case worlds.EventTypeHookDisposed:
@@ -683,7 +691,7 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 		_, err := a.tx.Exec(ctx, a.w.q(`INSERT INTO workflow.workflow_steps (run_id, step_id, step_name, status, input_slot, created_at, updated_at, spec_version)
 			VALUES ($1, $2, $3, 'pending', $4, $5, $5, $6)
 			ON CONFLICT (run_id, step_id) DO UPDATE SET step_name = excluded.step_name, status = excluded.status, input_slot = excluded.input_slot,
-				result_slot = NULL, attempt = 0, created_at = excluded.created_at, updated_at = excluded.updated_at,
+				output_slot = NULL, error_slot = NULL, attempt = 0, created_at = excluded.created_at, updated_at = excluded.updated_at,
 				started_at = NULL, completed_at = NULL, retry_after = NULL, spec_version = excluded.spec_version`),
 			event.RunID, event.CorrelationID, value.StepName, slot, at, event.SpecVersion)
 		return err
@@ -719,21 +727,23 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 	return nil
 }
 
-// updateStep applies a step event at slot. A step_completed, step_failed, or
-// step_retrying event becomes the step's result slot, holding its output or
-// error.
+// updateStep applies a step event at slot. A step_completed becomes the
+// step's output slot, and a step_failed or step_retrying its error slot,
+// which a later step_completed keeps, as world-postgres keeps a step's
+// error. A step_retrying sets the step's retry time, which its next start
+// clears.
 func (a *appender) updateStep(ctx context.Context, event worlds.Event, status worlds.Status, slot int64) error {
 	var result worlds.DataStepResult
-	parsed := json.Unmarshal(event.Data, &result) == nil
-	resulted := event.EventType != worlds.EventTypeStepStarted
+	_ = json.Unmarshal(event.Data, &result)
 	_, err := a.tx.Exec(ctx, a.w.q(`UPDATE workflow.workflow_steps SET status = $3::text::workflow.step_status, updated_at = $4,
 			attempt = attempt + CASE WHEN $3::text = 'running' THEN 1 ELSE 0 END,
 			started_at = CASE WHEN $3::text = 'running' THEN coalesce(started_at, $4) ELSE started_at END,
 			completed_at = CASE WHEN $3::text IN ('completed', 'failed') THEN $4 ELSE completed_at END,
-			result_slot = CASE WHEN $6::boolean THEN $7::bigint ELSE result_slot END,
-			retry_after = CASE WHEN $5::boolean THEN $8::timestamptz ELSE retry_after END
+			output_slot = CASE WHEN $5::text = 'step_completed' THEN $6::bigint ELSE output_slot END,
+			error_slot = CASE WHEN $5::text IN ('step_failed', 'step_retrying') THEN $6::bigint ELSE error_slot END,
+			retry_after = CASE $5::text WHEN 'step_started' THEN NULL WHEN 'step_retrying' THEN $7::timestamptz ELSE retry_after END
 		WHERE run_id = $1 AND step_id = $2`),
-		event.RunID, event.CorrelationID, string(status), event.CreatedAt, parsed, resulted, slot, result.RetryAfter)
+		event.RunID, event.CorrelationID, string(status), event.CreatedAt, string(event.EventType), slot, result.RetryAfter)
 	return err
 }
 
@@ -1009,9 +1019,10 @@ func (w *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSl
 }
 
 // resumed returns the result of the hook_received the resume resumeID
-// committed, or nil when it committed none. A repeat of the resume with
-// another payload digest is refused.
-func (a *appender) resumed(ctx context.Context, resumeID, digest string) (*worlds.EventResult, error) {
+// committed, or nil when it committed none. A repeat of the resume for
+// another hook or payload digest is refused with ErrEventInvalid,
+// as world-postgres's createHookResume refuses it.
+func (a *appender) resumed(ctx context.Context, requested worlds.EventsCreateEvent, resumeID, digest string) (*worlds.EventResult, error) {
 	if resumeID == "" {
 		return nil, nil
 	}
@@ -1025,12 +1036,12 @@ func (a *appender) resumed(ctx context.Context, resumeID, digest string) (*world
 	if err != nil {
 		return nil, err
 	}
-	if committed != digest {
-		return nil, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, resumeID)
-	}
 	event, err := scanEvent(a.tx.QueryRow(ctx, a.w.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 AND id = $2`), a.run.RunID, id))
 	if err != nil {
 		return nil, err
+	}
+	if committed != digest || event.CorrelationID != requested.CorrelationID {
+		return nil, fmt.Errorf("%w: resume %s was sent with other contents", worlds.ErrEventInvalid, resumeID)
 	}
 	result, err := a.result(ctx, event, false)
 	return &result, err

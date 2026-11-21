@@ -26,14 +26,16 @@ type runView struct {
 	resultEventID    worlds.EventID
 }
 
-// stepView is a STEP# item. Its Step holds no payloads; createdEventID and
-// resultEventID name the event that created the step, its step_created or
-// an inline step's first step_started, and its latest result event, which
-// hold them.
+// stepView is a STEP# item. Its Step holds no payloads; createdEventID,
+// resultEventID, and errorEventID name the events holding them: the one that
+// created the step, its step_created or an inline step's first step_started,
+// its step_completed, and its latest step_failed or step_retrying, which a
+// step_completed keeps.
 type stepView struct {
 	worlds.Step
 	createdEventID worlds.EventID
 	resultEventID  worlds.EventID
+	errorEventID   worlds.EventID
 }
 
 // tokenView is a TOKEN# item. It holds the hook owning a token and, once the
@@ -256,6 +258,7 @@ func stepItem(view stepView) map[string]ddb.AttributeValue {
 	setTime(item, "retryAfter", step.RetryAfter)
 	setString(item, "createdEventId", string(view.createdEventID))
 	setString(item, "resultEventId", string(view.resultEventID))
+	setString(item, "errorEventId", string(view.errorEventID))
 	return item
 }
 
@@ -276,6 +279,7 @@ func stepFromItem(item map[string]ddb.AttributeValue) stepView {
 		},
 		createdEventID: worlds.EventID(read(item, "createdEventId")),
 		resultEventID:  worlds.EventID(read(item, "resultEventId")),
+		errorEventID:   worlds.EventID(read(item, "errorEventId")),
 	}
 }
 
@@ -478,7 +482,10 @@ func sortedPage[T any](values []T, sortKey func(T) string, pagination worlds.Pag
 	result := worlds.Page[T]{Data: values}
 	if pagination.Limit > 0 && len(values) > pagination.Limit {
 		result.Data, result.HasMore = values[:pagination.Limit], true
-		result.Cursor = encodeCursor(map[string]string{"after": sortKey(values[pagination.Limit-1])})
+	}
+	// The last page's cursor resumes after it, as world-local's does.
+	if len(result.Data) > 0 {
+		result.Cursor = encodeCursor(map[string]string{"after": sortKey(result.Data[len(result.Data)-1])})
 	}
 	return result, nil
 }

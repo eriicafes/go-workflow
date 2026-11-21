@@ -25,11 +25,18 @@ type tokenHolder struct {
 }
 
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
-	hook, err := scanHook(w.pool.QueryRow(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+` WHERE h.hook_id = $1`), input.HookID))
+	hook, err := scanHook(w.pool.QueryRow(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+` WHERE h.hook_id = $1 AND `+hookAvailable("$2")), input.HookID, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return worlds.Hook{}, worlds.ErrHookNotFound
 	}
 	return hook, err
+}
+
+// hookAvailable is the condition on hooks h under which a hook is readable
+// at the time the argument at names, as world-postgres reads it: while its
+// token retention lasts or its run is unfinished.
+func hookAvailable(at string) string {
+	return "(h.token_retention_until > " + at + " OR EXISTS (SELECT 1 FROM workflow.workflow_runs ar WHERE ar.id = h.run_id AND ar.status IN ('pending', 'running')))"
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
@@ -47,6 +54,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	// The list's defaults are world-postgres's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 100)
 	var q query
+	q.where(hookAvailable(q.arg(now())))
 	if input.RunID != "" {
 		q.where("h.run_id = " + q.arg(input.RunID))
 	}
@@ -126,7 +134,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		claimant := runs[input.RunID]
 		before := claimant.count
 		if claimant.run.Status.Terminal() {
-			return worlds.FinishedRunRefusal(claimant.run.Status, input.Event, "")
+			return worlds.FinishedRunRefusal(claimant.run.Status, input.Event)
 		}
 		if err := claimant.fence(input.Options.InBandCount); err != nil {
 			return err
@@ -156,14 +164,19 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 				if owner == nil {
 					return errClaimRetry
 				}
-				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID, WorkflowName: owner.run.WorkflowName, DeploymentID: owner.run.DeploymentID, RunSpecVersion: owner.run.SpecVersion}
+				// The claim names a live owner's workflow, which the runtime
+				// wakes to read its disposal, as world-postgres names it. A
+				// finished owner has nothing to read or wake.
+				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
 				if owner.run.Status.Terminal() {
 					// A finished owner's hook goes with its token.
 					if _, err := tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), holder.hookID); err != nil {
 						return err
 					}
 				} else {
-					data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+					claim := created.ForceClaimedFrom
+					claim.WorkflowName, claim.DeploymentID, claim.RunSpecVersion = owner.run.WorkflowName, owner.run.DeploymentID, owner.run.SpecVersion
+					data, _ := json.Marshal(worlds.HookDisposedEventData{Token: token, ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
 					forced, err := owner.append(ctx, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(holder.hookID), Data: data})
 					if err != nil {
 						return err

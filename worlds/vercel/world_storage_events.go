@@ -446,9 +446,8 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string,
 		}
 		result.Data = append(result.Data, event)
 	}
-	if !result.HasMore {
-		result.Cursor = ""
-	}
+	// The backend's cursor is kept on the last page too, as the Workflow
+	// SDK's World keeps it: it is where an incremental read resumes.
 	return result, nil
 }
 

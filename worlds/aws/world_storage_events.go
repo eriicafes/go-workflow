@@ -49,8 +49,12 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		// A candidate's decision is permanent.
 		if item, found, err := w.item(ctx, startHookDecisionKey(string(input.RunID))); err != nil {
 			return worlds.EventResult{}, err
+		} else if found && read(item, "token") != input.StartHook.Token {
+			// A candidate is decided for its token, as the Workflow SDK's
+			// Worlds refuse another.
+			return worlds.EventResult{}, fmt.Errorf("%w: run %s was already decided for a different start hook token", worlds.ErrStartHookRejected, input.RunID)
 		} else if found && read(item, "decision") == "rejected" {
-			return worlds.EventResult{}, &worlds.HookConflictError{RunID: worlds.RunID(read(item, "conflictingRunId"))}
+			return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, worlds.StartHookDecision{Token: read(item, "token"), ConflictingRunID: worlds.RunID(read(item, "conflictingRunId"))})
 		} else if !found && worlds.StartHookCandidateExpired(input.RunID, now) {
 			return worlds.EventResult{}, worlds.ErrStartHookRejected
 		}
@@ -87,13 +91,16 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 }
 
 // repeatedStart returns the run_created of an accepted start that input
-// repeats, or ErrRunAlreadyExists.
+// repeats, or the error ExistingRunRefusal refuses input with.
 func (w *World) repeatedStart(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	created, err := w.EventsGet(ctx, worlds.EventsGetInput{RunID: input.RunID, EventID: worlds.EventIDForSlot(1)})
-	if err == nil && worlds.RepeatsAcceptedStart(created.Data, input) {
-		return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
+	if err != nil && !errors.Is(err, worlds.ErrEventNotFound) && !errors.Is(err, worlds.ErrRunNotFound) {
+		return worlds.EventResult{}, err
 	}
-	return worlds.EventResult{}, worlds.ErrRunAlreadyExists
+	if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
+		return worlds.EventResult{}, err
+	}
+	return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
 }
 
 // rejectStart records the refusal of a start hook candidate, which is
@@ -152,8 +159,8 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		var replay *worlds.EventResult
 		if resume != nil && resume.eventID != "" {
 			// A repeat of a resume returns the event it committed.
-			if resume.digest != input.Options.ResumePayloadDigest {
-				return fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, input.Options.ResumeID)
+			if err := worlds.CheckResumeReplay(input.Event, input.Options.ResumePayloadDigest, resume.hookID, resume.digest); err != nil {
+				return err
 			}
 			replay = &worlds.EventResult{EventID: resume.eventID, EventType: worlds.EventTypeHookReceived}
 		} else if replay, err = tx.admit(ctx, run, input.Event); err != nil {
@@ -168,7 +175,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 			}
 			if resume != nil {
 				run.events[len(run.events)-1].ResumeID, event.ResumeID = input.Options.ResumeID, input.Options.ResumeID
-				resume.digest, resume.eventID, resume.created = input.Options.ResumePayloadDigest, event.EventID, true
+				resume.hookID, resume.digest, resume.eventID, resume.created = worlds.HookID(input.Event.CorrelationID), input.Options.ResumePayloadDigest, event.EventID, true
 			}
 			advance(run, input.Options.InBandCount, 1)
 			result = tx.result(event, true)
@@ -367,7 +374,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			return err
 		}
 		if claimant.view.Status.Terminal() {
-			return worlds.FinishedRunRefusal(claimant.view.Status, input.Event, "")
+			return worlds.FinishedRunRefusal(claimant.view.Status, input.Event)
 		}
 		if err := fence(claimant, input.Options.InBandCount); err != nil {
 			return err
@@ -390,14 +397,15 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 				if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
 					return err
 				}
-				if owner != nil {
-					claim := created.ForceClaimedFrom
-					claim.WorkflowName, claim.DeploymentID, claim.RunSpecVersion = owner.view.WorkflowName, owner.view.DeploymentID, owner.view.SpecVersion
-				}
+				// The claim names a live owner's workflow, which the runtime
+				// wakes to read its disposal, as the Workflow SDK's Worlds
+				// name it. A finished owner has nothing to read or wake.
 				if owner == nil || owner.view.Status.Terminal() {
 					token.cur = nil
 				} else {
-					data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+					claim := created.ForceClaimedFrom
+					claim.WorkflowName, claim.DeploymentID, claim.RunSpecVersion = owner.view.WorkflowName, owner.view.DeploymentID, owner.view.SpecVersion
+					data, _ := json.Marshal(worlds.HookDisposedEventData{Token: created.Token, ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
 					if _, err := tx.append(ctx, owner, worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(previous.hookID), Data: data}, time.Now().UTC()); err != nil {
 						return err
 					}
@@ -459,7 +467,8 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		return worlds.EventsPage{}, err
 	}
 	if !found {
-		return worlds.EventsPage{}, worlds.ErrRunNotFound
+		// A missing run has no events, as in world-local.
+		return worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}, Snapshot: worlds.EventsSnapshot{InBandCount: 1}}, nil
 	}
 	view := runFromItem(item)
 	page, err := w.eventsPage(ctx, input.RunID, "", input.Pagination, input.ResolveData)
@@ -516,15 +525,14 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, correlationI
 			return worlds.Page[worlds.Event]{}, err
 		}
 	}
-	if len(events) == 0 && pagination.Cursor == "" {
-		if err := w.runExists(ctx, runID); err != nil {
-			return worlds.Page[worlds.Event]{}, err
-		}
-	}
+	// A missing run has no events, as in world-local. The last page's
+	// cursor resumes after its last event.
 	page := worlds.Page[worlds.Event]{Data: worlds.ResolveEvents(events, resolve)}
 	if pagination.Limit > 0 && len(events) > pagination.Limit {
-		page.Data, page.HasMore = events[:pagination.Limit], true
-		page.Cursor = string(events[pagination.Limit-1].EventID)
+		page.Data, page.HasMore = page.Data[:pagination.Limit], true
+	}
+	if len(page.Data) > 0 {
+		page.Cursor = string(page.Data[len(page.Data)-1].EventID)
 	}
 	return page, nil
 }
@@ -655,6 +663,7 @@ type tokenEntry struct {
 type resumeEntry struct {
 	runID    worlds.RunID
 	resumeID string
+	hookID   worlds.HookID
 	digest   string
 	eventID  worlds.EventID
 	created  bool
@@ -738,7 +747,7 @@ func (tx *appendTx) load(ctx context.Context, keys []map[string]ddb.AttributeVal
 			if _, ok := tx.resumes[itemID(key)]; ok {
 				continue
 			}
-			tx.resumes[itemID(key)] = &resumeEntry{runID: worlds.RunID(strings.TrimPrefix(pk, "RUN#")), resumeID: strings.TrimPrefix(sk, "RESUME#"), digest: read(item, "digest"), eventID: worlds.EventID(read(item, "eventId"))}
+			tx.resumes[itemID(key)] = &resumeEntry{runID: worlds.RunID(strings.TrimPrefix(pk, "RUN#")), resumeID: strings.TrimPrefix(sk, "RESUME#"), hookID: worlds.HookID(read(item, "hookId")), digest: read(item, "digest"), eventID: worlds.EventID(read(item, "eventId"))}
 		case strings.HasPrefix(sk, "WAIT#"):
 			if _, ok := tx.waits[itemID(key)]; ok {
 				continue
@@ -888,17 +897,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		return nil, err
 	}
 	if run.view.Status.Terminal() {
-		var stepStatus worlds.Status
-		if requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed || requested.EventType == worlds.EventTypeStepRetrying {
-			entry, err := tx.step(ctx, run.view.RunID, requested.CorrelationID)
-			if err != nil {
-				return nil, err
-			}
-			if entry.view != nil {
-				stepStatus = entry.view.Status
-			}
-		}
-		if err := worlds.FinishedRunRefusal(run.view.Status, requested, stepStatus); err != nil {
+		if err := worlds.FinishedRunRefusal(run.view.Status, requested); err != nil {
 			return nil, err
 		}
 	}
@@ -921,7 +920,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if entry.view != nil {
 			status, retryAfter = entry.view.Status, entry.view.RetryAfter
 		}
-		if err := worlds.CheckStepEvent(requested, entry.view != nil, status, retryAfter, tx.now); err != nil {
+		if err := worlds.CheckStepEvent(requested, entry.view != nil, status, retryAfter, run.view.Status, tx.now); err != nil {
 			return nil, err
 		}
 	case worlds.EventTypeAttrSet:
@@ -979,6 +978,9 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		}
 		if !owned {
 			return nil, worlds.ErrHookNotFound
+		}
+		if err := worlds.FinishedRunHookRefusal(run.view.Status, requested); err != nil {
+			return nil, err
 		}
 
 	case worlds.EventTypeHookDisposed:
@@ -1211,12 +1213,22 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &event.CreatedAt
 	}
-	if event.EventType != worlds.EventTypeStepStarted {
+	// A result keeps the rest of the step, so a completed step keeps the
+	// error of its last retry, as the Workflow SDK's Worlds keep it. A start
+	// ends the wait for a retry.
+	switch event.EventType {
+	case worlds.EventTypeStepStarted:
+		step.RetryAfter = nil
+	case worlds.EventTypeStepCompleted:
 		step.resultEventID = event.EventID
-	}
-	var result worlds.DataStepResult
-	if json.Unmarshal(event.Data, &result) == nil {
-		step.RetryAfter = result.RetryAfter
+	case worlds.EventTypeStepFailed:
+		step.errorEventID = event.EventID
+	case worlds.EventTypeStepRetrying:
+		var result worlds.DataStepResult
+		if json.Unmarshal(event.Data, &result) == nil {
+			step.RetryAfter = result.RetryAfter
+		}
+		step.errorEventID = event.EventID
 	}
 	return nil
 }
@@ -1317,7 +1329,7 @@ func (tx *appendTx) commit(ctx context.Context) error {
 	}
 	for _, entry := range tx.resumes {
 		if entry.created {
-			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: merge(resumeKey(string(entry.runID), entry.resumeID), map[string]ddb.AttributeValue{"digest": avs(entry.digest), "eventId": avs(string(entry.eventID))}), ConditionExpression: awsv2.String("attribute_not_exists(pk)")}})
+			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: merge(resumeKey(string(entry.runID), entry.resumeID), map[string]ddb.AttributeValue{"hookId": avs(string(entry.hookID)), "digest": avs(entry.digest), "eventId": avs(string(entry.eventID))}), ConditionExpression: awsv2.String("attribute_not_exists(pk)")}})
 		}
 	}
 	for _, entry := range tx.waits {

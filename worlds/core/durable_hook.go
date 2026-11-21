@@ -98,7 +98,10 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	if event.EventType == worlds.EventTypeHookConflict {
 		result.Err, result.ConflictRunID = worlds.ErrHookConflict, created.ConflictingRunID
 	}
-	if created.ForceClaimedFrom != nil {
+	// The run the token was taken from is woken to read its disposal while it
+	// runs, which the World says by naming its workflow, as the Workflow
+	// SDK's runtime wakes it.
+	if from := created.ForceClaimedFrom; from != nil && from.RunID != options.Execution.run.RunID && from.WorkflowName != "" {
 		queue, err := worlds.RunDelivery(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
 		if err != nil {
 			panic(options.Execution.exit(deliveryError{cause: err}))

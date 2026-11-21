@@ -370,6 +370,19 @@ func conformEventsList(t *testing.T, world worlds.World) {
 			t.Fatalf("ascending events = %v", ascending)
 		}
 	}
+	// The last page's cursor resumes after it, as in the Workflow SDK's
+	// Worlds, so a reader that reached the end picks up new events from it.
+	resumed := conformCreateRun(t, world, "events_resume")
+	last, err := world.EventsList(ctx, worlds.EventsListInput{RunID: resumed})
+	if err != nil || last.HasMore || last.Cursor == "" {
+		t.Fatalf("last page = %+v err = %v, want a cursor", last, err)
+	}
+	conformAppend(t, world, resumed, worlds.EventTypeWaitCreated, "wait_after", nil)
+	next, err := world.EventsList(ctx, worlds.EventsListInput{RunID: resumed, Pagination: worlds.Pagination{Cursor: last.Cursor}})
+	if err != nil || len(next.Data) != 1 || next.Data[0].CorrelationID != "wait_after" {
+		t.Fatalf("page after the last = %+v err = %v, want the new event", next, err)
+	}
+
 	var descending []worlds.EventID
 	cursor = ""
 	for {
@@ -402,8 +415,13 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrEventNotFound, "missing event")
 	_, err = world.EventsGet(ctx, worlds.EventsGetInput{RunID: "wrun_missing", EventID: worlds.EventIDForSlot(1)})
 	conformExpect(t, err, worlds.ErrRunNotFound, "event of missing run")
-	_, err = world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_missing"})
-	conformExpect(t, err, worlds.ErrRunNotFound, "events of missing run")
+	// A missing run's events list is empty, as in the Workflow SDK's Worlds.
+	if missing, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_missing"}); err != nil || len(missing.Data) != 0 || missing.HasMore {
+		t.Fatalf("events of missing run = %+v err = %v, want an empty page", missing, err)
+	}
+	if missing, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: "wrun_missing", CorrelationID: "step_a"}); err != nil || len(missing.Data) != 0 || missing.HasMore {
+		t.Fatalf("correlated events of missing run = %+v err = %v, want an empty page", missing, err)
+	}
 
 	stripped, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID, ResolveData: worlds.EventsResolveDataNone})
 	if err != nil || len(stripped.Data) != 5 || !bytes.Equal(stripped.Data[2].Data, event.Data) {

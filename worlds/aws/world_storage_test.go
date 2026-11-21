@@ -33,8 +33,9 @@ func TestSortedPage(t *testing.T) {
 		}
 		seen = append(seen, page.Data...)
 		if !page.HasMore {
-			if page.Cursor != "" {
-				t.Fatal("cursor on last page")
+			// The last page's cursor resumes after it.
+			if after, err := sortedPage(append([]string(nil), values...), identity, worlds.Pagination{Limit: 2, Cursor: page.Cursor}); err != nil || len(after.Data) != 0 {
+				t.Fatalf("page after the last = %+v err = %v", after, err)
 			}
 			break
 		}

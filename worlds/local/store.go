@@ -379,15 +379,9 @@ func (s *store) openWaits(runID worlds.RunID) ([]worlds.Wait, error) {
 
 // Hooks.
 
-// getHook returns the hook the store's tag sees, or nil.
+// getHook returns the hook, whatever its tag, or nil. world-local scopes
+// only runs by tag.
 func (s *store) getHook(hookID worlds.HookID) (*hookRecord, error) {
-	condition, args := s.tagged("tag")
-	return s.scanHook(s.q.QueryRowContext(s.ctx, "SELECT doc FROM hooks WHERE hook_id = ? AND "+condition, append([]any{string(hookID)}, args...)...))
-}
-
-// getHookAnyTag returns the hook whatever its tag, as a token's owner, or
-// nil.
-func (s *store) getHookAnyTag(hookID worlds.HookID) (*hookRecord, error) {
 	return s.scanHook(s.q.QueryRowContext(s.ctx, "SELECT doc FROM hooks WHERE hook_id = ?", string(hookID)))
 }
 
@@ -417,11 +411,10 @@ func (s *store) putHook(record *hookRecord) error {
 		string(record.HookID), string(record.RunID), record.Token, s.tagValue(), millis(record.CreatedAt), string(doc))
 }
 
-// listHooks returns the hooks the store's tag sees, of runID when it is set,
+// listHooks returns the hooks, whatever their tag, of runID when it is set,
 // oldest first.
 func (s *store) listHooks(runID worlds.RunID) ([]hookRecord, error) {
-	condition, args := s.tagged("tag")
-	query := "SELECT doc FROM hooks WHERE " + condition
+	query, args := "SELECT doc FROM hooks WHERE 1 = 1", []any{}
 	if runID != "" {
 		query += " AND run_id = ?"
 		args = append(args, string(runID))
@@ -516,15 +509,17 @@ func (s *store) putToken(token string, record *tokenRecord) error {
 
 // Resumes.
 
-// getResume returns the digest and slot of a deduplicated resume of the run.
-func (s *store) getResume(runID worlds.RunID, resumeID string) (string, int, bool, error) {
+// getResume returns the hook, digest, and slot of a deduplicated resume of
+// the run.
+func (s *store) getResume(runID worlds.RunID, resumeID string) (worlds.HookID, string, int, bool, error) {
+	var hookID string
 	var digest sql.NullString
 	var slot int
-	err := s.q.QueryRowContext(s.ctx, "SELECT payload_digest, seq FROM hook_resumes WHERE run_id = ? AND resume_id = ?", string(runID), resumeID).Scan(&digest, &slot)
+	err := s.q.QueryRowContext(s.ctx, "SELECT hook_id, payload_digest, seq FROM hook_resumes WHERE run_id = ? AND resume_id = ?", string(runID), resumeID).Scan(&hookID, &digest, &slot)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, false, nil
+		return "", "", 0, false, nil
 	}
-	return digest.String, slot, err == nil, err
+	return worlds.HookID(hookID), digest.String, slot, err == nil, err
 }
 
 func (s *store) putResume(event worlds.Event, digest string) error {

@@ -70,7 +70,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 				if mode == "HTTP resume" {
 					client = worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 				}
-				if err := client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: "racing-token", Data: []byte(`42`)}); err == nil || !strings.Contains(err.Error(), worlds.ErrRunTerminal.Error()) {
+				if err := client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: "racing-token", Data: []byte(`42`)}); err == nil || !strings.Contains(err.Error(), worlds.ErrHookForceClaimed.Error()) {
 					t.Fatalf("resume race error=%v", err)
 				}
 			}

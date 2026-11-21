@@ -65,14 +65,25 @@ releases:
   `owner_id`, `project_id`, and `environment` columns, which world-postgres
   keeps for Vercel's accounts, are gone.
 - **Steps are keyed by run** as well as by step, as world-local keys them,
-  since a step ID is unique only within its run.
+  since a step ID is unique only within its run. Streams are keyed by name
+  alone, as in world-postgres: the run is stored with each chunk for
+  `StreamsList`.
 - **A purge removes the payloads from each event's CBOR** and keeps the rest
   of its data, where world-postgres clears the whole column. It cuts each
   stream to an `eof` row, as world-local does, where world-postgres keeps the
   chunk rows with their data emptied.
 - **A `workflow_event_chunk` notification names its stream by a hash** of its
-  run and name. Postgres refuses a notification of 8000 bytes or more, and a
+  name. Postgres refuses a notification of 8000 bytes or more, and a
   stream name has no length limit.
+- **A queue row counts its job's attempts** in its payload and its
+  `deliveries` and `handoffs` columns, where world-postgres adds a Graphile job
+  per redelivery with `attemptOffset` and `deliveryOffset`. `Attempt`,
+  `DeliveryCount`, and the 73 attempts of a job come out the same.
+- **Startup recovery reads parked runs from the queue.** A due or leased flow
+  of the run stands in for world-postgres's `wake_pending` and locked
+  orchestrator jobs, and every run is recovered, as there is no `job_prefix`.
+  A recovery flow is deduplicated while its message lives, where Graphile
+  replaces an unlocked job with the same key.
 - **It appends batches** (`EventsCreateBatch`), which world-postgres does
   not: the SDK's `createBatch` is optional, but Go's runtime records a flow's
   steps and timers in one fenced write.

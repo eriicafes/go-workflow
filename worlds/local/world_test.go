@@ -211,7 +211,7 @@ func TestViewsHoldNoPayloadsAndEventsHoldCBOR(t *testing.T) {
 		t.Fatalf("run = %#v err=%v", run, err)
 	}
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"})
-	if err != nil || string(step.Input) != `"step-input-bytes"` || string(step.Output) != `"step-output-bytes"` || step.Error != nil || step.Attempt != 2 {
+	if err != nil || string(step.Input) != `"step-input-bytes"` || string(step.Output) != `"step-output-bytes"` || string(step.Error) != `"step-error-bytes"` || step.Attempt != 2 {
 		t.Fatalf("step = %#v err=%v", step, err)
 	}
 	hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
@@ -307,8 +307,8 @@ func TestTagIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A tagged World sees its tag and untagged rows; an untagged World only
-	// untagged ones.
+	// A tagged World sees its tag's runs and untagged ones; an untagged World
+	// only untagged ones.
 	for _, check := range []struct {
 		world   *localworld.World
 		visible []worlds.RunID
@@ -327,8 +327,9 @@ func TestTagIsolation(t *testing.T) {
 			if _, err := check.world.RunsGet(ctx, worlds.RunsGetInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
 				t.Fatalf("hidden run %s = %v", id, err)
 			}
-			if _, err := check.world.EventsList(ctx, worlds.EventsListInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
-				t.Fatalf("hidden run %s events = %v", id, err)
+			// A run's events are read whatever its tag, as in world-local.
+			if page, err := check.world.EventsList(ctx, worlds.EventsListInput{RunID: id}); err != nil || len(page.Data) != 1 {
+				t.Fatalf("hidden run %s events = %+v err=%v", id, page, err)
 			}
 			if names, err := check.world.StreamsList(ctx, worlds.StreamsListInput{RunID: id}); err != nil || len(names) != 0 {
 				t.Fatalf("hidden run %s streams = %q err=%v", id, names, err)
