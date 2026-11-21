@@ -69,7 +69,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			SELECT c.id, $1, $2, c.data, false FROM unnest($3::varchar[], $4::bytea[]) AS c(id, data)`), input.Name, input.RunID, ids, values); err != nil {
 			return err
 		}
-		return w.notifyChunk(ctx, tx, input.RunID, input.Name, ids[len(ids)-1])
+		return notifyChunk(tx, input.RunID, input.Name, ids[len(ids)-1])
 	})
 }
 
@@ -86,7 +86,7 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 		if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_stream_chunks (id, stream_id, run_id, data, eof) VALUES ($1, $2, $3, '', true)`), id, input.Name, input.RunID); err != nil {
 			return err
 		}
-		return w.notifyChunk(ctx, tx, input.RunID, input.Name, id)
+		return notifyChunk(tx, input.RunID, input.Name, id)
 	})
 }
 
@@ -268,11 +268,11 @@ func streamKey(runID worlds.RunID, name string) string {
 
 // notifyChunk sends workflow_event_chunk for the stream's chunk, as
 // world-postgres does.
-func (w *World) notifyChunk(ctx context.Context, tx pgx.Tx, runID worlds.RunID, name, chunkID string) error {
+func notifyChunk(tx pgx.Tx, runID worlds.RunID, name, chunkID string) error {
 	payload, err := json.Marshal(chunkNotification{StreamID: streamKey(runID, name), ChunkID: chunkID})
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelStreams, string(payload))
-	return err
+	notify(tx, channelStreams, string(payload))
+	return nil
 }
