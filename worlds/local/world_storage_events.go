@@ -927,3 +927,10 @@ func eventsPage(events []worlds.Event, hasMore bool) worlds.Page[worlds.Event] {
 	}
 	return page
 }
+
+// EventsSubscribe pushes the run's events after afterSlot as this process
+// commits them. Another process's writes reach it when this one next
+// commits, or through the reader's own reads.
+func (w *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSlot uint64, onEvent func(worlds.Event), onError func(error)) func() {
+	return worlds.FeedEvents(ctx, w, runID, afterSlot, func() (<-chan struct{}, func()) { return w.changed(), func() {} }, onEvent, onError)
+}

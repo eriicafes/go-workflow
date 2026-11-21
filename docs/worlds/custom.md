@@ -98,6 +98,11 @@ type World interface {
   `Capabilities().MaxConcurrency`. The fence keeps overlapping flows safe,
   and this makes them rare.
 
+Pushing a run's events is optional. A World that implements
+`worlds.EventsSubscriber` hands a flow waiting on an inline step each event
+as it commits, so the flow reads the log every 10 seconds instead of every 2.
+`worlds.FeedEvents` builds it from a change notification.
+
 Supporting [retention](/worlds/#retention) is optional. A World that supports
 it takes `Retention` and `Retentions` in its configuration, resolves each run's
 retention with `worlds.RetentionFor` from the run's workflow name, and deletes

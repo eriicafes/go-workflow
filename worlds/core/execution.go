@@ -111,6 +111,9 @@ type Execution struct {
 	aheadDepth int
 	ahead      []*aheadWrite
 	writer     *aheadWriter
+	// feed pushes the run's events while the flow waits for an inline step,
+	// when the World supports it. See feed.go.
+	feed *feed
 	// observedHooks holds the hooks the runner has looked for a payload of,
 	// which may change its decisions when one arrives.
 	observedHooks map[worlds.HookID]bool
@@ -740,17 +743,19 @@ func (e *Execution) writeBatch(events []worlds.EventsCreateEvent) map[string]boo
 // LogPollInterval is how often a flow that waits for a step it runs inline
 // reads the events others appended to the run's log, so a payload, a
 // cancellation, or another step's result reaches the runner while the step
-// runs.
+// runs, when its World does not push them (see FeedPollInterval).
 var LogPollInterval = 2 * time.Second
 
 // awaitInline waits for a step running inline to finish and records its
-// result. Meanwhile it completes the timers that fall due, and reads what
-// others append to the log every LogPollInterval, returning as soon as either
+// result. Meanwhile it completes the timers that fall due, and takes what
+// others append to the log from the World's feed or by reading it, returning as soon as either
 // adds an event for the walk to deliver.
 func (e *Execution) awaitInline() error {
+	e.subscribe()
+	e.catchUp()
 	held := len(e.events)
 	for len(e.events) == held {
-		wait := time.Now().Add(LogPollInterval)
+		wait := time.Now().Add(e.pollInterval())
 		var due *pendingWait
 		for _, open := range e.openWaits {
 			if open.dueAt.Before(wait) {
@@ -774,6 +779,12 @@ func (e *Execution) awaitInline() error {
 				return nil
 			}
 			return e.completeInlineStep(outcome.step, outcome.result)
+		case event := <-e.feedEvents():
+			timer.Stop()
+			if !e.superseded {
+				e.accept(event)
+			}
+			continue
 		case <-timer.C:
 		}
 		if e.superseded {
@@ -966,6 +977,7 @@ func stepCreation(events []worlds.Event, stepID worlds.StepID) (stepCreationEven
 // their results, once the runner has returned or stopped. A superseded flow
 // records none.
 func (e *Execution) finishSteps() (err error) {
+	defer e.unsubscribe()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = replayExit(recovered)
