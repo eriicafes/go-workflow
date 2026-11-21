@@ -42,9 +42,10 @@ type Config struct {
 	// uses WORKFLOW_LOCAL_DATA_DIR, or .workflow-data.
 	Dir string
 	// Tag scopes the runs, hooks, and streams this World writes, such as a
-	// test's. A tagged World sees its tag's rows and untagged ones, recovers
-	// only its tag's runs, and Clear deletes only its tag's data. Empty is
-	// untagged.
+	// test's. A tagged World sees its tag's runs and untagged ones, recovers
+	// only its tag's runs, and Clear deletes only its tag's data. Steps,
+	// events, hooks, and streams are read whatever their tag, as in
+	// world-local. Empty is untagged.
 	Tag string
 	// BaseURL is the absolute public URL of HTTP(world), including
 	// /v1/workflow. Webhooks created by this World use it as their URL base.

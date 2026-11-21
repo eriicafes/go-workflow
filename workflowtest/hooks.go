@@ -148,6 +148,26 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	if events := conformAllEvents(t, world, claimant); events[len(events)-1].EventType != worlds.EventTypeRunFailed {
 		t.Fatal("terminal owner received an additional event")
 	}
+
+	// A claim of a token a finished run retains names that run without its
+	// workflow, so nothing wakes it, and records nothing in its log, as in
+	// the Workflow SDK's Worlds.
+	retained := fmt.Sprintf("force-retained-%d", time.Now().UnixNano())
+	finished := conformCreateRun(t, world, "force_finished")
+	conformAppend(t, world, finished, worlds.EventTypeHookCreated, "hook_finished", conformHookData(retained, false, time.Hour))
+	conformAppend(t, world, finished, worlds.EventTypeRunCompleted, "", nil)
+	before := len(conformAllEvents(t, world, finished))
+	taker := conformCreateRun(t, world, "force_taker")
+	taken, err := conformClaim(world, taker, "hook_taker", retained, true)
+	if err != nil || taken.EventType != worlds.EventTypeHookCreated || taken.Hook == nil || taken.Hook.ClaimedFrom == nil {
+		t.Fatalf("force over a finished owner's retained token = %#v err=%v", taken, err)
+	}
+	if from := taken.Hook.ClaimedFrom; from.RunID != finished || from.HookID != "hook_finished" || from.WorkflowName != "" || from.DeploymentID != "" || from.RunSpecVersion != 0 {
+		t.Fatalf("claimed from a finished owner = %#v, want only its run and hook", from)
+	}
+	if after := len(conformAllEvents(t, world, finished)); after != before {
+		t.Fatalf("finished owner's log grew from %d to %d events", before, after)
+	}
 }
 
 func conformHooksRetention(t *testing.T, world worlds.World) {
@@ -188,6 +208,13 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
 	conformExpect(t, err, worlds.ErrHookNotFound, "expired retained token")
+	// A finished run's hook is not read once its retention lapsed, by ID or
+	// in a list, as in the Workflow SDK's Worlds.
+	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_retained"})
+	conformExpect(t, err, worlds.ErrHookNotFound, "hook of an expired retained token")
+	if page, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(page.Data) != 0 {
+		t.Fatalf("hooks of a finished run past their retention = %+v err = %v, want none", page.Data, err)
+	}
 	if _, err := conformClaim(world, other, "hook_other", retained, false); err != nil {
 		t.Fatalf("claim expired token: %v", err)
 	}
@@ -339,8 +366,15 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 	if err != nil || repeat.AllocatedEventCount != 0 || repeat.EventID != first.EventID {
 		t.Fatalf("repeated resume = %+v err = %v, want the first resume's event", repeat, err)
 	}
+	// A resume ID names one resume of one hook: world-local refuses another
+	// with EntityConflictError, and world-postgres as invalid.
 	_, err = resume("resume_a", `"two"`)
-	conformExpect(t, err, worlds.ErrEventInvalid, "a resume repeated with another payload")
+	conformExpectRefusedResume(t, err, "a resume repeated with another payload")
+	conformAppend(t, world, runID, worlds.EventTypeHookCreated, "hook_other", conformHookData("other:"+string(runID), false, 0))
+	other, _ := worlds.EncodeHookReceived([]byte(`"one"`), "conformance")
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_other", Data: other},
+		Options: worlds.EventsCreateOptions{ResumeID: "resume_a", ResumePayloadDigest: worlds.ResumeDigest([]byte(`"one"`))}})
+	conformExpectRefusedResume(t, err, "a resume repeated for another hook")
 	// A resume's digest is its payload's, as world-postgres checks it.
 	mismatched, _ := worlds.EncodeHookReceived([]byte(`"three"`), "conformance")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_resume", Data: mismatched},
@@ -409,8 +443,28 @@ func conformStartHookDecisions(t *testing.T, world worlds.World) {
 	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: refused}); !errors.Is(err, worlds.ErrRunNotFound) {
 		t.Fatalf("refused candidate has a run: %v", err)
 	}
+	// A refused candidate's ID with another token, and an ordinary run's ID
+	// with a start hook, are refused for good, as the Workflow SDK's Worlds
+	// refuse them.
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: refused, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-other"}})
+	conformExpect(t, err, worlds.ErrStartHookRejected, "a refused candidate with another token")
+	ordinary := conformCreateRun(t, world, "start_hook_ordinary")
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: ordinary, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-ordinary"}})
+	conformExpect(t, err, worlds.ErrStartHookRejected, "an ordinary run's ID with a start hook")
+	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: owner, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-other"}})
+	conformExpect(t, err, worlds.ErrStartHookRejected, "an accepted candidate with another token")
 	// A candidate older than any start can be is refused.
 	old := worlds.RunID("wrun_" + ulid.MustNew(ulid.Timestamp(time.Now().Add(-worlds.StartHookCandidateMaxAge-time.Hour)), rand.Reader).String())
 	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: old, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-old"}})
 	conformExpect(t, err, worlds.ErrStartHookRejected, "a start hook candidate past its age")
+}
+
+// conformExpectRefusedResume checks the refusal of a resume ID repeated with
+// another hook or payload: ErrEventConflict, as world-local refuses it, or
+// ErrEventInvalid, as world-postgres does.
+func conformExpectRefusedResume(t *testing.T, err error, label string) {
+	t.Helper()
+	if !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("%s: error = %v, want %v or %v", label, err, worlds.ErrEventConflict, worlds.ErrEventInvalid)
+	}
 }

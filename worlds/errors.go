@@ -86,6 +86,9 @@ var (
 	// ErrRunExpired is returned when reading the result of a run whose data
 	// was deleted.
 	ErrRunExpired = errors.New("workflow: run data expired")
+	// ErrStreamExpired is returned when reading a stream whose data a World
+	// deleted, as the Workflow SDK's StreamExpiredError.
+	ErrStreamExpired = errors.New("workflow: stream expired")
 	// ErrThrottled is returned when a World refuses a request for its rate
 	// limit. A *ThrottleError carries how long it asked to wait.
 	ErrThrottled = errors.New("workflow: rate limited")

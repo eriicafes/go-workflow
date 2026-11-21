@@ -163,7 +163,9 @@ const (
 // after After. Runtime.Execute returns it as its error, and the World does
 // not acknowledge the message. A Redelivery of zero is a handoff: the
 // message is delivered again at once, and the redelivery does not count as
-// an Attempt. Any other Redelivery counts as one.
+// an Attempt. Any other Redelivery counts as one, except where a World
+// restarts the count for a delayed retry, as the Postgres World restarts it
+// for a step's, as world-postgres does.
 type Redelivery struct {
 	After time.Duration
 }

@@ -11,10 +11,13 @@ import (
 	"io"
 	"log"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -66,7 +69,24 @@ const (
 	vqsLease          = 5 * time.Minute
 	vqsLeaseRenewal   = time.Minute
 	vqsPayloadMaxSize = 1 << 20
+	// vqsRequestTimeout is the deadline of one Vercel Queues request, the
+	// Workflow SDK's QUEUE_REQUEST_TIMEOUT_MS.
+	vqsRequestTimeout = 30 * time.Second
+	// vqsSendMaxAttempts is how many times a send is made, the first
+	// included, vqsSendRetryJitter the most random spread added to each
+	// backoff, vqsSendRetryBudget how long after the first attempt a retry
+	// may still start, and vqsSendMaxRetryAfter the longest Retry-After of a
+	// 429 waited out in-process, as the Workflow SDK's queue-send-retry sets
+	// them.
+	vqsSendMaxAttempts   = 3
+	vqsSendRetryJitter   = 100 * time.Millisecond
+	vqsSendRetryBudget   = 35 * time.Second
+	vqsSendMaxRetryAfter = 5 * time.Second
 )
+
+// vqsSendRetryDelays is the backoff before each retry of a send, the last
+// repeated, the Workflow SDK's QUEUE_SEND_RETRY_DELAYS_MS.
+var vqsSendRetryDelays = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond}
 
 // queueURL returns the Vercel Queues API root of region: Config.QueueURL when
 // it was set, and region's own host otherwise. Through Vercel's API proxy,
@@ -104,8 +124,14 @@ func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, pa
 		reader = bytes.NewReader(body)
 	}
 	base, routing := w.queueURL(region)
-	request, err := http.NewRequestWithContext(ctx, method, base+path, reader)
+	// Every request has a deadline of its own, as the Workflow SDK's queue
+	// dispatcher gives it, so a hung queue does not hold a lease past its
+	// renewal.
+	timeout := queueRequestTimeout()
+	requestCtx, cancel := context.WithTimeoutCause(ctx, timeout, errQueueRequestDeadline)
+	request, err := http.NewRequestWithContext(requestCtx, method, base+path, reader)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	for _, values := range []http.Header{routing, header} {
@@ -120,7 +146,28 @@ func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, pa
 	if request.Header.Get("Vqs-Deployment-Id") == "" && w.config.DeploymentID != "" {
 		request.Header.Set("Vqs-Deployment-Id", w.config.DeploymentID)
 	}
-	return w.http.Do(request)
+	response, err := w.http.Do(request)
+	if err != nil {
+		if ctx.Err() == nil && context.Cause(requestCtx) == errQueueRequestDeadline {
+			err = fmt.Errorf("%w after %s: %w", errQueueRequestDeadline, timeout, err)
+		}
+		cancel()
+		return nil, err
+	}
+	response.Body = cancelOnClose{response.Body, cancel}
+	return response, nil
+}
+
+// cancelOnClose is a response body that releases its request's deadline when
+// it is closed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (body cancelOnClose) Close() error {
+	defer body.cancel()
+	return body.ReadCloser.Close()
 }
 
 // vqsSend is how one message is published: its topic, deployment, and the
@@ -153,15 +200,21 @@ func messageLifetime(delay, retention time.Duration) (delaySecs, retentionSecs i
 }
 
 // publishVQS sends message to send.Topic, or to Config.Topic when it is
-// empty, addressed to send.DeploymentID when it is set.
-func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) error {
+// empty, addressed to send.DeploymentID when it is set, and returns the
+// message ID Vercel Queues gave it: empty when it answers 202, as it does when
+// it fails over to another region and cannot name the message. A send that
+// fails transiently is sent again, as the Workflow SDK's withQueueSendRetry
+// does (see sendRetryDelay). A send Vercel Queues refuses because it cannot
+// find the deployment's consumer returns an error wrapping
+// worlds.ErrDeploymentUnavailable once its retries run out.
+func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) (string, error) {
 	topic := send.Topic
 	if topic == "" {
 		topic = w.config.Topic
 	}
 	body, err := json.Marshal(message)
 	if err != nil {
-		return err
+		return "", err
 	}
 	header := http.Header{}
 	if send.IdempotencyKey != "" {
@@ -180,18 +233,180 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSe
 	if send.DeploymentID != "" {
 		header.Set("Vqs-Deployment-Id", send.DeploymentID)
 	}
-	response, err := w.vqsRequest(ctx, messageRegion(message.RunID), http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
+	region, path := messageRegion(message.RunID), "/topic/"+url.PathEscape(topic)
+	started := time.Now()
+	for attempt := 1; ; attempt++ {
+		id, err := w.sendVQS(ctx, region, path, body, header, send.DeploymentID)
+		if err == nil {
+			return id, nil
+		}
+		wait, retry := time.Duration(0), false
+		if attempt < vqsSendMaxAttempts {
+			wait, retry = sendRetryDelay(ctx, err, attempt-1)
+		}
+		if !retry || time.Since(started)+wait > vqsSendRetryBudget {
+			if attempt > 1 {
+				log.Printf("workflow/vercel: queue send to %s failed after %d attempts: %v", topic, attempt, err)
+			}
+			return "", err
+		}
+		log.Printf("workflow/vercel: queue send to %s failed (attempt %d), retrying in %s: %v", topic, attempt, wait, err)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+// sendVQS makes one attempt at a send, and returns the message ID Vercel
+// Queues answered with.
+func (w *World) sendVQS(ctx context.Context, region worlds.Region, path string, body []byte, header http.Header, deploymentID string) (string, error) {
+	response, err := w.vqsRequest(ctx, region, http.MethodPost, path, body, header)
 	if err != nil {
-		return fmt.Errorf("workflow/vercel: publish queue message: %w", err)
+		return "", fmt.Errorf("workflow/vercel: publish queue message: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusBadGateway && response.Header.Get("Vqs-Error-Code") == "consumer_discovery_failed" {
-		return fmt.Errorf("workflow/vercel: publish queue message to deployment %q: %w", send.DeploymentID, worlds.ErrDeploymentUnavailable)
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return responseError("publish queue message", response)
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return "", &vqsSendError{
+			Status:       response.StatusCode,
+			Code:         response.Header.Get("Vqs-Error-Code"),
+			RetryAfter:   vqsRetryAfter(response.Header.Get("Retry-After")),
+			DeploymentID: deploymentID,
+			Message:      strings.TrimSpace(string(data)),
+		}
+	}
+	if response.StatusCode == http.StatusAccepted {
+		// Vercel Queues failed over to another region, which took the
+		// message but cannot name it.
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return "", nil
+	}
+	var answer struct {
+		MessageID string `json:"messageId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&answer); err != nil {
+		return "", fmt.Errorf("workflow/vercel: publish queue message: invalid answer: %v", err)
+	}
+	return answer.MessageID, nil
+}
+
+// vqsSendError is a send Vercel Queues answered with a non-2xx status.
+type vqsSendError struct {
+	Status int
+	// Code is the Vqs-Error-Code header.
+	Code string
+	// RetryAfter is the wait the Retry-After header asks for, zero for none.
+	RetryAfter   time.Duration
+	DeploymentID string
+	Message      string
+}
+
+// consumerDiscovery reports whether Vercel Queues could not find the consumer
+// of the deployment the message is addressed to.
+func (e *vqsSendError) consumerDiscovery() bool {
+	return e.Status == http.StatusBadGateway && e.Code == "consumer_discovery_failed"
+}
+
+func (e *vqsSendError) Error() string {
+	if e.consumerDiscovery() {
+		return fmt.Sprintf("workflow/vercel: publish queue message to deployment %q: %v", e.DeploymentID, worlds.ErrDeploymentUnavailable)
+	}
+	return fmt.Sprintf("workflow/vercel: publish queue message: %d %s: %s", e.Status, http.StatusText(e.Status), e.Message)
+}
+
+func (e *vqsSendError) Unwrap() error {
+	if e.consumerDiscovery() {
+		return worlds.ErrDeploymentUnavailable
 	}
 	return nil
+}
+
+// sendRetryDelay returns how long to wait before sending again after err, the
+// retry-th retry's backoff of vqsSendRetryDelays plus up to vqsSendRetryJitter,
+// and false when err is not worth a re-send, as the Workflow SDK's
+// queueSendRetryDelayMs does. A transport failure, the queue request deadline,
+// a 5xx, and the 502 of a failed consumer discovery are sent again after the
+// backoff. A 429 is sent again after the backoff or its Retry-After, whichever
+// is longer, unless it asks for more than vqsSendMaxRetryAfter, which is left
+// to the caller. Any other 4xx means Vercel Queues decided, as does the 503 of
+// a consumer registry that is not configured.
+func sendRetryDelay(ctx context.Context, err error, retry int) (time.Duration, bool) {
+	backoff := vqsSendRetryDelays[min(retry, len(vqsSendRetryDelays)-1)] + rand.N(vqsSendRetryJitter)
+	var sendErr *vqsSendError
+	if errors.As(err, &sendErr) {
+		switch {
+		case sendErr.Status == http.StatusTooManyRequests:
+			if sendErr.RetryAfter > vqsSendMaxRetryAfter {
+				return 0, false
+			}
+			return max(backoff, sendErr.RetryAfter), true
+		case sendErr.Status == http.StatusServiceUnavailable && sendErr.Code == "consumer_registry_not_configured":
+			return 0, false
+		case sendErr.Status >= 500:
+			return backoff, true
+		}
+		return 0, false
+	}
+	if transientTransport(ctx, err) {
+		return backoff, true
+	}
+	return 0, false
+}
+
+// vqsRetryAfter returns the wait a Retry-After header asks for, in seconds or
+// as an HTTP date, as @vercel/queue reads it, or zero when it has none.
+func vqsRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseFloat(value, 64); err == nil {
+		return time.Duration(max(seconds, 0) * float64(time.Second))
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return max(time.Until(at), 0)
+	}
+	return 0
+}
+
+// errQueueRequestDeadline is the failure of a Vercel Queues request that ran
+// past its deadline, vqsRequestTimeout.
+var errQueueRequestDeadline = errors.New("workflow/vercel: queue request deadline exceeded")
+
+// queueRequestTimeout is the deadline of one Vercel Queues request:
+// WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS when it is set, within 5 seconds to 2
+// minutes, and vqsRequestTimeout otherwise, as the Workflow SDK's
+// getQueueRequestTimeoutMs reads it.
+func queueRequestTimeout() time.Duration {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS")))
+	if err != nil {
+		return vqsRequestTimeout
+	}
+	return min(max(time.Duration(value)*time.Millisecond, 5*time.Second), 2*time.Minute)
+}
+
+// transientTransport reports whether err is a transport failure worth
+// another attempt: a connection refused, reset or closed, a failed lookup,
+// a timeout, or the queue request deadline, but not the end of ctx.
+func transientTransport(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, errQueueRequestDeadline) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	var opErr *net.OpError
+	var dnsErr *net.DNSError
+	if errors.As(err, &opErr) || errors.As(err, &dnsErr) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // vqsDelivery is one push delivery resolved to its payload and lease.

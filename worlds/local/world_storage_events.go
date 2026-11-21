@@ -74,7 +74,7 @@ func (t *txn) hook(id worlds.HookID) (*hookRecord, error) {
 	if value, ok := t.hooks[id]; ok {
 		return value, nil
 	}
-	value, err := t.s.getHookAnyTag(id)
+	value, err := t.s.getHook(id)
 	if err == nil {
 		t.hooks[id] = value
 	}
@@ -146,17 +146,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		return "", err
 	}
 	if t.run.Status.Terminal() {
-		var stepStatus worlds.Status
-		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed || event.EventType == worlds.EventTypeStepRetrying {
-			step, err := t.step(worlds.StepID(event.CorrelationID))
-			if err != nil {
-				return "", err
-			}
-			if step != nil {
-				stepStatus = step.Status
-			}
-		}
-		if err := worlds.FinishedRunRefusal(t.run.Status, event, stepStatus); err != nil {
+		if err := worlds.FinishedRunRefusal(t.run.Status, event); err != nil {
 			return "", err
 		}
 	}
@@ -179,7 +169,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if step != nil {
 			status, retryAfter = step.Status, step.RetryAfter
 		}
-		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, now); err != nil {
+		if err := worlds.CheckStepEvent(event, step != nil, status, retryAfter, t.run.Status, now); err != nil {
 			return "", err
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
@@ -248,6 +238,9 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 		if owner == nil || owner.HookID != hook.HookID {
 			return "", worlds.ErrHookNotFound
+		}
+		if err := worlds.FinishedRunHookRefusal(t.run.Status, event); err != nil {
+			return "", err
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -472,15 +465,22 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 	case worlds.StatusCompleted, worlds.StatusFailed:
 		step.CompletedAt = &at
 	}
-	var result worlds.DataStepResult
-	if json.Unmarshal(event.Data, &result) == nil {
-		step.RetryAfter = result.RetryAfter
-	}
+	// A result keeps the rest of the step, so a completed step keeps the
+	// error of its last retry, as world-local's steps do. A start ends the
+	// wait for a retry.
 	switch event.EventType {
+	case worlds.EventTypeStepStarted:
+		step.RetryAfter = nil
 	case worlds.EventTypeStepCompleted:
-		step.OutputSlot, step.ErrorSlot = eventSlot(event), 0
-	case worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		step.OutputSlot, step.ErrorSlot = 0, eventSlot(event)
+		step.OutputSlot = eventSlot(event)
+	case worlds.EventTypeStepFailed:
+		step.ErrorSlot = eventSlot(event)
+	case worlds.EventTypeStepRetrying:
+		var result worlds.DataStepResult
+		if json.Unmarshal(event.Data, &result) == nil {
+			step.RetryAfter = result.RetryAfter
+		}
+		step.ErrorSlot = eventSlot(event)
 	}
 	t.setStep(&step)
 	return nil
@@ -698,16 +698,25 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 	if err := worlds.CheckRunCreation(input, now); err != nil {
 		return worlds.EventResult{}, err
 	}
+	if input.StartHook != nil {
+		// A refused candidate stays refused, as world-local's
+		// admitStartHook answers it.
+		if decision, err := s.getRejection(input.RunID); err != nil {
+			return worlds.EventResult{}, err
+		} else if decision != nil {
+			return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, *decision)
+		}
+	}
 	if existing, err := s.getRunAnyTag(input.RunID); err == nil {
 		// A repeat of an accepted start returns its run_created.
-		created, found, err := s.readEvent(existing.RunID, 1)
+		created, _, err := s.readEvent(existing.RunID, 1)
 		if err != nil {
 			return worlds.EventResult{}, err
 		}
-		if found && worlds.RepeatsAcceptedStart(created.Data, input) {
-			return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
+		if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
+			return worlds.EventResult{}, err
 		}
-		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
+		return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
 	} else if !errors.Is(err, worlds.ErrRunNotFound) {
 		return worlds.EventResult{}, err
 	}
@@ -724,12 +733,6 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 	if start := input.StartHook; start != nil {
 		if start.Token == "" {
 			return worlds.EventResult{}, worlds.ErrEventInvalid
-		}
-		if decision, err := s.getRejection(input.RunID); err != nil || decision != nil {
-			if err == nil {
-				err = decision.Err()
-			}
-			return worlds.EventResult{}, err
 		}
 		if worlds.StartHookCandidateExpired(input.RunID, now) {
 			return worlds.EventResult{}, worlds.ErrStartHookRejected
@@ -829,12 +832,13 @@ func (w *World) appendEvent(s *store, input worlds.EventsCreateInput) (worlds.Ev
 		resumeID = input.Options.ResumeID
 	}
 	var replay worlds.EventID
-	if digest, slot, ok, err := s.getResume(t.run.RunID, resumeID); err != nil {
+	if hookID, digest, slot, ok, err := s.getResume(t.run.RunID, resumeID); err != nil {
 		return worlds.EventResult{}, false, err
 	} else if ok && resumeID != "" {
-		// A repeat of a resume returns the event it committed.
-		if digest != input.Options.ResumePayloadDigest {
-			return worlds.EventResult{}, false, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, resumeID)
+		// A repeat of a resume returns the event it committed, whatever
+		// happened to the hook or run since.
+		if err := worlds.CheckResumeReplay(input.Event, input.Options.ResumePayloadDigest, hookID, digest); err != nil {
+			return worlds.EventResult{}, false, err
 		}
 		replay = worlds.EventIDForSlot(uint64(slot))
 	} else if replay, err = t.admit(input.Event, now); err != nil {
@@ -952,7 +956,9 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
 	var event worlds.Event
 	err := w.read(ctx, func(s *store) error {
-		run, err := s.getRun(input.RunID)
+		// A run's events are read whatever its tag, as world-local scopes
+		// only runs by tag.
+		run, err := s.getRunAnyTag(input.RunID)
 		if err != nil {
 			return err
 		}
@@ -980,7 +986,13 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	// order.
 	var page worlds.EventsPage
 	err := w.read(ctx, func(s *store) error {
-		run, err := s.getRun(input.RunID)
+		// A run's events are read whatever its tag, and a missing run has
+		// none, as in world-local.
+		run, err := s.getRunAnyTag(input.RunID)
+		if errors.Is(err, worlds.ErrRunNotFound) {
+			page = worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}, Snapshot: worlds.EventsSnapshot{InBandCount: 1}}
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1027,9 +1039,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Event]
 	err := w.read(ctx, func(s *store) error {
-		if _, err := s.getRun(input.RunID); err != nil {
-			return err
-		}
+		// A missing run has no events, as in world-local.
 		cursor, err := eventCursor(input.Pagination.Cursor)
 		if err != nil {
 			return err
@@ -1069,7 +1079,8 @@ func validAppend(eventType worlds.EventType) bool {
 
 func eventsPage(events []worlds.Event, hasMore bool) worlds.Page[worlds.Event] {
 	page := worlds.Page[worlds.Event]{Data: events, HasMore: hasMore && len(events) > 0}
-	if page.HasMore {
+	// The last page's cursor resumes after it, as world-local's does.
+	if len(events) > 0 {
 		page.Cursor = string(events[len(events)-1].EventID)
 	}
 	return page

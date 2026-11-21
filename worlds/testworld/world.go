@@ -124,6 +124,7 @@ func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ str
 // resumeClaim is a deduplicated resume: its payload digest and the event it
 // committed.
 type resumeClaim struct {
+	hookID  worlds.HookID
 	digest  string
 	eventID worlds.EventID
 }

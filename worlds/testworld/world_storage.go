@@ -49,12 +49,13 @@ func (m *World) stepPayloadsLocked(step worlds.Step, resolve worlds.ResolveData)
 				step.Input = worlds.EventPayload(event)
 			}
 		case worlds.EventTypeStepCompleted:
-			step.Output, step.Error = nil, nil
+			// A completed step keeps its last retry's error, as in the
+			// Workflow SDK's Worlds.
 			if resolve != worlds.ResolveDataNone {
 				step.Output = worlds.EventPayload(event)
 			}
 		case worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-			step.Output, step.Error = nil, worlds.EventPayload(event)
+			step.Error = worlds.EventPayload(event)
 		}
 	}
 	return step
@@ -119,7 +120,8 @@ func page[T any](values []T, pagination worlds.Pagination) worlds.Page[T] {
 		end = len(values)
 	}
 	result := worlds.Page[T]{Data: values[start:end], HasMore: end < len(values)}
-	if result.HasMore {
+	// The last page's cursor resumes after it, as world-local's does.
+	if end > start {
 		result.Cursor = strconv.Itoa(end)
 	}
 	return result

@@ -82,6 +82,7 @@ var rpcSentinels = []struct {
 	{"run_terminal", "conflict", ErrRunTerminal},
 	{"step_not_startable", "conflict", ErrStepNotStartable},
 	{"stream_closed", "conflict", ErrStreamClosed},
+	{"stream_expired", "not_found", ErrStreamExpired},
 	{"hook_conflict", "conflict", ErrHookConflict},
 	{"start_hook_rejected", "invalid_argument", ErrStartHookRejected},
 	{"hook_not_active", "conflict", ErrHookNotActive},

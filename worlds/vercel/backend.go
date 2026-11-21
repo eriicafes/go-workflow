@@ -82,6 +82,9 @@ type apiError struct {
 	// Fields holds the rest of a structured error body, such as the
 	// counters of an in-band refusal.
 	Fields map[string]any
+	// RetryAfter is the wait the answer's Retry-After header asks for, zero
+	// for none.
+	RetryAfter time.Duration
 }
 
 func (e *apiError) Error() string {
@@ -143,7 +146,9 @@ func (b *backend) request(ctx context.Context, method, path string, query url.Va
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	err = decodeAPIError(response.StatusCode, response.Header.Get("Content-Type"), data)
+	api := decodeAPIError(response.StatusCode, response.Header.Get("Content-Type"), data)
+	api.RetryAfter = retryAfter(response.Header.Get("Retry-After"))
+	err = api
 	// A 429 is the backend's rate limit, unless Vercel's firewall answered
 	// it with a challenge, which is a transport failure to retry.
 	if response.StatusCode == http.StatusTooManyRequests && response.Header.Get("X-Vercel-Mitigated") != "challenge" {

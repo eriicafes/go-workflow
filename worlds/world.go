@@ -257,7 +257,9 @@ type (
 	Page[T any] struct {
 		Data []T
 		// Cursor continues the list after this page when passed back in
-		// Pagination.
+		// Pagination. The last page has one too, as in the Workflow SDK's
+		// Worlds, so a reader that reached the end can later read what was
+		// added after it; an empty page may have none.
 		Cursor string
 		// HasMore reports whether items remain after this page.
 		HasMore bool

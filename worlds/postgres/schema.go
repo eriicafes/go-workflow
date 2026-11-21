@@ -40,8 +40,9 @@ const schemaLockKey int64 = 0x676f5f776f726b66
 //     graphile-worker tables. workflow_queue is Go's queue.
 //
 // A queue row keeps its message across redeliveries: payload holds the whole
-// delivery, deliveries counts every delivery and fences its lease, and
-// handoffs counts the redeliveries that are not attempts. An idempotency key
+// delivery with the delivery count its current job began at, deliveries
+// counts every delivery and fences its lease, and handoffs counts the
+// deliveries that are not attempts. An idempotency key
 // deduplicates while its message lives, running marks the one serialized flow
 // of a run that executes, and expires_at ends a message's life.
 var migrations = []string{`
@@ -116,7 +117,8 @@ CREATE TABLE workflow.workflow_steps (
 	step_name varchar NOT NULL,
 	status workflow.step_status NOT NULL,
 	input_slot bigint NOT NULL,
-	result_slot bigint,
+	output_slot bigint,
+	error_slot bigint,
 	attempt integer NOT NULL DEFAULT 0,
 	started_at timestamptz,
 	completed_at timestamptz,

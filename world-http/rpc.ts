@@ -232,6 +232,7 @@ const sdkErrorNames: Record<string, string> = {
 	event_conflict: "EntityConflictError",
 	run_already_exists: "EntityConflictError",
 	run_terminal: "RunExpiredError",
+	stream_expired: "StreamExpiredError",
 	run_not_found: "WorkflowRunNotFoundError",
 	hook_not_found: "HookNotFoundError",
 };

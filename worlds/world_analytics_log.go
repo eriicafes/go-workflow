@@ -304,6 +304,10 @@ func (a LogAnalytics) run(ctx context.Context, runID RunID) (Run, error) {
 
 // log returns every event of a run, in order, without payloads.
 func (a LogAnalytics) log(ctx context.Context, runID RunID) ([]Event, error) {
+	// A missing run's events list is empty: the run is read for its error.
+	if _, err := a.run(ctx, runID); err != nil {
+		return nil, err
+	}
 	var events []Event
 	pagination := Pagination{}
 	for {
@@ -466,7 +470,9 @@ func keyPage[T any](values []T, pagination Pagination, key func(T) string) (Page
 	if page.Data == nil {
 		page.Data = []T{}
 	}
-	if page.HasMore {
+	// The last page's cursor resumes after it, as the Workflow SDK's Worlds'
+	// lists do.
+	if end > start {
 		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
 	}
 	return page, nil

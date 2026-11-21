@@ -56,7 +56,7 @@ func TestKeysetPage(t *testing.T) {
 		t.Fatalf("page = %#v", page)
 	}
 	page = keysetPage([]string{"a", "b"}, 2, key)
-	if page.HasMore || page.Cursor != "" {
+	if page.HasMore || page.Cursor != encodeCursor(at, "b") {
 		t.Fatalf("last page = %#v", page)
 	}
 	page = keysetPage([]string{"a", "b"}, 0, key)
@@ -72,7 +72,7 @@ func TestOffsetPage(t *testing.T) {
 		t.Fatalf("first = %#v err=%v", page, err)
 	}
 	page, err = offsetPage(values, worlds.Pagination{Limit: 2, Cursor: page.Cursor})
-	if err != nil || len(page.Data) != 1 || page.HasMore || page.Cursor != "" {
+	if err != nil || len(page.Data) != 1 || page.HasMore || page.Cursor != "3" {
 		t.Fatalf("second = %#v err=%v", page, err)
 	}
 	if _, err := offsetPage(values, worlds.Pagination{Cursor: "x"}); !errors.Is(err, errInvalidCursor) {

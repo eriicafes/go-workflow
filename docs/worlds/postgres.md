@@ -46,13 +46,16 @@ context before calling `Close`.
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
 | `Routes` | none | The queue of each routed workflow. See [routing](#routing-workflows-to-queues). |
 | `Retention`, `Retentions` | keep forever | How long finished runs keep their data, by default and per workflow. See [retention](#retention). |
+| `SkipRecovery` | false | Leaves active runs alone when `Worker` starts. See [recovery](#recovery). |
 
 ## Entry points
 
 - **`Worker(ctx, world, runners, options...)`**: the queue worker. It blocks
   until `ctx` is cancelled, waits for in-flight deliveries, and returns
   `ctx.Err()`. `WorkerOptions.Queues` limits the queues it claims, and
-  `WorkerOptions.Concurrency` overrides `Config.Concurrency`.
+  `WorkerOptions.Concurrency` overrides `Config.Concurrency`. The World's first
+  `Worker` recovers active runs as it starts (see [recovery](#recovery)), and
+  returns an error when it cannot list them.
 - **`HTTP(world)`**: RPC and webhook endpoints under `/v1/workflow`.
 - **`HTTPPrefix(world, prefix)`**: the same endpoints under `prefix`.
 - **`RPC(world)`** and **`Webhook(world)`**: each endpoint alone.
@@ -143,17 +146,30 @@ nothing and return that message's ID. A delivery without a key is never
 deduplicated. A delivery with `Retention` expires that long after it was
 queued, and workers delete expired rows before claiming.
 
-`Worker` claims due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`, and
-increments `deliveries`, which fences the lease. Every delivery of a message
-has the row's ID as its `MessageID`, `deliveries` as its `DeliveryCount`, and
+A message's ID is `msg_<ULID>`, as world-postgres mints it. `Worker` claims
+due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`, and increments
+`deliveries`, which fences the lease. Every delivery of a message has the row's
+ID as its `MessageID`, `deliveries` as its `DeliveryCount`, and
 `deliveries - handoffs` as its `Attempt`. The worker executes each:
 
 - success deletes the row.
-- a `worlds.Redelivery` keeps the row and makes it due again after its delay.
-  A handoff (a delay of zero) increments `handoffs`, so it is not an attempt.
+- a `worlds.Redelivery` keeps the row and makes it due again after its delay,
+  as the next job of its message, counting `Attempt` as world-postgres does. A
+  handoff (a delay of zero on a spec 9 run's message) keeps `Attempt`. A
+  spec 9 run's flow redelivered after a delay is a counted redelivery, one
+  more `Attempt`. Any other redelivery, such as a step's in-place retry,
+  starts `Attempt` over from where the job started it, so a step retried in
+  place many times on one message is not failed by the runtime's
+  `MaxDeliveries`.
 - failure keeps the row and sets `not_before` to now plus a capped exponential
   backoff by attempt (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
   `*worlds.ThrottleError` asks for when that is longer, and logs the error.
+  Once the message's current job has been delivered 73 times (world-postgres's
+  Graphile `max_attempts`: the runtime's `MaxDeliveries` failure on delivery 49
+  plus 24 retries of its terminal write), its last failure deletes the row, as
+  Graphile Worker stops retrying the job. A row a crashed worker left with no
+  attempts is deleted when it is next claimed. Every `Redelivery` starts a new
+  job with all 73.
 - shutdown releases the lease so another worker picks the row up immediately.
 
 Flows of one run execute one at a time across every worker. A claimed
@@ -166,6 +182,23 @@ intermediate hops of a wait's timer are never held back.
 
 Delivery is at least once. The runtime's event admission and the in-band fence
 make duplicate deliveries inert.
+
+## Recovery
+
+The first `Worker` of a World queues a flow for every pending or running run
+before it claims anything, as world-postgres's `start()` does when it runs
+workers, so a run whose process exited before it queued the run's delivery
+resumes. A process that runs no `Worker` recovers nothing, and
+`Config.SkipRecovery` turns recovery off.
+
+Recovery leaves out a running run that is parked: one of spec 2 or later with a
+hook or an open wait, no pending or running step, no open wait that is due, and
+no flow of its run in the queue that is due or leased (world-postgres's
+`wake_pending` and locked orchestrator jobs). Its next wake is a hook delivery
+or a wait timer that queues its own flow. Each recovery flow carries the run's
+spec version and is keyed `startup-recovery:<run ID>`, so starting more workers
+while it is queued or executing queues nothing more. The queue persists, so the
+flow is not a `Recovery` flow: the run's queued messages still arrive.
 
 ## Start hooks
 

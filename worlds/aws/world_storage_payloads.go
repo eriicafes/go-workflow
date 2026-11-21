@@ -15,8 +15,8 @@ import (
 // A run's input is its run_created event, slot 1, and resultEventId names its
 // run_completed or run_failed event. A step's createdEventId names its
 // step_created event, or the step_started that created an inline step, and
-// resultEventId its latest step_completed,
-// step_failed, or step_retrying event. A hook's createdEventId names its
+// resultEventId its step_completed, and errorEventId its latest step_failed
+// or step_retrying event. A hook's createdEventId names its
 // hook_created event in the hook's run.
 
 // runInputEventID is the run_created event, which holds a run's input.
@@ -116,8 +116,11 @@ func (w *World) resolveSteps(ctx context.Context, views []stepView, resolve worl
 		if resolve != worlds.ResolveDataNone {
 			refs = append(refs, eventRef{view.RunID, view.createdEventID})
 		}
-		if wantsResult(view.resultEventID, view.Status, resolve) {
+		if view.resultEventID != "" && resolve != worlds.ResolveDataNone {
 			refs = append(refs, eventRef{view.RunID, view.resultEventID})
+		}
+		if view.errorEventID != "" {
+			refs = append(refs, eventRef{view.RunID, view.errorEventID})
 		}
 	}
 	events, err := w.payloadEvents(ctx, refs)
@@ -131,7 +134,8 @@ func (w *World) resolveSteps(ctx context.Context, views []stepView, resolve worl
 		if resolve != worlds.ResolveDataNone {
 			step.Input = worlds.EventPayload(events[eventRef{step.RunID, view.createdEventID}])
 		}
-		step.Output, step.Error = resultPayloads(events[eventRef{step.RunID, view.resultEventID}], resolve)
+		step.Output, _ = resultPayloads(events[eventRef{step.RunID, view.resultEventID}], resolve)
+		_, step.Error = resultPayloads(events[eventRef{step.RunID, view.errorEventID}], resolve)
 		steps[index] = step
 	}
 	return steps, nil

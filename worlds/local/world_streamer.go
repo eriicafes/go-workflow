@@ -17,10 +17,12 @@ const streamRetryAfter = 50 * time.Millisecond
 // streams' end markers.
 
 // streamState returns how many chunks a stream has and whether it is closed.
-func (s *store) streamState(runID worlds.RunID, name string) (int, bool, error) {
-	condition, args := s.tagged("tag")
+// A stream is keyed by its name alone, as world-local keys it: the run ID is
+// stored with each chunk, for StreamsList and purges, but a read, an append,
+// or an info of a stream names it only.
+func (s *store) streamState(name string) (int, bool, error) {
 	var count, closed int
-	err := s.q.QueryRowContext(s.ctx, "SELECT coalesce(sum(1 - eof), 0), coalesce(max(eof), 0) FROM stream_chunks WHERE run_id = ? AND name = ? AND "+condition, append([]any{string(runID), name}, args...)...).Scan(&count, &closed)
+	err := s.q.QueryRowContext(s.ctx, "SELECT coalesce(sum(1 - eof), 0), coalesce(max(eof), 0) FROM stream_chunks WHERE name = ?", name).Scan(&count, &closed)
 	return count, closed == 1, err
 }
 
@@ -30,7 +32,7 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
 	return w.write(ctx, func(s *store) error {
-		count, closed, err := s.streamState(input.RunID, input.Name)
+		count, closed, err := s.streamState(input.Name)
 		if err != nil {
 			return err
 		}
@@ -64,7 +66,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 
 func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
 	return w.write(ctx, func(s *store) error {
-		count, closed, err := s.streamState(input.RunID, input.Name)
+		count, closed, err := s.streamState(input.Name)
 		if err != nil || closed {
 			return err
 		}
@@ -95,7 +97,7 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 		ready := false
 		err := w.read(ctx, func(s *store) error {
 			var err error
-			result, ready, err = s.readChunks(input.RunID, input.Name, start, limit)
+			result, ready, err = s.readChunks(input.Name, start, limit)
 			return err
 		})
 		if err != nil || ready || !time.Now().Before(deadline) {
@@ -107,16 +109,15 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	}
 }
 
-func (s *store) readChunks(runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
-	count, closed, err := s.streamState(runID, name)
+func (s *store) readChunks(name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
+	count, closed, err := s.streamState(name)
 	if err != nil {
 		return worlds.StreamChunksResult{}, false, err
 	}
 	end := max(start, min(start+limit, count))
 	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: strconv.Itoa(end), HasMore: end < count, Done: closed, RetryAfter: streamRetryAfter}
 	if end > start {
-		condition, args := s.tagged("tag")
-		rows, err := s.q.QueryContext(s.ctx, "SELECT idx, data FROM stream_chunks WHERE run_id = ? AND name = ? AND eof = 0 AND idx > ? AND idx <= ? AND "+condition+" ORDER BY idx", append([]any{string(runID), name, start, end}, args...)...)
+		rows, err := s.q.QueryContext(s.ctx, "SELECT idx, data FROM stream_chunks WHERE name = ? AND eof = 0 AND idx > ? AND idx <= ? ORDER BY idx", name, start, end)
 		if err != nil {
 			return worlds.StreamChunksResult{}, false, err
 		}
@@ -142,7 +143,7 @@ func (s *store) readChunks(runID worlds.RunID, name string, start, limit int) (w
 func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
 	var info worlds.StreamInfo
 	err := w.read(ctx, func(s *store) error {
-		count, closed, err := s.streamState(input.RunID, input.Name)
+		count, closed, err := s.streamState(input.Name)
 		info = worlds.StreamInfo{TailIndex: count - 1, Done: closed}
 		return err
 	})

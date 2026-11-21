@@ -23,16 +23,19 @@ var eventPayloadFields = map[EventType]string{
 	EventTypeStepFailed:    "error",
 	EventTypeStepRetrying:  "error",
 	EventTypeHookCreated:   "metadata",
-	EventTypeHookConflict:  "metadata",
 	EventTypeHookReceived:  "payload",
 }
 
 // ResolveEventData returns the Data an event of eventType carries under
 // resolve. EventsResolveDataNone removes the type's payload field and keeps
-// its metadata, such as a step's name.
-// Data that is not a JSON object, or has no field left, is removed. Other
-// resolve values return data unchanged.
+// its metadata, such as a step's name, as the Workflow SDK's
+// stripEventDataRefs does. Data that is not a JSON object, or has no field
+// left, is removed. Other resolve values return data unchanged.
 func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveData) []byte {
+	return stripEventData(eventType, data, resolve, false)
+}
+
+func stripEventData(eventType EventType, data []byte, resolve EventsResolveData, startHookMetadata bool) []byte {
 	field, ok := eventPayloadFields[eventType]
 	if resolve != EventsResolveDataNone || len(data) == 0 || !ok {
 		return data
@@ -42,7 +45,7 @@ func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveDat
 		return nil
 	}
 	delete(object, field)
-	if raw, ok := object["startHook"]; ok && eventType == EventTypeRunCreated {
+	if raw, ok := object["startHook"]; ok && startHookMetadata && eventType == EventTypeRunCreated {
 		// A start hook's metadata is user data; its token and retention are
 		// not.
 		var hook map[string]json.RawMessage
@@ -112,9 +115,11 @@ func EventPayloadFields() map[EventType]string {
 
 // ScrubEventData returns event Data without its user data, as deleting a
 // run's data leaves it: the payload field of eventType is removed and its
-// metadata, such as a step's name or a hook's token, is kept.
+// metadata, such as a step's name or a hook's token, is kept. A run_created
+// also loses its start hook's metadata, as world-local's run retention
+// scrubs it.
 func ScrubEventData(eventType EventType, data []byte) []byte {
-	return ResolveEventData(eventType, data, EventsResolveDataNone)
+	return stripEventData(eventType, data, EventsResolveDataNone, true)
 }
 
 // ResolveEvents applies ResolveEventData to each event's Data in place and
@@ -189,6 +194,34 @@ func (d StartHookDecision) Err() error {
 		return nil
 	}
 	return &HookConflictError{RunID: d.ConflictingRunID}
+}
+
+// StartHookRejectionRefusal returns the error EventsCreateRun refuses input,
+// a start hook candidate, with once the World recorded rejection for its run
+// ID, as the Workflow SDK's Worlds refuse it: the rejection's
+// *HookConflictError, or ErrStartHookRejected when input carries another
+// token.
+func StartHookRejectionRefusal(input EventsCreateRunInput, rejection StartHookDecision) error {
+	if input.StartHook != nil && rejection.Token != input.StartHook.Token {
+		return fmt.Errorf("%w: run %s was already decided for a different start hook token", ErrStartHookRejected, input.RunID)
+	}
+	return rejection.Err()
+}
+
+// ExistingRunRefusal returns the error EventsCreateRun refuses input with
+// when its run exists, with the start hook its run_created recorded,
+// runCreated, as the Workflow SDK's Worlds refuse it, or nil when input
+// repeats its accepted start (RepeatsAcceptedStart). A start hook candidate
+// is refused with ErrStartHookRejected, and another creation with
+// ErrRunAlreadyExists.
+func ExistingRunRefusal(runCreated []byte, input EventsCreateRunInput) error {
+	switch {
+	case RepeatsAcceptedStart(runCreated, input):
+		return nil
+	case input.StartHook != nil:
+		return fmt.Errorf("%w: run %s already exists without this start hook", ErrStartHookRejected, input.RunID)
+	}
+	return ErrRunAlreadyExists
 }
 
 // StartHookCandidateExpired reports whether a start hook candidate's run ID
@@ -409,10 +442,12 @@ type DataWaitCompleted struct {
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.
+// IsWebhook is always recorded, as the Workflow SDK's runtime records it,
+// and Data without it reads as a webhook, as the SDK's Worlds read it.
 type DataHookCreated struct {
 	Token     string `json:"token" cbor:"token"`
 	Metadata  []byte `json:"metadata,omitempty" cbor:"metadata,omitempty"`
-	IsWebhook bool   `json:"isWebhook,omitempty" cbor:"isWebhook,omitempty"`
+	IsWebhook bool   `json:"isWebhook" cbor:"isWebhook"`
 	IsSystem  bool   `json:"isSystem,omitempty" cbor:"isSystem,omitempty"`
 	// TokenRetentionUntil reserves the token until this time, including
 	// after the run ends.
@@ -420,6 +455,17 @@ type DataHookCreated struct {
 	Force               bool            `json:"force,omitempty" cbor:"force,omitempty"`
 	ForceClaimedFrom    *HookForceClaim `json:"forceClaimedFrom,omitempty" cbor:"forceClaimedFrom,omitempty"`
 	ConflictingRunID    RunID           `json:"conflictingRunId,omitempty" cbor:"conflictingRunId,omitempty"`
+}
+
+// UnmarshalJSON reads Data without isWebhook as a webhook's.
+func (d *DataHookCreated) UnmarshalJSON(data []byte) error {
+	type plain DataHookCreated
+	value := plain{IsWebhook: true}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*d = DataHookCreated(value)
+	return nil
 }
 
 // DataHookReceived is the Data of a hook_received event.
@@ -451,6 +497,7 @@ func DecodeHookReceived(data []byte) []byte {
 // when the hook disposed of itself. ForceClaimedBy is set when another
 // hook took the token with a forced claim.
 type HookDisposedEventData struct {
+	Token          string          `json:"token,omitempty" cbor:"token,omitempty"`
 	ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty" cbor:"forceClaimedBy,omitempty"`
 }
 
@@ -531,24 +578,21 @@ const (
 )
 
 // FinishedRunRefusal returns the error a World refuses event with on a
-// finished run, the run's status, as the Workflow SDK's Worlds refuse it, or
-// nil when the event is checked as on a running run. stepStatus is the
-// status of the event's step, or empty.
+// finished run, the run's status, before checking its step or hook, as the
+// Workflow SDK's Worlds refuse it, or nil when the event is checked further.
 //
 //   - A run_cancelled of a cancelled run is recorded: nil.
+//   - A run_started is refused with ErrRunTerminal, the SDK's
+//     RunExpiredError.
 //   - A terminal transition, a step, wait, or hook creation, an inline
 //     step's creating step_started, and an attr_set are refused with
 //     ErrEventConflict, the SDK's EntityConflictError. The error also
 //     matches ErrRunTerminal, which says why.
-//   - A run_started, a step_started, a hook_received, and a step's result
-//     while the step is not running are refused with ErrRunTerminal, the
-//     SDK's RunExpiredError.
 //   - A wait_completed is refused with ErrEventNotFound, since a run's waits
 //     end with it.
-//   - A step's result while it runs, a result of a step a World refuses
-//     anyway, and a hook_disposed, which needs a hook its token retention
-//     kept, are checked further: nil.
-func FinishedRunRefusal(status Status, event EventsCreateEvent, stepStatus Status) error {
+//   - Another step event is checked as CheckStepEvent says, and a
+//     hook_received and a hook_disposed against their hook first: nil.
+func FinishedRunRefusal(status Status, event EventsCreateEvent) error {
 	switch event.EventType {
 	case EventTypeRunCancelled:
 		if status == StatusCancelled {
@@ -563,16 +607,39 @@ func FinishedRunRefusal(status Status, event EventsCreateEvent, stepStatus Statu
 		if StartCreatesStep(event.Data) {
 			return fmt.Errorf("%w: %w: cannot create a step on a run in terminal status %s", ErrEventConflict, ErrRunTerminal, status)
 		}
-	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying:
-		if stepStatus == StatusRunning || stepStatus == "" || stepStatus.Terminal() {
-			return nil
-		}
+		return nil
+	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeHookReceived, EventTypeHookDisposed:
+		return nil
 	case EventTypeWaitCompleted:
 		return fmt.Errorf("%w: wait %s ended with its run", ErrEventNotFound, event.CorrelationID)
-	case EventTypeHookDisposed:
-		return nil
 	}
 	return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+}
+
+// FinishedRunHookRefusal returns ErrRunTerminal, the Workflow SDK's
+// RunExpiredError, for a hook_received on a run in status that has
+// finished, once its hook was found, or nil.
+func FinishedRunHookRefusal(status Status, event EventsCreateEvent) error {
+	if event.EventType == EventTypeHookReceived && status.Terminal() {
+		return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+	}
+	return nil
+}
+
+// CheckResumeReplay returns the error a World refuses a hook_received
+// repeating the resume ID of an earlier one with, as world-local refuses it,
+// or nil when the World answers with the earlier event. hookID and digest are
+// the earlier resume's hook and payload digest. A resume ID names one resume
+// of one hook, and its payload, when both resumes carry a digest: another is
+// refused with ErrEventConflict, the SDK's EntityConflictError.
+func CheckResumeReplay(event EventsCreateEvent, resumeDigest string, hookID HookID, digest string) error {
+	if string(hookID) != event.CorrelationID {
+		return fmt.Errorf("%w: resume ID already recorded for hook %s", ErrEventConflict, hookID)
+	}
+	if resumeDigest != "" && digest != "" && resumeDigest != digest {
+		return fmt.Errorf("%w: resume ID already recorded with another payload", ErrEventConflict)
+	}
+	return nil
 }
 
 // Run ID time limits of a run's creation, as the Workflow SDK's
@@ -681,18 +748,22 @@ func CheckResumeDigest(event EventsCreateEvent, digest string) error {
 	return nil
 }
 
-// CheckStepEvent returns the error a World refuses a step event of a running
-// run with, as the Workflow SDK's Worlds refuse it, or nil. exists, status,
-// and retryAfter describe the event's step.
+// CheckStepEvent returns the error a World refuses a step event with, as the
+// Workflow SDK's Worlds refuse it, or nil. exists, status, and retryAfter
+// describe the event's step, and runStatus its run.
 //
 //   - A step_created of a step that exists, and an inline step's creating
 //     step_started (StartCreatesStep) of one, are refused with
 //     ErrEventConflict.
 //   - Any other step event needs its step (ErrStepNotFound), which must not
 //     have finished (ErrEventConflict).
+//   - On a finished run, a step_started, and a step_failed of a step that is
+//     not running, are refused with ErrRunTerminal, the SDK's
+//     RunExpiredError. A step_completed and a step_retrying are not checked
+//     against the run.
 //   - A step_started before the step's retry is due is refused with a
 //     *TooEarlyError (CheckStepStart).
-func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAfter *time.Time, now time.Time) error {
+func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAfter *time.Time, runStatus Status, now time.Time) error {
 	switch event.EventType {
 	case EventTypeStepCreated:
 		if exists {
@@ -713,6 +784,8 @@ func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAf
 		return fmt.Errorf("%w: step %s", ErrStepNotFound, event.CorrelationID)
 	case status.Terminal():
 		return fmt.Errorf("%w: step %s is %s", ErrEventConflict, event.CorrelationID, status)
+	case runStatus.Terminal() && (event.EventType == EventTypeStepStarted || event.EventType == EventTypeStepFailed && status != StatusRunning):
+		return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, runStatus)
 	case event.EventType == EventTypeStepStarted:
 		return CheckStepStart(retryAfter, now)
 	}

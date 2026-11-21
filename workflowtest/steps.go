@@ -122,9 +122,10 @@ func conformSteps(t *testing.T, world worlds.World) {
 
 // conformTerminalSteps checks what a finished run admits, as the Workflow
 // SDK's Worlds do: a step, wait, or hook creation is a conflict
-// (ErrEventConflict, also ErrRunTerminal), another attempt or the result of
-// a step that is not running finds the run finished (ErrRunTerminal), a
-// running step's result and retry are recorded, and its waits are gone.
+// (ErrEventConflict, also ErrRunTerminal), a missing step or hook is
+// refused as on a running run, another attempt or a step_failed of a step
+// that is not running finds the run finished (ErrRunTerminal), a step's
+// step_completed and step_retrying are recorded, and its waits are gone.
 func conformTerminalSteps(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "terminal_steps")
@@ -147,9 +148,15 @@ func conformTerminalSteps(t *testing.T, world worlds.World) {
 		conformExpect(t, err, worlds.ErrEventConflict, string(conflict.EventType)+" after the run finished")
 		conformExpect(t, err, worlds.ErrRunTerminal, string(conflict.EventType)+" after the run finished")
 	}
+	// A missing or finished step is refused as on a running run, before the
+	// run's end is checked, as in the Workflow SDK's Worlds.
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_missing", worlds.DataStepStarted{StepName: "m", Attempt: 1})})
+	conformExpect(t, err, worlds.ErrStepNotFound, "step_started of a missing step after the run finished")
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_missing", conformReceived(t, "x"))})
+	conformExpect(t, err, worlds.ErrHookNotFound, "hook_received of a missing hook after the run finished")
 	for _, expired := range []worlds.EventsCreateEvent{
 		conformEvent(t, worlds.EventTypeStepStarted, "step_b", worlds.DataStepStarted{StepName: "b", Attempt: 1}),
-		conformEvent(t, worlds.EventTypeStepCompleted, "step_b", worlds.DataStepResult{StepName: "b"}),
+		conformEvent(t, worlds.EventTypeStepFailed, "step_b", worlds.DataStepResult{StepName: "b", Error: []byte(`{"message":"x"}`)}),
 	} {
 		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: expired})
 		conformExpect(t, err, worlds.ErrRunTerminal, string(expired.EventType)+" after the run finished")
@@ -157,12 +164,15 @@ func conformTerminalSteps(t *testing.T, world worlds.World) {
 			t.Fatalf("%s after the run finished: error = %v, want no conflict", expired.EventType, err)
 		}
 	}
-	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
 	conformExpect(t, err, worlds.ErrEventNotFound, "wait_completed after the run finished")
+	// A step_completed and a step_retrying are not checked against the run,
+	// so they finish even a pending step.
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_b", worlds.DataStepResult{StepName: "b"})
 	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{StepName: "a"})
 	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_c", worlds.DataStepResult{StepName: "c", Attempt: 1, Error: []byte(`{"message":"x"}`)})
 	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_f", worlds.DataStepResult{StepName: "f", Attempt: 1, Error: []byte(`{"message":"x"}`)})
-	for id, want := range map[worlds.StepID]worlds.Status{"step_a": worlds.StatusCompleted, "step_c": worlds.StatusPending, "step_f": worlds.StatusFailed} {
+	for id, want := range map[worlds.StepID]worlds.Status{"step_a": worlds.StatusCompleted, "step_b": worlds.StatusCompleted, "step_c": worlds.StatusPending, "step_f": worlds.StatusFailed} {
 		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: id})
 		if err != nil || step.Status != want {
 			t.Fatalf("late result of %s = %#v, %v", id, step, err)
@@ -199,6 +209,21 @@ func conformStepAdmission(t *testing.T, world worlds.World) {
 	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_b"})
 	if err != nil || step.Status != worlds.StatusCompleted || string(step.Output) != `"out"` {
 		t.Fatalf("step = %#v err=%v", step, err)
+	}
+
+	// A step that completes after a retry keeps the retry's error, and its
+	// retry time, as in the Workflow SDK's Worlds.
+	conformAppend(t, world, runID, worlds.EventTypeStepCreated, "step_c", worlds.DataStepCreated{StepName: "third"})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_c", worlds.DataStepStarted{StepName: "third", Attempt: 1})
+	conformAppend(t, world, runID, worlds.EventTypeStepRetrying, "step_c", worlds.DataStepResult{StepName: "third", Attempt: 1, Error: json.RawMessage(`{"message":"retry"}`)})
+	conformAppend(t, world, runID, worlds.EventTypeStepStarted, "step_c", worlds.DataStepStarted{StepName: "third", Attempt: 2})
+	conformAppend(t, world, runID, worlds.EventTypeStepCompleted, "step_c", worlds.DataStepResult{StepName: "third", Attempt: 2, Result: json.RawMessage(`"done"`)})
+	step, err = world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_c"})
+	if err != nil || step.Status != worlds.StatusCompleted || string(step.Output) != `"done"` || string(step.Error) != `{"message":"retry"}` {
+		t.Fatalf("step completed after a retry = %#v err=%v, want its output and the retry's error", step, err)
+	}
+	if step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_c", ResolveData: worlds.ResolveDataNone}); err != nil || step.Output != nil || string(step.Error) != `{"message":"retry"}` {
+		t.Fatalf("unresolved step completed after a retry = %#v err=%v, want only its error", step, err)
 	}
 }
 

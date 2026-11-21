@@ -19,8 +19,10 @@ type listResponse struct {
 	HasMore bool             `cbor:"hasMore" json:"hasMore"`
 }
 
+// cursor returns the backend's cursor, which the Workflow SDK's World passes
+// on even on the last page, or "" when it sent none.
 func (page listResponse) cursor() string {
-	if page.Cursor == nil || !page.HasMore {
+	if page.Cursor == nil {
 		return ""
 	}
 	return *page.Cursor
@@ -310,10 +312,9 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
 	var page listResponse
+	// A 404 is returned as it is, as the Workflow SDK's World lets it
+	// through.
 	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/steps", entityQuery(input.Pagination, input.ResolveData), nil, &page); err != nil {
-		if statusOf(err) == http.StatusNotFound {
-			return worlds.Page[worlds.Step]{}, nil
-		}
 		return worlds.Page[worlds.Step]{}, err
 	}
 	result := worlds.Page[worlds.Step]{Cursor: page.cursor(), HasMore: page.HasMore}

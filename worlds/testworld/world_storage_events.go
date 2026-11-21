@@ -48,8 +48,8 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		// A repeat of a resume returns the event it committed.
 		resumeKey = string(input.RunID) + "/" + input.Options.ResumeID
 		if claim, ok := m.resumes[resumeKey]; ok {
-			if claim.digest != input.Options.ResumePayloadDigest {
-				return worlds.EventResult{}, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, input.Options.ResumeID)
+			if err := worlds.CheckResumeReplay(input.Event, input.Options.ResumePayloadDigest, claim.hookID, claim.digest); err != nil {
+				return worlds.EventResult{}, err
 			}
 			for _, event := range m.events[input.RunID] {
 				if event.EventID == claim.eventID {
@@ -71,7 +71,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[input.RunID]) + 1)), EventType: input.Event.EventType, CorrelationID: input.Event.CorrelationID, Data: bytes.Clone(input.Event.Data), CreatedAt: createdAt(input.Event, input.Options.InBandCount), SpecVersion: worlds.EventSpecVersion(input.Event.SpecVersion)}
 	if resumeKey != "" {
 		event.ResumeID = input.Options.ResumeID
-		m.resumes[resumeKey] = resumeClaim{digest: input.Options.ResumePayloadDigest, eventID: event.EventID}
+		m.resumes[resumeKey] = resumeClaim{hookID: worlds.HookID(input.Event.CorrelationID), digest: input.Options.ResumePayloadDigest, eventID: event.EventID}
 	}
 	before := worlds.ResolveEvents(m.deltaLocked(input.RunID, input.Options.EventCount, input.Options.SinceCursor), input.Options.ResolveData)
 	m.events[input.RunID] = append(m.events[input.RunID], event)
@@ -129,19 +129,22 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	if err := worlds.CheckRunCreation(input, time.Now()); err != nil {
 		return worlds.EventResult{}, err
 	}
+	if decision, ok := m.startDecisions[input.RunID]; ok && input.StartHook != nil {
+		// A refused candidate stays refused, as the Workflow SDK's Worlds
+		// answer it.
+		return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, decision)
+	}
 	if _, exists := m.runs[input.RunID]; exists {
-		if created := m.events[input.RunID][0]; worlds.RepeatsAcceptedStart(created.Data, input) {
-			return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: m.runs[input.RunID].InBandCount}, nil
+		created := m.events[input.RunID][0]
+		if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
+			return worlds.EventResult{}, err
 		}
-		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
+		return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: m.runs[input.RunID].InBandCount}, nil
 	}
 	now := time.Now().UTC()
 	if input.StartHook != nil {
 		if input.StartHook.Token == "" {
 			return worlds.EventResult{}, worlds.ErrEventInvalid
-		}
-		if decision, ok := m.startDecisions[input.RunID]; ok {
-			return worlds.EventResult{}, decision.Err()
 		}
 		if worlds.StartHookCandidateExpired(input.RunID, now) {
 			return worlds.EventResult{}, worlds.ErrStartHookRejected
@@ -264,7 +267,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		return worlds.EventResult{}, worlds.ErrRunNotFound
 	}
 	if claimant.Status.Terminal() {
-		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.Status, input.Event, "")
+		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.Status, input.Event)
 	}
 	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
@@ -283,12 +286,18 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			created.ConflictingRunID = owner.RunID
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
-			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID, WorkflowName: owner.ResumeContext.WorkflowName, DeploymentID: owner.ResumeContext.DeploymentID, RunSpecVersion: owner.ResumeContext.RunSpecVersion}
-			if m.runs[owner.RunID].Status.Terminal() {
+			// A live owner is woken to read its disposal, so the claim names
+			// its workflow; a finished one's hook is disposed of quietly, as
+			// in the Workflow SDK's Worlds.
+			by := &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}
+			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID}
+			if victim, ok := m.runs[owner.RunID]; !ok || victim.Status.Terminal() {
 				delete(m.tokens, created.Token)
 				delete(m.hooks, ownerID)
+				m.disposals[ownerID] = hookDisposal{runID: owner.RunID, forceClaimedBy: by}
 			} else {
-				data, _ := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}})
+				created.ForceClaimedFrom.WorkflowName, created.ForceClaimedFrom.DeploymentID, created.ForceClaimedFrom.RunSpecVersion = victim.WorkflowName, victim.DeploymentID, victim.SpecVersion
+				data, _ := json.Marshal(worlds.HookDisposedEventData{Token: created.Token, ForceClaimedBy: by})
 				forced := worlds.Event{RunID: owner.RunID, EventID: worlds.EventIDForSlot(uint64(len(m.events[owner.RunID]) + 1)), EventType: worlds.EventTypeHookDisposed, CorrelationID: string(ownerID), Data: data, CreatedAt: time.Now().UTC(), SpecVersion: worlds.SpecVersion}
 				m.events[owner.RunID] = append(m.events[owner.RunID], forced)
 				m.materializeLocked(forced)
@@ -319,7 +328,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	}
 	step, stepExists := m.steps[runID][worlds.StepID(requested.CorrelationID)]
 	if run.Status.Terminal() {
-		if err := worlds.FinishedRunRefusal(run.Status, requested, step.Status); err != nil {
+		if err := worlds.FinishedRunRefusal(run.Status, requested); err != nil {
 			return worlds.EventResult{}, false, err
 		}
 	}
@@ -331,7 +340,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	// A step is created once, and its other events need it unfinished, as
 	// in the Workflow SDK's Worlds. A started step may be started again: each
 	// start records a new attempt.
-	if err := worlds.CheckStepEvent(requested, stepExists, step.Status, step.RetryAfter, time.Now()); err != nil {
+	if err := worlds.CheckStepEvent(requested, stepExists, step.Status, step.RetryAfter, run.Status, time.Now()); err != nil {
 		return worlds.EventResult{}, false, err
 	}
 	if requested.EventType == worlds.EventTypeAttrSet {
@@ -371,6 +380,9 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		hook := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if hook.HookID == "" || hook.RunID != runID || m.tokens[hook.Token] != hook.HookID {
 			return worlds.EventResult{}, false, worlds.ErrHookNotFound
+		}
+		if err := worlds.FinishedRunHookRefusal(run.Status, requested); err != nil {
+			return worlds.EventResult{}, false, err
 		}
 	}
 
@@ -588,9 +600,16 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 	if status == worlds.StatusCompleted || status == worlds.StatusFailed {
 		step.CompletedAt = &event.CreatedAt
 	}
-	var result worlds.DataStepResult
-	if json.Unmarshal(event.Data, &result) == nil {
-		step.RetryAfter = result.RetryAfter
+	// A start ends the wait for a retry, which a step_retrying sets, and a
+	// result keeps, as in the Workflow SDK's Worlds.
+	switch event.EventType {
+	case worlds.EventTypeStepStarted:
+		step.RetryAfter = nil
+	case worlds.EventTypeStepRetrying:
+		var result worlds.DataStepResult
+		if json.Unmarshal(event.Data, &result) == nil {
+			step.RetryAfter = result.RetryAfter
+		}
 	}
 	m.steps[event.RunID][step.StepID] = step
 }
@@ -605,7 +624,8 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	defer m.mu.RUnlock()
 	log, ok := m.events[input.RunID]
 	if !ok {
-		return worlds.EventsPage{}, worlds.ErrRunNotFound
+		// A missing run has no events, as in world-local.
+		return worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}, Snapshot: worlds.EventsSnapshot{InBandCount: 1}}, nil
 	}
 	snapshot := worlds.EventsSnapshot{EventCount: len(log), InBandCount: m.runs[input.RunID].InBandCount}
 	values := make([]worlds.Event, len(log))
@@ -721,7 +741,8 @@ func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[
 		end = len(values)
 	}
 	result := worlds.Page[worlds.Event]{Data: values[start:end], HasMore: end < len(values)}
-	if result.HasMore && end != 0 {
+	// The last page's cursor resumes after it, as world-local's does.
+	if end > start {
 		result.Cursor = string(values[end-1].EventID)
 	}
 	return result

@@ -22,9 +22,10 @@ const (
 )
 
 // A stream's chunks are rows ordered by their chnk_<ULID> id, as
-// world-postgres stores them, keyed by the stream's run as well: a Go stream
-// name is unique only within its run. An eof row with empty data closes the
-// stream. A chunk's index is its position among the stream's other chunks.
+// world-postgres stores them. A stream is keyed by its name alone, as
+// world-postgres keys it: each chunk stores its run, for StreamsList and
+// purges, but appends, reads, and infos name the stream only. An eof row with
+// empty data closes the stream. A chunk's index is its position among the stream's other chunks.
 // Writers of one stream take its advisory lock, so each new id follows the
 // stream's last.
 
@@ -44,7 +45,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		last, closed, err := w.lockStream(ctx, tx, input.RunID, input.Name)
+		last, closed, err := w.lockStream(ctx, tx, input.Name)
 		if err != nil {
 			return err
 		}
@@ -60,7 +61,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_stream_chunks (id, stream_id, run_id, data, eof) VALUES ($1, $2, $3, '', true)`), id, input.Name, input.RunID); err != nil {
 				return err
 			}
-			return notifyChunk(tx, input.RunID, input.Name, id)
+			return notifyChunk(tx, input.Name, id)
 		}
 		if len(input.Chunks) == 0 {
 			return nil
@@ -77,7 +78,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			SELECT c.id, $1, $2, c.data, false FROM unnest($3::varchar[], $4::bytea[]) AS c(id, data)`), input.Name, input.RunID, ids, values); err != nil {
 			return err
 		}
-		return notifyChunk(tx, input.RunID, input.Name, ids[len(ids)-1])
+		return notifyChunk(tx, input.Name, ids[len(ids)-1])
 	})
 }
 
@@ -86,7 +87,7 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 		return err
 	}
 	return w.inTx(ctx, func(tx pgx.Tx) error {
-		last, closed, err := w.lockStream(ctx, tx, input.RunID, input.Name)
+		last, closed, err := w.lockStream(ctx, tx, input.Name)
 		if err != nil || closed {
 			return err
 		}
@@ -94,19 +95,19 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 		if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_stream_chunks (id, stream_id, run_id, data, eof) VALUES ($1, $2, $3, '', true)`), id, input.Name, input.RunID); err != nil {
 			return err
 		}
-		return notifyChunk(tx, input.RunID, input.Name, id)
+		return notifyChunk(tx, input.Name, id)
 	})
 }
 
 // lockStream takes the stream's write lock and returns its last chunk ID and
 // whether it is closed.
-func (w *World) lockStream(ctx context.Context, tx pgx.Tx, runID worlds.RunID, name string) (string, bool, error) {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, w.prefix+streamKey(runID, name)); err != nil {
+func (w *World) lockStream(ctx context.Context, tx pgx.Tx, name string) (string, bool, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, w.prefix+streamKey(name)); err != nil {
 		return "", false, err
 	}
 	var last *string
 	var closed bool
-	err := tx.QueryRow(ctx, w.q(`SELECT max(id), coalesce(bool_or(eof), false) FROM workflow.workflow_stream_chunks WHERE run_id = $1 AND stream_id = $2`), runID, name).Scan(&last, &closed)
+	err := tx.QueryRow(ctx, w.q(`SELECT max(id), coalesce(bool_or(eof), false) FROM workflow.workflow_stream_chunks WHERE stream_id = $1`), name).Scan(&last, &closed)
 	if err != nil || last == nil {
 		return "", closed, err
 	}
@@ -144,11 +145,9 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	if err != nil {
 		return worlds.StreamChunksResult{}, err
 	}
-	if input.Cursor != "" {
-		value, err := strconv.Atoi(input.Cursor)
-		if err != nil || value < 0 {
-			return worlds.StreamChunksResult{}, errInvalidCursor
-		}
+	// A cursor that does not decode reads from the start, as world-postgres
+	// reads it.
+	if value, err := strconv.Atoi(input.Cursor); input.Cursor != "" && err == nil && value >= 0 {
 		start = value
 	}
 	limit := input.Limit
@@ -157,8 +156,8 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	}
 	deadline := time.Now().Add(input.Wait)
 	for {
-		wake, release := w.notifier.wait(channelStreams, streamKey(input.RunID, input.Name))
-		result, available, err := w.readChunks(ctx, input.RunID, input.Name, start, limit)
+		wake, release := w.notifier.wait(channelStreams, streamKey(input.Name))
+		result, available, err := w.readChunks(ctx, input.Name, start, limit)
 		remaining := time.Until(deadline)
 		if err != nil || available || result.Done || input.Wait <= 0 || remaining <= 0 {
 			release()
@@ -178,7 +177,7 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 
 // readChunks reads the stream's state and chunks in one transaction, so the
 // page is consistent with Done.
-func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
+func (w *World) readChunks(ctx context.Context, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
 	var result worlds.StreamChunksResult
 	available := false
 	err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
@@ -189,7 +188,7 @@ func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string,
 		err := tx.QueryRow(ctx, w.q(`SELECT coalesce(bool_or(c.eof), false) OR coalesce(bool_or(r.expired_at <= now()), false),
 				CASE WHEN coalesce(bool_or(r.expired_at <= now()), false) THEN 0 ELSE count(*) FILTER (WHERE NOT c.eof) END
 			FROM workflow.workflow_stream_chunks c LEFT JOIN workflow.workflow_runs r ON r.id = c.run_id
-			WHERE c.run_id = $1 AND c.stream_id = $2`), runID, name).Scan(&closed, &count)
+			WHERE c.stream_id = $1`), name).Scan(&closed, &count)
 		if err != nil {
 			return err
 		}
@@ -199,8 +198,8 @@ func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string,
 			return nil
 		}
 		end := min(start+limit, total)
-		rows, err := tx.Query(ctx, w.q(`SELECT data FROM workflow.workflow_stream_chunks WHERE run_id = $1 AND stream_id = $2 AND NOT eof ORDER BY id OFFSET $3 LIMIT $4`),
-			runID, name, start, end-start)
+		rows, err := tx.Query(ctx, w.q(`SELECT data FROM workflow.workflow_stream_chunks WHERE stream_id = $1 AND NOT eof ORDER BY id OFFSET $2 LIMIT $3`),
+			name, start, end-start)
 		if err != nil {
 			return err
 		}
@@ -224,7 +223,7 @@ func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string,
 func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {
 	var info worlds.StreamInfo
 	var count int64
-	err := w.pool.QueryRow(ctx, w.q(`SELECT count(*) FILTER (WHERE NOT eof), coalesce(bool_or(eof), false) FROM workflow.workflow_stream_chunks WHERE run_id = $1 AND stream_id = $2`), input.RunID, input.Name).Scan(&count, &info.Done)
+	err := w.pool.QueryRow(ctx, w.q(`SELECT count(*) FILTER (WHERE NOT eof), coalesce(bool_or(eof), false) FROM workflow.workflow_stream_chunks WHERE stream_id = $1`), input.Name).Scan(&count, &info.Done)
 	if err != nil {
 		return worlds.StreamInfo{}, err
 	}
@@ -269,15 +268,15 @@ func (w *World) purgeStreams(ctx context.Context, tx pgx.Tx, runID worlds.RunID)
 // streamKey identifies a stream in notifications. It is a hash, because
 // pg_notify payloads must stay under 8000 bytes and stream names are not
 // bounded.
-func streamKey(runID worlds.RunID, name string) string {
-	sum := sha256.Sum256([]byte(string(runID) + "/" + name))
+func streamKey(name string) string {
+	sum := sha256.Sum256([]byte(name))
 	return hex.EncodeToString(sum[:])
 }
 
 // notifyChunk sends workflow_event_chunk for the stream's chunk, as
 // world-postgres does.
-func notifyChunk(tx pgx.Tx, runID worlds.RunID, name, chunkID string) error {
-	payload, err := json.Marshal(chunkNotification{StreamID: streamKey(runID, name), ChunkID: chunkID})
+func notifyChunk(tx pgx.Tx, name, chunkID string) error {
+	payload, err := json.Marshal(chunkNotification{StreamID: streamKey(name), ChunkID: chunkID})
 	if err != nil {
 		return err
 	}

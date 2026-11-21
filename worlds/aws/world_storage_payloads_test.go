@@ -26,8 +26,11 @@ func TestPayloadsAreReadFromEvents(t *testing.T) {
 	event(4, worlds.EventTypeHookCreated, "hook_a", worlds.DataHookCreated{Token: "tok", Metadata: []byte(`"meta"`)})
 	event(5, worlds.EventTypeRunFailed, "", worlds.DataRunFailed{Error: json.RawMessage(`"boom"`)})
 	store(runItem(runView{Run: worlds.Run{RunID: "wrun_1", WorkflowName: "flow", Status: worlds.StatusFailed, CreatedAt: now, UpdatedAt: now}, eventCount: 5, resultEventID: worlds.EventIDForSlot(5)}))
-	store(stepItem(stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, createdEventID: worlds.EventIDForSlot(2), resultEventID: worlds.EventIDForSlot(3)}))
-	hook, err := hookItem(worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", CreatedAt: now})
+	store(stepItem(stepView{Step: worlds.Step{RunID: "wrun_1", StepID: "step_a", Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, createdEventID: worlds.EventIDForSlot(2), errorEventID: worlds.EventIDForSlot(3)}))
+	// The run finished, so its hook is readable while its token retention
+	// lasts.
+	retained := now.Add(time.Hour)
+	hook, err := hookItem(worlds.Hook{RunID: "wrun_1", HookID: "hook_a", Token: "tok", TokenRetentionUntil: &retained, CreatedAt: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +55,11 @@ func TestPayloadsAreReadFromEvents(t *testing.T) {
 	if err != nil || string(got.Metadata) != `"meta"` {
 		t.Fatalf("hook metadata = %q err=%v", got.Metadata, err)
 	}
+	// Without data, the hook's run is read for its availability and no
+	// event is.
 	calls := dynamo.batchCalls
-	if got, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone}); err != nil || got.Metadata != nil || dynamo.batchCalls != calls {
-		t.Fatalf("unresolved hook metadata = %q err=%v, events read %d times", got.Metadata, err, dynamo.batchCalls-calls)
+	if got, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a", ResolveData: worlds.ResolveDataNone}); err != nil || got.Metadata != nil || dynamo.batchCalls != calls+1 {
+		t.Fatalf("unresolved hook metadata = %q err=%v, batch reads %d", got.Metadata, err, dynamo.batchCalls-calls)
 	}
 }
 

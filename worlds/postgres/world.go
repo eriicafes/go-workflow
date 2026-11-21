@@ -66,6 +66,9 @@ type Config struct {
 	// key derived from it for the run. Empty leaves payloads unencrypted.
 	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
+	// SkipRecovery leaves the active runs alone when Worker starts, rather
+	// than queueing a flow for each of them again.
+	SkipRecovery bool
 }
 
 // DefaultQueue is the queue of workflows Config.Routes doesn't route.
@@ -92,6 +95,12 @@ type World struct {
 	retentions map[string]time.Duration
 	// hookRetentionLimit is Config.HookRetentionLimit.
 	hookRetentionLimit time.Duration
+	// skipRecovery is Config.SkipRecovery.
+	skipRecovery bool
+	// recovery guards recovered, which is set once a Worker recovered the
+	// active runs.
+	recovery  sync.Mutex
+	recovered bool
 }
 
 // Open connects to config.URL, migrates the schema, and returns a World that
@@ -165,6 +174,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		routes:             config.Routes,
 		retention:          config.Retention,
 		retentions:         config.Retentions,
+		skipRecovery:       config.SkipRecovery,
 	}, nil
 }
 
@@ -226,6 +236,13 @@ type WorkerOptions struct {
 // share one database, and each delivery runs on one worker at a time. With
 // Config.Retention set, it also deletes expired runs in the background. The
 // last options apply.
+//
+// The World's first Worker queues a flow for every active run first, unless
+// Config.SkipRecovery, as world-postgres's start() does when it runs
+// workers: a run whose process exited before it queued the run's delivery
+// resumes. Runs parked on a hook or a wait are left alone, and a run's
+// recovery flow is queued once while it lives, however many processes start.
+// A process that runs no Worker recovers nothing.
 func Worker(ctx context.Context, world *World, runners core.RunnerSet, options ...WorkerOptions) error {
 	var option WorkerOptions
 	if len(options) > 0 {
@@ -233,6 +250,9 @@ func Worker(ctx context.Context, world *World, runners core.RunnerSet, options .
 	}
 	if option.Concurrency <= 0 {
 		option.Concurrency = world.concurrency
+	}
+	if err := world.recoverOnce(ctx); err != nil {
+		return fmt.Errorf("workflow/postgres: recover active runs: %w", err)
 	}
 	if longest, _ := worlds.MaxRetention(world.retention, world.retentions); longest > 0 {
 		done := make(chan struct{})
@@ -243,6 +263,24 @@ func Worker(ctx context.Context, world *World, runners core.RunnerSet, options .
 		}()
 	}
 	return world.work(ctx, core.NewRuntime(world, runners), option)
+}
+
+// recoverOnce recovers the active runs unless Config.SkipRecovery or a
+// Worker of the World already did.
+func (w *World) recoverOnce(ctx context.Context) error {
+	if w.skipRecovery {
+		return nil
+	}
+	w.recovery.Lock()
+	defer w.recovery.Unlock()
+	if w.recovered {
+		return nil
+	}
+	if err := w.recoverActiveRuns(ctx); err != nil {
+		return err
+	}
+	w.recovered = true
+	return nil
 }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from

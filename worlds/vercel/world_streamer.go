@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -23,7 +24,17 @@ const (
 	streamPollMax  = 500 * time.Millisecond
 	// streamCursorCacheSize bounds the backend cursors a World remembers.
 	streamCursorCacheSize = 1024
+	// streamCloseMaxRetries is how many times a stream's close is sent
+	// again, and streamCloseMaxBackoff caps the wait before each, as the
+	// Workflow SDK's stream close dispatcher, an undici RetryAgent with its
+	// defaults, retries it.
+	streamCloseMaxRetries = 5
+	streamCloseMaxBackoff = 30 * time.Second
 )
+
+// streamCloseMinBackoff is the wait before a stream close's first retry,
+// doubling with each retry, undici's RetryAgent default.
+var streamCloseMinBackoff = 500 * time.Millisecond
 
 // Streams are stored by the backend. Read cursors are chunk indexes, so any
 // instance can continue a read.
@@ -37,6 +48,14 @@ func (w *World) streamsPath(runID worlds.RunID, name, suffix string) string {
 }
 
 func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header) error {
+	return w.putStreamRetrying(ctx, runID, name, body, header, 0)
+}
+
+// putStreamRetrying is putStream sent again up to retries times after a
+// transport failure or a 429, 500, 502, 503 or 504: after the answer's
+// Retry-After, or a backoff from streamCloseMinBackoff doubling with each
+// retry, both capped at streamCloseMaxBackoff.
+func (w *World) putStreamRetrying(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header, retries int) error {
 	if header == nil {
 		header = http.Header{}
 	}
@@ -44,7 +63,25 @@ func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, 
 	if body == nil {
 		body = []byte{}
 	}
-	response, err := w.api.request(ctx, http.MethodPut, w.streamPath(runID, name), nil, body, header)
+	var response *http.Response
+	var err error
+	for retry := 1; ; retry++ {
+		response, err = w.api.request(ctx, http.MethodPut, w.streamPath(runID, name), nil, body, header)
+		if err == nil || retry > retries {
+			break
+		}
+		wait, ok := streamCloseRetryDelay(ctx, err, retry)
+		if !ok {
+			break
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+	}
 	if err != nil {
 		if status := statusOf(err); status == http.StatusConflict || status == http.StatusGone {
 			return errors.Join(worlds.ErrStreamClosed, err)
@@ -75,10 +112,54 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 	return nil
 }
 
+// StreamsClose closes a stream, sending the close again after a transient
+// failure, as the Workflow SDK's stream close dispatcher does: a close is
+// idempotent, and the backend answers a 503 while it reconciles a closing
+// stream, expecting the writer to close it again.
 func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
 	header := http.Header{}
 	header.Set("X-Stream-Done", "true")
-	return w.putStream(ctx, input.RunID, input.Name, nil, header)
+	return w.putStreamRetrying(ctx, input.RunID, input.Name, nil, header, streamCloseMaxRetries)
+}
+
+// streamCloseRetryDelay returns the wait before the retry-th retry of a
+// stream's close after err, and false when err is not retried.
+func streamCloseRetryDelay(ctx context.Context, err error, retry int) (time.Duration, bool) {
+	var api *apiError
+	if !errors.As(err, &api) {
+		if !transientTransport(ctx, err) {
+			return 0, false
+		}
+	} else {
+		switch api.Status {
+		case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		default:
+			return 0, false
+		}
+		if api.RetryAfter > 0 {
+			return min(api.RetryAfter, streamCloseMaxBackoff), true
+		}
+	}
+	backoff := streamCloseMinBackoff
+	for range min(retry-1, 16) {
+		backoff *= 2
+	}
+	return min(backoff, streamCloseMaxBackoff), true
+}
+
+// streamReadError maps a stream read's 410 as the Workflow SDK's World does:
+// the backend's stream-expired to worlds.ErrStreamExpired, its
+// StreamExpiredError, and any other to worlds.ErrRunExpired, its
+// RunExpiredError.
+func streamReadError(err error) error {
+	var api *apiError
+	if !errors.As(err, &api) || api.Status != http.StatusGone {
+		return err
+	}
+	if api.Code == "stream-expired" {
+		return fmt.Errorf("%w: %v", worlds.ErrStreamExpired, err)
+	}
+	return fmt.Errorf("%w: %v", worlds.ErrRunExpired, err)
 }
 
 // streamSocketRetryAfter is how long a World writes through HTTP after the
@@ -150,8 +231,10 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 		return worlds.StreamChunksResult{}, err
 	}
 	if input.Cursor != "" {
+		// A cursor that is not a chunk index reads from the beginning, as
+		// world-local and world-postgres read one.
 		if start, err = strconv.Atoi(input.Cursor); err != nil || start < 0 {
-			return worlds.StreamChunksResult{}, errors.New("workflow/vercel: invalid stream cursor")
+			start = 0
 		}
 	}
 	limit := input.Limit
@@ -193,7 +276,7 @@ func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string,
 			return result, nil
 		}
 		if err != nil {
-			return worlds.StreamChunksResult{}, err
+			return worlds.StreamChunksResult{}, streamReadError(err)
 		}
 		for _, chunk := range page.Data {
 			index = chunk.Index + 1
@@ -234,7 +317,7 @@ func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoI
 		return worlds.StreamInfo{TailIndex: -1}, nil
 	}
 	if err != nil {
-		return worlds.StreamInfo{}, err
+		return worlds.StreamInfo{}, streamReadError(err)
 	}
 	result := worlds.StreamInfo{TailIndex: -1, Done: info.Done}
 	if info.TailIndex != nil {
