@@ -136,7 +136,8 @@ deleted run's streams refuse writes.
 `Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
 ordered by `NotBefore`. Each due delivery runs in its own goroutine, and its
 record is deleted on success. A failed delivery is retried with exponential
-backoff from 100 ms up to 30 s.
+backoff from 100 ms up to 30 s, or after the wait a `*worlds.ThrottleError`
+asks for when that is longer.
 
 `IdempotencyKey` deduplicates per run while the delivery is pending. The key is
 released when delivery starts, so work queued during a delivery is never

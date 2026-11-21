@@ -173,7 +173,7 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		err = nil
 	}
 	if err != nil {
-		if visibilityErr := c.world.setVisibility(context.WithoutCancel(ctx), delivery, retryDelay(delivery.DeliveryCount)); visibilityErr != nil {
+		if visibilityErr := c.world.setVisibility(context.WithoutCancel(ctx), delivery, worlds.DeliveryRetryDelay(err, retryDelay(delivery.DeliveryCount))); visibilityErr != nil {
 			err = errors.Join(err, visibilityErr)
 		}
 		return http.StatusInternalServerError, err

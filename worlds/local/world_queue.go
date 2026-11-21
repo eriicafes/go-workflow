@@ -217,7 +217,7 @@ func (w *World) deliver(value delivery) {
 		return
 	}
 	value.attempt++
-	backoff := min(retryBase<<min(value.attempt-1, 20), retryMax)
+	backoff := worlds.DeliveryRetryDelay(err, min(retryBase<<min(value.attempt-1, 20), retryMax))
 	value.at = time.Now().Add(backoff)
 	log.Printf("workflow/local: delivery %s failed (attempt %d), retrying in %s: %v", value.id, value.attempt, backoff, err)
 	w.schedule(value)
