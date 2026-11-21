@@ -23,6 +23,8 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 200)
 	var page worlds.Page[worlds.Run]
 	err := w.read(ctx, func(s *store) error {
 		records, err := s.listRuns(runFilter{workflowName: input.WorkflowName, statuses: input.Status})

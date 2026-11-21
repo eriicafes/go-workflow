@@ -150,7 +150,8 @@ func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := third.Write(ctx, [][]byte{[]byte("late")}); !errors.Is(err, worlds.ErrStreamClosed) {
+	// A closed stream drops the write, as world-local does.
+	if err := third.Write(ctx, [][]byte{[]byte("late")}); err != nil {
 		t.Fatalf("write to a closed stream = %v", err)
 	}
 	chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: input.RunID, Name: input.Name})

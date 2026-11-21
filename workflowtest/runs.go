@@ -157,13 +157,15 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, ids[1], worlds.EventTypeRunStarted, "", nil)
 
+	// Runs list newest first unless asked otherwise, as in the Workflow
+	// SDK's Worlds.
 	all, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name})
-	if err != nil || len(all.Data) != 3 || all.Data[0].RunID != ids[0] || all.Data[2].RunID != ids[2] {
-		t.Fatalf("ascending runs = %#v err=%v", all, err)
+	if err != nil || len(all.Data) != 3 || all.Data[0].RunID != ids[2] || all.Data[2].RunID != ids[0] {
+		t.Fatalf("runs in the default order = %#v err=%v", all, err)
 	}
-	desc, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Pagination: worlds.Pagination{SortOrder: worlds.SortOrderDescending}})
-	if err != nil || len(desc.Data) != 3 || desc.Data[0].RunID != ids[2] {
-		t.Fatalf("descending runs = %#v err=%v", desc, err)
+	asc, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Pagination: worlds.Pagination{SortOrder: worlds.SortOrderAscending}})
+	if err != nil || len(asc.Data) != 3 || asc.Data[0].RunID != ids[0] {
+		t.Fatalf("ascending runs = %#v err=%v", asc, err)
 	}
 	running, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Status: []worlds.Status{worlds.StatusRunning}})
 	if err != nil || len(running.Data) != 1 || running.Data[0].RunID != ids[1] {
@@ -172,7 +174,7 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	var seen []worlds.RunID
 	cursor := ""
 	for {
-		page, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Pagination: worlds.Pagination{Limit: 2, Cursor: cursor}, ResolveData: worlds.ResolveDataNone})
+		page, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Pagination: worlds.Pagination{Limit: 2, Cursor: cursor, SortOrder: worlds.SortOrderAscending}, ResolveData: worlds.ResolveDataNone})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,9 +266,15 @@ func conformDeleteData(t *testing.T, world worlds.World) {
 		}
 	}
 	err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "out", Chunk: []byte("more")})
-	conformExpect(t, err, worlds.ErrStreamClosed, "write to a deleted run's stream")
+	conformExpectDropped(t, err, "write to a deleted run's stream")
 	err = world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "new", Chunk: []byte("more")})
-	conformExpect(t, err, worlds.ErrStreamClosed, "new stream of a deleted run")
+	conformExpectDropped(t, err, "new stream of a deleted run")
+	// A deleted run's streams hold nothing and are closed, a new one too.
+	for _, name := range []string{"out", "new"} {
+		if chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: purged, Name: name}); err != nil || len(chunks.Data) != 0 || !chunks.Done {
+			t.Fatalf("deleted run's stream %s = %#v err=%v", name, chunks, err)
+		}
+	}
 
 	// RunsDeleteDataMany is optional.
 	if !world.Capabilities().DeleteData {

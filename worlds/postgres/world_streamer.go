@@ -44,15 +44,23 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if expired {
-			return worlds.ErrStreamClosed
-		}
 		last, closed, err := w.lockStream(ctx, tx, input.RunID, input.Name)
 		if err != nil {
 			return err
 		}
 		if closed {
-			return worlds.ErrStreamClosed
+			// A closed stream takes no more data, as world-postgres drops
+			// it.
+			return nil
+		}
+		if expired {
+			// A deleted run's new stream is closed as it is first written,
+			// as world-local closes it.
+			id := chunkIDs(last, 1)[0]
+			if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_stream_chunks (id, stream_id, run_id, data, eof) VALUES ($1, $2, $3, '', true)`), id, input.Name, input.RunID); err != nil {
+				return err
+			}
+			return notifyChunk(tx, input.RunID, input.Name, id)
 		}
 		if len(input.Chunks) == 0 {
 			return nil

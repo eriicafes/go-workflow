@@ -140,6 +140,11 @@ const noEvent worlds.EventID = "-"
 // events-storage does. An event that repeats a creation the log holds is
 // refused with ErrEventConflict. A non-empty event ID is noEvent.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
+	// A run of a newer spec version is a newer release's, as the Workflow
+	// SDK's Worlds refuse it.
+	if err := worlds.CheckRunSpecVersion(t.run.RunID, t.run.SpecVersion); err != nil {
+		return "", err
+	}
 	if t.run.Status.Terminal() {
 		var stepStatus worlds.Status
 		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed || event.EventType == worlds.EventTypeStepRetrying {
@@ -963,6 +968,8 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 }
 
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	// Pages are by slot. The cursor is the last returned event ID, in either
 	// order.
 	var page worlds.EventsPage
@@ -1010,6 +1017,8 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Event]
 	err := w.read(ctx, func(s *store) error {
 		if _, err := s.getRun(input.RunID); err != nil {
@@ -1040,7 +1049,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 // refusal reports whether err is an event's refusal rather than a storage
 // failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}

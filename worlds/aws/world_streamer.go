@@ -111,7 +111,9 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
 	// Concurrent writers race on count and retry. The write's transaction
 	// also requires the run's data not to be deleted, so a deleted run's
-	// streams, including new ones, take no more data.
+	// streams, including new ones, take no more data: a new one is closed,
+	// as world-local closes it. A closed stream drops the write, as
+	// world-local does.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -121,7 +123,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			return err
 		}
 		if meta.closed {
-			return worlds.ErrStreamClosed
+			return nil
 		}
 		condition := "attribute_not_exists(pk)"
 		if meta.found {
@@ -134,7 +136,7 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if item, found, err := w.item(ctx, runKey(string(input.RunID))); err != nil {
 			return err
 		} else if found && worlds.RunDataExpired(runFromItem(item).Run, time.Now()) {
-			return worlds.ErrStreamClosed
+			return w.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: input.RunID, Name: input.Name})
 		}
 		if attempt+1 >= maxAppendAttempts {
 			return fmt.Errorf("workflow/aws: stream write still contended after %d attempts: %w", maxAppendAttempts, err)

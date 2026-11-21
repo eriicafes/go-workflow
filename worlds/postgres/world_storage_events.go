@@ -281,7 +281,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an admission refusal, as opposed to a
 // storage failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -326,6 +326,8 @@ func (w *World) runExists(ctx context.Context, runID worlds.RunID) error {
 // EventsList reads the run's counters before its page, so the page covers
 // every position the snapshot counts.
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	// The list's defaults are world-postgres's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	var inBandCount int64
 	var last *string
 	err := w.pool.QueryRow(ctx, w.q(`SELECT s.seq_in_band, (SELECT max(e.id) FROM workflow.workflow_events e WHERE e.run_id = s.run_id)
@@ -344,6 +346,8 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	// The list's defaults are world-postgres's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 100)
 	return w.listEvents(ctx, input.RunID, &input.CorrelationID, input.Pagination, input.ResolveData)
 }
 
@@ -421,6 +425,11 @@ type appender struct {
 // ErrEventConflict. It returns a non-nil result, holding no event, for a
 // run_started of a run that started before, which appends nothing.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
+	// A run of a newer spec version is a newer release's, as the Workflow
+	// SDK's Worlds refuse it.
+	if err := worlds.CheckRunSpecVersion(a.run.RunID, a.run.SpecVersion); err != nil {
+		return nil, err
+	}
 	var step *worlds.Step
 	switch event.EventType {
 	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:

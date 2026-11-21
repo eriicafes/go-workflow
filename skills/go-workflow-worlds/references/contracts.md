@@ -132,8 +132,14 @@ the run's deployment and workflow name onto the hooks it creates
 
 Maintain ordered chunks and cursor continuation. Streams have no exclusive
 writers: concurrent writes interleave, each writer's chunks staying in order.
-Writes to a closed stream fail with `ErrStreamClosed`, and closing a closed
-stream does nothing. A `StreamWriter` from `StreamsOpenWriter` keeps its
+A write to a closed stream, or to a stream of a run whose data was deleted,
+is dropped as world-local drops it (a deleted run's new stream is closed as
+it is first written), or refused with `ErrStreamClosed`, as Vercel's backend
+refuses it. Closing a closed stream does nothing. Lists take their defaults
+from `Pagination.WithDefaults`: newest first for runs and steps, oldest first
+for hooks and events, with each World's SDK counterpart's page sizes. Refuse
+events on a run of a newer spec version with `ErrRunNotSupported`
+(`worlds.CheckRunSpecVersion`). A `StreamWriter` from `StreamsOpenWriter` keeps its
 writes in order; Release ends the writer without closing the stream, and
 CloseStream closes it for every writer.
 

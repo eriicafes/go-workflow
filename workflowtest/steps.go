@@ -102,15 +102,19 @@ func conformSteps(t *testing.T, world worlds.World) {
 	if !errors.Is(decoded, cause) || !errors.As(decoded, &fatal) {
 		t.Fatalf("stored step error lost its cause or fatal marker: %s", step.Error)
 	}
+	// Steps list newest first unless asked otherwise, as in the Workflow
+	// SDK's Worlds.
 	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID})
-	if err != nil || len(steps.Data) != 2 || steps.Data[0].StepID != "step_a" || steps.Data[1].StepID != "step_b" {
-		t.Fatalf("steps = %#v err=%v", steps, err)
+	if err != nil || len(steps.Data) != 2 || steps.Data[0].StepID != "step_b" || steps.Data[1].StepID != "step_a" {
+		t.Fatalf("steps in the default order = %#v err=%v", steps, err)
 	}
-	paged, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1}})
-	if err != nil || len(paged.Data) != 1 || !paged.HasMore || paged.Cursor == "" {
+	ascending := worlds.Pagination{SortOrder: worlds.SortOrderAscending, Limit: 1}
+	paged, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID, Pagination: ascending})
+	if err != nil || len(paged.Data) != 1 || paged.Data[0].StepID != "step_a" || !paged.HasMore || paged.Cursor == "" {
 		t.Fatalf("first step page = %#v err=%v", paged, err)
 	}
-	next, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID, Pagination: worlds.Pagination{Limit: 1, Cursor: paged.Cursor}})
+	ascending.Cursor = paged.Cursor
+	next, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID, Pagination: ascending})
 	if err != nil || len(next.Data) != 1 || next.Data[0].StepID != "step_b" || next.HasMore {
 		t.Fatalf("second step page = %#v err=%v", next, err)
 	}

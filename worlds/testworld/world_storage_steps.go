@@ -2,6 +2,7 @@ package testworld
 
 import (
 	"context"
+	"slices"
 	"sort"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -21,6 +22,8 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	values := make([]worlds.Step, 0, len(w.steps[input.RunID]))
@@ -33,5 +36,8 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 		}
 		return values[i].StepID < values[j].StepID
 	})
+	if input.Pagination.SortOrder == worlds.SortOrderDescending {
+		slices.Reverse(values)
+	}
 	return page(values, input.Pagination), nil
 }

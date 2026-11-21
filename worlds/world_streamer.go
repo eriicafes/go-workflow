@@ -27,11 +27,12 @@ func UserStreamName(runID RunID, name string) string {
 // chunks stay in order, and the writes of different writers interleave in the
 // order the World stores them.
 type Streamer interface {
-	// StreamsWrite appends Chunk. It returns ErrStreamClosed when the stream
-	// is closed.
+	// StreamsWrite appends Chunk. A closed stream, and a stream of a
+	// run whose data was deleted, takes no more data: the write is dropped, as
+	// world-local and world-postgres drop it, or refused with
+	// ErrStreamClosed, as Vercel's backend refuses it.
 	StreamsWrite(context.Context, StreamsWriteInput) error
-	// StreamsWriteMulti appends Chunks in order. It returns ErrStreamClosed
-	// when the stream is closed.
+	// StreamsWriteMulti appends Chunks in order, as StreamsWrite does.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
 	// StreamsClose marks a stream done for every writer. Closing a closed
 	// stream succeeds.
@@ -61,8 +62,8 @@ type StreamWriterOpener interface {
 // writers of the stream do not wait for. After Release or CloseStream it
 // accepts no more writes.
 type StreamWriter interface {
-	// Write appends chunks in order. It returns ErrStreamClosed when the
-	// stream is closed.
+	// Write appends chunks in order. A closed stream drops them, or
+	// refuses them with ErrStreamClosed, as StreamsWrite does.
 	Write(ctx context.Context, chunks [][]byte) error
 	// Release gives up the writer and its transport, leaving the stream open
 	// for other writers.

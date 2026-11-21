@@ -29,6 +29,8 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	// Read the run's STEP# items, order them by creation time, and read the
 	// payloads of the requested page only.
 	if err := ctx.Err(); err != nil {
@@ -48,7 +50,7 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	}
 	sortKey := func(view stepView) string { return indexSortKey(view.CreatedAt, string(view.StepID)) }
 	sort.Slice(views, func(i, j int) bool { return sortKey(views[i]) < sortKey(views[j]) })
-	page, err := sortedPage(views, sortKey, worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit})
+	page, err := sortedPage(views, sortKey, input.Pagination)
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}

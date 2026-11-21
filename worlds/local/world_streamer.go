@@ -35,17 +35,19 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			return err
 		}
 		if closed {
-			return worlds.ErrStreamClosed
+			// A closed stream takes no more data, as world-local drops it.
+			return nil
 		}
 		if count == 0 {
 			// A deleted run's streams take no more data: its purge closed the
-			// streams it had, so only a new stream reads the run.
+			// streams it had, and a new one is closed as it is first written,
+			// as world-local closes it.
 			run, err := s.getRunAnyTag(input.RunID)
 			if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
 				return err
 			}
 			if err == nil && worlds.RunDataExpired(run.Run, time.Now()) {
-				return worlds.ErrStreamClosed
+				return s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, 1, ?, NULL, 1)", string(input.RunID), input.Name, s.tagValue())
 			}
 		}
 		for index, chunk := range input.Chunks {

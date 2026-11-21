@@ -44,14 +44,17 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	// The list's defaults are world-postgres's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 100)
 	var q query
 	if input.RunID != "" {
 		q.where("h.run_id = " + q.arg(input.RunID))
 	}
-	if err := q.keyset(input.Pagination.Cursor, "h.created_at", "h.hook_id", false); err != nil {
+	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
+	if err := q.keyset(input.Pagination.Cursor, "h.created_at", "h.hook_id", descending); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	rows, err := w.pool.Query(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+q.clause()+order("h.created_at", "h.hook_id", false)+q.limit(input.Pagination.Limit)), q.args...)
+	rows, err := w.pool.Query(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+q.clause()+order("h.created_at", "h.hook_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}

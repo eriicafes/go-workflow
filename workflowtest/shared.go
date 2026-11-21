@@ -138,7 +138,7 @@ func conformSharedStreams(t *testing.T, a, b worlds.World) {
 	if err := first.CloseStream(ctx); err != nil {
 		t.Fatal(err)
 	}
-	conformExpect(t, second.Write(ctx, [][]byte{[]byte("z")}), worlds.ErrStreamClosed, "write after another instance closed the stream")
+	conformExpectDropped(t, second.Write(ctx, [][]byte{[]byte("z")}), "write after another instance closed the stream")
 	info, err := b.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: runID, Name: "out"})
 	if err != nil || !info.Done || info.TailIndex != 1 {
 		t.Fatalf("stream info from second instance = %#v err=%v", info, err)

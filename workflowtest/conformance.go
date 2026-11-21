@@ -158,6 +158,16 @@ func conformExpect(t *testing.T, err, want error, label string) {
 	}
 }
 
+// conformExpectDropped checks the answer to a write a stream takes no more
+// data for: world-local and world-postgres drop it without an error, and
+// Vercel's backend refuses it (ErrStreamClosed).
+func conformExpectDropped(t *testing.T, err error, label string) {
+	t.Helper()
+	if err != nil && !errors.Is(err, worlds.ErrStreamClosed) {
+		t.Fatalf("%s: error = %v, want none or %v", label, err, worlds.ErrStreamClosed)
+	}
+}
+
 func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []worlds.Event {
 	t.Helper()
 	var events []worlds.Event

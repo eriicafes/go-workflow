@@ -52,6 +52,8 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Hook]
 	err := w.read(ctx, func(s *store) error {
 		records, err := s.listHooks(input.RunID)
@@ -66,9 +68,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 			}
 			hooks = append(hooks, hook)
 		}
-		pagination := input.Pagination
-		pagination.SortOrder = worlds.SortOrderAscending
-		page, err = keyPage(hooks, pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
+		page, err = keyPage(hooks, input.Pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
 		return err
 	})
 	return page, err

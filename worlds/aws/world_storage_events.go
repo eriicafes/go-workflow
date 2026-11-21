@@ -202,7 +202,7 @@ func (w *World) addWait(ctx context.Context, runID worlds.RunID, event worlds.Ev
 	if event.EventType != worlds.EventTypeWaitCreated && event.EventType != worlds.EventTypeWaitCompleted {
 		return nil
 	}
-	page, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: event.CorrelationID})
+	page, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runID, CorrelationID: event.CorrelationID, Pagination: worlds.Pagination{Limit: -1}})
 	if err != nil {
 		return err
 	}
@@ -300,7 +300,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 // refusal reports whether err is an event's refusal by the transition rules,
 // rather than a failure to read or write.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}
@@ -449,6 +449,8 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 // EventsList reads the run's META item with a consistent read before the
 // page, so its snapshot counts no position the page's query cannot see.
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	if err := ctx.Err(); err != nil {
 		return worlds.EventsPage{}, err
 	}
@@ -468,6 +470,8 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	return w.eventsPage(ctx, input.RunID, input.CorrelationID, input.Pagination, input.ResolveData)
 }
 
@@ -878,6 +882,11 @@ func (tx *appendTx) owns(ctx context.Context, hook *worlds.Hook) (*tokenEntry, b
 // ErrEventConflict. It returns a non-nil result, holding no event, for a
 // run_started of a run that started before, which appends nothing.
 func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) (*worlds.EventResult, error) {
+	// A run of a newer spec version is a newer release's, as the Workflow
+	// SDK's Worlds refuse it.
+	if err := worlds.CheckRunSpecVersion(run.view.RunID, run.view.SpecVersion); err != nil {
+		return nil, err
+	}
 	if run.view.Status.Terminal() {
 		var stepStatus worlds.Status
 		if requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed || requested.EventType == worlds.EventTypeStepRetrying {

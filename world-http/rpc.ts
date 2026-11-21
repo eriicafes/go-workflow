@@ -228,6 +228,7 @@ const sdkErrorNames: Record<string, string> = {
 	throttled: "ThrottleError",
 	too_early: "TooEarlyError",
 	attribute_invalid: "AttributeValidationError",
+	run_not_supported: "RunNotSupportedError",
 	event_conflict: "EntityConflictError",
 	run_already_exists: "EntityConflictError",
 	run_terminal: "RunExpiredError",

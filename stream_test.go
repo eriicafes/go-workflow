@@ -2,13 +2,11 @@ package workflow_test
 
 import (
 	"context"
-	"errors"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -223,15 +221,22 @@ func TestWritersDoNotWaitForEachOther(t *testing.T) {
 		t.Fatalf("stream = %q, %v", data, err)
 	}
 
-	// A writer of a closed stream learns it from the store of its writes.
+	// A closed stream drops a late writer's writes, as world-local does.
 	late, err := run.Writer(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := late.Write([]byte("late")); err != nil && !errors.Is(err, worlds.ErrStreamClosed) {
+	if _, err := late.Write([]byte("late")); err != nil {
 		t.Fatal(err)
 	}
-	if err := late.Flush(); !errors.Is(err, worlds.ErrStreamClosed) {
-		t.Fatalf("flush to a closed stream = %v, want ErrStreamClosed", err)
+	if err := late.Flush(); err != nil {
+		t.Fatalf("flush to a closed stream = %v", err)
+	}
+	again, err := run.Reader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := io.ReadAll(again); err != nil || string(data) != "abc" {
+		t.Fatalf("stream after a late write = %q, %v", data, err)
 	}
 }
