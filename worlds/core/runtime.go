@@ -49,6 +49,9 @@ const (
 type Runtime struct {
 	world   worlds.World
 	runners RunnerSet
+	// runAheadDepth is how many inline steps' results a flow hands to the
+	// runner ahead of their writes.
+	runAheadDepth int
 }
 
 // fenceRefusalRedelivery is how long a flow whose in-band write the World
@@ -58,8 +61,12 @@ const fenceRefusalRedelivery = time.Second
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
 // world using runners. It copies runners.
-func NewRuntime(world worlds.World, runners RunnerSet) *Runtime {
-	return &Runtime{world: world, runners: maps.Clone(runners)}
+func NewRuntime(world worlds.World, runners RunnerSet, options ...RuntimeOption) *Runtime {
+	runtime := &Runtime{world: world, runners: maps.Clone(runners), runAheadDepth: DefaultRunAheadDepth}
+	for _, option := range options {
+		option(runtime)
+	}
+	return runtime
 }
 
 // Execute handles one delivery. With a nil StepID it executes a flow, which
@@ -91,6 +98,18 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 		return r.continueWaitHop(ctx, input)
 	}
 	err := r.executeFlow(ctx, input)
+	for restarts := 0; ; restarts++ {
+		var stop errRunAheadStop
+		if !errors.As(err, &stop) {
+			break
+		}
+		if restarts == maxRunAheadRestarts {
+			// The next delivery decides from the log.
+			log.Printf("workflow: run %s handed off after its run-ahead stopped: %s", input.RunID, stop.reason)
+			return worlds.Redeliver(0)
+		}
+		err = r.executeFlow(ctx, input)
+	}
 	if errors.Is(err, errReplaySuperseded) {
 		return worlds.Redeliver(fenceRefusalRedelivery)
 	}
@@ -116,6 +135,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput) erro
 		return err
 	}
 	execution.delivery = input
+	execution.aheadDepth = r.runAheadDepth
 	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
@@ -197,6 +217,12 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 		return nil
 	case errors.Is(err, errReplaySuperseded):
 		return errReplaySuperseded
+	case errors.As(err, new(errRunAheadStop)):
+		// The flow writes nothing more, its steps' results included, and
+		// starts again from the log.
+		execution.superseded = true
+		execution.abandonAhead()
+		return err
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):

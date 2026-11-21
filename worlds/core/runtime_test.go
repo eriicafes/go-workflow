@@ -1736,7 +1736,10 @@ func TestFlowThatRecordsAnInlineResultIsStillSupersededByAnotherFlow(t *testing.
 		}, first+1)
 		return inlineOutput{Values: []int{first, value}}, err
 	})
-	world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
+	world, _, runID, delivery := startInline(t, ctx, runner, inlineInput{})
+	// A flow that runs ahead may start the next step before its result's
+	// write is refused, as at-least-once steps allow.
+	runtime := core.NewRuntime(world, core.Runners(runner), core.WithRunAheadDepth(0))
 	done := make(chan error, 1)
 	go func() { done <- runtime.Execute(ctx, delivery.Input) }()
 

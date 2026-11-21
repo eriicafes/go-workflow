@@ -22,7 +22,8 @@ These live in package `core` (`github.com/eriicafes/go-workflow/worlds/core`).
 func Runners(values ...Runner) RunnerSet
 func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner
 
-func NewRuntime(world World, runners RunnerSet) *Runtime
+func NewRuntime(world World, runners RunnerSet, options ...RuntimeOption) *Runtime
+func WithRunAheadDepth(depth int) RuntimeOption
 func (*Runtime) Execute(ctx context.Context, input QueueInput) error
 ```
 
@@ -31,6 +32,10 @@ builds one from a function of payloads, for runners written without the
 `workflow` package: it receives the run's input payload and returns its output
 payload, read and written with the `DecodePayload` and `EncodePayload` methods
 of the run's `Execution`, which encrypt as the run does.
+
+`WithRunAheadDepth` sets how many inline steps' results a flow hands to the
+runner before their writes commit: 10 by default, 0 for none, at most 16. See
+[Running ahead](/guide/replay#running-ahead).
 
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
 flow. With `StepID` set it executes that step. A delivery for a terminal run
