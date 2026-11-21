@@ -24,9 +24,9 @@ import (
 var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
 
 const (
-	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, as
-	// the Workflow SDK does: a message keeps Vercel's default retention of 24
-	// hours, so it is still retained for an hour after it becomes visible.
+	// vqsMaxQueueDelay is the longest delay published to Vercel Queues: a
+	// message keeps Vercel's default retention of 24 hours, so it is still
+	// retained for an hour after it becomes visible.
 	// Longer delays are delivered in hops.
 	vqsMaxQueueDelay = 23 * time.Hour
 	// vqsMinRetry is the shortest visibility timeout Vercel Queues accepts.
@@ -42,9 +42,8 @@ const (
 )
 
 // queueURL returns the Vercel Queues API root of region: Config.QueueURL when
-// it was set, and region's own host otherwise, as world-vercel routes each
-// message. Through Vercel's API proxy, the x-vercel-queue-region header names
-// the region the proxy forwards to, as world-vercel sends it there.
+// it was set, and region's own host otherwise. Through Vercel's API proxy,
+// the x-vercel-queue-region header names the region the proxy forwards to.
 func (w *World) queueURL(region worlds.Region) (string, http.Header) {
 	var header http.Header
 	if w.api.proxy {
@@ -288,9 +287,9 @@ func delaySeconds(delay time.Duration) int64 {
 	return int64((delay + time.Second - 1) / time.Second)
 }
 
-// retryDelay backs off failed deliveries as the Workflow SDK does: a second
-// doubling with each delivery up to 15 minutes, with up to 25% jitter either
-// way, and never less than the 5 seconds Vercel Queues accepts.
+// retryDelay backs off failed deliveries: a second doubling with each
+// delivery up to 15 minutes, with up to 25% jitter either way, and never less
+// than the 5 seconds Vercel Queues accepts.
 func retryDelay(deliveryCount int) time.Duration {
 	delay := time.Second
 	for range min(max(deliveryCount-1, 0), 10) {

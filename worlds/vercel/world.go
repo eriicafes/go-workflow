@@ -1,7 +1,7 @@
 // Package vercelworld implements a World on Vercel's managed workflow
 // storage and Vercel Queues, for deployments on Vercel Functions. Runs, steps,
-// hooks, and streams are stored by Vercel's workflow backend, the one the
-// Workflow SDK uses, scoped to the deployment's project and environment.
+// hooks, and streams are stored by Vercel's workflow backend, scoped to the
+// deployment's project and environment.
 // Deliveries go through Vercel Queues, in hops of up to 23 hours for work due
 // later.
 package vercelworld
@@ -30,13 +30,13 @@ type Config struct {
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// It is required.
 	BaseURL string
-	// QueueURL is a Vercel Queues API root including /api/v3 that every
-	// queue request goes to. Empty sends each message to
+	// QueueURL is a Vercel Queues API root including /api/v3 that every queue
+	// request goes to. Empty sends each message to
 	// https://<region>.vercel-queue.com/api/v3 for the region its run ID
-	// carries, as world-vercel does, else that of VERCEL_REGION, else iad1,
-	// and releases each delivery in the region that delivered it. Through
-	// Vercel's API proxy, with Token, requests name the region in the
-	// x-vercel-queue-region header.
+	// carries, else that of VERCEL_REGION, else iad1, and releases each
+	// delivery in the region that delivered it. Through Vercel's API proxy,
+	// with Token, requests name the region in the x-vercel-queue-region
+	// header.
 	QueueURL string
 	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
 	// are published to. It is required.
@@ -134,8 +134,8 @@ type World struct {
 	// stream socket after it declined one.
 	socketMutex         sync.Mutex
 	socketDeclinedUntil time.Time
-	// streamsOverHTTP keeps stream writes on HTTP, as
-	// WORKFLOW_STREAMS_TRANSPORT=http does for the Workflow SDK.
+	// streamsOverHTTP keeps stream writes on HTTP, set by
+	// WORKFLOW_STREAMS_TRANSPORT=http.
 	streamsOverHTTP bool
 	// runKeyURL overrides the Vercel API route run keys are read from, for
 	// tests.

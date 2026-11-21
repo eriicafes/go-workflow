@@ -98,8 +98,8 @@ type Capabilities struct {
 	Analytics          bool
 	SetAttributes      bool
 	DeploymentAffinity bool
-	// DeleteData: RunsDeleteDataMany, and $retention "0" deletes a run's
-	// data as it finishes.
+	// DeleteData: the optional RunsDeleteDataMany. Every World deletes a
+	// run's data as it finishes when its $retention attribute is "0".
 	DeleteData bool
 	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
 	// with the run, or returns a *HookConflictError and creates nothing.
@@ -447,8 +447,8 @@ integrations. Operations normally take the runner's next position with
 `Execution.NextPosition`. Lazy hooks reserve a position at creation and pass it
 to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 
-Each declaration's ID carries its position: `NewStepIDAt`, `NewHookIDAt`, and
-`NewWaitIDAt` mint ULIDs whose entropy holds it, and `OperationPosition`
+Each declaration's ID carries its position: `NewStepID`, `NewHookID`, and
+`NewWaitID` mint ULIDs whose entropy holds it, and `OperationPosition`
 recovers it. A World whose backend cannot store a declaration's data, as
 Vercel's keeps only a wait's resume time, rebuilds the position from the ID.
 

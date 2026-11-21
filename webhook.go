@@ -26,10 +26,10 @@ type WebhookOption struct {
 	Manual bool
 }
 
-// CreateWebhook creates a webhook in the run ctx belongs to, as the Workflow
-// SDK's createWebhook does. A webhook is a hook resumed by each HTTP request
-// to its URL. On replay it returns the same webhook. The last of options
-// applies. It returns ErrNoWorkflow when ctx does not belong to a run.
+// CreateWebhook creates a webhook in the run ctx belongs to. A webhook is a
+// hook resumed by each HTTP request to its URL. On replay it returns the same
+// webhook. The last of options applies. It returns ErrNoWorkflow when ctx
+// does not belong to a run.
 func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webhook[T], error) {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
@@ -96,9 +96,9 @@ func (w *Webhook[T]) Dispose(ctx context.Context) {
 	w.hook.Dispose(ctx)
 }
 
-// WebhookRequest is a request to a webhook, the Workflow SDK's Request. Its
-// body is a stream of the run, so Body, JSON, and RespondWith are step-only:
-// pass the request to a step to read it or respond.
+// WebhookRequest is a request to a webhook. Its body is a stream of the run,
+// so Body, JSON, and RespondWith are step-only: pass the request to a step to
+// read it or respond.
 type WebhookRequest[T any] struct {
 	Method string
 	URL    string
@@ -114,10 +114,10 @@ func newWebhookRequest[T any](value worlds.WebhookRequest) *WebhookRequest[T] {
 	return &WebhookRequest[T]{Method: value.Method, URL: value.URL, Header: header, value: value}
 }
 
-// MarshalPayload encodes the request as the SDK's Request.
+// MarshalPayload encodes the request as a worlds.WebhookRequest.
 func (r WebhookRequest[T]) MarshalPayload() (any, error) { return r.value, nil }
 
-// UnmarshalPayload decodes the SDK's Request.
+// UnmarshalPayload decodes a worlds.WebhookRequest.
 func (r *WebhookRequest[T]) UnmarshalPayload(decode func(any) error) error {
 	var value worlds.WebhookRequest
 	if err := decode(&value); err != nil {
@@ -168,8 +168,8 @@ func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Resp
 	return execution.WriteWebhookResponse(ctx, r.value, value)
 }
 
-// webhookResponse returns response as the SDK's Response, its body held in
-// memory. A nil response is 200 OK.
+// webhookResponse returns response as a worlds.WebhookResponse, its body
+// held in memory. A nil response is 200 OK.
 func webhookResponse(response *http.Response) (worlds.WebhookResponse, error) {
 	if response == nil {
 		return worlds.WebhookResponse{Status: http.StatusOK}, nil

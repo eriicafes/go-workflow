@@ -19,12 +19,12 @@ const (
 	expireBatch = 100
 )
 
-// A run's data is deleted as the Workflow SDK deletes it: the run, step,
-// event, and hook rows stay, the payloads in its events go, and its streams
-// are left empty and closed. The run's expired_at is when its data is gone,
-// and data_purged records that its rows no longer hold it. Reads hide a run's
-// payloads once expired_at has passed, so a Config.Retention deadline takes
-// effect before Worker gets to it.
+// When a run's data is deleted, the run, step, event, and hook rows stay, the
+// payloads in its events go, and its streams are left empty and closed. The
+// run's expired_at is when its data is gone, and data_purged records that its
+// rows no longer hold it. Reads hide a run's payloads once expired_at has
+// passed, so a Config.Retention deadline takes effect before Worker gets to
+// it.
 
 // expireLoop deletes the data of runs whose retention has passed every
 // expireInterval until ctx is done.

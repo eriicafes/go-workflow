@@ -14,7 +14,6 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// Run keys are resolved as the Workflow SDK's Vercel World resolves them.
 // Inside a Vercel Function, a run of this deployment derives its key from the
 // deployment's key, VERCEL_DEPLOYMENT_KEY. A run of another deployment, or
 // any run read from outside a function, asks Vercel's API for its key.
@@ -29,8 +28,8 @@ const runKeyAttempts = 4
 var _ worlds.EncryptionKeys = (*World)(nil)
 
 // EncryptionKeyForRun returns the key of a run's payloads, or nil when they
-// are not encrypted, as the Workflow SDK's Vercel World does. With no project
-// ID, from Config.ProjectID or VERCEL_PROJECT_ID, payloads are not encrypted.
+// are not encrypted. With no project ID, from Config.ProjectID or
+// VERCEL_PROJECT_ID, payloads are not encrypted.
 func (w *World) EncryptionKeyForRun(ctx context.Context, runID worlds.RunID, deploymentID string) ([]byte, error) {
 	projectID := w.config.ProjectID
 	if projectID == "" {

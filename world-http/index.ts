@@ -29,7 +29,7 @@ import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
 
-const HTTP_WORLD_SPEC_VERSION = 3;
+const HTTP_WORLD_SPEC_VERSION = 2;
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";

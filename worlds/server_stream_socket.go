@@ -159,10 +159,9 @@ type StreamSocketOptions struct {
 }
 
 // OpenStreamSocketWriter returns a writer that opens a stream socket in the
-// background and writes through Fallback until it is open, as the Workflow
-// SDK's writers do. A write whose socket fails before the server
-// acknowledges it is sent again through Fallback, so a chunk may be stored
-// twice but is never lost.
+// background and writes through Fallback until it is open. A write whose
+// socket fails before the server acknowledges it is sent again through
+// Fallback, so a chunk may be stored twice but is never lost.
 func OpenStreamSocketWriter(ctx context.Context, options StreamSocketOptions) StreamWriter {
 	if options.HTTPClient == nil {
 		options.HTTPClient = http.DefaultClient

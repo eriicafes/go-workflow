@@ -10,15 +10,12 @@ import (
 	"net/http"
 	"path"
 	"time"
-
-	"github.com/oklog/ulid/v2"
 )
 
-// Webhooks work as in the Workflow SDK. A webhook's metadata says how it
-// responds: 202 Accepted, a static Response, or, with respondWith "manual",
-// the Response a step writes to the request's response stream. Each request
-// resumes the webhook's hook with a Request whose body is a byte stream of
-// the run, which only steps read.
+// A webhook's metadata says how it responds: 202 Accepted, a static Response,
+// or, with respondWith "manual", the Response a step writes to the request's
+// response stream. Each request resumes the webhook's hook with a Request
+// whose body is a byte stream of the run, which only steps read.
 
 const (
 	// webhookRequestMaxBytes bounds a webhook request body.
@@ -29,9 +26,9 @@ const (
 	byteStreamFraming = "framed-v1"
 )
 
-// StreamRef refers to a stream of a run, as the Workflow SDK's
-// ReadableStream and WritableStream values do. A ReadableStream made from a
-// body in memory holds the body in BodyInit instead of naming a stream.
+// StreamRef refers to a stream of a run, as a payload's ReadableStream and
+// WritableStream values do. A ReadableStream made from a body in memory holds
+// the body in BodyInit instead of naming a stream.
 type StreamRef struct {
 	Name string
 	// Type is "bytes" for a byte stream, and empty for a stream of values.
@@ -42,10 +39,6 @@ type StreamRef struct {
 	// BodyInit is the body of a ReadableStream made from it.
 	BodyInit []byte
 }
-
-// NewStreamName returns a new stream name, strm_ and a ULID, as the Workflow
-// SDK names the streams its values refer to.
-func NewStreamName() string { return "strm_" + ulid.Make().String() }
 
 func (r StreamRef) reduced(typ string) PayloadReduced {
 	if typ == "ReadableStream" && r.Name == "" {
@@ -97,7 +90,7 @@ type WebhookRequest struct {
 	ResponseWritable *StreamRef
 }
 
-// MarshalPayload encodes the request as the SDK's Request.
+// MarshalPayload encodes the request as a Request value.
 func (r WebhookRequest) MarshalPayload() (any, error) {
 	value := map[string]any{"method": r.Method, "url": r.URL, "headers": r.Header, "body": nil, "duplex": "half"}
 	if value["headers"] == nil {
@@ -112,7 +105,7 @@ func (r WebhookRequest) MarshalPayload() (any, error) {
 	return PayloadReduced{Type: "Request", Value: value}, nil
 }
 
-// UnmarshalPayload decodes the SDK's Request.
+// UnmarshalPayload decodes a Request value.
 func (r *WebhookRequest) UnmarshalPayload(decode func(any) error) error {
 	var reduced PayloadReduced
 	if err := decode(&reduced); err != nil {
@@ -144,7 +137,7 @@ type WebhookResponse struct {
 	Body *StreamRef
 }
 
-// MarshalPayload encodes the response as the SDK's Response.
+// MarshalPayload encodes the response as a Response value.
 func (r WebhookResponse) MarshalPayload() (any, error) {
 	status := r.Status
 	if status == 0 {
@@ -165,7 +158,7 @@ func (r WebhookResponse) MarshalPayload() (any, error) {
 	return PayloadReduced{Type: "Response", Value: value}, nil
 }
 
-// UnmarshalPayload decodes the SDK's Response.
+// UnmarshalPayload decodes a Response value.
 func (r *WebhookResponse) UnmarshalPayload(decode func(any) error) error {
 	var reduced PayloadReduced
 	if err := decode(&reduced); err != nil {
@@ -185,8 +178,8 @@ func (r *WebhookResponse) UnmarshalPayload(decode func(any) error) error {
 	return err
 }
 
-// WebhookMetadata is a webhook's metadata as the Workflow SDK's
-// createWebhook records it: respondWith is "manual" or the static Response.
+// WebhookMetadata is a webhook's metadata as it is recorded: respondWith is
+// "manual" or the static Response.
 // A webhook that answers 202 Accepted has no metadata.
 type WebhookMetadata struct {
 	// Manual holds each request open until a step responds to it.
@@ -229,12 +222,12 @@ func (m *WebhookMetadata) UnmarshalPayload(decode func(any) error) error {
 	return nil
 }
 
-// WebhookHandler serves a webhook's requests as the Workflow SDK does. It
-// writes the request body to a byte stream of the run, resumes the webhook's
-// hook with a Request referring to it, and responds as the webhook's
-// metadata says: 202 Accepted, its static Response, or the Response a step
-// writes for the request. It responds 404 when no active webhook owns the
-// token and 413 when the body exceeds 128 KiB.
+// WebhookHandler serves a webhook's requests. It writes the request body to a
+// byte stream of the run, resumes the webhook's hook with a Request referring
+// to it, and responds as the webhook's metadata says: 202 Accepted, its
+// static Response, or the Response a step writes for the request. It
+// responds 404 when no active webhook owns the token and 413 when the body
+// exceeds 128 KiB.
 //
 // The token is read from a {token} path wildcard when the handler is mounted
 // with one, otherwise from the last path segment. Mount it at

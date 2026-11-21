@@ -69,10 +69,14 @@ var (
 	// compensations, since they would replay against the same log.
 	ErrCorruptedEventLog = errors.New("workflow: corrupted event log")
 	// ErrRunExpired is returned when reading the result of a run whose data
-	// was deleted, as the Workflow SDK's RunExpiredError.
+	// was deleted.
 	ErrRunExpired = errors.New("workflow: run data expired")
-	// ErrAttributeInvalid is returned for run attributes outside the
-	// Workflow SDK's limits. See CheckAttributes.
+	// ErrStartHookOptions is the error of a hook that opens its run's start
+	// hook (see Execution.OpenStartHook) with MinRetention or Force, which
+	// only the start can set.
+	ErrStartHookOptions = errors.New("workflow: a hook opening the run's start hook takes no MinRetention or Force; set the retention on StartOptions.Hook")
+	// ErrAttributeInvalid is returned for run attributes outside the limits
+	// CheckAttributes enforces.
 	ErrAttributeInvalid = errors.New("workflow: invalid run attribute")
 	// ErrDeleteDataInvalid is returned by RunsDeleteDataMany for a request
 	// without one to MaxDeleteDataRunIDs unique run IDs.
@@ -322,10 +326,10 @@ var (
 	retryableErrorTypeName = errorTypeName(reflect.TypeFor[RetryableError]())
 )
 
-// encodeErrorNode returns err as the Workflow SDK's Error value: each error
-// of its chain is an Error whose name is its Go type, with its JSON encoding
-// as data and the next error as its cause. FatalError and RetryableError are
-// the SDK's errors of those names.
+// encodeErrorNode returns err as an Error value: each error of its chain is
+// an Error whose name is its Go type, with its JSON encoding as data and the
+// next error as its cause. FatalError and RetryableError are encoded under
+// those names.
 func encodeErrorNode(err error) (any, error) {
 	chain := NewError(err).chain
 	var next any
@@ -363,7 +367,7 @@ func encodeErrorNode(err error) (any, error) {
 	return next, nil
 }
 
-// decodeErrorNode returns the Error an SDK Error value records, reading its
+// decodeErrorNode returns the Error an Error value records, reading its
 // causes as its chain.
 func decodeErrorNode(node any) (error, error) {
 	if message, ok := node.(string); ok {
@@ -418,8 +422,7 @@ func decodeErrorNode(node any) (error, error) {
 	return &Error{message: chain[0].Message, chain: chain}, nil
 }
 
-// HookConflictError is ErrHookConflict naming the run that holds the token,
-// as the Workflow SDK's HookConflictError carries conflictingRunId.
+// HookConflictError is ErrHookConflict naming the run that holds the token.
 type HookConflictError struct{ RunID RunID }
 
 func (e *HookConflictError) Error() string {

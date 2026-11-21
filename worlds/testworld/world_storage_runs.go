@@ -117,10 +117,10 @@ func (m *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 	return worlds.NewDeleteDataResult(results), nil
 }
 
-// purgeLocked deletes a finished run's data, as the Workflow SDK does: the
-// payloads in its events, which are also its run, step, and hook payloads,
-// and its streams' chunks, leaving each stream empty and closed. It sets the
-// run's ExpiredAt unless it has already passed.
+// purgeLocked deletes a finished run's data: the payloads in its events,
+// which are also its run, step, and hook payloads, and its streams' chunks,
+// leaving each stream empty and closed. It sets the run's ExpiredAt unless it
+// has already passed.
 func (m *World) purgeLocked(runID worlds.RunID, now time.Time) {
 	run := m.runs[runID]
 	if !worlds.RunDataExpired(run, now) {

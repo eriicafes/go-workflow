@@ -162,7 +162,7 @@ hooks, and streams of Go runs show in Vercel's dashboard as JS ones do.
 | `attr_set` | | changes and writer |
 
 The runtime mints every step, hook, and wait ID with its replay position in the
-ID's entropy (`worlds.NewWaitIDAt` and the like), so a declaration's position
+ID's entropy (`worlds.NewWaitID` and the like), so a declaration's position
 comes back from its ID, and a step's retries and cancellation contexts come from
 the replay that declares it.
 

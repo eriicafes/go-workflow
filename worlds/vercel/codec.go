@@ -10,9 +10,9 @@ import (
 
 // The backend keeps an event as metadata it reads, in a fixed set of fields
 // per event type, plus one opaque payload in the event type's payload field.
-// go-workflow's events have the Workflow SDK's shape, so the codec maps each
-// field to the backend's: metadata fields to frame meta, and the payload,
-// already in the SDK's envelope, to the frame body.
+// go-workflow's events have the shape the backend reads, so the codec maps
+// each field to the backend's: metadata fields to frame meta, and the
+// payload, already encoded, to the frame body.
 
 // payloadFields names the payload field of each event type that has one.
 var payloadFields = map[worlds.EventType]string{

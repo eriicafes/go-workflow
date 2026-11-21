@@ -42,9 +42,9 @@ func Routes(routes ...QueueRoute) map[string]string {
 	return byWorkflow
 }
 
-// Retention is how long a finished run's data is kept, as the Workflow SDK's
+// Retention is how long a finished run's data is kept, as the run's
 // $retention attribute records it. Its zero value is RetainDefault, and
-// RetainNone is the only other value: the SDK supports no other retention.
+// RetainNone is the only other value.
 type Retention struct{ value string }
 
 var (
@@ -59,10 +59,10 @@ var (
 // RetainDefault, which is recorded by leaving the attribute out.
 func (r Retention) String() string { return r.value }
 
-// ReadRunRetention returns the retention a run's attributes ask for, as the
-// Workflow SDK reads it: RetainNone for a RetentionAttribute of "0", and
-// RetainDefault otherwise. A value the SDK does not support, such as another
-// duration, keeps the run's data rather than deleting it.
+// ReadRunRetention returns the retention a run's attributes ask for:
+// RetainNone for a RetentionAttribute of "0", and RetainDefault otherwise.
+// Any other value, such as another duration, keeps the run's data rather
+// than deleting it.
 func ReadRunRetention(attributes map[string]string) Retention {
 	if attributes[RetentionAttribute] == RetainNone.value {
 		return RetainNone

@@ -33,13 +33,15 @@ type StorageRuns interface {
 	// whose Capabilities report SetAttributes as false ignores the call and
 	// returns nil.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
-	// RunsDeleteDataMany deletes the data of finished runs, as the Workflow
-	// SDK's runs.deleteDataMany does: their payloads, the payloads in their
-	// events, their hooks' metadata, and their streams' chunks, leaving each
-	// stream empty and closed. The run, step, event, and hook records stay,
-	// and the run's ExpiredAt is set. It returns one result per RunID, in
-	// order. A World whose Capabilities report DeleteData as false returns an
-	// error wrapping errors.ErrUnsupported.
+	// A World deletes a run's data as the run finishes when the run's
+	// RetentionAttribute is RetainNone's, as RunsDeleteDataMany does.
+	//
+	// RunsDeleteDataMany deletes the data of finished runs: their payloads,
+	// the payloads in their events, their hooks' metadata, and their streams'
+	// chunks, leaving each stream empty and closed. The run, step, event, and
+	// hook records stay, and the run's ExpiredAt is set. It returns one
+	// result per RunID, in order. A World whose Capabilities report
+	// DeleteData as false returns an error wrapping errors.ErrUnsupported.
 	RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error)
 }
 
@@ -80,12 +82,12 @@ type StorageEvents interface {
 	// running step is not a repeat. It appends a new attempt, so a delivery can
 	// take over a step whose previous delivery died.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
-	// EventsCreateBatch appends Events to a run in order, as one in-band write
-	// when InBandCount is set. It appends none of them when any event is
-	// invalid. When one cannot be admitted it returns that refusal, and the
-	// events of other steps, hooks, and waits in the batch may still be
-	// appended, as in the Workflow SDK, so the runtime replays whatever the
-	// log holds. A refused in-band write appends none of them.
+	// EventsCreateBatch appends Events to a run in order, as one in-band
+	// write when InBandCount is set. It appends none of them when any event
+	// is invalid. When one cannot be admitted it returns that refusal, and
+	// the events of other steps, hooks, and waits in the batch may still be
+	// appended, so the runtime replays whatever the log holds. A refused
+	// in-band write appends none of them.
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
 	// EventsGet returns the event identified by RunID and EventID. It returns
 	// ErrEventNotFound when the event does not exist. It applies ResolveData to
@@ -150,9 +152,8 @@ type (
 	RunsDeleteDataManyInput struct {
 		RunIDs []RunID
 	}
-	// RunsDeleteDataManyResult is the result of RunsDeleteDataMany, as the
-	// Workflow SDK's DeleteRunsDataResult: one result per requested run, in
-	// order, and a count of each outcome.
+	// RunsDeleteDataManyResult is the result of RunsDeleteDataMany: one
+	// result per requested run, in order, and a count of each outcome.
 	RunsDeleteDataManyResult struct {
 		Summary DeleteDataSummary
 		Results []DeleteDataResult
@@ -195,8 +196,7 @@ const (
 	// RootRunIDAttribute holds the ID of the run at the root of a child run's
 	// lineage.
 	RootRunIDAttribute = "$rootRunId"
-	// RetentionAttribute holds a run's data retention, as the Workflow SDK
-	// records it. See Retention.
+	// RetentionAttribute holds a run's data retention. See Retention.
 	RetentionAttribute = "$retention"
 )
 
@@ -228,13 +228,12 @@ type Run struct {
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
 	CompletedAt *time.Time
-	// ExecutionContext is plain-text metadata about how the run was started,
-	// as the Workflow SDK's executionContext. See EventsCreateRunInput.
+	// ExecutionContext is plain-text metadata about how the run was started.
+	// See EventsCreateRunInput.
 	ExecutionContext map[string]any
 	// ExpiredAt is when the run's data was deleted, or is deleted for a
-	// World's retention, as the Workflow SDK's expiredAt records it. Once it
-	// has passed, the run's payloads are gone and Run.Value returns
-	// ErrRunExpired. See RunDataExpired.
+	// World's retention. Once it has passed, the run's payloads are gone and
+	// Run.Value returns ErrRunExpired. See RunDataExpired.
 	ExpiredAt *time.Time
 }
 
@@ -421,9 +420,8 @@ type (
 		// Run, and in the ResumeContext of the run's hooks.
 		EncryptionPublicKey string
 		// ExecutionContext is plain-text metadata about how the run was
-		// started, as the Workflow SDK's executionContext, such as
-		// ExecutionContextReplayedFromRunID. The World records it in
-		// run_created and on the Run.
+		// started, such as ExecutionContextReplayedFromRunID. The World
+		// records it in run_created and on the Run.
 		ExecutionContext map[string]any
 		// StartHook, on a World with Capabilities().StartHook, creates the
 		// run's start hook in the same write as the run, claiming its token.
@@ -556,8 +554,7 @@ func EventSlot(id EventID) (uint64, error) {
 	return slot, nil
 }
 
-// MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes,
-// as in the Workflow SDK.
+// MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes.
 const MaxDeleteDataRunIDs = 100
 
 // DeleteDataOutcome is the outcome of deleting one run's data.
@@ -574,7 +571,7 @@ const (
 	DeleteDataSkipped DeleteDataOutcome = "skipped"
 	// DeleteDataNotCreated reports a run cancelled before it was created.
 	// go-workflow creates a run before queueing it, so its Worlds never
-	// report it, but the Workflow SDK's do.
+	// report it.
 	DeleteDataNotCreated DeleteDataOutcome = "not_created"
 	// DeleteDataNotFound reports that no run has the ID.
 	DeleteDataNotFound DeleteDataOutcome = "not_found"

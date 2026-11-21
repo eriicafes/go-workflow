@@ -190,8 +190,8 @@ func conformWebhooks(t *testing.T, world worlds.World) {
 		t.Fatalf("webhook = %#v err=%v", hook, err)
 	}
 
-	// A webhook takes any number of requests, as in the Workflow SDK, and its
-	// payloads are opaque to the World.
+	// A webhook takes any number of requests, and its payloads are opaque to
+	// the World.
 	for range 2 {
 		conformAppend(t, world, runID, worlds.EventTypeHookReceived, "hook_web", conformReceived(t, []byte("devl-request")))
 	}

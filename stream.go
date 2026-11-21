@@ -26,7 +26,7 @@ func writerOption(values []WriterOption) WriterOption {
 
 // StreamWriter writes a run's stream. Writers of a stream do not wait for
 // each other: each writer's chunks stay in order, and different writers'
-// chunks interleave, as in the Workflow SDK.
+// chunks interleave.
 //
 // Each Write is one chunk. Write returns once the chunk is buffered, and the
 // writer stores buffered chunks together in the background, so a failed
@@ -35,7 +35,7 @@ type StreamWriter interface {
 	// Write buffers p as one chunk. It blocks while the buffer is full.
 	io.Writer
 	// Close stores what is buffered and gives up the writer, leaving the
-	// stream open for other writers. It is the Workflow SDK's releaseLock.
+	// stream open for other writers.
 	io.Closer
 	// Flush waits until every buffered chunk is stored.
 	Flush() error
@@ -359,9 +359,8 @@ func (r *streamReader) resolveKeys() error {
 }
 
 // outsideStreamFrame returns how a writer outside the run writes its stream
-// frames, as the Workflow SDK writes them: sealed to the run's public key,
-// or, for a run that published none, encrypted with its key, or plain when
-// it has none.
+// frames: sealed to the run's public key, or, for a run that published none,
+// encrypted with its key, or plain when it has none.
 func outsideStreamFrame(ctx context.Context, client Client, runID worlds.RunID) (func([]byte) ([]byte, error), error) {
 	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if err != nil {

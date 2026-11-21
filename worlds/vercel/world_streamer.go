@@ -90,11 +90,11 @@ const streamSocketRetryAfter = 5 * time.Minute
 type directStreamer struct{ worlds.Streamer }
 
 // StreamsOpenWriter returns a writer that sends a stream's writes over the
-// backend's stream socket, as the Workflow SDK does, writing through HTTP
-// while the socket opens and when it is declined or fails. The socket is
-// reachable with a deployment's OIDC token only, so through the API proxy,
-// or with WORKFLOW_STREAMS_TRANSPORT set to http, writes go through HTTP.
-// A writer without a writer ID is given one.
+// backend's stream socket, writing through HTTP while the socket opens and
+// when it is declined or fails. The socket is reachable with a deployment's
+// OIDC token only, so through the API proxy, or with
+// WORKFLOW_STREAMS_TRANSPORT set to http, writes go through HTTP. A writer
+// without a writer ID is given one.
 func (w *World) StreamsOpenWriter(ctx context.Context, input worlds.StreamsOpenWriterInput) (worlds.StreamWriter, error) {
 	if input.WriterID == "" {
 		input.WriterID = worlds.NewWriterID()

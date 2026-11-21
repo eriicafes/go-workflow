@@ -19,8 +19,8 @@ import (
 type requestIDKey struct{}
 
 // setRequestID records in an event's frame meta the Vercel request ID of the
-// delivery writing it, as the Workflow SDK does, so the dashboard links the
-// event to the invocation's logs.
+// delivery writing it, so the dashboard links the event to the invocation's
+// logs.
 func setRequestID(ctx context.Context, meta map[string]any) {
 	if id, ok := ctx.Value(requestIDKey{}).(string); ok {
 		meta["vercelId"] = id
@@ -56,7 +56,7 @@ func (message queueMessage) input() worlds.QueueInput {
 // or to Config.DeploymentID when that is empty, and returns an error wrapping
 // worlds.ErrDeploymentUnavailable when Vercel cannot find that deployment's
 // consumer. A delivery due more than 23 hours ahead is delivered in hops of up
-// to 23 hours, as the Workflow SDK does.
+// to 23 hours.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err

@@ -580,10 +580,10 @@ func (r *Runtime) reroute(ctx context.Context, run Run, input QueueInput) error 
 	return err
 }
 
-// MaxDeliveries is the most attempts of one delivery Runtime.Execute makes,
-// as in the Workflow SDK. With a World's retry backoff it spans hours, short
-// of a queue's retention, so a delivery that keeps failing fails its run or
-// step instead of expiring unseen.
+// MaxDeliveries is the most attempts of one delivery Runtime.Execute makes.
+// With a World's retry backoff it spans hours, short of a queue's retention,
+// so a delivery that keeps failing fails its run or step instead of expiring
+// unseen.
 const MaxDeliveries = 48
 
 // exceedDeliveries fails the run, or the step, of a delivery attempted more
