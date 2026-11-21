@@ -810,7 +810,9 @@ func TestInlineStepStorageErrorRetriesDeliveryAndCompletesStep(t *testing.T) {
 	}
 	// The retried delivery finds the attempt without a result, starts
 	// another, and completes the step.
-	if err := runtime.Execute(ctx, delivery); err != nil {
+	retried := delivery
+	retried.DeliveryCount, retried.Attempt = 2, 2
+	if err := runtime.Execute(ctx, retried); err != nil {
 		t.Fatalf("retried delivery: %v", err)
 	}
 	if calls := inlineCounter.Load() - before; calls != 2 {

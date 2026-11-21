@@ -70,7 +70,7 @@ func TestFlowRunsAgainAnInlineAttemptAStoppedDeliveryLeft(t *testing.T) {
 	// Any flow that finds the attempt without a result runs the next one,
 	// since the fence keeps a second flow from writing alongside it.
 	other := delivery.Input
-	other.MessageID = "other"
+	other.MessageID, other.RunInput = "other", nil
 	if err := runtime.Execute(ctx, other); err != nil {
 		t.Fatal(err)
 	}

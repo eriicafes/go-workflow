@@ -295,6 +295,7 @@ type QueueInput struct {
 
 	StepName, StepAttempt, StepResent            // a step delivery's step
 	RunSpecVersion                               // SpecVersion
+	RunInput                                     // a run's first flow: the run's creation
 	CompleteWaits                                // waits a WakeUp's flow completes first
 	Recovery                                     // a flow queued after the World lost its messages
 	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt

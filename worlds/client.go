@@ -3,7 +3,6 @@ package worlds
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -127,11 +126,9 @@ type ClientSpec struct {
 	Capabilities Capabilities `cbor:"capabilities"`
 }
 
-// CreateRun creates a run and queues its first delivery. It fills an empty
-// RunID, and an empty DeploymentID as StartDeploymentID does, for
-// LatestDeployment when input.Latest. When the run already exists and is still pending, as after a
-// create whose queueing failed, it queues the delivery again and returns the
-// run's ID with ErrRunAlreadyExists.
+// CreateRun creates a run and queues its first delivery, as StartRun does. It
+// fills an empty RunID, and an empty DeploymentID as StartDeploymentID does,
+// for LatestDeployment when input.Latest.
 func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
 	if input.RunID == "" {
 		input.RunID = NewRunID()
@@ -147,20 +144,10 @@ func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (R
 		}
 		input.DeploymentID = deploymentID
 	}
-	_, err := world.EventsCreateRun(ctx, input.EventsCreateRunInput)
-	if errors.Is(err, ErrRunAlreadyExists) {
-		run, getErr := world.RunsGet(ctx, RunsGetInput{RunID: input.RunID, ResolveData: ResolveDataNone})
-		if getErr != nil || run.Status != StatusPending {
-			return input.RunID, errors.Join(err, getErr)
-		}
-		input.DeploymentID = run.DeploymentID
-	} else if err != nil {
+	if err := StartRun(ctx, world, input.EventsCreateRunInput); err != nil {
 		return "", err
 	}
-	if _, queueErr := world.Queue(ctx, FirstFlow(input.RunID, input.WorkflowName, input.DeploymentID)); queueErr != nil {
-		return "", queueErr
-	}
-	return input.RunID, err
+	return input.RunID, nil
 }
 
 // NewClient returns a Client that calls world directly, in the same process.

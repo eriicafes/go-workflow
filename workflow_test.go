@@ -1052,6 +1052,19 @@ func TestRunCancellationLetsRunningStepFinish(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal(ctx.Err())
 				}
+				// A first delivery starts an inline body before its start is
+				// written, so the run is cancelled once the step is recorded
+				// as running.
+				for {
+					steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(steps.Data) == 1 && steps.Data[0].Status == worlds.StatusRunning {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
 				if err := run.Cancel(ctx); err != nil {
 					t.Fatal(err)
 				}

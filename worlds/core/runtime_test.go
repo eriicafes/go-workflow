@@ -1503,7 +1503,7 @@ func TestRedeliveredFlowRunsTheStepItStartedInlineAgain(t *testing.T) {
 
 	// The queue redelivers the flow's message, which owns the step, so it
 	// runs the step again at once.
-	if err := runtime.Execute(ctx, delivery.Input); err != nil {
+	if err := runtime.Execute(ctx, redelivered(delivery.Input, 1)); err != nil {
 		t.Fatal(err)
 	}
 	if queued := len(world.QueuedMessages()); queued != 1 {
@@ -1797,10 +1797,10 @@ func TestFailedStartReleasesTheStepForTheNextDelivery(t *testing.T) {
 
 	// The redelivery fails to start the step again, and the next one does.
 	world.fail.Store(true)
-	if err := runtime.Execute(ctx, delivery.Input); !errors.Is(err, errStartUnavailable) {
+	if err := runtime.Execute(ctx, redelivered(delivery.Input, 1)); !errors.Is(err, errStartUnavailable) {
 		t.Fatalf("delivery error = %v, want the batch error", err)
 	}
-	if err := runtime.Execute(ctx, delivery.Input); err != nil {
+	if err := runtime.Execute(ctx, redelivered(delivery.Input, 2)); err != nil {
 		t.Fatal(err)
 	}
 	output, err := runOutput(t, ctx, world, worlds.RunID(run.ID()))
@@ -2070,4 +2070,88 @@ func TestStepRedeliveryWaitsForAPendingRetryFromTheStepsLatestEvent(t *testing.T
 	if world.reads != 0 {
 		t.Fatalf("the delivery read the run %d times, want none", world.reads)
 	}
+}
+
+// redelivered returns input as the World delivers it again, times times
+// later, counted as attempts.
+func redelivered(input worlds.QueueInput, times int) worlds.QueueInput {
+	input.DeliveryCount += times
+	input.Attempt += times
+	return input
+}
+
+type turboInput struct{}
+type turboOutput struct{ Value int }
+
+func (turboInput) Workflow(turboOutput) {}
+
+var turboRunner = workflow.Use(func(ctx context.Context, _ turboInput) (turboOutput, error) {
+	value, err := workflow.Step(ctx, func(context.Context, int) (int, error) { return 7, nil }, 0)
+	return turboOutput{Value: value}, err
+})
+
+func TestFirstDeliveryOfARunReplaysWithoutReadingTheLog(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	base := testworld.NewManual()
+	defer base.Close()
+	world := &runReads{World: base}
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(base)), turboInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := base.QueuedMessages()[0].Input
+	if first.RunInput == nil {
+		t.Fatal("the first flow carries no run input")
+	}
+	runtime := core.NewRuntime(world, core.Runners(turboRunner))
+	if err := runtime.Execute(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if world.reads != 0 {
+		t.Fatalf("the first delivery read the run %d times, want none", world.reads)
+	}
+	if output, err := turboResult(t, ctx, base, worlds.RunID(run.ID())); err != nil || output.Value != 7 {
+		t.Fatalf("output = %+v err = %v", output, err)
+	}
+	// A platform's replay of the first delivery finds the run started, and
+	// replays from the log.
+	world.reads = 0
+	if err := runtime.Execute(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if world.reads == 0 {
+		t.Fatal("the replayed first delivery did not read the log")
+	}
+}
+
+func TestFirstFlowCreatesARunWhoseCreationNeverLanded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runID := worlds.NewRunID()
+	input, err := worlds.EncodePayload([1]turboInput{}, worlds.PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the first flow was queued.
+	first := worlds.FirstFlow(worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[turboInput](), Input: input})
+	first.DeliveryCount, first.Attempt = 1, 1
+	if err := core.NewRuntime(world, core.Runners(turboRunner)).Execute(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := turboResult(t, ctx, world, runID); err != nil || output.Value != 7 {
+		t.Fatalf("output = %+v err = %v", output, err)
+	}
+}
+
+// turboResult returns the output of a run of turboRunner.
+func turboResult(t *testing.T, ctx context.Context, world worlds.World, runID worlds.RunID) (turboOutput, error) {
+	t.Helper()
+	run, err := workflow.Get[turboOutput](workflow.NewContext(ctx, workflow.NewClient(world)), string(runID))
+	if err != nil {
+		return turboOutput{}, err
+	}
+	return run.Value(ctx)
 }

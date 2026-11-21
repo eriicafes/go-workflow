@@ -71,6 +71,14 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !validEvent(input.Event) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	if input.Event.EventType == worlds.EventTypeRunStarted {
+		// A first flow's run_started creates a run whose run_created never
+		// landed, and is stored without the creation it carries.
+		if err := worlds.CreateRunForStart(ctx, w, input.RunID, input.Event.Data); err != nil {
+			return worlds.EventResult{}, err
+		}
+		input.Event.Data = nil
+	}
 	var result worlds.EventResult
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
 		a, err := w.lockRun(ctx, tx, input.RunID)

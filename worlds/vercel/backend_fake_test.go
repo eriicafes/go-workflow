@@ -467,6 +467,21 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	if err != nil {
 		return outcome{status: http.StatusBadRequest, code: "invalid", message: err.Error()}
 	}
+	if eventType == worlds.EventTypeRunStarted && str(in.Meta, "workflowName") != "" {
+		// A first flow's run_started creates a run whose run_created never
+		// landed.
+		creation, _ := eventData(wireEvent{EventType: string(worlds.EventTypeRunCreated), Data: stored})
+		if err := worlds.CreateRunForStart(ctx, f.store, runID, creation); err != nil {
+			status, code := goErrorStatus(err)
+			return outcome{status: status, code: code, message: err.Error()}
+		}
+		f.mu.Lock()
+		if _, ok := f.specs[runID]; !ok {
+			f.specs[runID] = spec
+		}
+		f.mu.Unlock()
+		data = nil
+	}
 	if eventType == worlds.EventTypeRunCreated {
 		var created worlds.DataRunCreated
 		_ = json.Unmarshal(data, &created)

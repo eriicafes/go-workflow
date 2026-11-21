@@ -364,3 +364,34 @@ func conformExpectDataDeleted(t *testing.T, world worlds.World, runID worlds.Run
 		}
 	}
 }
+
+// conformResilientStart checks that a first flow's run_started carrying the
+// run's creation creates a run whose run_created never landed, and is stored
+// without it.
+func conformResilientStart(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	runID := conformRunID("resilient")
+	data, err := worlds.RunCreatedData(worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"seed": "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := 1
+	started, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data}, Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	if err != nil || started.EventID != worlds.EventIDForSlot(2) || started.InBandCount != 2 {
+		t.Fatalf("run_started = %+v err = %v, want the second event of a created run", started, err)
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.Status != worlds.StatusRunning || run.WorkflowName != "conformance" || string(run.Input) != `"input"` || run.Attributes["seed"] != "x" {
+		t.Fatalf("run = %+v err = %v", run, err)
+	}
+	events := conformAllEvents(t, world, runID)
+	if len(events) != 2 || events[0].EventType != worlds.EventTypeRunCreated || events[1].EventType != worlds.EventTypeRunStarted || len(events[1].Data) != 0 {
+		t.Fatalf("events = %+v, want run_created and a run_started without data", events)
+	}
+	// On a run that exists, the creation is ignored, and a repeat appends
+	// nothing.
+	again, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data}})
+	if err != nil || again.AllocatedEventCount != 0 {
+		t.Fatalf("repeated run_started = %+v err = %v", again, err)
+	}
+}

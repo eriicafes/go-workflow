@@ -9,8 +9,10 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -295,10 +297,72 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	return len(selected), nil
 }
 
-// FirstFlow returns the delivery that starts run runID of workflowName,
-// pinned to deploymentID, keyed by the run so a retried start queues it once.
-func FirstFlow(runID RunID, workflowName, deploymentID string) QueueInput {
-	return QueueInput{RunID: runID, WorkflowName: workflowName, IdempotencyKey: string(runID), DeploymentID: deploymentID, RunSpecVersion: SpecVersion}
+// FirstFlow returns the delivery that starts the run input creates, pinned
+// to its deployment, keyed by the run so a retried start queues it once, and
+// carrying the run's creation.
+func FirstFlow(input EventsCreateRunInput) QueueInput {
+	run := input
+	return QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID, RunSpecVersion: SpecVersion, RunInput: &run}
+}
+
+// StartRun creates the run input describes and queues its first flow at the
+// same time, as the Workflow SDK's start does. A failure to queue fails the
+// start. A creation that fails retryably does not: the queued flow's
+// run_started creates the run. Nor does a run that exists already, which the
+// queued flow's run_started may have created first.
+func StartRun(ctx context.Context, world World, input EventsCreateRunInput) error {
+	created := make(chan error, 1)
+	go func() {
+		_, err := world.EventsCreateRun(ctx, input)
+		created <- err
+	}()
+	_, queueErr := world.Queue(ctx, FirstFlow(input))
+	createErr := <-created
+	if queueErr != nil {
+		return queueErr
+	}
+	if createErr != nil && (IsRetryableWorldError(createErr) || errors.Is(createErr, ErrRunAlreadyExists)) {
+		return nil
+	}
+	return createErr
+}
+
+// IsRetryableWorldError reports whether a World's err is a transient one, a
+// throttle, a deadline, a network failure, or a server error, that the same
+// write could succeed after.
+func IsRetryableWorldError(err error) bool {
+	var throttle *ThrottleError
+	var network net.Error
+	var status interface{ HTTPStatus() int }
+	switch {
+	case errors.As(err, &throttle), errors.Is(err, context.DeadlineExceeded), errors.As(err, &network):
+		return true
+	case errors.As(err, &status):
+		return status.HTTPStatus() >= 500
+	}
+	return false
+}
+
+// CreateRunForStart creates the run of a run_started whose data carries the
+// run's creation, when the run does not exist: the first flow of a start
+// whose run_created never landed. A World that implements EventsCreate calls
+// it for every run_started and stores the event without its data.
+func CreateRunForStart(ctx context.Context, world World, runID RunID, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var created DataRunCreated
+	if json.Unmarshal(data, &created) != nil || created.WorkflowName == "" {
+		return nil
+	}
+	if _, err := world.RunsGet(ctx, RunsGetInput{RunID: runID, ResolveData: ResolveDataNone}); !errors.Is(err, ErrRunNotFound) {
+		return nil
+	}
+	_, err := world.EventsCreateRun(ctx, EventsCreateRunInput{RunID: runID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook})
+	if errors.Is(err, ErrRunAlreadyExists) {
+		return nil
+	}
+	return err
 }
 
 // PendingWaits returns the IDs of run runID's waits that have not completed,
@@ -336,6 +400,9 @@ func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, erro
 	}
 	return pending, nil
 }
+
+// resumeQueueAttempts is how often ResumeHook tries to queue a recorded payload's run.
+const resumeQueueAttempts = 3
 
 // ResumeHook appends payload to hook as a hook_received event and queues a
 // delivery so the hook's run resumes, addressed to the run's deployment. When
@@ -385,9 +452,6 @@ retry:
 	}
 	return result, queueErr
 }
-
-// resumeQueueAttempts is how often ResumeHook tries to queue a recorded payload's run.
-const resumeQueueAttempts = 3
 
 // RunDeploymentID returns the deployment run runID is pinned to, so a delivery
 // queued from outside the run can be addressed to it. It returns "" without

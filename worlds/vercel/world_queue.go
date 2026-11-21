@@ -46,11 +46,25 @@ type queueMessage struct {
 	StepAttempt                  int                    `json:"stepAttempt,omitempty"`
 	StepResent                   bool                   `json:"stepResent,omitempty"`
 	RunSpecVersion               int                    `json:"runSpecVersion,omitempty"`
+	RunInput                     *queueRunInput         `json:"runInput,omitempty"`
 	CompleteWaits                []string               `json:"completeWaits,omitempty"`
 	Recovery                     bool                   `json:"recovery,omitempty"`
 	WaitContinuation             *queueWaitContinuation `json:"waitContinuation,omitempty"`
 	// RetentionMs is the delivery's Retention in milliseconds.
 	RetentionMs int64 `json:"retentionMs,omitempty"`
+}
+
+// queueRunInput is a first flow's RunInput in a queueMessage: the run's
+// creation, as the Workflow SDK's runInput carries it.
+type queueRunInput struct {
+	WorkflowName        string            `json:"workflowName"`
+	DeploymentID        string            `json:"deploymentId,omitempty"`
+	Input               []byte            `json:"input,omitempty"`
+	Attributes          map[string]string `json:"attributes,omitempty"`
+	ExecutionContext    map[string]any    `json:"executionContext,omitempty"`
+	EncryptionPublicKey string            `json:"encryptionPublicKey,omitempty"`
+	StartHook           *worlds.StartHook `json:"startHook,omitempty"`
+	SpecVersion         int               `json:"specVersion"`
 }
 
 // queueWaitContinuation is worlds.WaitContinuation in a queueMessage.
@@ -80,6 +94,7 @@ func newQueueMessage(id string, input worlds.QueueInput) queueMessage {
 		RunSpecVersion:               input.RunSpecVersion,
 		CompleteWaits:                input.CompleteWaits,
 		Recovery:                     input.Recovery,
+		RunInput:                     toQueueRunInput(input.RunInput),
 		RetentionMs:                  input.Retention.Milliseconds(),
 	}
 	if wait := input.WaitContinuation; wait != nil {
@@ -106,6 +121,7 @@ func (message queueMessage) input() worlds.QueueInput {
 		RunSpecVersion:               message.RunSpecVersion,
 		CompleteWaits:                message.CompleteWaits,
 		Recovery:                     message.Recovery,
+		RunInput:                     message.RunInput.input(message.RunID),
 		Retention:                    time.Duration(message.RetentionMs) * time.Millisecond,
 	}
 	if wait := message.WaitContinuation; wait != nil {
@@ -394,4 +410,18 @@ func (c *consumer) rotate(ctx context.Context, delivery vqsDelivery, message que
 	}
 	log.Printf("workflow/vercel: continuing run %s on a new message instead of handing off queue message %s (%s; handoffs: %d)", input.RunID, delivery.MessageID, why, delivery.HandoffCount)
 	return true, nil
+}
+
+func toQueueRunInput(input *worlds.EventsCreateRunInput) *queueRunInput {
+	if input == nil {
+		return nil
+	}
+	return &queueRunInput{WorkflowName: input.WorkflowName, DeploymentID: input.DeploymentID, Input: input.Input, Attributes: input.Attributes, ExecutionContext: input.ExecutionContext, EncryptionPublicKey: input.EncryptionPublicKey, StartHook: input.StartHook, SpecVersion: worlds.SpecVersion}
+}
+
+func (run *queueRunInput) input(runID worlds.RunID) *worlds.EventsCreateRunInput {
+	if run == nil {
+		return nil
+	}
+	return &worlds.EventsCreateRunInput{RunID: runID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, Input: run.Input, Attributes: run.Attributes, ExecutionContext: run.ExecutionContext, EncryptionPublicKey: run.EncryptionPublicKey, StartHook: run.StartHook}
 }

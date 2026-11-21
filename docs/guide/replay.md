@@ -98,6 +98,15 @@ cancellation, and clients are out-of-band: they are never fenced and don't
 move the count. Replay ignores any event of a step, hook, or timer after its
 final one, so the first writer of a step's result wins.
 
+### A run's first delivery
+
+The first delivery of a run's first message knows the whole log already: the
+run's creation, which the message carries. So it replays without reading the
+log, writes `run_started` without waiting for it, and starts its inline steps
+before their writes commit, as the Workflow SDK's turbo mode does
+(`core.TurboFirstDeliveries`). When the run had already started, as on a
+platform's replay of a first delivery, it starts again from a read of the log.
+
 ### Running ahead
 
 A flow hands an inline step's result to the runner as soon as the step
