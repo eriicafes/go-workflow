@@ -40,9 +40,8 @@ Metadata fields are the SDK's: a step records `stepName`, a wait `resumeAt`,
 `run_created` the run's `encryptionPublicKey` when its payloads are encrypted,
 and a hook `token`, `isWebhook`, `isSystem` for hooks the runtime creates for
 itself, `forceClaimedFrom` for a forced claim, and `tokenRetentionUntil` for a
-reserved token. A declaration's position is in its ID
-(`worlds.OperationPosition`), and a step's retries and cancellation contexts
-come from the replay that declares it. Helpers named `Decode*` read a payload
+reserved token. A step's retries and cancellation contexts come from the
+replay that declares it. Helpers named `Decode*` read a payload
 from event data, such as `worlds.DecodeRunCompleted`, `worlds.DecodeRunFailed`,
 and `worlds.DecodeHookReceived`, and helpers named `Encode*` build event data,
 such as `worlds.EncodeRunFailed`, `worlds.EncodeHookReceived`, and

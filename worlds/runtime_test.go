@@ -23,7 +23,7 @@ func TestRuntimeMarksRunsWithUnknownWorkflowsAsFailed(t *testing.T) {
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	runID := worlds.RunID("wrun_missing_workflow")
+	runID := worlds.NewRunID()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "missing"}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestReplayDivergenceFailsRunWithoutReachingRunnerCode(t *testing.T) {
 
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 0 after 3 recovery replays")
+	awaitFailure(t, ctx, world, run, "after 3 recovery replays: recorded step")
 	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); !errors.Is(err, worlds.ErrCorruptedEventLog) {
 		t.Fatalf("run error = %v, want ErrCorruptedEventLog", err)
 	}
@@ -323,7 +323,7 @@ func TestReplayDivergenceRequeuesTheDivergedStepDelivery(t *testing.T) {
 
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 0 after 3 recovery replays")
+	awaitFailure(t, ctx, world, run, "after 3 recovery replays: recorded step")
 }
 
 func TestReplayDivergenceCatchesUnreachedOperations(t *testing.T) {
@@ -346,7 +346,7 @@ func TestReplayDivergenceCatchesUnreachedOperations(t *testing.T) {
 	// v2 returns after alpha without reaching the recorded beta.
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 1")
+	awaitFailure(t, ctx, world, run, "runner returned without reaching the recorded operation")
 }
 
 type hookedInput struct{ Token string }
@@ -727,9 +727,7 @@ func (w *racingWorld) EventsCreateBatch(ctx context.Context, input worlds.Events
 	if !w.raced && input.InBandCount != nil && input.Events[0].EventType == worlds.EventTypeStepCreated {
 		w.raced = true
 		other := input.Events[0]
-		// Another flow declared a step at the same position first.
-		position, _ := worlds.OperationPosition(other.CorrelationID)
-		other.CorrelationID = string(worlds.NewStepID(position))
+		// Another flow drew the same step ID and declared it first.
 		w.otherStep = other.CorrelationID
 		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: other, Options: worlds.EventsCreateOptions{InBandCount: input.InBandCount}}); err != nil {
 			return worlds.EventBatchResult{}, err
@@ -1993,24 +1991,25 @@ func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
 	runtime := worlds.NewRuntime(world, worlds.Runners())
 
 	// A flow past the cap fails its run without replaying it.
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_flow_cap", WorkflowName: "w"}); err != nil {
+	flowCap, flowAtCap := worlds.NewRunID(), worlds.NewRunID()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: flowCap, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_flow_cap", Attempt: worlds.MaxDeliveries + 1}); err != nil {
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: flowCap, Attempt: worlds.MaxDeliveries + 1}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_flow_cap"})
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: flowCap})
 	if err != nil || run.Status != worlds.StatusFailed || !strings.Contains(string(run.Error), "maximum attempts") {
 		t.Fatalf("run past the cap = %#v err=%v", run, err)
 	}
 	// The cap itself still executes.
-	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_flow_at_cap", WorkflowName: "w"}); err != nil {
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: flowAtCap, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_flow_at_cap", Attempt: worlds.MaxDeliveries}); err != nil {
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: flowAtCap, Attempt: worlds.MaxDeliveries}); err != nil {
 		t.Fatal(err)
 	}
-	if run, _ := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_flow_at_cap"}); strings.Contains(string(run.Error), "maximum attempts") {
+	if run, _ := world.RunsGet(ctx, worlds.RunsGetInput{RunID: flowAtCap}); strings.Contains(string(run.Error), "maximum attempts") {
 		t.Fatalf("run at the cap failed for its attempts: %#v", run)
 	}
 

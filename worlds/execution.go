@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,7 +38,8 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 }
 
 // Execution holds a delivery's run, event log, and target step. Durable operations
-// match declarations by position and read recorded outcomes. Results become
+// draw their IDs from the run's seed, match declarations by ID, and read
+// recorded outcomes. Results become
 // visible as Wait walks the event log.
 type Execution struct {
 	world  World
@@ -53,12 +55,14 @@ type Execution struct {
 	// keys encrypts and opens the run's payloads. It is nil when the run's
 	// payloads are not encrypted.
 	keys *RunKeys
-	// index maps declaration positions to indexes in events.
-	index map[int]int
+	// seed draws the run's correlation IDs, hook tokens, and random values.
+	seed *runSeed
+	// index maps the ULID of each recorded declaration to its index in
+	// events, and reached holds the ULIDs this replay has declared.
+	index   map[string]int
+	reached map[string]bool
 	// rollbacks holds compensations in registration order.
 	rollbacks []func(context.Context, *Execution) error
-	// next is the next declaration position to reserve.
-	next int
 	// horizon is the number of events the walk has passed. A result at a
 	// smaller index is visible to the runner.
 	horizon int
@@ -100,14 +104,20 @@ type Execution struct {
 	inlineUntil time.Time
 }
 
-func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) *Execution {
+func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) (*Execution, error) {
+	seed, err := newRunSeed(run)
+	if err != nil {
+		return nil, err
+	}
 	execution := &Execution{
 		world:     world,
 		ctx:       ctx,
 		run:       run,
 		events:    events,
 		target:    target,
-		index:     make(map[int]int),
+		seed:      seed,
+		index:     make(map[string]int),
+		reached:   make(map[string]bool),
 		settles:   make(map[string]int),
 		inBand:    run.InBandCount,
 		startedAt: time.Now(),
@@ -118,7 +128,7 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 	for index, event := range events {
 		execution.trackEvent(index, event)
 	}
-	return execution
+	return execution, nil
 }
 
 func (e *Execution) trackEvent(index int, event Event) {
@@ -133,13 +143,13 @@ func (e *Execution) trackEvent(index int, event Event) {
 		return
 	case EventTypeHookConflict:
 		e.settles[event.CorrelationID] = index
-		// A conflict also records the declaration, so index its position below.
+		// A conflict also records the declaration, so index it below.
 	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated:
 	default:
 		return
 	}
-	if position, ok := OperationPosition(event.CorrelationID); ok {
-		e.index[position] = index
+	if _, key, ok := strings.Cut(event.CorrelationID, "_"); ok {
+		e.index[key] = index
 	}
 }
 
@@ -222,27 +232,47 @@ func (e *Execution) GetTargetResult() (DataStepResult, bool) {
 	return result, true
 }
 
-// NextPosition returns the position of the next operation the runner declares
-// and advances the counter. Positions are recorded in event data so each replay
-// matches an operation to its recorded events. This is why a runner must
-// declare its operations in the same order on every replay.
-func (e *Execution) NextPosition() int {
-	position := e.next
-	e.next++
-	return position
+// NextStepID draws the ID of the next step the runner declares: step_ and the
+// run's next correlation ULID.
+func (e *Execution) NextStepID() StepID { return StepID("step_" + e.seed.ulid()) }
+
+// NextWaitID draws the ID of the next timer the runner declares: wait_ and
+// the run's next correlation ULID.
+func (e *Execution) NextWaitID() WaitID { return WaitID("wait_" + e.seed.ulid()) }
+
+// NextHookID draws the ID of the next hook the runner declares: hook_ and the
+// run's next correlation ULID.
+func (e *Execution) NextHookID() HookID { return HookID("hook_" + e.seed.ulid()) }
+
+// NextHookToken draws the token of the next hook the runner declares without
+// one.
+func (e *Execution) NextHookToken() string { return e.seed.hookToken() }
+
+// declared marks the operation with id as reached and returns the index of
+// its recorded declaration, matched by ULID so an operation of another kind
+// recorded with it is reported too. Because IDs come from the run's seed, a
+// runner must declare its operations in the same order on every replay.
+func (e *Execution) declared(id string) (int, bool) {
+	_, key, _ := strings.Cut(id, "_")
+	e.reached[key] = true
+	index, ok := e.index[key]
+	return index, ok
 }
 
-// unreachedPosition reports the lowest position of a recorded operation that the
-// replay has not reached. A runner that returns with such an operation left
-// over has diverged from its event log.
-func (e *Execution) unreachedPosition() (int, bool) {
-	lowest, found := 0, false
-	for position := range e.index {
-		if position >= e.next && (!found || position < lowest) {
-			lowest, found = position, true
+// unreached reports the earliest recorded declaration that the replay has
+// not reached. A runner that returns with such an operation left over has
+// diverged from its event log.
+func (e *Execution) unreached() (string, bool) {
+	lowest := -1
+	for key, index := range e.index {
+		if !e.reached[key] && (lowest < 0 || index < lowest) {
+			lowest = index
 		}
 	}
-	return lowest, found
+	if lowest < 0 {
+		return "", false
+	}
+	return e.events[lowest].CorrelationID, true
 }
 
 // InBandCount returns the count that fences a write made by this replay, for

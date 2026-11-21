@@ -23,20 +23,19 @@ type (
 	}
 )
 
-// DurableWait declares the timer at the next position. On first execution it
+// DurableWait declares the next timer. On first execution it
 // queues a delivery for DueAt and records wait_created. On replay it matches
 // the recorded declaration, and a flow that reaches the declaration once the
 // timer is due completes it. The timer settles when the walk reaches its
 // wait_completed, which Execution.Settled reports. When the operation recorded
-// at the position is not a timer, it ends the replay with a panic carrying a
+// with its ID is not a timer, it ends the replay with a panic carrying a
 // replayDivergenceError.
 func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitResult {
-	position := options.Execution.NextPosition()
-	creationIndex, exists := options.Execution.index[position]
+	waitID := options.Execution.NextWaitID()
+	creationIndex, exists := options.Execution.declared(string(waitID))
 	if !exists {
 		// On first execution, schedule the timer, then persist its
 		// declaration.
-		waitID := NewWaitID(position)
 		data := DataWaitCreated{ResumeAt: options.DueAt}
 		options.Execution.queue(QueueInput{NotBefore: &data.ResumeAt, IdempotencyKey: string(waitID)})
 		encoded, err := json.Marshal(data)
@@ -50,16 +49,15 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 		return DurableWaitResult{WaitID: waitID}
 	}
 
-	// Replay the declaration at this logical workflow position.
+	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeWaitCreated {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(waitID), Reason: fmt.Sprintf("recorded %s, replay reached a wait", event.EventType)}))
 	}
 	var data DataWaitCreated
 	if err := json.Unmarshal(event.Data, &data); err != nil {
 		return DurableWaitResult{Err: fmt.Errorf("workflow: decode wait: %w", err)}
 	}
-	waitID := WaitID(event.CorrelationID)
 
 	// A flow completes a due timer where it reaches its declaration, which
 	// every replay does, so the timer's own delivery or any later flow

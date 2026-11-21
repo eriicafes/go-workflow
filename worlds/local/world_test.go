@@ -519,13 +519,14 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_restart", WorkflowName: workflow.Use(double).Name(), Input: input})
+	restartID := worlds.NewRunID()
+	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: restartID, WorkflowName: workflow.Use(double).Name(), Input: input})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = created
 	notBefore := time.Now().Add(300 * time.Millisecond)
-	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_restart", NotBefore: &notBefore}); err != nil {
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: restartID, NotBefore: &notBefore}); err != nil {
 		t.Fatal(err)
 	}
 	if err := world.Close(); err != nil {
@@ -537,7 +538,7 @@ func TestQueuedWorkSurvivesRestart(t *testing.T) {
 	}
 
 	reopened := startWorld(t, dir, runners)
-	run, err := reopened.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: "wrun_restart", Timeout: 10 * time.Second})
+	run, err := reopened.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: restartID, Timeout: 10 * time.Second})
 	var output doubleInput
 	if err != nil || run.Status != worlds.StatusCompleted || worlds.DecodePayload(run.Output, nil, &output) != nil || output.Value != 8 {
 		t.Fatalf("run after restart = %#v err=%v", run, err)

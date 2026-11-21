@@ -324,7 +324,8 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 		return nil, nil
 	}))
 	ctx := context.Background()
-	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_manual", WorkflowName: "manual"})
+	runID := worlds.NewRunID()
+	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "manual"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +337,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_manual", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_manual", Data: data}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook_manual", Data: data}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,33 +416,9 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 
 func ptr(value int) *int { return &value }
 
-func TestOperationPosition(t *testing.T) {
-	for _, position := range []int{0, 1, 7, 1 << 20} {
-		for _, id := range []string{string(worlds.NewStepID(position)), string(worlds.NewHookID(position)), string(worlds.NewWaitID(position))} {
-			if got, ok := worlds.OperationPosition(id); !ok || got != position {
-				t.Fatalf("worlds.OperationPosition(%s) = %d, %v, want %d", id, got, ok, position)
-			}
-		}
-	}
-	if worlds.NewStepID(3) == worlds.NewStepID(3) {
-		t.Fatal("positioned IDs repeat")
-	}
-	for _, id := range []string{"", "step", "step_notaulid", "evnt_00000000000000000000000001x"} {
-		if _, ok := worlds.OperationPosition(id); ok {
-			t.Errorf("worlds.OperationPosition(%q) reported ok", id)
-		}
-	}
-}
-
 func TestHookTokensUseNanoIDsAlphabet(t *testing.T) {
 	const alphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
-	run := worlds.Run{RunID: "wrun_tokens", WorkflowName: "wf"}
-	for _, token := range []string{worlds.NewHookToken(), worlds.NewRunHookToken(run, 3)} {
-		if len(token) != 21 || strings.Trim(token, alphabet) != "" {
-			t.Errorf("token %q is not 21 characters of Nano ID's alphabet", token)
-		}
-	}
-	if worlds.NewRunHookToken(run, 3) != worlds.NewRunHookToken(run, 3) || worlds.NewRunHookToken(run, 3) == worlds.NewRunHookToken(run, 4) {
-		t.Error("run hook tokens are not stable per position")
+	if token := worlds.NewHookToken(); len(token) != 21 || strings.Trim(token, alphabet) != "" {
+		t.Errorf("token %q is not 21 characters of Nano ID's alphabet", token)
 	}
 }

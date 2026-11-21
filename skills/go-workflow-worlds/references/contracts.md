@@ -27,9 +27,8 @@ input is slot 1) and reads decode them with `worlds.EventPayload`, skipping
 input, output, and metadata under `ResolveDataNone` but keeping errors.
 
 A backend that cannot store an event's whole Data rebuilds what it dropped:
-step, hook, and wait IDs minted by the runtime carry their declaration
-position (`worlds.OperationPosition`), and the runtime reads a wait's
-cancellation contexts from the replay, so a wait needs only its resume time.
+replay matches declarations by ID and reads a wait's cancellation contexts
+from the replay, so a wait needs only its resume time.
 
 Use SDK payload types such as `DataStepCreated`, `DataStepResult`,
 `DataRunCreated`, `DataRunCompleted`, `DataRunFailed`, `DataHookCreated`,

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -489,14 +490,18 @@ func TestStartOptions(t *testing.T) {
 	}
 }
 
-// regionalWorld is a World whose run IDs carry their region as a suffix.
-type regionalWorld struct{ *testworld.World }
+// regionalWorld is a World that remembers the region each run ID was given.
+type regionalWorld struct {
+	*testworld.World
+	regions *sync.Map
+}
 
-func (regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
+func (w regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
 	if region == "" {
 		region = "iad1"
 	}
-	return id + worlds.RunID("_"+string(region))
+	w.regions.Store(id, region)
+	return id
 }
 
 func (w regionalWorld) Capabilities() worlds.Capabilities {
@@ -505,9 +510,12 @@ func (w regionalWorld) Capabilities() worlds.Capabilities {
 	return capabilities
 }
 
-func (regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
-	_, code, _ := strings.Cut(strings.TrimPrefix(string(id), "wrun_"), "_")
-	return worlds.Region(code), code != ""
+func (w regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
+	region, ok := w.regions.Load(id)
+	if !ok {
+		return "", false
+	}
+	return region.(worlds.Region), true
 }
 
 type regionParentInput struct{}
@@ -528,7 +536,7 @@ func TestStartRegion(t *testing.T) {
 	// The runtime runs on the regional World, so child starts see it.
 	inner := testworld.NewManual()
 	defer inner.Close()
-	world := regionalWorld{inner}
+	world := regionalWorld{inner, &sync.Map{}}
 	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

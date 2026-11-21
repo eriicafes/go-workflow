@@ -82,3 +82,34 @@ func TestIncrementBase32Overflow(t *testing.T) {
 		t.Fatalf("incrementBase32(0Z) = %s", value)
 	}
 }
+
+// TestExecutionDrawsFromRunSeed checks that declarations draw the SDK's IDs
+// and tokens for the run, in declaration order.
+func TestExecutionDrawsFromRunSeed(t *testing.T) {
+	run := Run{RunID: "wrun_41JQ8Z5K3M50NP6Q7R8S9T0VWX", WorkflowName: "checkout"}
+	execution, err := newExecution(t.Context(), nil, run, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{string(execution.NextStepID()), execution.NextHookToken(), string(execution.NextHookID()), execution.NextHookToken(), string(execution.NextWaitID())}
+	raw, err := os.ReadFile("testdata/seed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		RunID   RunID    `json:"runId"`
+		Results []string `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	want := cases[1].Results
+	if cases[1].RunID != run.RunID {
+		t.Fatalf("vector run = %s", cases[1].RunID)
+	}
+	for index, prefix := range []string{"step_", "", "hook_", "", "wait_"} {
+		if got[index] != prefix+want[index] {
+			t.Errorf("draw %d = %s, want %s", index, got[index], prefix+want[index])
+		}
+	}
+}

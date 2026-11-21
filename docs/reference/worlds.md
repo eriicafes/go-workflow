@@ -446,18 +446,15 @@ such as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata`, the SDK's
 
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced
-integrations. Operations normally take the runner's next position with
-`Execution.NextPosition`. Lazy hooks reserve a position at creation and pass it
-to `DurableHook` when receiving, selecting, or explicitly checking ownership.
-
-Each declaration's ID carries its position: `NewStepID`, `NewHookID`, and
-`NewWaitID` mint ULIDs whose entropy holds it, and `OperationPosition`
-recovers it. A World whose backend cannot store a declaration's data, as
-Vercel's keeps only a wait's resume time, rebuilds the position from the ID.
+integrations. Operations draw their IDs from the run's seed with
+`Execution.NextStepID`, `NextWaitID`, and `NextHookID`, and a hook created
+without a token draws one with `NextHookToken`. Lazy hooks draw their ID at
+creation and pass it to `DurableHook` when receiving, selecting, or explicitly
+checking ownership.
 
 | Function | Description |
 | --- | --- |
-| `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
+| `DurableStep` | Declares the next step, or executes it in its step delivery. |
 | `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
 | `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
@@ -471,7 +468,6 @@ Vercel's keeps only a wait's resume time, rebuilds the position from the ID.
 | `PendingWaits` | The IDs of a run's pending waits, in creation order. |
 | `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
 | `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
-| `NewRunHookToken` | Derives a stable token from a run and hook declaration position. |
 | `ExecutionFromContext` | The replay state of the current delivery. |
 
 ## Errors

@@ -233,8 +233,5 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 		if err := json.Unmarshal(event.Data, &data); err != nil || data.ResumeAt.IsZero() {
 			t.Fatalf("wait as the backend keeps it = %s err=%v", event.Data, err)
 		}
-		if position, ok := worlds.OperationPosition(event.CorrelationID); !ok || position == 0 {
-			t.Fatalf("wait position from %s", event.CorrelationID)
-		}
 	}
 }
