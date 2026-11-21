@@ -87,6 +87,9 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	if input.StepID != nil {
 		return r.executeStep(ctx, input)
 	}
+	if input.Intermediate() {
+		return r.continueWaitHop(ctx, input)
+	}
 	err := r.executeFlow(ctx, input)
 	if errors.Is(err, errReplaySuperseded) {
 		return worlds.Redeliver(fenceRefusalRedelivery)
@@ -179,6 +182,9 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 		if execution.superseded && err == nil {
 			err = errReplaySuperseded
 		}
+		if err == nil {
+			err = r.armTimers(execution)
+		}
 	}()
 
 	// Interpret replay control flow or materialize the root outcome.
@@ -212,7 +218,7 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 }
 
 // resend queues again the step deliveries a delivery that stopped may have
-// left unqueued.
+// left unqueued, and completes the waits the delivery wakes the run for.
 func (r *Runtime) resend(execution *Execution) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -220,6 +226,18 @@ func (r *Runtime) resend(execution *Execution) (err error) {
 		}
 	}()
 	execution.resendSteps()
+	execution.completeWaitsOnWake()
+	return nil
+}
+
+// armTimers queues the timers the flow owns as it ends.
+func (r *Runtime) armTimers(execution *Execution) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = replayExit(recovered)
+		}
+	}()
+	execution.armTimers()
 	return nil
 }
 
@@ -400,7 +418,7 @@ func stepRetryDue(events []worlds.Event, stepID worlds.StepID) (time.Time, bool)
 // wake queues a flow of run, without an idempotency key, so the flow
 // consumes what the delivery recorded.
 func (r *Runtime) wake(ctx context.Context, run worlds.Run) error {
-	_, err := r.world.Queue(ctx, worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID})
+	_, err := r.world.Queue(ctx, worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, RunSpecVersion: worlds.SpecVersion})
 	return err
 }
 
@@ -540,7 +558,9 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input worlds.QueueInput
 		}
 		return err
 	}
-	input.NotBefore = nil
+	// The recovery is a new message, which the key of the one being
+	// delivered, still live, would absorb.
+	input.NotBefore, input.IdempotencyKey = nil, ""
 	input.ReplayDivergenceCount++
 	_, err := r.world.Queue(ctx, input)
 	return err
@@ -564,6 +584,9 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 		input.WorkflowName = run.WorkflowName
 		input.DeploymentID = run.DeploymentID
 		input.DeploymentMismatchRetryCount = attempts + 1
+		// The re-route is a new message, which the key of the one being
+		// delivered, still live, would absorb.
+		input.IdempotencyKey = ""
 		_, err := r.world.Queue(ctx, input)
 		if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 			return err

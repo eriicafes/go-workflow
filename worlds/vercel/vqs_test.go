@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,10 +65,10 @@ func TestPublishVQS(t *testing.T) {
 	world := newQueueWorld(t, server)
 	world.config.OIDCToken = func(context.Context) (string, error) { return "rotated-token", nil }
 	world.config.DeploymentID = "dpl_1"
-	if err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, "01ID", 90*time.Second+time.Millisecond, ""); err != nil {
+	if err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{IdempotencyKey: "key", ConcurrencyKey: "wrun_1", Delay: 90*time.Second + time.Millisecond}); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.publishVQS(context.Background(), queueMessage{ID: "02ID", RunID: "wrun_1"}, "02ID", 0, "dpl_run"); err != nil {
+	if err := world.publishVQS(context.Background(), queueMessage{ID: "02ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_run", Retention: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.all()
@@ -76,11 +77,12 @@ func TestPublishVQS(t *testing.T) {
 		t.Fatalf("publish = %+v", first)
 	}
 	for header, want := range map[string]string{
-		"Authorization":       "Bearer rotated-token",
-		"Content-Type":        "application/json",
-		"Vqs-Idempotency-Key": "01ID",
-		"Vqs-Delay-Seconds":   "91",
-		"Vqs-Deployment-Id":   "dpl_1",
+		"Authorization":                    "Bearer rotated-token",
+		"Content-Type":                     "application/json",
+		"Vqs-Idempotency-Key":              "key",
+		"Vqs-Experimental-Concurrency-Key": "wrun_1",
+		"Vqs-Delay-Seconds":                "91",
+		"Vqs-Deployment-Id":                "dpl_1",
 	} {
 		if got := first.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
@@ -89,8 +91,12 @@ func TestPublishVQS(t *testing.T) {
 	if got := first.Header.Get("Vqs-Retention-Seconds"); got != "" {
 		t.Fatalf("publish sets retention %q, want Vercel's default", got)
 	}
-	if got := requests[1].Header.Get("Vqs-Delay-Seconds"); got != "" {
+	second := requests[1]
+	if got := second.Header.Get("Vqs-Delay-Seconds"); got != "" {
 		t.Fatalf("immediate publish has delay %q", got)
+	}
+	if second.Header.Get("Vqs-Idempotency-Key") != "" || second.Header.Get("Vqs-Experimental-Concurrency-Key") != "" || second.Header.Get("Vqs-Retention-Seconds") != "3600" {
+		t.Fatalf("second publish headers = %v", second.Header)
 	}
 	if got := requests[1].Header.Get("Vqs-Deployment-Id"); got != "dpl_run" {
 		t.Fatalf("addressed publish deployment = %q, want dpl_run", got)
@@ -102,7 +108,15 @@ func TestQueuePublishesTheDelivery(t *testing.T) {
 	world := newQueueWorld(t, server)
 	stepID := worlds.StepID("step_1")
 	due := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", StepID: &stepID, NotBefore: &due, IdempotencyKey: "key", DeploymentID: "dpl_run", ReplayDivergenceCount: 2, DeploymentMismatchRetryCount: 1})
+	resumeAt, hopAt := due.Add(48*time.Hour), due.Add(25*time.Hour)
+	sent := worlds.QueueInput{
+		RunID: "wrun_1", QueueName: "queue", WorkflowName: "wf", StepID: &stepID, NotBefore: &due, IdempotencyKey: "key", DeploymentID: "dpl_run",
+		ReplayDivergenceCount: 2, DeploymentMismatchRetryCount: 1, StepName: "double", StepAttempt: 3, StepResent: true, StepInput: []byte{0, 1, 2},
+		RunSpecVersion: worlds.SpecVersion, RunInput: &worlds.RunInput{WorkflowName: "wf", DeploymentID: "dpl_run", SpecVersion: worlds.SpecVersion},
+		CompleteWaits: []string{"wait_1"}, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_2", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
+		Retention: worlds.StepRetention,
+	}
+	result, err := world.Queue(context.Background(), sent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,24 +125,92 @@ func TestQueuePublishesTheDelivery(t *testing.T) {
 	if err := json.Unmarshal([]byte(publish.Body), &message); err != nil {
 		t.Fatal(err)
 	}
-	input := message.input()
-	if input.MessageID != result.MessageID || input.RunID != "wrun_1" || *input.StepID != stepID || !input.NotBefore.Equal(due) || input.IdempotencyKey != "key" || input.DeploymentID != "dpl_run" || input.ReplayDivergenceCount != 2 || input.DeploymentMismatchRetryCount != 1 {
-		t.Fatalf("published delivery = %+v", input)
+	// Every field of the delivery comes back from the message.
+	got, want := message.input(), sent
+	want.MessageID = result.MessageID
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("published delivery = %+v\nwant %+v", got, want)
 	}
 	if delay, _ := strconv.Atoi(publish.Header.Get("Vqs-Delay-Seconds")); delay < 3599 || delay > 3600 {
 		t.Fatalf("delay = %d", delay)
 	}
-	if got := publish.Header.Get("Vqs-Idempotency-Key"); got != result.MessageID {
+	// The runtime's key is the message's idempotency key.
+	if got := publish.Header.Get("Vqs-Idempotency-Key"); got != "key" {
 		t.Fatalf("idempotency key = %q", got)
 	}
+	if got := publish.Header.Get("Vqs-Retention-Seconds"); got != "604800" {
+		t.Fatalf("retention = %q", got)
+	}
+	if got := publish.Header.Get("Vqs-Deployment-Id"); got != "dpl_run" {
+		t.Fatalf("deployment = %q", got)
+	}
 
-	// A delay beyond Vercel Queues' limit is published as a 23-hour hop.
+	// A delivery without a key is published without one, and a delay beyond
+	// what the default retention allows is cut to 23 hours: the runtime
+	// reaches later timers in hops.
 	later := time.Now().Add(10 * 24 * time.Hour)
 	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", NotBefore: &later}); err != nil {
 		t.Fatal(err)
 	}
-	if got := server.all()[1].Header.Get("Vqs-Delay-Seconds"); got != strconv.Itoa(int(vqsMaxQueueDelay/time.Second)) {
+	long := server.all()[1]
+	if got := long.Header.Get("Vqs-Delay-Seconds"); got != strconv.Itoa(int(vqsMaxQueueDelay/time.Second)) {
 		t.Fatalf("long delay = %s", got)
+	}
+	if long.Header.Get("Vqs-Idempotency-Key") != "" || long.Header.Get("Vqs-Retention-Seconds") != "" {
+		t.Fatalf("unkeyed publish headers = %v", long.Header)
+	}
+}
+
+func TestQueueSerializesFlowsByRun(t *testing.T) {
+	server := newRecorder(t, nil)
+	world := newQueueWorld(t, server)
+	ctx := context.Background()
+	stepID := worlds.StepID("step_1")
+	resumeAt, hopAt := time.Now().Add(48*time.Hour), time.Now().Add(time.Hour)
+	for _, input := range []worlds.QueueInput{
+		{RunID: "wrun_1"},
+		{RunID: "wrun_1", StepID: &stepID},
+		{RunID: "wrun_1", NotBefore: &hopAt, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_1", ResumeAt: &resumeAt, HopAt: &hopAt}},
+		{RunID: "wrun_1", NotBefore: &hopAt, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_1"}},
+	} {
+		if _, err := world.Queue(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A flow carries its run as its concurrency key, and a step delivery and
+	// an intermediate hop of a timer none; the last hop is a flow.
+	for index, want := range []string{"wrun_1", "", "", "wrun_1"} {
+		if got := server.all()[index].Header.Get("Vqs-Experimental-Concurrency-Key"); got != want {
+			t.Errorf("message %d concurrency key = %q, want %q", index, got, want)
+		}
+	}
+}
+
+func TestMessageLifetime(t *testing.T) {
+	for _, test := range []struct {
+		delay, retention         time.Duration
+		wantDelay, wantRetention int64
+	}{
+		{0, 0, 0, 0},
+		{time.Millisecond, 0, 1, 0},
+		{10 * 24 * time.Hour, 0, 23 * 3600, 0},
+		{10 * 24 * time.Hour, worlds.StepRetention, 7*24*3600 - 3600, 7 * 24 * 3600},
+		{time.Hour, 30 * 24 * time.Hour, 3600, 7 * 24 * 3600},
+		{time.Hour, time.Second, 0, 60},
+		{time.Hour, 90 * time.Minute, 1800, 5400},
+	} {
+		delay, retention := messageLifetime(test.delay, test.retention)
+		if delay != test.wantDelay || retention != test.wantRetention {
+			t.Errorf("messageLifetime(%s, %s) = %d, %d, want %d, %d", test.delay, test.retention, delay, retention, test.wantDelay, test.wantRetention)
+		}
+	}
+}
+
+func TestCapabilities(t *testing.T) {
+	world := newQueueWorld(t, newRecorder(t, nil))
+	capabilities := world.Capabilities()
+	if !capabilities.InBandFence || !capabilities.MaxConcurrency || capabilities.MaxQueueDelay != 23*time.Hour {
+		t.Fatalf("capabilities = %+v", capabilities)
 	}
 }
 
@@ -142,7 +224,7 @@ func TestPublishVQSReportsUnavailableDeployment(t *testing.T) {
 	t.Cleanup(unavailable.Close)
 	world.config.QueueURL = unavailable.URL + "/api/v3"
 
-	err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, "01ID", 0, "dpl_gone")
+	err := world.publishVQS(context.Background(), queueMessage{ID: "01ID", RunID: "wrun_1"}, vqsSend{DeploymentID: "dpl_gone"})
 	if !errors.Is(err, worlds.ErrDeploymentUnavailable) {
 		t.Fatalf("publish error = %v, want ErrDeploymentUnavailable", err)
 	}
@@ -193,13 +275,14 @@ func TestQueueConsumerPaths(t *testing.T) {
 		t.Fatalf("ack authorization = %q", got)
 	}
 
-	// An early delivery is hidden until due.
-	due := time.Now().Add(30 * time.Minute)
+	// An early delivery is hidden until due, for as long as Vercel Queues
+	// honors, and nothing is published for it.
+	due := time.Now().Add(8 * 24 * time.Hour)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, deliveryRequest("msg_2", message(queueMessage{ID: "early", RunID: "wrun_1", NotBefore: &due})))
 	patch := server.all()[1]
-	if response.Code != http.StatusAccepted || patch.Method != http.MethodPatch || patch.Path != lease || patch.Body != `{"visibilityTimeoutSeconds":1800}` {
-		t.Fatalf("early delivery: status %d request %+v", response.Code, patch)
+	if response.Code != http.StatusAccepted || len(server.all()) != 2 || patch.Method != http.MethodPatch || patch.Path != lease || patch.Body != `{"visibilityTimeoutSeconds":900}` {
+		t.Fatalf("early delivery: status %d request %+v", response.Code, server.all())
 	}
 
 	// A failing execution schedules a retry.
@@ -350,45 +433,129 @@ func deliveryRequest(messageID, body string) *http.Request {
 	return request
 }
 
-func TestQueueConsumerPublishesNextHop(t *testing.T) {
+func TestQueueConsumerRedelivers(t *testing.T) {
 	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
 	world := newQueueWorld(t, server)
-	handler := Queue(world, nil)
-	due := time.Now().Add(8 * 24 * time.Hour)
-	long, _ := json.Marshal(queueMessage{ID: "long", RunID: "wrun_1", NotBefore: &due, DeploymentID: "dpl_run"})
+	var got worlds.QueueInput
+	var result error
+	handler := &consumer{world: world, execute: func(_ context.Context, input worlds.QueueInput) error {
+		got = input
+		return result
+	}}
+	body, _ := json.Marshal(queueMessage{ID: "01MSG", RunID: "wrun_1"})
+	deliver := func(redelivery error) (int, recorded) {
+		t.Helper()
+		result = redelivery
+		request := deliveryRequest("msg_1", string(body))
+		request.Header.Set("Ce-Vqsdeliverycount", "5")
+		request.Header.Set("Ce-Vqsexperimentalhandoffcount", "2")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		requests := server.all()
+		return response.Code, requests[len(requests)-1]
+	}
 
-	// A delivery due beyond one lease is continued on a new message for the
-	// rest of the delay, then acknowledged.
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, deliveryRequest("msg_1", string(long)))
-	requests := server.all()
-	if response.Code != http.StatusOK || len(requests) != 2 {
-		t.Fatalf("hop delivery: status %d requests %+v", response.Code, requests)
+	// The delivery carries its message's ID, its deliveries, and its
+	// attempts, which leave out handoffs.
+	status, settle := deliver(worlds.Redeliver(30 * time.Second))
+	if got.MessageID != "01MSG" || got.DeliveryCount != 5 || got.Attempt != 3 {
+		t.Fatalf("delivery = %+v", got)
 	}
-	publish, ack := requests[0], requests[1]
-	if publish.Method != http.MethodPost || publish.Path != "/api/v3/topic/workflow" || publish.Body != string(long) {
-		t.Fatalf("next hop publish = %+v", publish)
+	// A redelivery hides the message for its delay, unacknowledged.
+	if status != http.StatusAccepted || settle.Method != http.MethodPatch || settle.Body != `{"visibilityTimeoutSeconds":30}` || settle.Header.Get("Vqs-Experimental-Handoff") != "" {
+		t.Fatalf("redelivery: status %d request %+v", status, settle)
 	}
-	for header, want := range map[string]string{
-		"Vqs-Idempotency-Key": "long:msg_1",
-		"Vqs-Delay-Seconds":   strconv.Itoa(int(vqsMaxQueueDelay / time.Second)),
-		"Vqs-Deployment-Id":   "dpl_run",
-	} {
-		if got := publish.Header.Get(header); got != want {
-			t.Errorf("%s = %q, want %q", header, got, want)
+	// A longer one is cut to what Vercel Queues honors.
+	if status, settle = deliver(worlds.Redeliver(2 * time.Hour)); status != http.StatusAccepted || settle.Body != `{"visibilityTimeoutSeconds":900}` {
+		t.Fatalf("long redelivery: status %d request %+v", status, settle)
+	}
+	// A redelivery of zero hands the message off.
+	if status, settle = deliver(worlds.Redeliver(0)); status != http.StatusAccepted || settle.Method != http.MethodPatch || settle.Body != `{"visibilityTimeoutSeconds":0}` || settle.Header.Get("Vqs-Experimental-Handoff") != "1" {
+		t.Fatalf("handoff: status %d request %+v", status, settle)
+	}
+	for _, request := range server.all() {
+		if request.Method == http.MethodDelete {
+			t.Fatalf("redelivered message acknowledged: %+v", request)
 		}
 	}
-	if ack.Method != http.MethodDelete {
-		t.Fatalf("hop delivery not acknowledged: %+v", ack)
+}
+
+func TestQueueConsumerCoversCoalescedMessages(t *testing.T) {
+	// refusals is how many acknowledgments the queue refuses for messages
+	// coalesced into the delivery, one more each time; coded drops the error
+	// code from the refusals.
+	refusals, coded := 0, true
+	server := newRecorder(t, nil)
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		entry := recorded{Method: request.Method, Path: request.URL.EscapedPath(), Header: request.Header.Clone(), Body: readRequestBody(request)}
+		server.mu.Lock()
+		server.requests = append(server.requests, entry)
+		pending := 0
+		for _, request := range server.requests {
+			if request.Method == http.MethodDelete {
+				pending++
+			}
+		}
+		server.mu.Unlock()
+		if request.Method == http.MethodDelete && pending <= refusals {
+			if coded {
+				writer.Header().Set("Vqs-Error-Code", "concurrency_coalesced_pending")
+			}
+			writer.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprintf(writer, `{"coalescedCount":%d}`, pending)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(queue.Close)
+	world := newQueueWorld(t, server)
+	world.config.QueueURL = queue.URL + "/api/v3"
+	var deliveries []int
+	handler := &consumer{world: world, execute: func(_ context.Context, input worlds.QueueInput) error {
+		deliveries = append(deliveries, input.DeliveryCount)
+		return nil
+	}}
+	body, _ := json.Marshal(queueMessage{ID: "01MSG", RunID: "wrun_1"})
+	deliver := func() int {
+		t.Helper()
+		server.mu.Lock()
+		server.requests = nil
+		server.mu.Unlock()
+		deliveries = nil
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, deliveryRequest("msg_1", string(body)))
+		return response.Code
 	}
 
-	// The last hop is delayed only by what remains.
-	due = time.Now().Add(20 * time.Hour)
-	last, _ := json.Marshal(queueMessage{ID: "long", RunID: "wrun_1", NotBefore: &due})
-	handler.ServeHTTP(httptest.NewRecorder(), deliveryRequest("msg_2", string(last)))
-	seconds, _ := strconv.ParseInt(server.all()[2].Header.Get("Vqs-Delay-Seconds"), 10, 64)
-	if remaining := time.Duration(seconds) * time.Second; remaining > 20*time.Hour+time.Second || remaining < 20*time.Hour-time.Minute {
-		t.Fatalf("last hop delay = %s, want about 20 hours", remaining)
+	// An acknowledgment refused for coalesced messages runs the delivery
+	// again, as a redelivery would, and then covers them.
+	refusals = 2
+	if status := deliver(); status != http.StatusOK || !reflect.DeepEqual(deliveries, []int{2, 3, 4}) {
+		t.Fatalf("coalesced delivery: status %d deliveries %v", status, deliveries)
+	}
+	var covered []string
+	for _, request := range server.all() {
+		if request.Method == http.MethodDelete {
+			covered = append(covered, request.Header.Get("Vqs-Experimental-If-Coalesced"))
+		}
+	}
+	if !reflect.DeepEqual(covered, []string{"", "1", "2"}) {
+		t.Fatalf("acknowledgments covered %q", covered)
+	}
+
+	// A delivery that keeps having messages coalesced into it hands its
+	// message off after its last run.
+	refusals = 1000
+	status := deliver()
+	requests := server.all()
+	if last := requests[len(requests)-1]; status != http.StatusAccepted || len(deliveries) != vqsMaxCoalescedReruns+1 || last.Method != http.MethodPatch || last.Header.Get("Vqs-Experimental-Handoff") != "1" {
+		t.Fatalf("busy delivery: status %d deliveries %d last request %+v", status, len(deliveries), last)
+	}
+
+	// Without the error code a conflict is an ordinary failure.
+	refusals, coded = 1, false
+	if status := deliver(); status != http.StatusInternalServerError || len(deliveries) != 1 {
+		t.Fatalf("conflict: status %d deliveries %v", status, deliveries)
 	}
 }
 
@@ -403,7 +570,7 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	// A message goes to the region its run ID carries, else VERCEL_REGION's.
 	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", RegionSYD1)
 	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1"} {
-		if err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, "id", 0, ""); err != nil {
+		if err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, vqsSend{}); err != nil {
 			t.Fatal(err)
 		}
 	}

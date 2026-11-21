@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
 )
@@ -173,5 +175,188 @@ func TestConsumerWaitsForAThrottle(t *testing.T) {
 	// The third receive would back off 4s; the throttle asked for 2m.
 	if len(queue.visibility) != 1 || queue.visibility[0].VisibilityTimeout != 120 {
 		t.Fatalf("visibility = %+v", queue.visibility)
+	}
+}
+
+// fakeExecutor records the deliveries it executes and returns its results in
+// turn, then nil.
+type fakeExecutor struct {
+	inputs  []worlds.QueueInput
+	results []error
+}
+
+func (f *fakeExecutor) Execute(_ context.Context, input worlds.QueueInput) error {
+	f.inputs = append(f.inputs, input)
+	if len(f.results) == 0 {
+		return nil
+	}
+	err := f.results[0]
+	f.results = f.results[1:]
+	return err
+}
+
+// lastBody returns the body of the last message sent.
+func lastBody(t *testing.T, queue *fakeSQS) string {
+	t.Helper()
+	sent := queue.sent()
+	if len(sent) == 0 {
+		t.Fatal("nothing sent")
+	}
+	return awsv2.ToString(sent[len(sent)-1].MessageBody)
+}
+
+func TestDeliverRedeliversAndCountsAttempts(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	stepID := worlds.StepID("step_1")
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeExecutor{results: []error{worlds.Redeliver(0), worlds.Redeliver(time.Minute), errors.New("failed")}}
+
+	// A handoff is sent again at once.
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	if sent := queue.sent(); len(sent) != 2 || sent[1].DelaySeconds != 0 {
+		t.Fatalf("handoff sent %+v", sent)
+	}
+	// A redelivery after a delay is sent again with it and due then.
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	if sent := queue.sent(); len(sent) != 3 || sent[2].DelaySeconds < 59 || sent[2].DelaySeconds > 60 {
+		t.Fatalf("redelivery sent %+v", sent)
+	}
+	record, _, _ := world.queueRecord(ctx, queued.MessageID)
+	if record.notBefore == nil || time.Until(*record.notBefore) < 59*time.Second {
+		t.Fatalf("record notBefore = %v, want a minute ahead", record.notBefore)
+	}
+	// Arriving early, it is sent again without executing.
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil || len(runtime.inputs) != 2 || len(queue.sent()) != 4 {
+		t.Fatalf("early arrival: err=%v, %d executions, %d sends", err, len(runtime.inputs), len(queue.sent()))
+	}
+	dynamo.items[itemID(queueKey(queued.MessageID))]["notBefore"] = avs(stamp(time.Now().Add(-time.Second)))
+	// A failure stays with SQS, and the next delivery succeeds.
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err == nil {
+		t.Fatal("the failed delivery reported no error")
+	}
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	if dynamo.has(queued.MessageID) {
+		t.Fatal("the completed delivery kept its record")
+	}
+	want := [][2]int{{1, 1}, {2, 1}, {3, 2}, {4, 3}}
+	if len(runtime.inputs) != len(want) {
+		t.Fatalf("%d executions, want %d", len(runtime.inputs), len(want))
+	}
+	for i, input := range runtime.inputs {
+		if input.MessageID != queued.MessageID || input.DeliveryCount != want[i][0] || input.Attempt != want[i][1] {
+			t.Errorf("execution %d: message %s, DeliveryCount %d, Attempt %d; want %s, %v", i, input.MessageID, input.DeliveryCount, input.Attempt, queued.MessageID, want[i])
+		}
+	}
+	// A delivery whose record is gone is acknowledged without executing.
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil || len(runtime.inputs) != len(want) {
+		t.Fatalf("delivery after acknowledgement: err=%v, %d executions", err, len(runtime.inputs))
+	}
+}
+
+func TestDeliverCapsALongRedeliveryWithoutScheduler(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	stepID := worlds.StepID("step_1")
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.deliver(ctx, &fakeExecutor{results: []error{worlds.Redeliver(48 * time.Hour)}}, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	if sent := queue.sent(); sent[len(sent)-1].DelaySeconds != 900 {
+		t.Fatalf("delay = %d, want SQS's longest", sent[len(sent)-1].DelaySeconds)
+	}
+	if record, _, _ := world.queueRecord(ctx, queued.MessageID); record.notBefore == nil || time.Until(*record.notBefore) < 47*time.Hour {
+		t.Fatalf("record notBefore = %v, want the full delay", record.notBefore)
+	}
+}
+
+func TestDeliverSchedulesALongRedelivery(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue, schedules := newFakeDynamo(), &fakeSQS{}, newFakeScheduler()
+	world := testWorld(t, dynamo, queue, schedules)
+	stepID := worlds.StepID("step_1")
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.deliver(ctx, &fakeExecutor{results: []error{worlds.Redeliver(48 * time.Hour)}}, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	if len(schedules.schedules) != 1 || len(queue.sent()) != 1 {
+		t.Fatalf("%d schedules, %d sends; want the redelivery scheduled", len(schedules.schedules), len(queue.sent()))
+	}
+	for _, schedule := range schedules.schedules {
+		if !strings.Contains(awsv2.ToString(schedule.Target.Input), queued.MessageID) {
+			t.Fatalf("schedule input = %s", awsv2.ToString(schedule.Target.Input))
+		}
+	}
+}
+
+func TestDeliverHandsOffOnAFIFOQueueWithANewDeduplicationID(t *testing.T) {
+	ctx := context.Background()
+	queue := &fakeSQS{}
+	world := routingWorld(t, queue, newFakeScheduler())
+	stepID := worlds.StepID("step_1")
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: worlds.WorkflowName[orderedWorkflow](), StepID: &stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.deliver(ctx, &fakeExecutor{results: []error{worlds.Redeliver(0)}}, lastBody(t, queue)); err != nil {
+		t.Fatal(err)
+	}
+	sent := queue.sent()
+	if len(sent) != 2 || awsv2.ToString(sent[1].QueueUrl) != orderedURL || awsv2.ToString(sent[1].MessageGroupId) != "wrun_ordered" {
+		t.Fatalf("handoff sent %+v", sent)
+	}
+	if dedupe := awsv2.ToString(sent[1].MessageDeduplicationId); dedupe == queued.MessageID || !strings.HasPrefix(dedupe, queued.MessageID) {
+		t.Fatalf("handoff deduplication ID = %q, want one apart from the first send's", dedupe)
+	}
+}
+
+func TestDeliverDropsAMessagePastItsRetention(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	stepID := worlds.StepID("step_1")
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID, Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamo.items[itemID(queueKey(queued.MessageID))]["expiresAt"] = avs(stamp(time.Now().Add(-time.Second)))
+	runtime := &fakeExecutor{}
+	if err := world.deliver(ctx, runtime, lastBody(t, queue)); err != nil || len(runtime.inputs) != 0 || dynamo.has(queued.MessageID) {
+		t.Fatalf("err=%v, %d executions, record kept %v", err, len(runtime.inputs), dynamo.has(queued.MessageID))
+	}
+}
+
+func TestConsumerReportsNoFailureForARedelivery(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	stepID := worlds.StepID("step_1")
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", StepID: &stepID}); err != nil {
+		t.Fatal(err)
+	}
+	var message queueMessage
+	if err := json.Unmarshal([]byte(lastBody(t, queue)), &message); err != nil {
+		t.Fatal(err)
+	}
+	response := world.consume(ctx, &fakeExecutor{results: []error{worlds.Redeliver(time.Minute)}}, events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, message.ID, message.Input)}})
+	if len(response.BatchItemFailures) != 0 || len(queue.visibility) != 0 {
+		t.Fatalf("response = %+v, visibility changes %+v; want the message acknowledged and sent again", response, queue.visibility)
 	}
 }

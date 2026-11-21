@@ -149,7 +149,7 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 	var notBefore time.Time
 	var leased bool
 	for time.Now().Before(deadline) {
-		if err := world.pool.QueryRow(ctx, `SELECT attempts, not_before, lease_until IS NOT NULL FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts, &notBefore, &leased); err != nil {
+		if err := world.pool.QueryRow(ctx, `SELECT deliveries, not_before, lease_until IS NOT NULL FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts, &notBefore, &leased); err != nil {
 			t.Fatal(err)
 		}
 		if attempts == 1 && !leased {
@@ -161,47 +161,12 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 		t.Fatalf("after failure attempts=%d leased=%v notBefore in %v", attempts, leased, time.Until(notBefore))
 	}
 	time.Sleep(200 * time.Millisecond)
-	if err := world.pool.QueryRow(ctx, `SELECT attempts FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts); err != nil || attempts != 1 {
+	if err := world.pool.QueryRow(ctx, `SELECT deliveries FROM go_workflow_queue WHERE id = $1`, queued.MessageID).Scan(&attempts); err != nil || attempts != 1 {
 		t.Fatalf("redelivered before backoff: attempts=%d err=%v", attempts, err)
 	}
 	stop()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Start returned %v", err)
-	}
-}
-
-func TestQueueIdempotencyKey(t *testing.T) {
-	t.Parallel()
-	world := newTestWorld(t)
-	ctx := context.Background()
-	later := time.Now().Add(time.Hour)
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key", NotBefore: &later})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key", NotBefore: &later})
-	if err != nil || again.MessageID != first.MessageID {
-		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
-	}
-	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", IdempotencyKey: "key", NotBefore: &later})
-	if err != nil || other.MessageID == first.MessageID {
-		t.Fatalf("same key in another run = %#v err=%v", other, err)
-	}
-	// A claimed delivery no longer deduplicates: it may have read state the
-	// new message must observe.
-	if _, err := world.pool.Exec(ctx, `UPDATE go_workflow_queue SET not_before = now() WHERE id = $1`, first.MessageID); err != nil {
-		t.Fatal(err)
-	}
-	claimed, err := world.claim(ctx, 10, nil)
-	if err != nil || len(claimed) != 1 || claimed[0].id != first.MessageID || claimed[0].input.IdempotencyKey != "key" {
-		t.Fatalf("claimed = %#v err=%v", claimed, err)
-	}
-	fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "key", NotBefore: &later})
-	if err != nil || fresh.MessageID == first.MessageID {
-		t.Fatalf("key after claim = %#v err=%v", fresh, err)
-	}
-	if again, err := world.claim(ctx, 10, nil); err != nil || len(again) != 0 {
-		t.Fatalf("leased delivery claimed again: %#v err=%v", again, err)
 	}
 }
 

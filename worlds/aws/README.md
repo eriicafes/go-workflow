@@ -96,27 +96,73 @@ still interleave when one waits.
 
 ### Queue delivery
 
-`Queue` writes a `QUEUE#<id>` record holding the delivery, then publishes the
-message ID:
+`Queue` writes a `QUEUE#<id>` record holding the delivery, every
+`QueueInput` field included, then publishes the message ID:
 
 - due within 15 minutes: `SendMessage` with `DelaySeconds`;
 - due later: a one-time EventBridge schedule (`at(...)` in UTC, flexible time
-  window off, deleted after it runs) that sends the same body to the queue.
-  The schedule name, `go-workflow-<id>`, is stored on the record.
+  window off, deleted after it runs) that sends the message to the queue.
+  The schedule name, `go-workflow-<id>`, is stored on the record. A schedule
+  takes at most 8 KB of input, so a delivery too large for it (such as a step
+  delivery carrying its input) is sent as its ID alone; the record holds the
+  delivery either way.
 
 If publishing fails the record is deleted and the error returned. Without
 `Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
-error. `New` rejects a `SchedulerConfig` without a client, target ARN, and
-role ARN. SQS standard queues do not deduplicate, so `IdempotencyKey` is not
-used; delivery is at least once and the runtime is idempotent.
+error, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the runtime
+reaches a later timer in hops of at most 15 minutes. With `Scheduler`,
+`MaxQueueDelay` is zero and any delay is scheduled directly. `New` rejects a
+`SchedulerConfig` without a client, target ARN, and role ARN.
 
-The `Queue` handler loads the record for each SQS message. A missing record
-(already done) is acknowledged. A message that arrives before its
-due time is sent again with the remaining delay (at most 15 minutes per hop).
-Otherwise it runs the workflow, deletes the record on success, and reports the
-message in `BatchItemFailures` on failure so SQS redelivers only that message.
-Malformed messages are also reported as failures; configure a dead-letter
-queue to collect them.
+**Deduplication.** A delivery with an `IdempotencyKey` claims the key with a
+`DEDUPE#<runID>#<sha256(key)>` item that lasts 24 hours
+(`worlds.MinDeduplicationWindow`), through a conditional put. Queueing the
+same key of the same run again while the claim lasts and its message lives
+(its `QUEUE#` record exists) stores and sends nothing, and returns the first
+message's ID. A claim whose window has passed, or whose message was
+acknowledged or never published, is taken over by the next message. A
+delivery without a key is never deduplicated.
+
+**Delivery.** The `Queue` handler loads the record for each SQS message. A
+missing record (already done or cancelled) is acknowledged, and so is a
+record past its `Retention`, counted from when the message is first due,
+without executing it. A message that arrives before its due time is sent
+again for the rest of the delay. Otherwise the handler counts the delivery on
+the record (`deliveries`) and executes it with a `MessageID` that stays the
+same across redeliveries, a `DeliveryCount` of `deliveries`, and an `Attempt`
+of `deliveries` minus the handoffs recorded on the record (`handoffs`). On
+success it deletes the record. On failure it reports the message in
+`BatchItemFailures` and sets its visibility to a backoff that grows with its
+receive count, so SQS redelivers only that message, and a redrive policy
+still moves one that keeps failing to the dead-letter queue. Malformed
+messages are dropped.
+
+**Redelivery.** When the runtime asks for its message again
+(`worlds.Redelivery`), the handler records it and sends the same message ID
+again as a new SQS message, then acknowledges the old one, so redeliveries
+never count toward the redrive policy and are not bound by SQS's 12-hour
+visibility limit:
+
+- a handoff (`After` zero) adds one to `handoffs`, so it does not count as an
+  attempt, and is sent again at once;
+- a redelivery after a delay sets the record's due time and is sent again
+  after it: through SQS within 15 minutes, through Scheduler beyond that, or,
+  without Scheduler, after 15 minutes, arriving early and waiting again for
+  the rest.
+
+A FIFO queue gives a message sent again at once its own deduplication ID, so
+the queue does not drop it as a duplicate of its first send.
+
+**One flow of a run at a time.** Before executing a serialized flow
+(`QueueInput.SerializedFlow`), the handler takes the run's flow lease, a
+`LEASE#<runID>` item put on condition that no lease exists or the one there
+has expired. The lease lasts two minutes and is renewed every 30 seconds
+while the flow executes, then deleted. A flow that finds the lease taken is
+sent again two seconds later without counting a delivery. Step deliveries,
+intermediate hops of a wait's timer, and retention deliveries never take the
+lease. The lease makes overlapping flows rare and the run's in-band fence
+keeps them safe, so `Capabilities()` reports `MaxConcurrency` and
+`InBandFence`.
 
 ## Table
 
@@ -134,6 +180,8 @@ that project only keys and `status`:
 | hook | `HOOK#<hookID>` | `META` |
 | token owner | `TOKEN#<token>` | `META` |
 | queue record | `QUEUE#<messageID>` | `META` |
+| idempotency-key claim | `DEDUPE#<runID>#<base64url(sha256(key))>` | `META` |
+| run's flow lease | `LEASE#<runID>` | `META` |
 
 Events are the only copy of payloads. Run, step and hook items hold no
 input, output, error or metadata; they name the events that recorded them. A
@@ -160,14 +208,18 @@ do not write to the indexes. All other reads are consistent reads of the base
 table. Stream names are base64url-encoded in keys so names containing `#` do
 not overlap.
 
+Claims and leases carry a `ttl` attribute (epoch seconds) after which they
+are no longer needed. The World checks their expiry itself, so enabling the
+table's TTL on `ttl`, as the Terraform module does, only reclaims their space.
+
 Create the table with the [Terraform module](#infrastructure), or with
 `awsworld.CreateTable(ctx, dynamoClient, name)`, which creates the same table
 on demand and waits until it is active (handy for DynamoDB Local
-and tests).
+and tests). `CreateTable` does not enable TTL.
 
 ## Retention
 
-A run's data is deleted as the Workflow SDK deletes it: the run's items stay,
+When a run's data is deleted, the run's items stay,
 the payloads in its `EVENT#` items are removed, and its chunk items are
 deleted, leaving each `STREAM#` item empty and closed. `expiredAt` is set
 first and `dataPurged` last. `$retention: "0"` deletes the data right after the
@@ -230,7 +282,9 @@ and `GetQueueAttributes` (for the event source mapping), and, with
   view, each event, and each changed step, hook, token and wait marker in one
   transaction. A batch that needs more than 100 actions for its admitted
   events returns `worlds.ErrEventInvalid` and appends none of them. A stream write holds at most 99 chunks.
-- **15-minute SQS delay.** Longer delays need `Scheduler`.
+- **15-minute SQS delay.** Queueing a longer delay needs `Scheduler`.
+  Without it, the runtime reaches its timers in 15-minute hops, and a longer
+  redelivery waits in 15-minute hops too.
 - **Hot keys.** Appends to one run are serialized by its event count and
   retried with jittered backoff (up to 64 attempts), so heavy concurrent
   appends to one run trade throughput for retries. Run and hook creation writes to the `RUNS` and

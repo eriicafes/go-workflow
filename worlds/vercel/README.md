@@ -9,7 +9,7 @@ deployment's OIDC token authenticates every request.
 | Service | Role |
 | --- | --- |
 | Vercel workflow storage | Event log, run, step, and hook views, hook tokens, and streams |
-| Vercel Queues | Delivers queued items with delays up to 23 hours, in hops for longer timers |
+| Vercel Queues | Delivers queued items with delays up to 23 hours, one flow of a run at a time |
 
 ## Usage
 
@@ -110,8 +110,7 @@ world, err := vercelworld.New(vercelworld.Config{
 ```
 
 Every delivery of a routed workflow's runs is published to its queue's topic,
-and other workflows' to `Topic`. The message keeps the topic, so the hops of a
-long timer stay on it. `Queue(world, runners)` consumes whichever topics its
+and other workflows' to `Topic`. `Queue(world, runners)` consumes whichever topics its
 function is triggered by, so give each topic its own trigger, with its own
 concurrency, or one function several triggers. `New` rejects a route to a queue
 without a topic.
@@ -187,7 +186,7 @@ correlation ID stays on `/v4/events` for every run. On `/v5`:
 | Snapshot | A listing reports the counters it read before listing in the `x-wf-snapshot-seq` and `x-wf-snapshot-seq-in-band` headers and in its end frame's `snapshot`. |
 | Fence | An in-band write whose `expectedSeqInBand` is not `seqInBand` is refused with a 412 whose body has `error: "in-band-superseded"`, `seq`, `seqInBand`, and optionally the events the writer was missing. Nothing is written. A batch is fenced as one block. |
 | Skipped-slot report | The answer to an in-band write has `allocated`, and `events`, the events in the positions after `maxSlot` and before its own, in order, with `hasMore` when that list is incomplete. A batch answers with one result per frame and the report and `allocated` at the top level. |
-| Queue | Vercel Queues delivers a published message once per `Vqs-Idempotency-Key`. |
+| Queue | Vercel Queues stores one message per `Vqs-Idempotency-Key` while it lives, delivers one message per `Vqs-Experimental-Concurrency-Key` at a time, and redelivers the same message after a visibility change or a handoff. |
 
 The World also relies on what the client cannot see, which
 `TestBackendAssumptionsLive` checks against a real project:
@@ -217,18 +216,13 @@ Without a deployment key, or a project ID, payloads are not encrypted. See
 
 ## Long timers
 
-The World publishes with Vercel Queues' default retention of 24 hours and, as
-the Workflow SDK does, delays of up to 23 hours, so every message is still
-retained for an hour after it becomes visible. A delivery due later is
-published with a 23-hour delay, and when it arrives more than an hour early the
-consumer
-publishes a new message for the rest of the delay, then acknowledges the old
-one. Each hop's idempotency key is the delivery's message ID and the incoming
-Vercel message ID, so a hop retried after a crash is dropped.
-
-When the deployment a delivery is pinned to has been deleted, the next hop
-goes to the current deployment instead, whose runtime fails the run with
-`worlds.ErrDeploymentMismatch`.
+A message published without a retention keeps Vercel Queues' default of 24
+hours, so the World delays it by at most 23 hours, leaving it retained for an
+hour after it becomes visible. A message with a retention lives for it, within
+the 1 minute to 7 days Vercel Queues accepts, and may be delayed by up to an
+hour less. The World reports a `MaxQueueDelay` of 23 hours, and the runtime
+reaches a later timer in hops of up to 23 hours, each its own message, so the
+World publishes no hops of its own.
 
 ## Latest deployment
 
@@ -254,26 +248,43 @@ deployment that starts them.
 
 ## Queue delivery
 
-`Queue` publishes the whole delivery as the message: `POST
-{QueueURL}/topic/{Topic}` with `Vqs-Delay-Seconds`,
-the delivery's message ID as
-`Vqs-Idempotency-Key`. Nothing is stored for it.
+`Queue` publishes the whole delivery as the message, `POST
+{QueueURL}/topic/{Topic}`, and stores nothing for it. The request carries:
+
+| Header | Value |
+| --- | --- |
+| `Vqs-Idempotency-Key` | The delivery's `IdempotencyKey`, when it has one. Vercel Queues stores one message per key while it lives. |
+| `Vqs-Experimental-Concurrency-Key` | The run ID, on a flow other than an intermediate hop of a wait's timer. Vercel Queues delivers one message per key at a time and coalesces the key's other messages into that delivery. Step deliveries carry none. |
+| `Vqs-Retention-Seconds` | The delivery's `Retention`, clamped to 60 seconds through 7 days, when it is set. |
+| `Vqs-Delay-Seconds` | The time until `NotBefore`, rounded up, and capped as in [long timers](#long-timers). |
+| `Vqs-Deployment-Id` | The deployment the delivery is addressed to. |
 
 The consumer handles each delivery as follows:
 
 1. Parses the push request: a binary `com.vercel.queue.v2beta` CloudEvent or a
    structured `v1beta` one.
-2. If the delivery is due within an hour, extends the lease instead of
-   failing. If it is due later, publishes the next hop and acknowledges this
-   one.
-3. Executes the delivery, renewing the lease every minute.
-4. On success acknowledges the message.
-5. On failure sets the visibility to the Workflow SDK's backoff, a second
-   doubling with each delivery up to 15 minutes with 25% jitter, and at least
-   the 5 seconds Vercel Queues accepts, and answers `500`, so Vercel
-   redelivers. A delivery for a run that no longer exists is dropped. The
-   delivery count is the delivery's `Attempt`, so the runtime gives up after
-   48 deliveries.
+2. If the delivery is not yet due, hides it until it is, for at most 15
+   minutes at a time.
+3. Executes the delivery, renewing the lease every minute. The delivery's
+   `MessageID` is the World's ID for the message, the same on every
+   redelivery. Its `DeliveryCount` is Vercel's delivery count, and its
+   `Attempt` that count less the message's handoffs.
+4. On success acknowledges the message. When Vercel refuses because messages
+   were coalesced into the delivery, executes it again with the next
+   `DeliveryCount`, as a redelivery, and acknowledges with
+   `Vqs-Experimental-If-Coalesced` covering them. After 32 such runs it hands
+   the message off instead.
+5. When the runtime asks for a redelivery after a delay, sets the message's
+   visibility to that delay, at most the 15 minutes Vercel Queues honors (the
+   runtime asks again when it arrives early), and leaves it unacknowledged.
+   A redelivery of zero hands the message off: a visibility of zero with
+   `Vqs-Experimental-Handoff: 1`, which Vercel Queues redelivers at once and
+   does not count as an attempt.
+6. On failure sets the visibility to a backoff, a second doubling with each
+   delivery up to 15 minutes with 25% jitter, and at least the 5 seconds
+   Vercel Queues accepts, or longer when the backend asks for it, and answers
+   `500`. A delivery for a run that no longer exists is dropped. The runtime
+   gives up after 48 attempts.
 
 ## Security
 

@@ -408,3 +408,24 @@ func DeliveryRetryDelay(err error, backoff time.Duration) time.Duration {
 	}
 	return backoff
 }
+
+// InBandSupersededError is a World's refusal of an in-band write whose count
+// is stale, with the run's counters as the World read them when it refused
+// it: EventCount positions, InBandCount of them in-band. It matches
+// ErrInBandSuperseded.
+type InBandSupersededError struct {
+	EventCount  int
+	InBandCount int
+	Cause       error
+}
+
+func (e *InBandSupersededError) Error() string {
+	message := fmt.Sprintf("%s: the run is at %d positions, %d in-band", ErrInBandSuperseded, e.EventCount, e.InBandCount)
+	if e.Cause != nil {
+		message += ": " + e.Cause.Error()
+	}
+	return message
+}
+
+func (e *InBandSupersededError) Is(target error) bool { return target == ErrInBandSuperseded }
+func (e *InBandSupersededError) Unwrap() error        { return e.Cause }

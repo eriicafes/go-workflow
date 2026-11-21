@@ -102,6 +102,9 @@ type Execution struct {
 	// were due, which a flow waiting for an inline step completes when they
 	// are.
 	openWaits map[worlds.WaitID]pendingWait
+	// completedChains holds the chains of the waits this delivery
+	// completed, whose timers it arms.
+	completedChains map[string]bool
 	// outcomes receives the result of each step the flow runs inline.
 	outcomes chan inlineOutcome
 	// inline counts the steps the flow runs inline that have not recorded
@@ -139,8 +142,10 @@ func newExecution(ctx context.Context, world worlds.World, run worlds.Run, event
 		settles:   make(map[string]int),
 		ranInline: make(map[worlds.StepID]bool),
 		openWaits: make(map[worlds.WaitID]pendingWait),
-		inBand:    run.InBandCount,
-		startedAt: time.Now(),
+
+		completedChains: make(map[string]bool),
+		inBand:          run.InBandCount,
+		startedAt:       time.Now(),
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		execution.inlineUntil = execution.startedAt.Add(deadline.Sub(execution.startedAt) / 2)
@@ -389,10 +394,7 @@ func (e *Execution) AddRollback(fn func(context.Context, *Execution) error) {
 // queue queues input for this run, addressed to its deployment. A storage
 // error ends the replay so the queue retries the delivery.
 func (e *Execution) queue(input worlds.QueueInput) worlds.QueueResult {
-	input.RunID = e.run.RunID
-	input.WorkflowName = e.run.WorkflowName
-	input.DeploymentID = e.run.DeploymentID
-	result, err := e.world.Queue(e.ctx, input)
+	result, err := e.world.Queue(e.ctx, e.addressed(input))
 	if err != nil {
 		panic(e.exit(deliveryError{cause: err}))
 	}
@@ -621,12 +623,19 @@ func (e *Execution) createDeclared() {
 	committed := e.writeBatch(events)
 	for _, step := range background {
 		if committed[string(step.stepID)] {
-			e.queue(stepMessage(step.stepID, step.name, 1, false))
+			message := stepMessage(step.stepID, step.name, 1, false)
+			if len(step.input) <= worlds.MaxStepMessageInput {
+				message.StepInput = step.input
+			}
+			if step.maxRetries == 0 {
+				message.Retention = worlds.StepRetentionOnce
+			}
+			e.queue(message)
 		}
 	}
 	for _, wait := range waits {
 		if committed[string(wait.waitID)] {
-			e.queue(worlds.QueueInput{NotBefore: &wait.dueAt, IdempotencyKey: string(wait.waitID)})
+			// The flow arms the timers of its chain when it ends.
 			e.openWaits[wait.waitID] = wait
 		}
 	}
@@ -788,6 +797,7 @@ func (e *Execution) addressed(input worlds.QueueInput) worlds.QueueInput {
 	input.RunID = e.run.RunID
 	input.WorkflowName = e.run.WorkflowName
 	input.DeploymentID = e.run.DeploymentID
+	input.RunSpecVersion = worlds.SpecVersion
 	return input
 }
 

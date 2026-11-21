@@ -157,7 +157,6 @@ func CancelContext(ctx context.Context, ref cancellationReference, cause error) 
 	if err != nil {
 		return cancellationData{}, err
 	}
-	queue.IdempotencyKey = stream
 	_, err = world.Queue(ctx, queue)
 	return data, err
 }

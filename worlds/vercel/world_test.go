@@ -1,11 +1,15 @@
 package vercelworld
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,26 +18,163 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// fakeVQS accepts publishes like the Vercel Queues API.
+// fakeVQS plays the Vercel Queues API: it stores published messages, one per
+// idempotency key, and serves their leases, so deliverAll can push them to a
+// consumer. A message with a concurrency key that becomes visible while
+// another message of the key is being delivered is coalesced into that
+// delivery, whose acknowledgment must then cover it. status, when set, is the
+// answer to every request instead.
 type fakeVQS struct {
 	mu       sync.Mutex
 	requests []*http.Request
 	bodies   [][]byte
 	status   int
+	messages []*fakeMessage
+	sequence int
+}
+
+// fakeMessage is a message fakeVQS stores.
+type fakeMessage struct {
+	id, topic, idempotencyKey, concurrencyKey string
+	body                                      []byte
+	visibleAt                                 time.Time
+	deliveries, handoffs                      int
+	receipt                                   string
+	// coalesced counts the messages coalesced into this one.
+	coalesced int
+	// pushing is set while a delivery of the message is being pushed.
+	pushing, done bool
 }
 
 func (f *fakeVQS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	body, _ := io.ReadAll(request.Body)
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	f.bodies = append(f.bodies, body)
-	status := f.status
-	f.mu.Unlock()
-	if status == 0 {
-		status = http.StatusCreated
+	if f.status != 0 {
+		writer.WriteHeader(f.status)
+		_, _ = writer.Write([]byte(`{"messageId":"msg_test"}`))
+		return
 	}
-	writer.WriteHeader(status)
-	_, _ = writer.Write([]byte(`{"messageId":"msg_test"}`))
+	path := request.URL.Path
+	switch {
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/api/v3/topic/") && !strings.Contains(path, "/consumer/"):
+		key := request.Header.Get("Vqs-Idempotency-Key")
+		if key != "" {
+			for _, message := range f.messages {
+				if message.idempotencyKey == key {
+					writer.WriteHeader(http.StatusCreated)
+					_, _ = fmt.Fprintf(writer, `{"messageId":%q}`, message.id)
+					return
+				}
+			}
+		}
+		f.sequence++
+		message := &fakeMessage{id: fmt.Sprintf("msg_%d", f.sequence), topic: strings.TrimPrefix(path, "/api/v3/topic/"), idempotencyKey: key, concurrencyKey: request.Header.Get("Vqs-Experimental-Concurrency-Key"), body: body, visibleAt: time.Now()}
+		if seconds, err := strconv.Atoi(request.Header.Get("Vqs-Delay-Seconds")); err == nil {
+			message.visibleAt = message.visibleAt.Add(time.Duration(seconds) * time.Second)
+		}
+		f.messages = append(f.messages, message)
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(writer, `{"messageId":%q}`, message.id)
+	case strings.Contains(path, "/lease/"):
+		message := f.leased(path[strings.LastIndex(path, "/")+1:])
+		if message == nil {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if request.Method == http.MethodDelete {
+			if covered, _ := strconv.Atoi(request.Header.Get("Vqs-Experimental-If-Coalesced")); message.coalesced > covered {
+				writer.Header().Set("Vqs-Error-Code", "concurrency_coalesced_pending")
+				writer.Header().Set("Vqs-Experimental-Coalesced", strconv.Itoa(message.coalesced))
+				writer.WriteHeader(http.StatusConflict)
+				return
+			}
+			message.done = true
+			writer.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var visibility struct {
+			VisibilityTimeoutSeconds int64 `json:"visibilityTimeoutSeconds"`
+		}
+		_ = json.Unmarshal(body, &visibility)
+		message.visibleAt = time.Now().Add(time.Duration(visibility.VisibilityTimeoutSeconds) * time.Second)
+		if request.Header.Get("Vqs-Experimental-Handoff") == "1" && visibility.VisibilityTimeoutSeconds == 0 {
+			message.handoffs++
+			writer.Header().Set("Vqs-Experimental-Handoff", "accepted")
+		}
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"success":true}`))
+	default:
+		writer.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// leased returns the message whose current lease is receipt.
+func (f *fakeVQS) leased(receipt string) *fakeMessage {
+	for _, message := range f.messages {
+		if message.receipt == receipt && !message.done {
+			return message
+		}
+	}
+	return nil
+}
+
+// next leases the first message that is visible, coalescing a keyed one into
+// its key's delivery, and returns the push request of its delivery, or nil
+// when no message is visible.
+func (f *fakeVQS) next() (*fakeMessage, *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	for _, message := range f.messages {
+		if message.done || message.pushing || message.visibleAt.After(now) {
+			continue
+		}
+		if holder := f.pushing(message.concurrencyKey); holder != nil {
+			holder.coalesced++
+			message.done = true
+			continue
+		}
+		message.deliveries++
+		message.receipt = fmt.Sprintf("rh_%s_%d", message.id, message.deliveries)
+		message.visibleAt = now.Add(vqsLease)
+		message.pushing = true
+		request := httptest.NewRequest(http.MethodPost, "/queue", bytes.NewReader(message.body))
+		request.Header.Set("Ce-Type", "com.vercel.queue.v2beta")
+		request.Header.Set("Ce-Vqsqueuename", message.topic)
+		request.Header.Set("Ce-Vqsconsumergroup", "api-queue")
+		request.Header.Set("Ce-Vqsmessageid", message.id)
+		request.Header.Set("Ce-Vqsreceipthandle", message.receipt)
+		request.Header.Set("Ce-Vqsdeliverycount", strconv.Itoa(message.deliveries))
+		if message.handoffs > 0 {
+			request.Header.Set("Ce-Vqsexperimentalhandoffcount", strconv.Itoa(message.handoffs))
+		}
+		request.Header.Set("Content-Type", "application/json")
+		return message, request
+	}
+	return nil, nil
+}
+
+// pushing returns the message of key whose delivery is being pushed.
+func (f *fakeVQS) pushing(key string) *fakeMessage {
+	if key == "" {
+		return nil
+	}
+	for _, message := range f.messages {
+		if message.pushing && message.concurrencyKey == key {
+			return message
+		}
+	}
+	return nil
+}
+
+// pushed ends the push of message's delivery.
+func (f *fakeVQS) pushed(message *fakeMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	message.pushing = false
 }
 
 func (f *fakeVQS) published() [][]byte {

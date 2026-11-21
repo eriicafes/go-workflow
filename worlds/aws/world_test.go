@@ -184,7 +184,8 @@ func (f *fakeDynamo) PutItem(_ context.Context, input *dynamodb.PutItemInput, _ 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := itemID(input.Item)
-	if awsv2.ToString(input.ConditionExpression) == "attribute_not_exists(pk)" && f.items[id] != nil {
+	// Conditions the fake does not understand pass.
+	if ok, known := fakeCondition(awsv2.ToString(input.ConditionExpression), f.items[id], input.ExpressionAttributeValues); known && !ok {
 		return nil, &ddb.ConditionalCheckFailedException{}
 	}
 	f.items[id] = input.Item
@@ -196,15 +197,8 @@ func (f *fakeDynamo) DeleteItem(_ context.Context, input *dynamodb.DeleteItemInp
 	defer f.mu.Unlock()
 	id := itemID(input.Key)
 	old := f.items[id]
-	switch awsv2.ToString(input.ConditionExpression) {
-	case "attribute_exists(pk)":
-		if old == nil {
-			return nil, &ddb.ConditionalCheckFailedException{}
-		}
-	case "hookId = :hook":
-		if old == nil || read(old, "hookId") != read(input.ExpressionAttributeValues, ":hook") {
-			return nil, &ddb.ConditionalCheckFailedException{}
-		}
+	if ok, known := fakeCondition(awsv2.ToString(input.ConditionExpression), old, input.ExpressionAttributeValues); known && !ok {
+		return nil, &ddb.ConditionalCheckFailedException{}
 	}
 	delete(f.items, id)
 	output := &dynamodb.DeleteItemOutput{}
@@ -212,6 +206,41 @@ func (f *fakeDynamo) DeleteItem(_ context.Context, input *dynamodb.DeleteItemInp
 		output.Attributes = old
 	}
 	return output, nil
+}
+
+// fakeCondition evaluates a condition of terms joined by OR, each
+// attribute_exists(name), attribute_not_exists(name), name = :value, or
+// name < :value on numbers. known is false for any other condition.
+func fakeCondition(condition string, item map[string]ddb.AttributeValue, values map[string]ddb.AttributeValue) (ok, known bool) {
+	if condition == "" {
+		return true, true
+	}
+	for _, term := range strings.Split(condition, " OR ") {
+		term = strings.TrimSpace(term)
+		switch {
+		case strings.HasPrefix(term, "attribute_exists(") && strings.HasSuffix(term, ")"):
+			if item != nil && item[term[len("attribute_exists("):len(term)-1]] != nil {
+				return true, true
+			}
+		case strings.HasPrefix(term, "attribute_not_exists(") && strings.HasSuffix(term, ")"):
+			if item == nil || item[term[len("attribute_not_exists("):len(term)-1]] == nil {
+				return true, true
+			}
+		case strings.Contains(term, " = "):
+			name, value, _ := strings.Cut(term, " = ")
+			if item != nil && item[name] != nil && read(item, name) == read(values, value) {
+				return true, true
+			}
+		case strings.Contains(term, " < "):
+			name, value, _ := strings.Cut(term, " < ")
+			if item != nil && item[name] != nil && readInt(item, name) < readInt(values, value) {
+				return true, true
+			}
+		default:
+			return false, false
+		}
+	}
+	return false, true
 }
 
 // BatchGetItem leaves the first unprocessed keys of each call unprocessed
@@ -244,24 +273,25 @@ func (f *fakeDynamo) BatchGetItem(_ context.Context, input *dynamodb.BatchGetIte
 	return output, nil
 }
 
-// UpdateItem applies an UpdateExpression of plain SET name = :value and
-// REMOVE name clauses, with an attribute_exists(pk) condition.
+// UpdateItem applies an UpdateExpression of plain SET name = :value, REMOVE
+// name, or ADD name :number clauses, under a condition fakeCondition
+// understands.
 func (f *fakeDynamo) UpdateItem(_ context.Context, input *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	id := itemID(input.Key)
 	item := f.items[id]
-	switch awsv2.ToString(input.ConditionExpression) {
-	case "":
-	case "attribute_exists(pk)":
-		if item == nil {
-			return nil, &ddb.ConditionalCheckFailedException{}
-		}
-	default:
+	ok, known := fakeCondition(awsv2.ToString(input.ConditionExpression), item, input.ExpressionAttributeValues)
+	if !known {
 		return nil, errUnsupported
+	}
+	if !ok {
+		return nil, &ddb.ConditionalCheckFailedException{}
 	}
 	if item == nil {
 		item = maps.Clone(input.Key)
+	} else {
+		item = maps.Clone(item)
 	}
 	name := func(value string) string {
 		if resolved, ok := input.ExpressionAttributeNames[value]; ok {
@@ -283,11 +313,24 @@ func (f *fakeDynamo) UpdateItem(_ context.Context, input *dynamodb.UpdateItemInp
 			}
 			item[name(strings.TrimSpace(path))] = attribute
 		}
+	} else if rest, ok := strings.CutPrefix(expression, "ADD "); ok {
+		for _, addition := range strings.Split(rest, ",") {
+			path, value, ok := strings.Cut(strings.TrimSpace(addition), " ")
+			if _, found := input.ExpressionAttributeValues[value]; !ok || !found {
+				return nil, errUnsupported
+			}
+			path = name(path)
+			item[path] = avn(readInt(item, path) + readInt(input.ExpressionAttributeValues, value))
+		}
 	} else {
 		return nil, errUnsupported
 	}
 	f.items[id] = item
-	return &dynamodb.UpdateItemOutput{}, nil
+	output := &dynamodb.UpdateItemOutput{}
+	if input.ReturnValues == ddb.ReturnValueAllNew {
+		output.Attributes = item
+	}
+	return output, nil
 }
 
 // Query returns the items whose partition key, or list_group_pk on the

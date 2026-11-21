@@ -578,8 +578,12 @@ func TestQueueIdempotencyKey(t *testing.T) {
 		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
 	}
 	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || other.MessageID == first.MessageID {
-		t.Fatalf("same key on another run = %#v err=%v", other, err)
+	if err != nil || other.MessageID != first.MessageID {
+		t.Fatalf("same key on another run = %#v err=%v, want %s", other, err, first.MessageID)
+	}
+	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later})
+	if err != nil || unkeyed.MessageID == first.MessageID {
+		t.Fatalf("unkeyed = %#v err=%v", unkeyed, err)
 	}
 }
 

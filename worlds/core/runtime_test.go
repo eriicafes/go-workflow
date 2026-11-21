@@ -1061,9 +1061,10 @@ func TestEarlyTimerDeliveryQueuesItsReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The timer is armed again, keyed apart from the one it spent.
 	queued := world.QueuedMessages()
-	if len(queued) != 1 || queued[0].Input.IdempotencyKey != timer.Input.IdempotencyKey || queued[0].Input.NotBefore == nil || !queued[0].Input.NotBefore.Equal(*timer.Input.NotBefore) {
-		t.Fatalf("queued = %#v, want the timer queued again", queued)
+	if len(queued) != 1 || queued[0].Input.IdempotencyKey != timer.Input.IdempotencyKey+":a1" || queued[0].Input.NotBefore == nil || !queued[0].Input.NotBefore.Equal(*timer.Input.NotBefore) {
+		t.Fatalf("queued = %#v, want the timer armed again", queued)
 	}
 	if status, err := run.Status(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil || status != workflow.StatusRunning {
 		t.Fatalf("status = %s, err = %v", status, err)

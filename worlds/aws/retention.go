@@ -71,7 +71,7 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 	if _, err := w.dynamo.PutItem(ctx, &dynamodb.PutItemInput{TableName: awsv2.String(w.config.TableName), Item: item}); err != nil {
 		return err
 	}
-	err = w.publish(ctx, queue, id, input, delay, scheduleName(id))
+	err = w.publish(ctx, queue, id, input, delay, scheduleName(id), true)
 	var exists *sch.ConflictException
 	if errors.As(err, &exists) {
 		return nil

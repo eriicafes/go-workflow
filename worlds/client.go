@@ -157,7 +157,7 @@ func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (R
 	} else if err != nil {
 		return "", err
 	}
-	if _, queueErr := world.Queue(ctx, QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID}); queueErr != nil {
+	if _, queueErr := world.Queue(ctx, FirstFlow(input.RunID, input.WorkflowName, input.DeploymentID)); queueErr != nil {
 		return "", queueErr
 	}
 	return input.RunID, err
