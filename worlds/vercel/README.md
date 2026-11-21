@@ -170,8 +170,8 @@ resume time.
 | Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. |
 | Stream reads | Cursors are chunk indexes. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. The default stream, whose name is empty, is stored as `_default`. |
 | `RunsList` by several statuses | The backend filters by one status, so the World reads a page of each and merges them by creation time. |
-| Hooks | `HooksGet` reads the hook and its events, for when it received a payload or was disposed. |
-| Analytics | Not supported. `Capabilities().Analytics` is false. |
+| Hooks | `HooksGet` reads the hook and its `hook_created` event, for its metadata, webhook flag, and forced claim. |
+| Analytics | `Analytics()` reads the backend's `/v2/analytics` endpoints, as world-vercel does. The backend filters analytics runs by one status, so `RunsList` with several is refused with `ErrEventInvalid`, and a run filter with one time bound sends the other as the earliest or latest time a run can have. Larger pages than the backend allows (100, or 1000 for a run's steps, events, and waits) come back with `HasMore`. |
 | Retention | Vercel's plan decides how long runs are kept. |
 
 ### Backend contract
