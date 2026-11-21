@@ -252,6 +252,17 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 			}
 			return c.redeliver(ctx, delivery, err)
 		}
+		if rerun >= vqsMaxCoalescedReruns {
+			// The last re-run Vercel Queues makes: if more messages are
+			// coalesced into the delivery meanwhile, it refuses the
+			// acknowledgment and the message is handed off, keeping its
+			// expiry and handoff count. A message due for rotation is
+			// continued on a new one first; if the acknowledgment then
+			// succeeds, the continuation is one extra wake.
+			if _, err := c.rotate(ctx, delivery, message); err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
 		err = c.world.acknowledge(ctx, delivery, coalesced)
 		var pending *errCoalescedPending
 		if !errors.As(err, &pending) {
@@ -263,12 +274,7 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 		if rerun >= vqsMaxCoalescedReruns {
 			// Messages keep being coalesced into this delivery: a busy run,
 			// not a failing one. Its next delivery replays from the log what
-			// they were sent for. A message due for rotation continues on a
-			// new one first, and the handoff that keeps the old one until it
-			// expires is one extra wake.
-			if _, err := c.rotate(ctx, delivery, message); err != nil {
-				return http.StatusInternalServerError, err
-			}
+			// they were sent for.
 			if err := c.world.handOff(ctx, delivery); err != nil {
 				return http.StatusInternalServerError, err
 			}

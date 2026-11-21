@@ -244,19 +244,45 @@ func (e *Execution) armTimers() {
 	}
 }
 
-// armOwnChain queues the timer of the earliest open wait of the chain of
-// the delivery's own message, before a handoff that a World may continue on
-// a new message, whose deliveries do not own the chain.
-func (e *Execution) armOwnChain() {
-	open := e.openWaitsInLog()
-	earliest := ""
+// earliestOwnWait returns the earliest open wait of the chain of the
+// delivery's own message, among open and the waits about to be created.
+func (e *Execution) earliestOwnWait(open map[string]openWait) (string, time.Time) {
+	earliest, at := "", time.Time{}
 	for id, wait := range open {
-		if wait.creator == e.delivery.MessageID && (earliest == "" || wait.resumeAt.Before(open[earliest].resumeAt)) {
-			earliest = id
+		if wait.creator == e.delivery.MessageID && (earliest == "" || wait.resumeAt.Before(at)) {
+			earliest, at = id, wait.resumeAt
 		}
 	}
-	if earliest != "" {
-		e.armWait(earliest, open[earliest].resumeAt, 0, false)
+	return earliest, at
+}
+
+// armWaitsBeforeCreation queues, before the delivery commits the wait_created
+// of waits, the timer of its own chain's earliest open wait when that is one
+// of them, so a delivery that commits the creation and fails before it ends
+// leaves no wait without a timer. A wait already due gets none: whichever
+// delivery comes next completes it.
+func (e *Execution) armWaitsBeforeCreation(waits []pendingWait) {
+	now := time.Now()
+	open := e.openWaitsInLog()
+	creating := map[string]bool{}
+	for _, wait := range waits {
+		if wait.dueAt.After(now) {
+			open[string(wait.waitID)] = openWait{resumeAt: wait.dueAt, creator: e.delivery.MessageID}
+			creating[string(wait.waitID)] = true
+		}
+	}
+	if earliest, at := e.earliestOwnWait(open); creating[earliest] {
+		e.armWait(earliest, at, 0, false)
+	}
+}
+
+// armCreatedWaitTimers queues, before a handoff that a World may continue on
+// a new message whose deliveries do not own this message's chain, the timer
+// of the chain's earliest open wait when the delivery created it: a wait an
+// earlier delivery of the message created got its timer from that delivery.
+func (e *Execution) armCreatedWaitTimers() {
+	if earliest, at := e.earliestOwnWait(e.openWaitsInLog()); e.createdWaits[earliest] {
+		e.armWait(earliest, at, 0, false)
 	}
 }
 

@@ -100,8 +100,10 @@ type World interface {
 
 Pushing a run's events is optional. A World that implements
 `worlds.EventsSubscriber` hands a flow waiting on an inline step each event
-as it commits, so the flow reads the log every 10 seconds instead of every 2.
-`worlds.FeedEvents` builds it from a change notification.
+as it commits. The flow still polls the log's tail, as a safety net every 10
+seconds or more while the push is up, and every 2 seconds or more without
+one, and takes an event only when it is the next one it expects.
+`worlds.FeedEvents` builds the push from a change notification.
 
 Supporting [retention](/worlds/#retention) is optional. A World that supports
 it takes `Retention` and `Retentions` in its configuration, resolves each run's

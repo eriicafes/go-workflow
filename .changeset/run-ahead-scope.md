@@ -2,4 +2,4 @@
 "go-workflow": patch
 ---
 
-Run ahead past background steps the runner does not wait on, repair from the log when a write's report is incomplete, and warn about repeated fence refusals and run-ahead stops.
+Handle events below a write ahead as the Workflow SDK does: fold, stop, or replay again from the log, and warn about repeated fence refusals.

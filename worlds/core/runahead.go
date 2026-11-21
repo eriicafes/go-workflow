@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -29,14 +31,13 @@ import (
 //   - A flow runs ahead past a boundary only while nothing another writer can
 //     append could change what the runner decides there: no hook the runner
 //     waits on, no cancellation context, which a cancellation reaches through
-//     a hook, no step delivered by another delivery that the runner waits on,
-//     whose result is unknown, and no timer due within the delivery's inline
-//     window. Otherwise it drains first.
+//     a hook, no step delivered by another delivery, whose result is
+//     unknown, and no timer due within the delivery's inline window. Otherwise it drains first.
 //   - Each write's answer reports the events between the position the flow
 //     placed it at and its own, and the flow reads the rest from the log when
 //     the report is incomplete. One that is inert there, a payload of a hook
-//     nobody waits on, a step result nobody waits on, an attribute write, or
-//     the run's cancellation, is folded in after the flow's own writes: a
+//     nobody waits on, an attribute write, or the run's cancellation, is
+//     folded in after the flow's own writes: a
 //     replay that reads it earlier decides the same. Any other ends the
 //     delivery, which starts again from a fresh read of the log once, and
 //     then hands its message on.
@@ -112,10 +113,11 @@ type aheadWrite struct {
 	createdAt []time.Time
 	err       error
 	// observed holds the hooks the runner waited on when it made the write,
-	// and awaited the steps, which an event below it could have changed a
-	// decision for.
+	// which an event below it could have changed a decision for.
 	observed map[worlds.HookID]bool
-	awaited  map[string]bool
+	// startedBy is the write ahead that starts the step whose outcome this
+	// write is, while that write is unconfirmed.
+	startedBy *aheadWrite
 }
 
 // count returns the number of events the write appends.
@@ -130,12 +132,28 @@ func (w *aheadWrite) count() int {
 // fenced with the count the one before it left.
 type aheadWriter struct {
 	writes chan *aheadWrite
+	// stopped is set once run-ahead stopped: the writer then sends only the
+	// outcomes of steps whose start committed, and refuses every decision
+	// made from the view ahead.
+	stopped atomic.Bool
 }
+
+// errNotWritten answers a write ahead the writer refused after run-ahead
+// stopped.
+var errNotWritten = errors.New("workflow: write ahead not sent after run-ahead stopped")
+
+// errRunAheadRepair ends a pass whose writes ahead another writer's event
+// displaced where a replay that reads it earlier could decide differently:
+// the delivery replays again from a fresh read of the log, with run-ahead
+// still on.
+type errRunAheadRepair struct{ reason string }
+
+func (e errRunAheadRepair) Error() string { return "workflow: run-ahead repair: " + e.reason }
 
 // canRunAhead reports whether the flow may hand an inline step's result to
 // the runner before its write commits.
 func (e *Execution) canRunAhead() bool {
-	if e.aheadDepth == 0 || e.superseded || len(e.ahead) >= e.aheadDepth || runAheadDisabledFor(e.world) {
+	if e.aheadDepth == 0 || e.superseded || e.stopped || e.repairDue || len(e.ahead) >= e.aheadDepth || runAheadDisabledFor(e.world) {
 		return false
 	}
 	return e.boundaryInert()
@@ -143,8 +161,8 @@ func (e *Execution) canRunAhead() bool {
 
 // boundaryInert reports whether nothing another writer can append now could
 // change a decision of the runner: no hook it waits on, no cancellation
-// context, no step another delivery runs that the runner waits on, and no
-// timer that can fall due within the delivery's inline window.
+// context, no step another delivery runs, and no timer that can fall due
+// within the delivery's inline window.
 func (e *Execution) boundaryInert() bool {
 	if len(e.observedHooks) > 0 {
 		return false
@@ -177,10 +195,8 @@ func (e *Execution) boundaryInert() bool {
 		case worlds.EventTypeHookDisposed:
 			finished[event.CorrelationID] = true
 		case worlds.EventTypeStepCreated, worlds.EventTypeStepRetrying:
-			// A step delivery runs it, and the runner waits on it.
-			if e.awaited[event.CorrelationID] && !e.ranInline[worlds.StepID(event.CorrelationID)] {
-				created[event.CorrelationID] = true
-			}
+			// A step delivery runs it.
+			created[event.CorrelationID] = true
 		case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed:
 			finished[event.CorrelationID] = true
 		}
@@ -203,8 +219,8 @@ func (e *Execution) runAheadHazard(event worlds.Event, write *aheadWrite) string
 			return fmt.Sprintf("%s for a hook the runner may be waiting on", event.EventType)
 		}
 	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		if write.awaited[event.CorrelationID] && !e.ranInline[worlds.StepID(event.CorrelationID)] {
-			return fmt.Sprintf("%s of a step the runner waits on and this delivery does not run", event.EventType)
+		if !e.selfSteps[worlds.StepID(event.CorrelationID)] {
+			return fmt.Sprintf("%s of a step this delivery does not run", event.EventType)
 		}
 	case worlds.EventTypeWaitCompleted:
 		return "wait_completed written by another writer"
@@ -244,12 +260,12 @@ func (e *Execution) writeAhead(step pendingStep, result worlds.DataStepResult) {
 	}
 	occurred := time.Now().UTC().Truncate(time.Millisecond)
 	write := &aheadWrite{
-		event:    worlds.EventsCreateEvent{EventType: eventType, CorrelationID: string(step.stepID), Data: data, OccurredAt: occurred},
-		index:    len(e.events),
-		occurred: occurred,
-		done:     make(chan struct{}),
-		observed: maps.Clone(e.observedHooks),
-		awaited:  maps.Clone(e.awaited),
+		event:     worlds.EventsCreateEvent{EventType: eventType, CorrelationID: string(step.stepID), Data: data, OccurredAt: occurred},
+		index:     len(e.events),
+		occurred:  occurred,
+		done:      make(chan struct{}),
+		observed:  maps.Clone(e.observedHooks),
+		startedBy: e.speculativeStarts[step.stepID],
 	}
 	if e.writer == nil {
 		e.startWriter()
@@ -269,9 +285,15 @@ func (e *Execution) startWriter() {
 	count := e.inBand
 	go func() {
 		failed := false
-		for write := range e.writer.writes {
+		writer := e.writer
+		for write := range writer.writes {
 			if failed {
 				write.err = errReplaySuperseded
+				close(write.done)
+				continue
+			}
+			if writer.stopped.Load() && (write.batch != nil || write.startedBy != nil && write.startedBy.err != nil) {
+				write.err = errNotWritten
 				close(write.done)
 				continue
 			}
@@ -297,9 +319,11 @@ func (e *Execution) startWriter() {
 }
 
 // confirmAhead takes the answers of the writes ahead that came back, in
-// order, waiting for all of them when wait is set. A write's answer that
-// reports events below it folds the inert ones in after the flow's own
-// writes, and ends the delivery for any other.
+// order, waiting for all of them when wait is set. An event a write's answer
+// reports below it stops the delivery when it could have changed a decision
+// the runner made. An inert one is folded in after the flow's own writes when
+// the runner's view ahead may take it in later; otherwise a repair is due, and
+// the delivery replays again from the log once its writes ahead settle.
 func (e *Execution) confirmAhead(wait bool) {
 	for len(e.ahead) > 0 {
 		write := e.ahead[0]
@@ -321,30 +345,49 @@ func (e *Execution) confirmAhead(wait bool) {
 			panic(e.exit(deliveryError{cause: write.err}))
 		}
 		e.inBand = write.result.InBandCount
+		e.noteActivity()
+		e.confirmStarts(write)
+		below := e.belowWrite(write)
+		for _, event := range below {
+			if reason := e.runAheadHazard(event, write); reason != "" {
+				e.stopRunAhead(reason, event)
+			}
+		}
 		for _, createdAt := range write.createdAt {
 			if !createdAt.Truncate(time.Millisecond).Equal(write.occurred) {
 				// The runner read a time a replay never reads.
 				disableRunAheadFor(e.world)
-				e.abandonAhead()
-				panic(e.exit(errRunAheadStop{reason: fmt.Sprintf("the World stored a write at %v, not at the %v it occurred", createdAt, write.occurred)}))
+				e.stopRunAhead(fmt.Sprintf("the World stored a write at %v, not at the %v it occurred", createdAt, write.occurred), worlds.Event{})
 			}
 		}
-		e.foldBelow(write)
+		if !e.repairDue {
+			e.foldBelow(write, below)
+		}
 	}
 	if len(e.ahead) == 0 && e.writer != nil {
 		close(e.writer.writes)
 		e.writer = nil
 	}
+	if e.repairDue && len(e.ahead) == 0 && !e.finishing {
+		panic(e.exit(errRunAheadRepair{reason: e.repairReason}))
+	}
 }
 
-// foldBelow adds the events write's answer reports below it to the log after
-// the flow's own writes, and moves the flow's writes still ahead up by as
-// many positions, or ends the delivery when one of them could have changed a
-// decision.
-func (e *Execution) foldBelow(write *aheadWrite) {
-	if write.result.MoreEvents {
-		write.result.Events = e.readBelow(write)
+// confirmStarts marks the steps a committed write ahead started as started.
+func (e *Execution) confirmStarts(write *aheadWrite) {
+	if write.err != nil {
+		return
 	}
+	for _, event := range write.batch {
+		if event.EventType == worlds.EventTypeStepStarted {
+			delete(e.speculativeStarts, worlds.StepID(event.CorrelationID))
+		}
+	}
+}
+
+// belowWrite returns the events write's answer reports below it that are
+// neither the flow's own nor in the log it holds: another writer's.
+func (e *Execution) belowWrite(write *aheadWrite) []worlds.Event {
 	var below []worlds.Event
 	for _, event := range write.result.Events {
 		// An event at a position the flow placed one of its own writes at
@@ -355,21 +398,35 @@ func (e *Execution) foldBelow(write *aheadWrite) {
 			below = append(below, event)
 		}
 	}
+	return below
+}
+
+// foldBelow adds the events below write to the log after the flow's own
+// writes, and moves the flow's writes still ahead up by as many positions,
+// when each is one the runner's view ahead may take in later: a payload or
+// disposal of a hook no boundary ahead waited on, or an attribute write.
+// Otherwise, or when the report was incomplete, or the write committed below
+// the position it was placed at, a repair is due.
+func (e *Execution) foldBelow(write *aheadWrite, below []worlds.Event) {
 	committed, err := worlds.EventSlot(write.result.EventID)
 	// Where the write is expected to land, moved up by the events found
 	// below the writes before it.
 	predicted, _ := worlds.EventSlot(e.events[write.index].EventID)
-	if err != nil || committed < predicted {
-		e.abandonAhead()
-		panic(e.exit(errRunAheadStop{reason: fmt.Sprintf("%s committed at %s, below the position it was placed at", write.event.EventType, write.result.EventID)}))
+	switch {
+	case write.result.MoreEvents:
+		e.markRepair("the report of the events below a write ahead was incomplete")
+		return
+	case err != nil || committed < predicted:
+		e.markRepair(fmt.Sprintf("%s committed at %s, below the position it was placed at", write.event.EventType, write.result.EventID))
+		return
 	}
 	if len(below) == 0 && committed == predicted {
 		return
 	}
 	for _, event := range below {
-		if reason := e.runAheadHazard(event, write); reason != "" {
-			e.abandonAhead()
-			panic(e.exit(errRunAheadStop{reason: reason}))
+		if !admitBelow(event, write.observed) {
+			e.markRepair(fmt.Sprintf("%s landed below a write ahead", event.EventType))
+			return
 		}
 	}
 	// The flow's writes from this one on landed, or land, as many positions
@@ -394,33 +451,46 @@ func (e *Execution) foldBelow(write *aheadWrite) {
 	}
 }
 
-// readBelow reads from the log the events between the position write was
-// placed at and the one it committed at, when its answer's report of them
-// was incomplete.
-func (e *Execution) readBelow(write *aheadWrite) []worlds.Event {
-	committed, err := worlds.EventSlot(write.result.EventID)
-	if err != nil {
-		e.abandonAhead()
-		panic(e.exit(deliveryError{cause: err}))
+// admitBelow reports whether event, another writer's below a write ahead,
+// may join the runner's view after the events it read since: a hook event
+// for a hook no boundary ahead was sensitive to, or an attribute write.
+func admitBelow(event worlds.Event, observed map[worlds.HookID]bool) bool {
+	switch event.EventType {
+	case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed, worlds.EventTypeHookConflict:
+		return !observed[worlds.HookID(event.CorrelationID)]
+	case worlds.EventTypeAttrSet:
+		return true
 	}
-	var events []worlds.Event
-	cursor := string(worlds.EventIDForSlot(uint64(write.index)))
-	for {
-		page, err := e.world.EventsList(e.ctx, worlds.EventsListInput{RunID: e.run.RunID, Pagination: worlds.Pagination{Cursor: cursor}})
-		if err != nil {
-			e.abandonAhead()
-			panic(e.exit(deliveryError{cause: err}))
-		}
-		for _, event := range page.Data {
-			if slot, err := worlds.EventSlot(event.EventID); err != nil || slot >= committed {
-				return events
-			}
-			events = append(events, event)
-		}
-		if !page.HasMore {
-			return events
-		}
-		cursor = page.Cursor
+	return false
+}
+
+// markRepair makes a repair due: the flow runs ahead no more, folds in
+// nothing more, and replays again from the log once its writes ahead settle.
+func (e *Execution) markRepair(reason string) {
+	if !e.repairDue {
+		e.repairDue, e.repairReason = true, reason
+	}
+}
+
+// stopRunAhead ends the delivery's decisions, because event, or the World,
+// broke an assumption the runner ran ahead on. The writes ahead of the
+// outcomes of steps whose start committed still go out, and so do the results
+// of the steps still running, so the delivery that decides from the log runs
+// none of them again.
+func (e *Execution) stopRunAhead(reason string, event worlds.Event) {
+	if event.EventType != "" {
+		log.Printf("workflow: error: run %s stopped running ahead: an event that could change the workflow landed below a write ahead: %s (%s)", e.run.RunID, reason, event.EventID)
+	}
+	e.stopped = true
+	if e.stopReason == "" {
+		e.stopReason = reason
+	}
+	if e.writer != nil {
+		e.writer.stopped.Store(true)
+	}
+	e.abandonAhead()
+	if !e.finishing {
+		panic(e.exit(errRunAheadStop{reason: reason}))
 	}
 }
 
@@ -462,7 +532,7 @@ func (e *Execution) sendBatchAhead(batch []worlds.EventsCreateEvent, held, fence
 // flow's other writes ahead. Every event is taken as committed.
 func (e *Execution) writeBatchAhead(events []worlds.EventsCreateEvent) map[string]bool {
 	occurred := time.Now().UTC().Truncate(time.Millisecond)
-	write := &aheadWrite{batch: events, index: len(e.events), occurred: occurred, done: make(chan struct{}), observed: maps.Clone(e.observedHooks), awaited: maps.Clone(e.awaited)}
+	write := &aheadWrite{batch: events, index: len(e.events), occurred: occurred, done: make(chan struct{}), observed: maps.Clone(e.observedHooks)}
 	committed := make(map[string]bool, len(events))
 	for index := range events {
 		events[index].OccurredAt = occurred
@@ -470,6 +540,9 @@ func (e *Execution) writeBatchAhead(events []worlds.EventsCreateEvent) map[strin
 		e.trackEvent(len(e.events), event)
 		e.events = append(e.events, event)
 		committed[event.CorrelationID] = true
+		if event.EventType == worlds.EventTypeStepStarted {
+			e.speculativeStarts[worlds.StepID(event.CorrelationID)] = write
+		}
 	}
 	if e.writer == nil {
 		e.startWriter()
@@ -487,11 +560,15 @@ func (e *Execution) drainAhead() {
 	}
 }
 
-// abandonAhead waits for the writes still ahead to finish, without reading
-// their answers, when the flow stops.
+// abandonAhead waits for the writes still ahead to finish, without folding
+// in their answers, when the flow stops.
 func (e *Execution) abandonAhead() {
 	for _, write := range e.ahead {
 		<-write.done
+		if write.err == nil {
+			e.inBand = write.result.InBandCount
+			e.confirmStarts(write)
+		}
 	}
 	e.ahead = nil
 	if e.writer != nil {
