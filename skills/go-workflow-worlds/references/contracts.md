@@ -18,9 +18,13 @@ An event that repeats a creation the log holds is refused with
 a running run appends nothing and returns no event (or `ErrEventConflict`), a
 `run_cancelled` of a cancelled run is appended without changing the run, and
 a `step_started` for a started step is a new attempt, not a repeat.
-A finished run refuses `step_created`, `step_started`, `step_retrying`, and
-`wait_created` (`ErrRunTerminal`) and accepts `step_completed`, `step_failed`,
-and `wait_completed`. Other step and wait checks are optional, and a World
+A finished run refuses events as `worlds.FinishedRunRefusal` says: a
+transition or a new step, wait, hook, or attribute with `ErrEventConflict`
+(also matching `ErrRunTerminal`), another attempt or a result of a step that
+is not running with `ErrRunTerminal`, and a `wait_completed` with
+`ErrEventNotFound`. It records a running step's result or retry. A
+`wait_completed` needs its `wait_created` (`ErrEventNotFound`). Other step
+and wait checks are optional, and a World
 that checks accepts a step's result while the step is not finished and a
 `step_started` that creates its step. `hook_disposed` and `hook_received` need
 a hook of the same run (`ErrHookNotFound`), so a repeated disposal is refused.

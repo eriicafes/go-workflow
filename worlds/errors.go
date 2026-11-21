@@ -56,7 +56,9 @@ var (
 	// ErrEventConflict reports an event that repeats one the run's log
 	// already holds, such as a second step_created or wait_completed for
 	// the same step or wait, as the Workflow SDK's EntityConflictError does.
-	// What the event records is already in the log.
+	// What the event records is already in the log. A transition from, or
+	// a creation on, a finished run is refused with it too, and then also
+	// matches ErrRunTerminal.
 	ErrEventConflict = errors.New("workflow: event conflicts with the run's log")
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.

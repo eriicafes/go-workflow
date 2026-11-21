@@ -960,7 +960,7 @@ func awaitBackoff(ctx context.Context, _ backoffInput) (backoffOutput, error) {
 	return backoffOutput{}, err
 }
 
-func TestRuntimeRecordsFailedStepAfterRunCancellationWithoutRetry(t *testing.T) {
+func TestRuntimeRecordsARetryAfterRunCancellationAndStartsNoAttempt(t *testing.T) {
 	cause := errors.New("step failed")
 	runner := workflow.Use(func(ctx context.Context, _ backoffInput) (backoffOutput, error) {
 		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
@@ -985,14 +985,28 @@ func TestRuntimeRecordsFailedStepAfterRunCancellationWithoutRetry(t *testing.T) 
 	}
 	deliverNext(t, ctx, world, runtime)
 	delivery := deliverNext(t, ctx, world, runtime)
+	// As in the Workflow SDK, a finished run records the retry of a step that
+	// was running when it finished. The retry's delivery waits for its time,
+	// then finds the run finished and starts no attempt.
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
-	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeErrorPayload(step.Error, nil), cause) {
-		t.Fatalf("late failure = %#v, err=%v", step, err)
+	if err != nil || step.Status != worlds.StatusPending || step.RetryAfter == nil || step.Attempt != 1 || !errors.Is(worlds.DecodeErrorPayload(step.Error, nil), cause) {
+		t.Fatalf("retry after cancellation = %#v, err=%v", step, err)
 	}
+	retried := false
 	for _, message := range world.QueuedMessages() {
-		if message.Input.StepID != nil {
-			t.Fatalf("cancelled run queued a retry: %#v", message.Input)
+		if message.Input.StepID == nil {
+			continue
 		}
+		retried = true
+		if _, ok := worlds.RedeliveryOf(runtime.Execute(ctx, message.Input)); !ok {
+			t.Fatal("the retry ran before its time")
+		}
+	}
+	if !retried {
+		t.Fatal("the step's retry was not queued")
+	}
+	if step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID}); err != nil || step.Attempt != 1 || step.Status != worlds.StatusPending {
+		t.Fatalf("step after its retry's delivery = %#v, err=%v", step, err)
 	}
 	drain(t, ctx, world, runtime)
 	if status, err := run.Status(ctx); err != nil || status != workflow.StatusCancelled {

@@ -327,10 +327,10 @@ func conformBatch(t *testing.T, world worlds.World) {
 	if err != nil || completed.Results[0].Err != nil || !errors.Is(completed.Results[1].Err, worlds.ErrRunTerminal) {
 		t.Fatalf("batch appending after its own terminal event = %#v err=%v", completed, err)
 	}
-	// The finished run refuses the retry, and so the failure behind it,
-	// which alone it accepts.
+	// The finished run refuses another attempt, and so the failure behind
+	// it, which alone it accepts.
 	ordered, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
-		conformEvent(t, worlds.EventTypeStepRetrying, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
+		conformEvent(t, worlds.EventTypeStepStarted, "step_x", worlds.DataStepStarted{StepName: "x", Attempt: 2}),
 		conformEvent(t, worlds.EventTypeStepFailed, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
 	}})
 	if err != nil || !errors.Is(ordered.Results[0].Err, worlds.ErrRunTerminal) || ordered.Results[1].Err == nil || ordered.AllocatedEventCount != 0 {
@@ -434,16 +434,23 @@ func conformEventsList(t *testing.T, world worlds.World) {
 func conformWaits(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "waits")
+	// A wait completes once it was created, as in the Workflow SDK's Worlds.
+	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
+	conformExpect(t, err, worlds.ErrEventNotFound, "wait_completed of a wait never created")
+	resumeAt := time.Now().Add(time.Hour).UTC()
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_b", worlds.DataWaitCreated{ResumeAt: resumeAt})
 	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
 	// A wait completes once, as in the Workflow SDK's Worlds.
-	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
 	conformExpect(t, err, worlds.ErrEventConflict, "repeated wait_completed")
-	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_b"}}); err != nil {
-		t.Fatal(err)
+	if events := conformAllEvents(t, world, runID); len(events) != 4 {
+		t.Fatalf("events = %d, want 4", len(events))
 	}
-	if events := conformAllEvents(t, world, runID); len(events) != 3 {
-		t.Fatalf("events = %d, want 3", len(events))
-	}
+	// A run's waits end with it.
+	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_b"}})
+	conformExpect(t, err, worlds.ErrEventNotFound, "wait_completed after the run finished")
 }
 
 // conformEventsSubscribe checks a World that pushes a run's events: each

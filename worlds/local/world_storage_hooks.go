@@ -103,7 +103,7 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 		return worlds.EventResult{}, err
 	}
 	if claimant.run.Status.Terminal() {
-		return worlds.EventResult{}, worlds.ErrRunTerminal
+		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.run.Status, input.Event, "")
 	}
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err

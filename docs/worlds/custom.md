@@ -35,10 +35,13 @@ type World interface {
 ## Key requirements
 
 - **Atomic admission.** `EventsCreate` must check the transition rules and
-  append in one atomic operation. A finished run refuses `step_created`,
-  `step_started`, `step_retrying`, `wait_created`, and other new work with
-  `ErrRunTerminal`, and still records a step's `step_completed` or
-  `step_failed` and a `wait_completed`. Other checks of a step or wait are
+  append in one atomic operation. A finished run refuses events as
+  `worlds.FinishedRunRefusal` says, as the Workflow SDK's Worlds do: a
+  transition or a new step, wait, hook, or attribute with `ErrEventConflict`
+  (also matching `ErrRunTerminal`), another attempt or the result of a step
+  that is not running with `ErrRunTerminal`, and a `wait_completed` with
+  `ErrEventNotFound`. It still records a running step's result or retry. A
+  `wait_completed` needs its `wait_created`. Other checks of a step or wait are
   optional: the runtime decides from the log alone, so a World that appends
   every such event is correct. A World that checks steps accepts a step's
   result while the step is not finished, and a `step_started` that creates

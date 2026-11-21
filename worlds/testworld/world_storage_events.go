@@ -255,7 +255,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		return worlds.EventResult{}, worlds.ErrRunNotFound
 	}
 	if claimant.Status.Terminal() {
-		return worlds.EventResult{}, worlds.ErrRunTerminal
+		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.Status, input.Event, "")
 	}
 	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
@@ -304,17 +304,10 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEvent) (worlds.EventResult, bool, error) {
 	run := m.runs[runID]
 	step, stepExists := m.steps[runID][worlds.StepID(requested.CorrelationID)]
-	// A finished run still records what was running when it finished: a
-	// step's final result, and a wait's completion.
-	finishing := (requested.EventType == worlds.EventTypeStepCompleted || requested.EventType == worlds.EventTypeStepFailed) && stepExists && !step.Status.Terminal() ||
-		requested.EventType == worlds.EventTypeWaitCompleted
-	if run.Status.Terminal() && !finishing {
-		if requested.EventType == worlds.EventTypeRunCancelled && run.Status == worlds.StatusCancelled {
-			// Cancelling a cancelled run records the request, as in the
-			// Workflow SDK's Worlds.
-			return worlds.EventResult{}, false, nil
+	if run.Status.Terminal() {
+		if err := worlds.FinishedRunRefusal(run.Status, requested, step.Status); err != nil {
+			return worlds.EventResult{}, false, err
 		}
-		return worlds.EventResult{}, false, worlds.ErrRunTerminal
 	}
 	if requested.EventType == worlds.EventTypeRunStarted && run.Status == worlds.StatusRunning {
 		// The run started before: no second run_started is appended, and
@@ -342,6 +335,10 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return worlds.EventResult{}, false, fmt.Errorf("%w: step %s already created", worlds.ErrEventConflict, requested.CorrelationID)
 		}
 	case worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet:
+		// A wait completes once it was created.
+		if requested.EventType == worlds.EventTypeWaitCompleted && !m.hasEventLocked(runID, worlds.EventTypeWaitCreated, requested.CorrelationID) {
+			return worlds.EventResult{}, false, fmt.Errorf("%w: wait %s not found", worlds.ErrEventNotFound, requested.CorrelationID)
+		}
 		// A wait is created and completed once, and an attribute write of
 		// the workflow is recorded once.
 		once := requested.EventType != worlds.EventTypeAttrSet || worlds.WorkflowAttrSet(requested.Data)

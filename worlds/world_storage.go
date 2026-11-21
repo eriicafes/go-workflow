@@ -75,9 +75,14 @@ type StorageEvents interface {
 	// when the target hook does not allow the event, and ErrHookConflict when
 	// a hook_created token is taken.
 	//
-	// A finished run refuses step_created, step_started, step_retrying, and
-	// wait_created, and still accepts step_completed, step_failed, and
-	// wait_completed, which record what was running when it finished. Other
+	// A finished run refuses events as FinishedRunRefusal says, as the
+	// Workflow SDK's Worlds do: a transition from it or a creation on it with
+	// ErrEventConflict (which also matches ErrRunTerminal), another attempt
+	// or a result of a step that is not running with ErrRunTerminal, and a
+	// wait_completed with ErrEventNotFound, since its waits end with it. It
+	// still records a running step's step_completed, step_failed, and
+	// step_retrying. A wait_completed needs its wait_created
+	// (ErrEventNotFound). Other
 	// checks of a step or wait against the events before it, which a World
 	// returns as ErrStepNotStartable, are optional: the runtime decides from
 	// the log alone, and a World that appends every such event is correct. A

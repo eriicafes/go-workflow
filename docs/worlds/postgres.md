@@ -90,7 +90,7 @@ They differ from world-postgres's where Go needs it:
 - `payload_cbor` is Go's own CBOR (`worlds.EncodeEventData`), with payloads as
   raw bytes, not cbor-x. There are no deprecated `jsonb` columns.
 - Steps are keyed by run and step, since a step ID is unique only within its
-  run, and stream chunks by run as well as stream.
+  run, as world-local keys them.
 - `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
   `Config.Retention`.
 - Hooks fill in `resume_context`, which world-postgres leaves empty, with the

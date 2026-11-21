@@ -141,22 +141,18 @@ const noEvent worlds.EventID = "-"
 // refused with ErrEventConflict. A non-empty event ID is noEvent.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
 	if t.run.Status.Terminal() {
-		// A finished run still records what was running when it finished: a
-		// step's final result, and a wait's completion.
-		finishing := event.EventType == worlds.EventTypeWaitCompleted
-		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed {
+		var stepStatus worlds.Status
+		if event.EventType == worlds.EventTypeStepCompleted || event.EventType == worlds.EventTypeStepFailed || event.EventType == worlds.EventTypeStepRetrying {
 			step, err := t.step(worlds.StepID(event.CorrelationID))
 			if err != nil {
 				return "", err
 			}
-			finishing = step != nil && !step.Status.Terminal()
-		}
-		if !finishing {
-			if event.EventType == worlds.EventTypeRunCancelled && t.run.Status == worlds.StatusCancelled {
-				// Cancelling a cancelled run records the request.
-				return "", nil
+			if step != nil {
+				stepStatus = step.Status
 			}
-			return "", worlds.ErrRunTerminal
+		}
+		if err := worlds.FinishedRunRefusal(t.run.Status, event, stepStatus); err != nil {
+			return "", err
 		}
 	}
 	switch event.EventType {
@@ -208,6 +204,16 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		// the workflow is recorded once.
 		if event.CorrelationID == "" || event.EventType == worlds.EventTypeAttrSet && !worlds.WorkflowAttrSet(event.Data) {
 			break
+		}
+		if event.EventType == worlds.EventTypeWaitCompleted {
+			// A wait completes once it was created.
+			created, err := t.findEvent(worlds.EventTypeWaitCreated, event.CorrelationID)
+			if err != nil {
+				return "", err
+			}
+			if created == "" {
+				return "", fmt.Errorf("%w: wait %s not found", worlds.ErrEventNotFound, event.CorrelationID)
+			}
 		}
 		earlier, err := t.findEvent(event.EventType, event.CorrelationID)
 		if err != nil {
@@ -1043,7 +1049,7 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 // refusal reports whether err is an event's refusal rather than a storage
 // failure.
 func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
+	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
 		if errors.Is(err, target) {
 			return true
 		}

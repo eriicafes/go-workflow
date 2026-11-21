@@ -27,11 +27,12 @@ const schemaLockKey int64 = 0x676f5f776f726b66
 //     workflow_events. A run's input is always slot 1 (run_created).
 //   - An event's data is payload_cbor, Go's own CBOR (worlds.EncodeEventData),
 //     with payloads as raw bytes. There are no jsonb twins.
-//   - Steps are keyed by run and step, since a step ID is unique only within
-//     its run, and stream chunks by run as well as stream.
-//   - Hooks keep the run's workflow, deployment, public key, and spec
-//     version, which wake the run, and the time a payload was received.
-//     A hook's row goes when it is disposed or done with its token, as in
+//   - Steps are keyed by run and step, as world-local keys them, since a step
+//     ID is unique only within its run.
+//   - Hooks fill in resume_context, the run's workflow, deployment, public
+//     key, and spec version, which wake the run, where world-postgres leaves
+//     it empty, and have no owner_id, project_id, or environment. A hook's
+//     row goes when it is disposed or done with its token, as in
 //     world-postgres.
 //   - workflow_runs.data_purged records that a run's rows no longer hold its
 //     data, for Config.Retention's background purge.
@@ -168,8 +169,9 @@ CREATE TABLE workflow.workflow_stream_chunks (
 	data bytea NOT NULL,
 	created_at timestamptz NOT NULL DEFAULT now(),
 	eof boolean NOT NULL,
-	PRIMARY KEY (run_id, stream_id, id)
+	PRIMARY KEY (stream_id, id)
 );
+CREATE INDEX workflow_stream_chunks_run_id_index ON workflow.workflow_stream_chunks (run_id);
 
 CREATE TABLE workflow.workflow_queue (
 	id text PRIMARY KEY,

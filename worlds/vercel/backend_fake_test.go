@@ -864,12 +864,17 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusNotFound, "not-found"
 	case errors.Is(err, worlds.ErrHookNotFound), errors.Is(err, worlds.ErrHookNotActive):
 		return http.StatusNotFound, "hook-not-found"
+	case errors.Is(err, worlds.ErrEventConflict) && errors.Is(err, worlds.ErrRunTerminal):
+		// A transition from, or a creation on, a finished run.
+		return http.StatusConflict, "run-terminal"
 	case errors.Is(err, worlds.ErrEventConflict):
 		return http.StatusConflict, "entity-conflict"
 	case errors.Is(err, worlds.ErrRunAlreadyExists):
 		return http.StatusConflict, "run-exists"
 	case errors.Is(err, worlds.ErrRunTerminal):
-		return http.StatusConflict, "run-terminal"
+		// The backend answers a write to a finished run 410, which
+		// world-vercel reports as RunExpiredError.
+		return http.StatusGone, "run-expired"
 	case errors.Is(err, worlds.ErrStepNotStartable):
 		return http.StatusConflict, "step-not-startable"
 	case errors.Is(err, worlds.ErrHookForceClaimed):
