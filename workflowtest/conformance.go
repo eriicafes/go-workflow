@@ -185,9 +185,6 @@ func conformClaim(world worlds.World, runID worlds.RunID, hookID worlds.HookID, 
 }
 
 func conformIdentity(t *testing.T, world worlds.World) {
-	if world.SpecVersion() != worlds.SpecVersion {
-		t.Fatalf("SpecVersion = %d", world.SpecVersion())
-	}
 	normalized, err := worlds.NormalizeBaseURL(world.BaseURL())
 	if err != nil || normalized != world.BaseURL() {
 		t.Fatalf("BaseURL %q is not normalized: %v", world.BaseURL(), err)

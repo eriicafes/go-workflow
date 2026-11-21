@@ -17,7 +17,7 @@ export namespace RPC {
 	// @workflow/world SDK entities.
 	/** The RPC server's protocol version and capabilities, from `client.spec`. */
 	export type Spec = {
-		specVersion: number;
+		rpcVersion: number;
 		capabilities: Capabilities;
 	};
 	/** The optional behavior the RPC server's World implements. */
@@ -249,7 +249,7 @@ export class RPCClient {
 	readonly baseURL: string;
 	readonly fetch: typeof globalThis.fetch;
 	readonly headers: HeadersInit;
-	specVersion?: number;
+	rpcVersion?: number;
 
 	constructor(options: ClientOptions) {
 		const { baseURL, fetch: fetchImplementation = globalThis.fetch, headers = {} } = options;
@@ -268,7 +268,7 @@ export class RPCClient {
 		const encodedBody = encode({
 			method,
 			input: toWire(input),
-			...(this.specVersion === undefined ? {} : { specVersion: this.specVersion }),
+			...(this.rpcVersion === undefined ? {} : { rpcVersion: this.rpcVersion }),
 		});
 		const body = new Uint8Array(encodedBody.byteLength);
 		body.set(encodedBody);

@@ -208,7 +208,6 @@ func New(config Config) (*World, error) {
 }
 
 func (w *World) BaseURL() string           { return w.config.BaseURL }
-func (*World) SpecVersion() int            { return worlds.SpecVersion }
 func (w *World) DeploymentID() string      { return w.config.DeploymentID }
 func (*World) Analytics() worlds.Analytics { return nil }
 func (w *World) Capabilities() worlds.Capabilities {

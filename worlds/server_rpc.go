@@ -12,6 +12,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// RPCVersion is the version of the RPC protocol HTTPHandler serves and the
+// HTTP client speaks.
+const RPCVersion = 1
+
 // RPCContentType is the content type accepted and returned by HTTPHandler's
 // RPC endpoint.
 const RPCContentType = "application/cbor"
@@ -22,9 +26,9 @@ type RPCRequest struct {
 	Method string `cbor:"method"`
 	// Input is the CBOR-encoded input of the operation.
 	Input cbor.RawMessage `cbor:"input"`
-	// SpecVersion is the client's RPC protocol version. When set and
-	// different from the World's, the request fails with invalid_argument.
-	SpecVersion *int `cbor:"specVersion,omitempty"`
+	// RPCVersion is the client's RPC protocol version. When set and
+	// different from RPCVersion, the request fails with invalid_argument.
+	RPCVersion *int `cbor:"rpcVersion,omitempty"`
 }
 
 // RPCResponse is the CBOR envelope returned by an HTTPHandler RPC endpoint.
@@ -90,14 +94,14 @@ var rpcSentinels = []struct {
 	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
 }
 
-// specVersionMismatchError reports incompatible RPC protocol versions.
-type specVersionMismatchError struct {
+// rpcVersionMismatchError reports incompatible RPC protocol versions.
+type rpcVersionMismatchError struct {
 	client int
 	server int
 }
 
-func (e specVersionMismatchError) Error() string {
-	return fmt.Sprintf("workflow: RPC spec version does not match world: client=%d server=%d", e.client, e.server)
+func (e rpcVersionMismatchError) Error() string {
+	return fmt.Sprintf("workflow: RPC version does not match server: client=%d server=%d", e.client, e.server)
 }
 
 func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
@@ -139,8 +143,8 @@ func writeRPC(writer http.ResponseWriter, response RPCResponse) {
 }
 
 func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.RawMessage, error) {
-	if request.SpecVersion != nil && *request.SpecVersion != world.SpecVersion() {
-		return nil, specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
+	if request.RPCVersion != nil && *request.RPCVersion != RPCVersion {
+		return nil, rpcVersionMismatchError{client: *request.RPCVersion, server: RPCVersion}
 	}
 	switch request.Method {
 	case "world.deploymentId":
@@ -580,7 +584,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		}
 		return encodeRPC(deploymentID)
 	case "client.spec":
-		return encodeRPC(ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()})
+		return encodeRPC(ClientSpec{RPCVersion: RPCVersion, Capabilities: world.Capabilities()})
 	case "client.runs.create":
 		input, err := decodeRPC[ClientRunsCreateInput](request.Input)
 		if err != nil {
@@ -859,8 +863,8 @@ func newRPCError(err error) *RPCError {
 			return failure
 		}
 	}
-	var specVersionMismatch specVersionMismatchError
-	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &specVersionMismatch) {
+	var rpcVersionMismatch rpcVersionMismatchError
+	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &rpcVersionMismatch) {
 		return &RPCError{Code: "invalid_argument", Message: err.Error()}
 	}
 	return &RPCError{Code: "internal", Message: err.Error()}

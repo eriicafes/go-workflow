@@ -17,7 +17,7 @@ installed contract. `go doc github.com/eriicafes/go-workflow/workflowtest`
 describes the public conformance test entry points.
 
 `World` embeds `Storage`, `Queue`, and `Streamer` and exposes BaseURL,
-Analytics, Capabilities, SpecVersion, and DeploymentID. A World with
+Analytics, Capabilities, and DeploymentID. A World with
 deployment affinity can implement `worlds.LatestDeployments` so runs started
 with `workflow.LatestDeployment` start on its newest deployment, and
 `worlds.StreamWriterOpener` to hold a connection for each stream writer.

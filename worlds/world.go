@@ -23,10 +23,6 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// SpecVersion is the RPC protocol version implemented by this package. A
-// World returns it from its SpecVersion method.
-const SpecVersion = 2
-
 // World is the backend a run is recorded in. It provides event storage, a
 // delivery queue, and streams. The runtime, the client, and HTTPHandler all
 // operate on a World.
@@ -42,8 +38,6 @@ type World interface {
 	Analytics() Analytics
 	// Capabilities reports the optional behavior this World implements.
 	Capabilities() Capabilities
-	// SpecVersion returns the RPC protocol version implemented by this World.
-	SpecVersion() int
 	// DeploymentID returns the deployment whose code this World's deliveries
 	// execute, or "" when the World has no deployments. Runs created through
 	// the World's Client record it, and the Runtime enforces it only when

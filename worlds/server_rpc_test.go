@@ -57,9 +57,9 @@ func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
 	assertRPCError(t, response, "not_found")
 }
 
-func TestRPCRejectsMismatchedSpecVersion(t *testing.T) {
-	version := worlds.SpecVersion + 1
-	body, err := cbor.Marshal(rpcRequest{Method: "client.spec", SpecVersion: &version})
+func TestRPCRejectsMismatchedRPCVersion(t *testing.T) {
+	version := worlds.RPCVersion + 1
+	body, err := cbor.Marshal(rpcRequest{Method: "client.spec", RPCVersion: &version})
 	if err != nil {
 		t.Fatal(err)
 	}

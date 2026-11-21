@@ -90,7 +90,6 @@ type World interface {
 	BaseURL() string
 	Analytics() Analytics
 	Capabilities() Capabilities
-	SpecVersion() int
 	DeploymentID() string
 }
 
@@ -382,7 +381,7 @@ The rest are the Client's own:
 
 ```go
 type ClientSpec struct {
-	SpecVersion  int
+	RPCVersion   int
 	Capabilities Capabilities
 }
 ```
