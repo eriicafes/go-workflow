@@ -18,12 +18,15 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	// The list's defaults are world-postgres's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	var q query
 	q.where("s.run_id = " + q.arg(input.RunID))
-	if err := q.keyset(input.Pagination.Cursor, "s.created_at", "s.step_id", false); err != nil {
+	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
+	if err := q.keyset(input.Pagination.Cursor, "s.created_at", "s.step_id", descending); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
-	rows, err := w.pool.Query(ctx, w.q(stepSelect(input.ResolveData)+q.clause()+order("s.created_at", "s.step_id", false)+q.limit(input.Pagination.Limit)), q.args...)
+	rows, err := w.pool.Query(ctx, w.q(stepSelect(input.ResolveData)+q.clause()+order("s.created_at", "s.step_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}

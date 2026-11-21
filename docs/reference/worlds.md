@@ -192,7 +192,13 @@ attempts. A repeat with a different payload is refused with `ErrEventInvalid`.
 Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
 Lists take a `Pagination` with `Cursor`, `Limit`, and `SortOrder`, and return
-a `Page` with `Data`, `Cursor`, and `HasMore`. `ResolveData` selects whether payloads
+a `Page` with `Data`, `Cursor`, and `HasMore`. Unset fields take the list's
+defaults, as the Workflow SDK's Worlds do: runs and steps list newest first,
+hooks and events oldest first, and a zero `Limit` is the World's default page
+size (the local, AWS, and test Worlds use world-local's, 200 runs and 20
+steps or hooks, and the Postgres World world-postgres's, 20 runs and steps and
+100 hooks; an event list holds up to `MaxEventsPerRun`). A negative `Limit`
+reads every remaining item. `ResolveData` selects whether payloads
 (inputs, outputs, hook metadata) are returned.
 
 ### Views
@@ -369,7 +375,7 @@ is negative, for validating a configuration.
 
 | Method | Description |
 | --- | --- |
-| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. `ErrStreamClosed` once the stream is closed. |
+| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. A closed stream, or one of a run whose data was deleted, drops them, as world-local does, or refuses them with `ErrStreamClosed`, as Vercel's backend does. |
 | `StreamsClose` | Marks a stream done for every writer. Closing it again does nothing. |
 | `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
 | `StreamsGetInfo` | Tail index and whether the stream is done. |
@@ -570,7 +576,8 @@ checking ownership.
 | `ErrHookForceClaimed` | Another hook took the token with `Force`. |
 | `ErrStartHookRejected` | A start hook candidate the World will never admit, such as one whose run ID is older than `StartHookCandidateMaxAge`. |
 | `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
-| `ErrStreamClosed` | Writing to a closed stream. |
+| `ErrStreamClosed` | Writing to a closed stream, on a World that refuses it. |
+| `ErrRunNotSupported` | An event on a run created under a newer spec version than this release supports. |
 | `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
 | `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |

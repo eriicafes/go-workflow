@@ -75,6 +75,7 @@ var rpcSentinels = []struct {
 	{"hook_not_found", "not_found", ErrHookNotFound},
 	{"event_invalid", "invalid_argument", ErrEventInvalid},
 	{"event_conflict", "conflict", ErrEventConflict},
+	{"run_not_supported", "invalid_argument", ErrRunNotSupported},
 	{"attribute_invalid", "invalid_argument", ErrAttributeInvalid},
 	{"too_early", "too_early", ErrTooEarly},
 	{"run_already_exists", "conflict", ErrRunAlreadyExists},

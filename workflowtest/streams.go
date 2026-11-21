@@ -40,9 +40,9 @@ func conformStreams(t *testing.T, world worlds.World) {
 	if err := second.CloseStream(ctx); err != nil {
 		t.Fatal(err)
 	}
-	conformExpect(t, open().Write(ctx, [][]byte{[]byte("late")}), worlds.ErrStreamClosed, "writer of a closed stream")
+	conformExpectDropped(t, open().Write(ctx, [][]byte{[]byte("late")}), "writer of a closed stream")
 	err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "output", Chunk: []byte("closed")})
-	conformExpect(t, err, worlds.ErrStreamClosed, "direct write on closed stream")
+	conformExpectDropped(t, err, "direct write on closed stream")
 	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: "output"}); err != nil {
 		t.Fatalf("closing a closed stream: %v", err)
 	}

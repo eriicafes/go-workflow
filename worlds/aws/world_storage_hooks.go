@@ -111,6 +111,8 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 // hook created a moment ago may be missing from the result. The hooks it
 // returns are read consistently.
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
@@ -118,8 +120,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	if input.RunID != "" {
 		query = indexQuery{index: listGroupIndex, partition: "HOOKS#" + string(input.RunID)}
 	}
-	pagination := worlds.Pagination{Cursor: input.Pagination.Cursor, Limit: input.Pagination.Limit}
-	items, cursor, more, err := w.indexPage(ctx, query, pagination, nil)
+	items, cursor, more, err := w.indexPage(ctx, query, input.Pagination, nil)
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}

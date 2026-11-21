@@ -312,6 +312,11 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 // granting another execution.
 func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEvent) (worlds.EventResult, bool, error) {
 	run := m.runs[runID]
+	// A run of a newer spec version is a newer release's, as the Workflow
+	// SDK's Worlds refuse it.
+	if err := worlds.CheckRunSpecVersion(runID, run.SpecVersion); err != nil {
+		return worlds.EventResult{}, false, err
+	}
 	step, stepExists := m.steps[runID][worlds.StepID(requested.CorrelationID)]
 	if run.Status.Terminal() {
 		if err := worlds.FinishedRunRefusal(run.Status, requested, step.Status); err != nil {
@@ -585,6 +590,8 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 }
 
 func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	if err := ctx.Err(); err != nil {
 		return worlds.EventsPage{}, err
 	}
@@ -609,7 +616,9 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData, Pagination: worlds.Pagination{SortOrder: input.Pagination.SortOrder}})
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
+	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData, Pagination: worlds.Pagination{SortOrder: input.Pagination.SortOrder, Limit: -1}})
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
@@ -631,7 +640,7 @@ func (m *World) analyticsRunsGet(ctx context.Context, input worlds.AnalyticsRuns
 }
 
 func (m *World) analyticsRunsList(ctx context.Context, input worlds.AnalyticsRunsListInput) (worlds.Page[worlds.AnalyticsRun], error) {
-	runs, err := m.RunsList(ctx, worlds.RunsListInput{WorkflowName: input.WorkflowName, Status: input.Status})
+	runs, err := m.RunsList(ctx, worlds.RunsListInput{WorkflowName: input.WorkflowName, Status: input.Status, Pagination: worlds.Pagination{SortOrder: worlds.SortOrderAscending, Limit: -1}})
 	if err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}

@@ -91,11 +91,11 @@ type Client interface {
 	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
 	// returns the number of waits it settled.
 	RunsWake(context.Context, ClientRunsWakeInput) (int, error)
-	// StreamsWrite appends a chunk to a stream. It returns ErrStreamClosed
-	// when the stream is closed.
+	// StreamsWrite appends a chunk to a stream. A closed stream drops it, or
+	// refuses it with ErrStreamClosed, as Streamer.StreamsWrite does.
 	StreamsWrite(context.Context, StreamsWriteInput) error
-	// StreamsWriteMulti appends several chunks to a stream. It returns
-	// ErrStreamClosed when the stream is closed.
+	// StreamsWriteMulti appends several chunks to a stream, as StreamsWrite
+	// does.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
 	// StreamsClose closes a stream for every writer.
 	StreamsClose(context.Context, StreamsCloseInput) error

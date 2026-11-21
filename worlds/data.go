@@ -718,3 +718,13 @@ func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAf
 	}
 	return nil
 }
+
+// CheckRunSpecVersion returns ErrRunNotSupported for an event on a run whose
+// spec version, version, is newer than SpecVersion, as the Workflow SDK's
+// Worlds refuse it, or nil.
+func CheckRunSpecVersion(runID RunID, version int) error {
+	if version > SpecVersion {
+		return fmt.Errorf("%w: run %s has spec version %d, over %d", ErrRunNotSupported, runID, version, SpecVersion)
+	}
+	return nil
+}

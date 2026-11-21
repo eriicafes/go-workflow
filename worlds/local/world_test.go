@@ -256,8 +256,13 @@ func TestZeroRetentionPurgesWithTheRunsEnd(t *testing.T) {
 	if err != nil || len(chunks.Data) != 0 || !chunks.Done {
 		t.Fatalf("chunks = %+v, err=%v", chunks, err)
 	}
-	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "new", Chunk: []byte("x")}); !errors.Is(err, worlds.ErrStreamClosed) {
+	// A purged run's new stream is closed as it is first written, as
+	// world-local closes it, and holds nothing.
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "new", Chunk: []byte("x")}); err != nil {
 		t.Fatalf("write to a purged run = %v", err)
+	}
+	if chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "new"}); err != nil || len(chunks.Data) != 0 || !chunks.Done {
+		t.Fatalf("purged run's new stream = %+v, err=%v", chunks, err)
 	}
 }
 

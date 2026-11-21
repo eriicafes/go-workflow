@@ -27,7 +27,8 @@ func (page listResponse) cursor() string {
 }
 
 // entityQuery maps a Pagination and ResolveData to entity list parameters.
-// The backend's default order is not ascending, so the order is always sent.
+// An unset limit or order is left to the backend's defaults, as world-vercel
+// leaves them.
 func entityQuery(pagination worlds.Pagination, resolve worlds.ResolveData) url.Values {
 	query := url.Values{}
 	if pagination.Limit > 0 {
@@ -36,11 +37,9 @@ func entityQuery(pagination worlds.Pagination, resolve worlds.ResolveData) url.V
 	if pagination.Cursor != "" {
 		query.Set("cursor", pagination.Cursor)
 	}
-	order := pagination.SortOrder
-	if order == "" {
-		order = worlds.SortOrderAscending
+	if pagination.SortOrder != "" {
+		query.Set("sortOrder", string(pagination.SortOrder))
 	}
-	query.Set("sortOrder", string(order))
 	query.Set("remoteRefBehavior", entityRefs(resolve))
 	return query
 }
@@ -367,7 +366,8 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 	if err != nil {
 		return worlds.Hook{}, err
 	}
-	events, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: hook.RunID, CorrelationID: string(hook.HookID)})
+	// The hook's first event is its hook_created.
+	events, err := w.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: hook.RunID, CorrelationID: string(hook.HookID), Pagination: worlds.Pagination{Limit: 1, SortOrder: worlds.SortOrderAscending}})
 	if err != nil {
 		return worlds.Hook{}, err
 	}

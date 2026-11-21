@@ -176,7 +176,7 @@ const (
 )
 
 // SortOrder is the order in which a list returns its items. The zero value
-// behaves like SortOrderAscending.
+// is the list's default order (see Pagination.SortOrder).
 type SortOrder string
 
 const (
@@ -243,10 +243,14 @@ type (
 		// Cursor is the Cursor of the previous Page. Empty starts at the
 		// first item.
 		Cursor string
-		// Limit is the maximum number of items to return. Zero or less
-		// requests every remaining item, though a World may still return
-		// fewer and set HasMore.
-		Limit     int
+		// Limit is the maximum number of items to return. Zero uses the
+		// list's default page size, as the Workflow SDK's Worlds do, and a
+		// negative Limit requests every remaining item, though a World may
+		// still return fewer and set HasMore.
+		Limit int
+		// SortOrder is the order of the list. Empty uses the list's
+		// default: newest first for runs and steps, oldest first for hooks
+		// and events, as the Workflow SDK's Worlds order them.
 		SortOrder SortOrder
 	}
 	// Page is one page of a list.
@@ -586,4 +590,20 @@ func RunIDTime(id RunID) (time.Time, bool) {
 	}
 	value[0] &^= 0x80
 	return time.UnixMilli(int64(value.Time())).UTC(), true
+}
+
+// MaxEventsPerRun is the default page size of a run's event list, as the
+// Workflow SDK's getMaxEventsPerRun.
+const MaxEventsPerRun = 25_000
+
+// WithDefaults returns pagination with a list's defaults where it leaves
+// them unset: order for an empty SortOrder, and limit for a zero Limit.
+func (pagination Pagination) WithDefaults(order SortOrder, limit int) Pagination {
+	if pagination.SortOrder == "" {
+		pagination.SortOrder = order
+	}
+	if pagination.Limit == 0 {
+		pagination.Limit = limit
+	}
+	return pagination
 }

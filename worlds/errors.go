@@ -50,6 +50,10 @@ var (
 	ErrMaxDeliveriesExceeded = errors.New("workflow: delivery exceeded the maximum attempts")
 	// ErrStreamClosed reports a write to a closed stream.
 	ErrStreamClosed = errors.New("workflow: stream is closed")
+	// ErrRunNotSupported reports an event on a run created under a newer
+	// spec version than this release supports (SpecVersion), as the
+	// Workflow SDK's RunNotSupportedError does: a newer release runs it.
+	ErrRunNotSupported = errors.New("workflow: run needs a newer World")
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
 	// malformed or names an unknown event type.
 	ErrEventInvalid = errors.New("workflow: event is invalid")

@@ -856,12 +856,21 @@ func (r *Runtime) pendingRetry(ctx context.Context, input worlds.QueueInput) (ti
 }
 
 func (r *Runtime) stepStalled(ctx context.Context, input worlds.QueueInput) bool {
-	page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: string(*input.StepID)})
-	if err != nil {
-		return true
+	var events []worlds.Event
+	pagination := worlds.Pagination{Limit: -1}
+	for {
+		page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: string(*input.StepID), Pagination: pagination})
+		if err != nil {
+			return true
+		}
+		events = append(events, page.Data...)
+		if !page.HasMore {
+			break
+		}
+		pagination.Cursor = page.Cursor
 	}
 	since := time.Now().Add(-stepStallWindow)
-	for _, event := range page.Data {
+	for _, event := range events {
 		switch event.EventType {
 		case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted:
 			if event.CreatedAt.After(since) {

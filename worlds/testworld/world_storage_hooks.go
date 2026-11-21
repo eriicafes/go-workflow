@@ -2,6 +2,7 @@ package testworld
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"time"
 
@@ -34,6 +35,8 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
+	// The list's defaults are world-local's.
+	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	values := make([]worlds.Hook, 0, len(w.hooks))
@@ -49,5 +52,8 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		}
 		return values[i].HookID < values[j].HookID
 	})
+	if input.Pagination.SortOrder == worlds.SortOrderDescending {
+		slices.Reverse(values)
+	}
 	return page(values, input.Pagination), nil
 }
