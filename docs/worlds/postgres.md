@@ -74,7 +74,7 @@ The tables are world-postgres's, with its names and columns:
 
 | Table | Contents |
 | --- | --- |
-| `workflow_runs` | Runs, keyed by `id`, with `status` as the `status` enum, `name`, `attributes`, `error_code`, `start_hook`, and the slot of the run's result. |
+| `workflow_runs` | Runs, keyed by `id`, with `status` as the `status` enum, `name`, `attributes`, `error_code`, `execution_context_cbor`, `start_hook_cbor`, and the slot of the run's result. |
 | `workflow_events` | The event log, keyed by `(run_id, id)`, where `id` is the slot's `evnt_` ID. `payload_cbor` holds the event's data. |
 | `workflow_event_slots` | Each run's in-band fence, `seq_in_band`. |
 | `workflow_steps` | Steps, keyed by `(run_id, step_id)`, with the slots of their input and result. |
@@ -100,8 +100,9 @@ They differ from world-postgres's where Go needs it:
 - The queue is Go's own. There are no graphile-worker, snapshot, or
   invocation tables.
 
-Attributes and execution contexts are `jsonb`, and timestamps are
-`timestamptz` at microsecond precision. Times returned by the World are UTC.
+Attributes are `jsonb`, execution contexts and start hooks are CBOR in
+world-postgres's `_cbor` columns, and timestamps are `timestamptz` at
+microsecond precision. Times returned by the World are UTC.
 
 ## Consistency
 

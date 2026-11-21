@@ -85,7 +85,7 @@ func runSelect(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.payload_cbor END", ""
 	}
-	return "SELECT r.id, r.name, r.status::text, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, coalesce(r.encryption_public_key, ''), coalesce(r.error_code, ''), s.seq_in_band, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
+	return "SELECT r.id, r.name, r.status::text, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, coalesce(r.encryption_public_key, ''), coalesce(r.error_code, ''), s.seq_in_band, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context_cbor, r.start_hook_cbor" +
 		" FROM workflow.workflow_runs r JOIN workflow.workflow_event_slots s ON s.run_id = r.id" + join + " LEFT JOIN workflow.workflow_events re ON re.run_id = r.id AND re.id = " + slotID("r.result_slot") + live
 }
 
@@ -103,7 +103,7 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 		return worlds.Run{}, err
 	}
 	if len(startHook) > 0 {
-		if err := json.Unmarshal(startHook, &run.StartHook); err != nil {
+		if err := cborDecoding.Unmarshal(startHook, &run.StartHook); err != nil {
 			return worlds.Run{}, err
 		}
 	}
@@ -132,7 +132,7 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 		return worlds.Run{}, err
 	}
 	if len(executionContext) > 0 {
-		if err := json.Unmarshal(executionContext, &run.ExecutionContext); err != nil {
+		if err := cborDecoding.Unmarshal(executionContext, &run.ExecutionContext); err != nil {
 			return worlds.Run{}, err
 		}
 	}

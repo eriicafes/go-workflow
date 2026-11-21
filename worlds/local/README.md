@@ -36,7 +36,8 @@ Go never shares a data directory with a JavaScript World, so the World keeps
 world-local's tables and behavior except where they exist only for
 JavaScript or for data written by older releases:
 
-- **No `snapshots` table.** Go has no dynamic workflow code to snapshot.
+- **No `snapshots` table.** world-local keeps images of the QuickJS virtual
+  machine its workflows run in, and Go does not run workflows in one.
 - **Payloads are stored once, in the events.** The run, step, and hook views
   record the slot of the event holding each payload, where world-local copies
   the payload into every view.
@@ -45,7 +46,7 @@ JavaScript or for data written by older releases:
   since no JavaScript reads them.
 - **Stream chunks are keyed by run as well as name.** An SDK stream name
   carries its run's ID, but a Go stream name is unique only within its run.
-- **Restart recovery's backstop wake is a flow** with a `NotBefore`, since Go
-  has no plain wake message.
 - **There is one schema version and no legacy data**, so the World writes no
   `version.txt` and prints no legacy notice.
+- **It serves analytics,** which world-local does not: runs and attributes
+  from its tables, and steps, events, hooks, and waits from the event log.
