@@ -534,6 +534,7 @@ checking ownership.
 | `WakeRun` | Queues a flow that completes the selected pending waits first. |
 | `PendingWaits` | The IDs of a run's pending waits, in creation order. |
 | `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
+| `EncodeEventData`, `DecodeEventData` | An event's JSON Data as the CBOR the local World stores, with payloads as raw bytes, and back. Data that fits its event type's `Data*` struct is stored as that struct; other Data is kept as its JSON value. |
 | `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
 | `ExecutionFromContext` | The replay state of the current delivery. |
 

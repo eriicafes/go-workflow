@@ -15,33 +15,23 @@ type analytics struct{ world *World }
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	// Analytics runs carry no payloads, so the run record alone answers.
-	if err := ctx.Err(); err != nil {
-		return worlds.AnalyticsRun{}, err
-	}
-	unlock, err := a.world.readLock()
-	if err != nil {
-		return worlds.AnalyticsRun{}, err
-	}
-	defer unlock()
-	record, err := a.world.readRun(input.RunID)
-	if err != nil {
-		return worlds.AnalyticsRun{}, err
-	}
-	return analyticsRun(record.Run), nil
+	var run worlds.AnalyticsRun
+	err := a.world.read(ctx, func(s *store) error {
+		record, err := s.getRun(input.RunID)
+		run = analyticsRun(record.Run)
+		return err
+	})
+	return run, err
 }
 
 // matchingRuns returns runs that match the filters, ascending by CreatedAt.
 func (a analytics) matchingRuns(ctx context.Context, workflowName string, statuses []worlds.Status, start, end *time.Time, attributes map[string]string) ([]worlds.AnalyticsRun, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	unlock, err := a.world.readLock()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	records, err := a.world.readRuns()
-	if err != nil {
+	var records []runRecord
+	if err := a.world.read(ctx, func(s *store) error {
+		var err error
+		records, err = s.listRuns(runFilter{workflowName: workflowName, statuses: statuses})
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	runs := make([]worlds.AnalyticsRun, 0, len(records))
@@ -131,20 +121,15 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 // waits derives waits from the run's committed wait_created and
 // wait_completed events.
 func (a analytics) waits(ctx context.Context, runID worlds.RunID) ([]worlds.AnalyticsWait, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	unlock, err := a.world.readLock()
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	run, err := a.world.readRun(runID)
-	if err != nil {
-		return nil, err
-	}
-	events, err := a.world.readEvents(runID, 1, run.EventCount)
-	if err != nil {
+	var events []worlds.Event
+	if err := a.world.read(ctx, func(s *store) error {
+		run, err := s.getRun(runID)
+		if err != nil {
+			return err
+		}
+		events, err = s.readEvents(runID, 1, run.EventCount)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	index := map[worlds.WaitID]int{}

@@ -1,7 +1,7 @@
 # Getting Started
 
 This page builds a small workflow and runs it on the local World, which stores
-runs as JSON files and needs no database or worker.
+runs in a SQLite file and needs no database server or worker.
 
 ## Install
 

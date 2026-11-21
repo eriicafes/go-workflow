@@ -1,23 +1,32 @@
-// Package localworld implements a World on JSON files in a local directory,
-// for development and single-process deployments. It delivers queued work
-// in-process and keeps every run across restarts. Only one process may use a
-// directory at a time.
+// Package localworld implements a World on a SQLite database in a local
+// directory, for development and single-machine deployments: a port of the
+// Workflow SDK's world-local. It delivers queued work in-process from an
+// in-memory queue, and keeps every run across restarts. Several processes may
+// share a directory: the database serializes their writes.
 package localworld
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
-const defaultBaseURL = "http://localhost:3000/v1/workflow"
+const (
+	defaultBaseURL = "http://localhost:3000/v1/workflow"
+	// defaultDir is the data directory when neither Config.Dir nor
+	// WORKFLOW_LOCAL_DATA_DIR names one.
+	defaultDir = ".workflow-data"
+	// pollInterval is how often waiters read the database for writes made
+	// by other processes.
+	pollInterval = 100 * time.Millisecond
+)
 
 var (
 	// ErrNotPrepared is returned by World methods called before Prepare, and by
@@ -29,8 +38,14 @@ var (
 
 // Config configures the local World.
 type Config struct {
-	// Dir is the storage directory. It is required by Open and ignored by New.
+	// Dir is the data directory, which holds the database world.db. Empty
+	// uses WORKFLOW_LOCAL_DATA_DIR, or .workflow-data.
 	Dir string
+	// Tag scopes the runs, hooks, and streams this World writes, such as a
+	// test's. A tagged World sees its tag's rows and untagged ones, recovers
+	// only its tag's runs, and Clear deletes only its tag's data. Empty is
+	// untagged.
+	Tag string
 	// BaseURL is the absolute public URL of HTTP(world), including
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
 	// Empty uses http://localhost:3000/v1/workflow.
@@ -39,79 +54,49 @@ type Config struct {
 	// key derived from it for the run. Empty leaves payloads unencrypted.
 	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
+	// Concurrency is how many deliveries execute at once. Zero uses
+	// WORKFLOW_LOCAL_QUEUE_CONCURRENCY, or 1000.
+	Concurrency int
+	// HookRetentionLimit caps a hook's token retention. Zero uses
+	// WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS, or 30 days.
+	HookRetentionLimit time.Duration
+	// SkipRecovery leaves the active runs of the World's tag alone when it
+	// is prepared, rather than queueing each of them again.
+	SkipRecovery bool
 }
 
-// World is the local World. It stores events, run, step, and hook views,
-// streams, and queued deliveries as JSON files under one directory, and only
-// one prepared World may use a directory at a time.
+// World is the local World. It stores events, run, step, wait, and hook
+// views, and streams in a SQLite database, and queues deliveries in memory.
 type World struct {
-	// mu guards the files and lifecycle fields. Mutations hold it exclusively,
-	// so readers only ever observe committed state.
-	mu        sync.RWMutex
-	root      *os.Root
-	ownedRoot bool
-	baseURL   string
+	// mu guards the lifecycle fields.
+	mu       sync.RWMutex
+	dir      string
+	tag      string
+	baseURL  string
+	db       *database
+	prepared bool
+	closed   bool
 	// encryptionKey is Config.EncryptionKey.
-	encryptionKey []byte
-	lock          *os.File
-	prepared      bool
-	closed        bool
-	broken        error
-	// unpurged names runs whose data was deleted but whose files a failed
-	// purge left holding it. Reads scrub them until the purge is retried.
-	unpurged map[worlds.RunID]bool
-	ctx      context.Context
-	cancel   context.CancelFunc
-	runtime  *core.Runtime
-	workers  sync.WaitGroup
+	encryptionKey      []byte
+	hookRetentionLimit time.Duration
+	skipRecovery       bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	runtime            *core.Runtime
+	workers            sync.WaitGroup
 
 	changesMu sync.Mutex
 	changes   chan struct{}
 
-	queueMu   sync.Mutex
-	pending   deliveryHeap
-	queueWake chan struct{}
-	// flows lets one serialized flow of a run execute at a time.
-	flows flowGates
+	queue *queue
 	// execute executes a delivery: runtime.Execute, or a test's stand-in.
 	execute func(context.Context, worlds.QueueInput) error
 }
 
-// Open creates config.Dir with private permissions if needed and returns a
-// World that executes deliveries for the workflows of runners. The World owns the
-// directory handle and closes it on Close. Open reads no state, so call Prepare
-// before using the World.
-func Open(config Config, runners core.RunnerSet) (*World, error) {
-	if config.Dir == "" {
-		return nil, errors.New("workflow/local: storage directory is required")
-	}
-	if err := os.MkdirAll(config.Dir, 0700); err != nil {
-		return nil, fmt.Errorf("workflow/local: create storage: %w", err)
-	}
-	if err := os.Chmod(config.Dir, 0700); err != nil {
-		return nil, fmt.Errorf("workflow/local: protect storage: %w", err)
-	}
-	root, err := os.OpenRoot(config.Dir)
-	if err != nil {
-		return nil, fmt.Errorf("workflow/local: open storage: %w", err)
-	}
-	world, err := New(root, config, runners)
-	if err != nil {
-		_ = root.Close()
-		return nil, err
-	}
-	world.ownedRoot = true
-	return world, nil
-}
-
-// New returns a World stored in root that executes deliveries for the workflows
-// in runners. The caller keeps owning root and closes it after Close.
-// config.Dir is ignored. New reads no state, so call Prepare before using the
+// Open returns a World on config.Dir that executes deliveries for the
+// workflows of runners. Open reads no state, so call Prepare before using the
 // World.
-func New(root *os.Root, config Config, runners core.RunnerSet) (*World, error) {
-	if root == nil {
-		return nil, errors.New("workflow/local: nil storage root")
-	}
+func Open(config Config, runners core.RunnerSet) (*World, error) {
 	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
 		return nil, err
 	}
@@ -123,63 +108,63 @@ func New(root *os.Root, config Config, runners core.RunnerSet) (*World, error) {
 		}
 		baseURL = normalized
 	}
-	world := &World{root: root, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), changes: make(chan struct{}), queueWake: make(chan struct{}, 1)}
+	dir := config.Dir
+	if dir == "" {
+		dir = os.Getenv("WORKFLOW_LOCAL_DATA_DIR")
+	}
+	if dir == "" {
+		dir = defaultDir
+	}
+	limit, err := hookRetentionLimit(config.HookRetentionLimit)
+	if err != nil {
+		return nil, err
+	}
+	world := &World{dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
 	world.runtime = core.NewRuntime(world, runners)
 	world.execute = world.runtime.Execute
+	world.queue = newQueue(world, queueConcurrency(config.Concurrency))
 	return world, nil
 }
 
-// Prepare locks the directory, checks its storage version, recovers writes
-// interrupted by a crash, and begins delivering queued work in the background.
-// It returns once delivery has begun, and cancelling ctx stops delivery.
+// Prepare opens the database, creating its schema in a new directory,
+// begins delivering queued work in the background, and queues every active
+// run of the World's tag again unless Config.SkipRecovery: the queue is in
+// memory, so a restart lost their messages. Cancelling ctx stops delivery.
 //
-// Every other World method returns ErrNotPrepared until Prepare succeeds. Prepare
-// returns ErrInUse when another World, in this or another process, holds the
-// directory, ErrClosed after Close, and nil when the World is already prepared.
+// Every other World method returns ErrNotPrepared until Prepare succeeds.
+// Prepare returns ErrClosed after Close, and nil when the World is already
+// prepared.
 func (w *World) Prepare(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.closed {
+		w.mu.Unlock()
 		return ErrClosed
 	}
 	if w.prepared {
+		w.mu.Unlock()
 		return nil
 	}
-	lock, err := acquireLock(w.root)
+	db, err := openDatabase(ctx, w.dir)
 	if err != nil {
+		w.mu.Unlock()
 		return err
 	}
-	if err := validateVersion(w.root); err != nil {
-		releaseLock(lock)
-		return err
-	}
-	if err := w.recoverLocked(); err != nil {
-		releaseLock(lock)
-		return err
-	}
-	deliveries, err := w.loadQueueLocked()
-	if err != nil {
-		releaseLock(lock)
-		return err
-	}
-	w.lock, w.prepared = lock, true
+	w.db, w.prepared = db, true
 	w.ctx, w.cancel = context.WithCancel(ctx)
-	for _, delivery := range deliveries {
-		w.schedule(delivery)
+	w.mu.Unlock()
+	if w.skipRecovery {
+		return nil
 	}
-	w.workers.Add(1)
-	go w.dispatch()
-	return nil
+	return w.recoverActiveRuns(ctx)
 }
 
-// Close stops delivery, waits for in-flight deliveries to return, releases the
-// directory lock, and closes the directory handle when Open created it.
-// Interrupted deliveries stay queued and run again after the next Prepare.
-// Later calls to World methods return ErrClosed, and closing twice returns
-// nil.
+// Close stops delivery, waits for in-flight deliveries to return, and closes
+// the database. Queued deliveries are lost: the next Prepare queues the
+// active runs again. Later calls to World methods return ErrClosed, and
+// closing twice returns nil.
 func (w *World) Close() error {
 	if !w.stop(false) {
 		return nil
@@ -187,8 +172,9 @@ func (w *World) Close() error {
 	return w.release()
 }
 
-// Clear stops delivery, deletes every run, hook, stream, and queued delivery in
-// the directory, and closes the World. It returns ErrNotPrepared unless the
+// Clear stops delivery, deletes the World's data, and closes the World: a
+// tagged World's runs, everything they own, and its hooks and streams, and
+// an untagged World's whole database. It returns ErrNotPrepared unless the
 // World is prepared. Open a new World on the directory to continue.
 func (w *World) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -197,17 +183,10 @@ func (w *World) Clear(ctx context.Context) error {
 	if !w.stop(true) {
 		return ErrNotPrepared
 	}
-	w.mu.Lock()
-	var err error
-	for _, name := range []string{"runs", "events", "steps", "hooks", "tokens", "streams", "queue", "queue-keys", versionName} {
-		if removeErr := w.root.RemoveAll(name); removeErr != nil {
-			err = errors.Join(err, removeErr)
-		}
-	}
+	err := w.db.update(ctx, func(tx *sqlTx) error { return clearTag(ctx, tx, w.tag) })
 	if err == nil {
-		err = writeJSON(w.root, versionName, versionRecord{Version: storeVersion})
+		w.db.maintain(ctx)
 	}
-	w.mu.Unlock()
 	return errors.Join(err, w.release())
 }
 
@@ -234,48 +213,59 @@ func (w *World) release() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.prepared = false
-	releaseLock(w.lock)
-	w.lock = nil
-	if w.ownedRoot {
-		return w.root.Close()
+	if w.db == nil {
+		return nil
 	}
-	return nil
+	err := w.db.close()
+	w.db = nil
+	return err
 }
 
-// readLock holds the shared lock for a prepared World.
-func (w *World) readLock() (func(), error) {
+// usable returns the World's database while it is prepared and open.
+func (w *World) usable() (*database, error) {
 	w.mu.RLock()
-	if err := w.usableLocked(); err != nil {
-		w.mu.RUnlock()
-		return nil, err
-	}
-	return w.mu.RUnlock, nil
-}
-
-// writeLock holds the exclusive lock for a prepared World.
-func (w *World) writeLock() (func(), error) {
-	w.mu.Lock()
-	if err := w.usableLocked(); err != nil {
-		w.mu.Unlock()
-		return nil, err
-	}
-	return w.mu.Unlock, nil
-}
-
-func (w *World) usableLocked() error {
+	defer w.mu.RUnlock()
 	switch {
 	case w.closed:
-		return ErrClosed
+		return nil, ErrClosed
 	case !w.prepared:
-		return ErrNotPrepared
-	case w.broken != nil:
-		return w.broken
+		return nil, ErrNotPrepared
 	}
+	return w.db, nil
+}
+
+// read runs fn on a snapshot of the database.
+func (w *World) read(ctx context.Context, fn func(*store) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	db, err := w.usable()
+	if err != nil {
+		return err
+	}
+	return db.view(ctx, func(tx *sqlTx) error { return fn(&store{ctx: ctx, q: tx, tag: w.tag}) })
+}
+
+// write runs fn in a write transaction, which commits when fn returns nil,
+// and signals waiters after a commit.
+func (w *World) write(ctx context.Context, fn func(*store) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	db, err := w.usable()
+	if err != nil {
+		return err
+	}
+	if err := db.update(ctx, func(tx *sqlTx) error { return fn(&store{ctx: ctx, q: tx, tag: w.tag}) }); err != nil {
+		return err
+	}
+	w.signal()
 	return nil
 }
 
-// changed returns a channel closed by the next committed change. Waiters take
-// it before reading so a concurrent change is never missed.
+// changed returns a channel closed by the next change this process commits,
+// or after pollInterval, when another process may have committed one.
+// Waiters take it before reading so a concurrent change is never missed.
 func (w *World) changed() <-chan struct{} {
 	w.changesMu.Lock()
 	defer w.changesMu.Unlock()
@@ -287,6 +277,21 @@ func (w *World) signal() {
 	close(w.changes)
 	w.changes = make(chan struct{})
 	w.changesMu.Unlock()
+}
+
+// waitChange waits for a change this process commits, pollInterval, the
+// deadline's timer, or ctx.
+func waitChange(ctx context.Context, changed <-chan struct{}, timer <-chan time.Time) error {
+	poll := time.NewTimer(pollInterval)
+	defer poll.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer:
+	case <-changed:
+	case <-poll.C:
+	}
+	return nil
 }
 
 func (w *World) BaseURL() string             { return w.baseURL }

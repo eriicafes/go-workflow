@@ -17,7 +17,7 @@ recorded results instead of running again. The run resumes where it left off.
 | **Runner** | A function that takes a context and the workflow input, returns the output and an error, and executes the workflow. You register it with `workflow.Use`. |
 | **Step** | A function with the same shape as a runner that does the real work and side effects. It runs at least once and retries on error. |
 | **Run** | One execution of a workflow, recorded as an append-only event log. |
-| **World** | The backend that stores runs, queues deliveries, and holds streams: local files, Postgres, Vercel, AWS, or your own. |
+| **World** | The backend that stores runs, queues deliveries, and holds streams: a local SQLite file, Postgres, Vercel, AWS, or your own. |
 | **Client** | The API that code outside a run uses to start, read, cancel, and resume runs. |
 
 ## Two contexts
@@ -64,7 +64,7 @@ break these rules. [How Replay Works](/guide/replay) explains the model in detai
 | --- | --- |
 | [`workflow`](/reference/workflow) | The API runners, steps, and applications use. |
 | [`worlds`](/reference/worlds) | The World contract, the runtime, the client, and the HTTP server. |
-| [`worlds/local`](/worlds/local) | JSON files on disk, in-process delivery. |
+| [`worlds/local`](/worlds/local) | A SQLite file on disk, in-process delivery. |
 | [`worlds/postgres`](/worlds/postgres) | PostgreSQL with LISTEN/NOTIFY workers. |
 | [`worlds/vercel`](/worlds/vercel) | Vercel workflow storage, Vercel Queues. |
 | [`worlds/aws`](/worlds/aws) | DynamoDB, SQS, optional EventBridge Scheduler. |

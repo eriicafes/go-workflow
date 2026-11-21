@@ -3,7 +3,6 @@ package localworld
 import (
 	"context"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,14 +11,19 @@ import (
 )
 
 // queueWorld returns a prepared World that hands each delivery to execute
-// instead of the runtime.
-func queueWorld(t *testing.T, dir string, execute func(context.Context, worlds.QueueInput) error) *World {
+// instead of the runtime, and retries failed deliveries at once.
+func queueWorld(t *testing.T, config Config, execute func(context.Context, worlds.QueueInput) error) *World {
 	t.Helper()
-	world, err := Open(Config{Dir: dir}, nil)
+	if config.Dir == "" {
+		config.Dir = t.TempDir()
+	}
+	config.SkipRecovery = true
+	world, err := Open(config, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	world.execute = execute
+	world.queue.retry = func(int) time.Duration { return 10 * time.Millisecond }
 	if err := world.Prepare(context.Background()); err != nil {
 		_ = world.Close()
 		t.Fatal(err)
@@ -39,12 +43,29 @@ func receive(t *testing.T, deliveries <-chan worlds.QueueInput) worlds.QueueInpu
 	}
 }
 
+func expectNone(t *testing.T, deliveries <-chan worlds.QueueInput) {
+	t.Helper()
+	select {
+	case input := <-deliveries:
+		t.Fatalf("unexpected delivery %+v", input)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	for failed, want := range map[int]time.Duration{1: 5 * time.Second, 32: 5 * time.Second, 33: 10 * time.Second, 34: 20 * time.Second, 36: 60 * time.Second, 200: 60 * time.Second} {
+		if got := retryDelay(failed); got != want {
+			t.Fatalf("retryDelay(%d) = %s, want %s", failed, got, want)
+		}
+	}
+}
+
 func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 10)
 	// The first delivery asks for a redelivery after a delay, the second
 	// hands off, and the third succeeds.
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
 		switch input.DeliveryCount {
 		case 1:
@@ -79,7 +100,7 @@ func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 10)
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
 		if input.DeliveryCount == 1 {
 			return context.DeadlineExceeded
@@ -95,38 +116,34 @@ func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 	}
 }
 
-func TestQueueRedeliverySurvivesRestart(t *testing.T) {
+func TestQueueLosesMessagesOnClose(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	deliveries := make(chan worlds.QueueInput, 10)
-	world := queueWorld(t, dir, func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{Dir: dir}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
-		return worlds.Redeliver(time.Hour)
+		return nil
 	})
-	result, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a"})
-	if err != nil {
+	later := time.Now().Add(200 * time.Millisecond)
+	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a", NotBefore: &later}); err != nil {
 		t.Fatal(err)
 	}
-	receive(t, deliveries)
-	time.Sleep(50 * time.Millisecond)
 	if err := world.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var record queueRecord
-	reopened := queueWorld(t, dir, func(context.Context, worlds.QueueInput) error { return nil })
-	if ok, err := reopened.readOptional(queuePath(result.MessageID), &record); err != nil || !ok {
-		t.Fatalf("message after restart: ok=%v err=%v", ok, err)
-	}
-	if record.Deliveries != 1 || record.DueAt == nil || time.Until(*record.DueAt) < 50*time.Minute {
-		t.Fatalf("record after restart = %+v", record)
-	}
+	queueWorld(t, Config{Dir: dir}, func(_ context.Context, input worlds.QueueInput) error {
+		deliveries <- input
+		return nil
+	})
+	time.Sleep(time.Until(later))
+	expectNone(t, deliveries)
 }
 
 func TestQueueDeduplicatesOnlyWhileTheMessageLives(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
 	deliveries := make(chan worlds.QueueInput, 10)
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
 		<-release
 		return nil
@@ -138,7 +155,7 @@ func TestQueueDeduplicatesOnlyWhileTheMessageLives(t *testing.T) {
 	}
 	receive(t, deliveries)
 	// The message is executing but lives until it is acknowledged.
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", IdempotencyKey: "k"})
+	again, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", IdempotencyKey: "k"})
 	if err != nil || again.MessageID != first.MessageID {
 		t.Fatalf("queue while executing = %v err=%v, want %s", again, err, first.MessageID)
 	}
@@ -155,9 +172,7 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	t.Parallel()
 	var running, overlap, steps atomic.Int32
 	var stepsTogether atomic.Bool
-	var done sync.WaitGroup
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
-		defer done.Done()
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		if input.StepID != nil {
 			// Both steps must be executing at once to finish.
 			if steps.Add(1) == 2 {
@@ -179,9 +194,7 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 		}
 		return nil
 	})
-	ctx := context.Background()
 	stepA, stepB := worlds.StepID("step_a"), worlds.StepID("step_b")
-	done.Add(7)
 	items := []worlds.QueueInput{
 		{RunID: "wrun_a"},
 		{RunID: "wrun_a"},
@@ -190,16 +203,10 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 		{RunID: "wrun_a", StepID: &stepA},
 		{RunID: "wrun_a", StepID: &stepB},
 	}
-	if _, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: items}); err != nil {
+	if _, err := world.QueueBatch(context.Background(), worlds.QueueBatchInput{Items: items}); err != nil {
 		t.Fatal(err)
 	}
-	wait := make(chan struct{})
-	go func() { done.Wait(); close(wait) }()
-	select {
-	case <-wait:
-	case <-time.After(10 * time.Second):
-		t.Fatal("deliveries did not finish")
-	}
+	waitQueueEmpty(t, world)
 	if overlap.Load() != 0 {
 		t.Fatal("two flows of one run executed at once")
 	}
@@ -208,11 +215,107 @@ func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	}
 }
 
+func TestQueueCoalescesFlowsWaitingBehindADelivery(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	deliveries := make(chan worlds.QueueInput, 20)
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
+		deliveries <- input
+		if input.DeliveryCount == 1 && input.RunInput == nil && len(input.CompleteWaits) == 0 {
+			<-release
+		}
+		return nil
+	})
+	ctx := context.Background()
+	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receive(t, deliveries)
+	var coalesced []string
+	for range 3 {
+		result, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		coalesced = append(coalesced, result.MessageID)
+	}
+	wake, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", CompleteWaits: []string{"w"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitWaiters(t, world, "wrun_a", 4)
+	close(release)
+	// The holder re-runs once for the three flows it took, then the wake,
+	// which names waits the log does not, is delivered on its own.
+	rerun := receive(t, deliveries)
+	if rerun.MessageID != holder.MessageID || rerun.DeliveryCount != 2 || rerun.Attempt != 1 {
+		t.Fatalf("re-run = message %s count %d attempt %d, want %s 2 1", rerun.MessageID, rerun.DeliveryCount, rerun.Attempt, holder.MessageID)
+	}
+	if own := receive(t, deliveries); own.MessageID != wake.MessageID {
+		t.Fatalf("delivered %s, want the wake %s", own.MessageID, wake.MessageID)
+	}
+	waitQueueEmpty(t, world)
+	expectNone(t, deliveries)
+	_ = coalesced
+}
+
+func TestQueueHandoffKeepsTheGateAndCoversWaitingFlows(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	deliveries := make(chan worlds.QueueInput, 20)
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
+		deliveries <- input
+		if input.DeliveryCount == 1 && input.CompleteWaits != nil {
+			<-release
+			return worlds.Redeliver(0)
+		}
+		return nil
+	})
+	ctx := context.Background()
+	holder, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", CompleteWaits: []string{"w"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receive(t, deliveries)
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a"}); err != nil {
+		t.Fatal(err)
+	}
+	waitWaiters(t, world, "wrun_a", 1)
+	close(release)
+	handoff := receive(t, deliveries)
+	if handoff.MessageID != holder.MessageID || handoff.DeliveryCount != 2 || handoff.Attempt != 1 {
+		t.Fatalf("handoff = message %s count %d attempt %d, want %s 2 1", handoff.MessageID, handoff.DeliveryCount, handoff.Attempt, holder.MessageID)
+	}
+	waitQueueEmpty(t, world)
+	expectNone(t, deliveries)
+}
+
+func TestQueueSleepsDelaysWithoutASlot(t *testing.T) {
+	t.Parallel()
+	deliveries := make(chan worlds.QueueInput, 10)
+	world := queueWorld(t, Config{Concurrency: 1}, func(_ context.Context, input worlds.QueueInput) error {
+		deliveries <- input
+		return nil
+	})
+	ctx := context.Background()
+	later := time.Now().Add(time.Hour)
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_a", NotBefore: &later}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := receive(t, deliveries); got.RunID != "wrun_b" {
+		t.Fatalf("delivered %s, want wrun_b", got.RunID)
+	}
+}
+
 func TestQueueIntermediateHopIsNotHeld(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
 	deliveries := make(chan worlds.QueueInput, 10)
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
 		if input.WaitContinuation == nil {
 			<-release
@@ -237,7 +340,7 @@ func TestQueueIntermediateHopIsNotHeld(t *testing.T) {
 func TestQueueRoundTripsEveryField(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 1)
-	world := queueWorld(t, t.TempDir(), func(_ context.Context, input worlds.QueueInput) error {
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
 		deliveries <- input
 		return nil
 	})
@@ -274,20 +377,32 @@ func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	}
 }
 
-func waitQueueEmpty(t *testing.T, world *World) {
+// waitWaiters waits until count deliveries of the run wait behind its gate.
+func waitWaiters(t *testing.T, world *World, runID worlds.RunID, count int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		names, err := listJSON(world.root, "queue")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(names) == 0 {
+		world.queue.gate.mu.Lock()
+		waiting := len(world.queue.gate.runs[runID])
+		world.queue.gate.mu.Unlock()
+		if waiting == count {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("messages left: %v", names)
+			t.Fatalf("%d waiters, want %d", waiting, count)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitQueueEmpty(t *testing.T, world *World) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for world.queue.live.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("messages left: %d", world.queue.live.Load())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+

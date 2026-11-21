@@ -158,9 +158,9 @@ type (
 	}
 	// RunsAttributeChange sets or deletes one run attribute.
 	RunsAttributeChange struct {
-		Key string `json:"key"`
+		Key string `json:"key" cbor:"key"`
 		// Value is the new value. Nil deletes the attribute.
-		Value *string `json:"value"`
+		Value *string `json:"value" cbor:"value"`
 	}
 	// RunsDeleteDataManyInput holds the arguments to RunsDeleteDataMany:
 	// one to MaxDeleteDataRunIDs unique run IDs.
@@ -326,15 +326,15 @@ type (
 	}
 	// HookForceClaim names the hook that took a token with a forced claim.
 	HookForceClaim struct {
-		RunID  RunID  `json:"runId"`
-		HookID HookID `json:"hookId"`
+		RunID  RunID  `json:"runId" cbor:"runId"`
+		HookID HookID `json:"hookId" cbor:"hookId"`
 		// WorkflowName, DeploymentID, and RunSpecVersion address the run a
 		// forced claim took its token from, so the claimant wakes it without
 		// reading it. A World sets them on a hook's ClaimedFrom when it has
 		// the run.
-		WorkflowName   string `json:"workflowName,omitempty"`
-		DeploymentID   string `json:"deploymentId,omitempty"`
-		RunSpecVersion int    `json:"runSpecVersion,omitempty"`
+		WorkflowName   string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
+		DeploymentID   string `json:"deploymentId,omitempty" cbor:"deploymentId,omitempty"`
+		RunSpecVersion int    `json:"runSpecVersion,omitempty" cbor:"runSpecVersion,omitempty"`
 	}
 )
 

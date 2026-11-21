@@ -4,108 +4,101 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.Hook{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	defer unlock()
-	hook, err := w.readHook(input.HookID)
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	if hook == nil {
-		return worlds.Hook{}, worlds.ErrHookNotFound
-	}
-	return hookView(*hook, w.committed(hook.RunID), input.ResolveData)
+	var hook worlds.Hook
+	err := w.read(ctx, func(s *store) error {
+		record, err := s.getHook(input.HookID)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return worlds.ErrHookNotFound
+		}
+		hook, err = hookView(*record, s.committed(record.RunID), input.ResolveData)
+		return err
+	})
+	return hook, err
 }
 
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
-	// A token whose retention has passed is unclaimed. Its expired record is
+	// A token whose retention has passed is unclaimed. Its expired row is
 	// replaced by the next claim.
-	if err := ctx.Err(); err != nil {
-		return worlds.Hook{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	defer unlock()
-	owner, err := w.readToken(input.Token)
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	if !owner.held(time.Now()) {
-		return worlds.Hook{}, worlds.ErrHookNotFound
-	}
-	hook, err := w.readHook(owner.HookID)
-	if err != nil {
-		return worlds.Hook{}, err
-	}
-	if hook == nil {
-		return worlds.Hook{}, worlds.ErrHookNotFound
-	}
-	return hookView(*hook, w.committed(hook.RunID), input.ResolveData)
+	var hook worlds.Hook
+	err := w.read(ctx, func(s *store) error {
+		owner, err := s.getToken(input.Token)
+		if err != nil {
+			return err
+		}
+		if !owner.held(time.Now()) {
+			return worlds.ErrHookNotFound
+		}
+		record, err := s.getHook(owner.HookID)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			return worlds.ErrHookNotFound
+		}
+		hook, err = hookView(*record, s.committed(record.RunID), input.ResolveData)
+		return err
+	})
+	return hook, err
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
-	if err := ctx.Err(); err != nil {
-		return worlds.Page[worlds.Hook]{}, err
-	}
-	unlock, err := w.readLock()
-	if err != nil {
-		return worlds.Page[worlds.Hook]{}, err
-	}
-	defer unlock()
-	records, err := w.readHooks()
-	if err != nil {
-		return worlds.Page[worlds.Hook]{}, err
-	}
-	hooks := make([]worlds.Hook, 0, len(records))
-	for _, record := range records {
-		if input.RunID != "" && record.RunID != input.RunID {
-			continue
-		}
-		hook, err := hookView(record, w.committed(record.RunID), input.ResolveData)
+	var page worlds.Page[worlds.Hook]
+	err := w.read(ctx, func(s *store) error {
+		records, err := s.listHooks(input.RunID)
 		if err != nil {
-			return worlds.Page[worlds.Hook]{}, err
+			return err
 		}
-		hooks = append(hooks, hook)
-	}
-	pagination := input.Pagination
-	pagination.SortOrder = worlds.SortOrderAscending
-	return keyPage(hooks, pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
+		hooks := make([]worlds.Hook, 0, len(records))
+		for _, record := range records {
+			hook, err := hookView(record, s.committed(record.RunID), input.ResolveData)
+			if err != nil {
+				return err
+			}
+			hooks = append(hooks, hook)
+		}
+		pagination := input.Pagination
+		pagination.SortOrder = worlds.SortOrderAscending
+		page, err = keyPage(hooks, pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
+		return err
+	})
+	return page, err
 }
 
+// createHook appends a hook_created when its token is free. A forced claim
+// over a live owner first appends hook_disposed, naming the claimant in
+// ForceClaimedBy, to the owner's run, which releases the token, in the same
+// transaction.
 func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
-	// The claimant's hook_created is appended only when the token is free. A
-	// forced claim over a live owner first commits hook_disposed, naming the
-	// claimant in ForceClaimedBy, to the owner's run, which releases the token.
-	if err := ctx.Err(); err != nil {
-		return worlds.EventResult{}, err
-	}
-	if input.Event.EventType != worlds.EventTypeHookCreated {
-		return worlds.EventResult{}, worlds.ErrEventInvalid
-	}
 	var created worlds.DataHookCreated
 	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" || input.Event.CorrelationID == string(worlds.StartHookID(input.RunID)) {
 		// The start hook's ID is the start hook's alone.
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	unlock, err := w.writeLock()
-	if err != nil {
-		return worlds.EventResult{}, err
+	now := time.Now().UTC()
+	if created.TokenRetentionUntil != nil && created.TokenRetentionUntil.After(now.Add(w.hookRetentionLimit)) {
+		return worlds.EventResult{}, fmt.Errorf("%w: hook retention cannot exceed %s in the local World", worlds.ErrEventInvalid, w.hookRetentionLimit)
 	}
-	defer unlock()
-	claimant, err := w.begin(input.RunID)
+	var result worlds.EventResult
+	err := w.write(ctx, func(s *store) error {
+		var err error
+		result, err = claimHook(s, input, created, now)
+		return err
+	})
+	return result, err
+}
+
+func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHookCreated, now time.Time) (worlds.EventResult, error) {
+	claimant, err := begin(s, input.RunID)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -115,122 +108,78 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
-	delta, err := w.delta(claimant.run, input.Options)
+	delta, err := s.delta(claimant.run, input.Options)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	now := time.Now().UTC()
-	owner, err := w.readToken(created.Token)
+	owner, err := s.getToken(created.Token)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-
-	var result worlds.EventResult
 	if owner.held(now) {
-		previous, err := w.readHook(owner.HookID)
+		previous, err := s.getHookAnyTag(owner.HookID)
 		if err != nil {
 			return worlds.EventResult{}, err
+		}
+		if previous == nil {
+			previous = &hookRecord{Hook: worlds.Hook{RunID: owner.RunID, HookID: owner.HookID}}
 		}
 		if !created.Force {
 			created.ConflictingRunID = previous.RunID
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
 			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: previous.RunID, HookID: previous.HookID, WorkflowName: previous.ResumeContext.WorkflowName, DeploymentID: previous.ResumeContext.DeploymentID, RunSpecVersion: previous.ResumeContext.RunSpecVersion}
-			input.Event.Data, _ = json.Marshal(created)
-			if previous.RunID != input.RunID {
-				if err := writeJSON(w.root, "hook-handoff.json", hookHandoff{RunID: input.RunID, Event: input.Event, InBandCount: input.Options.InBandCount, Previous: *created.ForceClaimedFrom, At: now}); err != nil {
-					return worlds.EventResult{}, err
-				}
-			}
-			if _, err := w.forceRelease(claimant, owner.HookID, worlds.HookID(input.Event.CorrelationID), now); err != nil {
-				return w.recoverClaim(input, err)
+			if err := forceRelease(claimant, previous, worlds.HookID(input.Event.CorrelationID), now); err != nil {
+				return worlds.EventResult{}, err
 			}
 		}
 	}
-	input.Event.Data, _ = json.Marshal(created)
-
+	if input.Event.Data, err = json.Marshal(created); err != nil {
+		return worlds.EventResult{}, err
+	}
 	event, err := claimant.append(input.Event, eventTime(input.Event, input.Options.InBandCount, now))
 	if err != nil {
-		return w.recoverClaim(input, err)
+		return worlds.EventResult{}, err
 	}
 	delta = append(delta, claimant.appended[:len(claimant.appended)-1]...)
 	claimant.advance(input.Options.InBandCount, len(claimant.appended))
 	if err := claimant.commit(); err != nil {
-		return w.recoverClaim(input, err)
-	}
-	if err := remove(w.root, "hook-handoff.json"); err != nil {
-		w.broken = err
 		return worlds.EventResult{}, err
 	}
-	w.signal()
-	result = claimant.result(event, delta)
+	result, err := claimant.result(event, delta)
 	result.AllocatedEventCount = len(claimant.appended)
-	return result, nil
-}
-
-// recoverClaim completes an interrupted forced claim from its handoff record.
-// When recovery commits the claimant's hook_created, the claim succeeded and
-// its result is returned instead of cause.
-func (w *World) recoverClaim(input worlds.EventsCreateInput, cause error) (worlds.EventResult, error) {
-	if err := w.recoverHandoff(); err != nil {
-		w.broken = err
-		return worlds.EventResult{}, cause
-	}
-	claimant, err := w.begin(input.RunID)
-	if err != nil {
-		return worlds.EventResult{}, cause
-	}
-	id, err := claimant.findEvent(worlds.EventTypeHookCreated, input.Event.CorrelationID)
-	if err != nil || id == "" {
-		return worlds.EventResult{}, cause
-	}
-	record, err := w.readHook(worlds.HookID(input.Event.CorrelationID))
-	if err != nil {
-		return worlds.EventResult{}, cause
-	}
-	var hook *worlds.Hook
-	if record != nil {
-		value, err := hookView(*record, w.committed(record.RunID), worlds.ResolveDataAll)
-		if err != nil {
-			return worlds.EventResult{}, cause
-		}
-		hook = &value
-	}
-	return worlds.EventResult{EventID: id, EventType: worlds.EventTypeHookCreated, Hook: hook, AllocatedEventCount: 1, InBandCount: claimant.run.InBandCount}, nil
+	return result, err
 }
 
 // forceRelease records hook_disposed, naming claimantHook in ForceClaimedBy,
-// in a live owner's run. A terminal or missing owner is simply replaced by the
-// claim. An owner in the claimant's own run is recorded in the claimant's txn
-// so both events commit together.
-func (w *World) forceRelease(claimant *txn, hookID, claimantHook worlds.HookID, now time.Time) (worlds.RunID, error) {
-	hook, err := w.readHook(hookID)
-	if err != nil || hook == nil {
-		return "", err
-	}
+// in a live owner's run. A finished or missing owner is simply replaced by
+// the claim. An owner in the claimant's own run is recorded in the
+// claimant's txn so both events commit together.
+func forceRelease(claimant *txn, hook *hookRecord, claimantHook worlds.HookID, now time.Time) error {
 	data, err := json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: &worlds.HookForceClaim{RunID: claimant.run.RunID, HookID: claimantHook}})
 	if err != nil {
-		return "", err
+		return err
 	}
-	event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID), Data: data}
+	event := worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hook.HookID), Data: data}
 	if hook.RunID == claimant.run.RunID {
 		_, err := claimant.append(event, now)
-		return hook.RunID, err
+		return err
 	}
-	owner, err := w.begin(hook.RunID)
+	run, err := claimant.s.getRunAnyTag(hook.RunID)
 	if errors.Is(err, worlds.ErrRunNotFound) {
-		return "", nil
+		return nil
 	}
-	if err != nil || owner.run.Status.Terminal() {
-		return "", err
+	if err != nil || run.Status.Terminal() {
+		return err
 	}
+	owner := newTxn(claimant.s, run)
 	if _, err := owner.append(event, now); err != nil {
-		return "", err
+		return err
 	}
 	if err := owner.commit(); err != nil {
-		return "", err
+		return err
 	}
 	// The claimant's staged view of the token predates the owner's release.
 	delete(claimant.tokens, hook.Token)
-	return hook.RunID, nil
+	return nil
 }
