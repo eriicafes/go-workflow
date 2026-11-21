@@ -102,8 +102,7 @@ an error. Queued deliveries are never cancelled. Set `QueueInput.MessageID`
 whose delivery passes `core.MaxDeliveries` attempts. A `*worlds.Redelivery`
 from `Runtime.Execute` asks for the same message again after `After`, a
 handoff when zero. Deliver one serialized flow of a run at a time
-(`QueueInput.SerializedFlow`) where the queue can, and report
-`MaxConcurrency`; report the furthest NotBefore the queue accepts as
+(`QueueInput.SerializedFlow`); report the furthest NotBefore the queue accepts as
 `MaxQueueDelay`, and the runtime reaches later timers in hops.
 
 Persist every QueueInput field, including StepID, QueueName, DeploymentID,

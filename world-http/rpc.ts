@@ -27,8 +27,6 @@ export namespace RPC {
 		deploymentAffinity?: boolean;
 		deleteData?: boolean;
 		startHook?: boolean;
-		inBandFence?: boolean;
-		maxConcurrency?: boolean;
 		hookResumeDedup?: boolean;
 	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";

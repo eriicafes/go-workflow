@@ -153,9 +153,8 @@ has the row's ID as its `MessageID`, `deliveries` as its `DeliveryCount`, and
   `*worlds.ThrottleError` asks for when that is longer, and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
 
-Flows of one run execute one at a time across every worker
-(`Capabilities().MaxConcurrency`). A claimed serialized flow
-(`QueueInput.SerializedFlow`) is marked `running`, and the claim skips a
+Flows of one run execute one at a time across every worker. A claimed
+serialized flow (`QueueInput.SerializedFlow`) is marked `running`, and the claim skips a
 serialized flow while another of its run is running, taking at most one per
 run. A unique index on the run's running flow turns a race between two workers
 into a retried claim. A running flow whose worker crashed holds the run's other

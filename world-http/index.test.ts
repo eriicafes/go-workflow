@@ -42,6 +42,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 		hookRetention: { active: true },
 		hookForceClaim: true,
 		inBandFence: true,
+		maxConcurrency: true,
 	});
 
 	const run = await world.runs.get("wrun_01");

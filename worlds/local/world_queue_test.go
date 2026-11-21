@@ -372,7 +372,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	t.Parallel()
 	capabilities := (*World)(nil).Capabilities()
-	if !capabilities.InBandFence || !capabilities.MaxConcurrency || capabilities.MaxQueueDelay != 0 {
+	if capabilities.MaxQueueDelay != 0 {
 		t.Fatalf("capabilities = %+v", capabilities)
 	}
 }

@@ -20,8 +20,9 @@ type Queue interface {
 	//
 	// A delivery whose Runtime.Execute returns a *Redelivery is delivered
 	// again, with the same MessageID and the next DeliveryCount. A World
-	// whose Capabilities report MaxConcurrency delivers one serialized flow
-	// of a run at a time (see QueueInput.SerializedFlow).
+	// delivers one serialized flow of a run at a time (see
+	// QueueInput.SerializedFlow): the fence keeps overlapping flows safe, and
+	// this makes them rare.
 	Queue(context.Context, QueueInput) (QueueResult, error)
 	// QueueBatch stores the supplied deliveries and returns their message IDs. It
 	// may return results for items stored before an error.

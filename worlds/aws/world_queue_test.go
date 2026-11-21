@@ -15,11 +15,11 @@ import (
 
 func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	without := testWorld(t, newFakeDynamo(), &fakeSQS{}, nil).Capabilities()
-	if !without.InBandFence || !without.MaxConcurrency || without.MaxQueueDelay != 15*time.Minute {
+	if without.MaxQueueDelay != 15*time.Minute {
 		t.Fatalf("capabilities without Scheduler = %+v", without)
 	}
 	with := testWorld(t, newFakeDynamo(), &fakeSQS{}, newFakeScheduler()).Capabilities()
-	if !with.InBandFence || !with.MaxConcurrency || with.MaxQueueDelay != 0 {
+	if with.MaxQueueDelay != 0 {
 		t.Fatalf("capabilities with Scheduler = %+v", with)
 	}
 }

@@ -209,7 +209,7 @@ func TestMessageLifetimeClampsRetentionAndDelay(t *testing.T) {
 func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	world := newQueueWorld(t, newRecorder(t, nil))
 	capabilities := world.Capabilities()
-	if !capabilities.InBandFence || !capabilities.MaxConcurrency || capabilities.MaxQueueDelay != 23*time.Hour {
+	if capabilities.MaxQueueDelay != 23*time.Hour {
 		t.Fatalf("capabilities = %+v", capabilities)
 	}
 }

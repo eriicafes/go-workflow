@@ -20,9 +20,6 @@ func conformQueue(t *testing.T, world worlds.World) {
 	if _, err := world.Queue(ctx, worlds.QueueInput{RunID: runID, NotBefore: &later, IdempotencyKey: "conformance"}); err != nil {
 		t.Fatalf("queue with a repeated key: %v", err)
 	}
-	if !world.Capabilities().InBandFence {
-		t.Fatal("Capabilities().InBandFence = false, but every World fences in-band writes")
-	}
 	stepID := worlds.StepID("step_queue")
 	batch, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: runID, NotBefore: &later}, {RunID: runID, StepID: &stepID, NotBefore: &later}}})
 	if err != nil || len(batch) != 2 || batch[0].MessageID == "" || batch[0].MessageID == batch[1].MessageID {
