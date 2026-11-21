@@ -257,6 +257,9 @@ type Run struct {
 	// World's retention. Once it has passed, the run's payloads are gone and
 	// Run.Value returns ErrRunExpired. See RunDataExpired.
 	ExpiredAt *time.Time
+	// StartHook is the run's start hook, with its HookID and without its
+	// metadata, when the run was created with one.
+	StartHook *StartHook
 }
 
 type (
@@ -371,6 +374,10 @@ type Hook struct {
 	ForceClaimedBy      *HookForceClaim
 	// SpecVersion is the spec version of the event that created the hook.
 	SpecVersion int
+	// ResumeDedup reports, on a read by token, that the World deduplicates
+	// resumes of the hook now (see EventsCreateOptions.ResumeID): a backend
+	// may attest it per read rather than as a capability.
+	ResumeDedup bool
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ReceivedAt  *time.Time
@@ -529,6 +536,14 @@ type (
 		// the write out-of-band, which is never refused and leaves the count
 		// unchanged.
 		InBandCount *int
+		// ResumeID and ResumePayloadDigest deduplicate a hook_received on a
+		// World with Capabilities().HookResumeDedup: ResumeID names one
+		// logical resume, and ResumePayloadDigest is the hex SHA-256 of its
+		// payload (ResumeDigest). A repeat of a resume with the same digest
+		// returns the event it committed and appends nothing; one with
+		// another digest returns ErrEventInvalid.
+		ResumeID            string
+		ResumePayloadDigest string
 	}
 	// EventsCreateBatchInput holds the arguments to EventsCreateBatch.
 	EventsCreateBatchInput struct {
@@ -657,6 +672,8 @@ type Event struct {
 	// OccurredAt is when the writer decided the event, where the World
 	// stores it apart from CreatedAt.
 	OccurredAt *time.Time
+	// ResumeID is the resume a hook_received was deduplicated under, if any.
+	ResumeID string
 	// SpecVersion is the spec version of the event's writer.
 	SpecVersion int
 }

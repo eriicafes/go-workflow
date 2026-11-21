@@ -484,8 +484,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		// landed.
 		creation, _ := eventData(wireEvent{EventType: string(worlds.EventTypeRunCreated), Data: stored})
 		if err := worlds.CreateRunForStart(ctx, f.store, runID, creation); err != nil {
-			status, code := goErrorStatus(err)
-			return outcome{status: status, code: code, message: err.Error()}
+			return refuse(err)
 		}
 		f.mu.Lock()
 		if _, ok := f.specs[runID]; !ok {
@@ -507,7 +506,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		events, _ := f.store.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 		return outcome{status: http.StatusOK, answer: map[string]any{"event": f.wireEvent(events.Data[0], true), "run": f.wireRun(run, nil), "allocated": 1}}
 	}
-	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred, SpecVersion: spec}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report}})
+	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred, SpecVersion: spec}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report, ResumeID: str(in.Meta, "resumeId"), ResumePayloadDigest: str(in.Meta, "resumePayloadDigest")}})
 	if err != nil {
 		if errors.Is(err, worlds.ErrInBandSuperseded) {
 			seq, seqInBand := f.counters(ctx, runID)
@@ -517,7 +516,10 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	}
 	// The backend refuses a repeated transition instead of answering with
 	// the event that admitted it, except run_started.
-	if result.AllocatedEventCount == 0 && eventType != worlds.EventTypeRunStarted && eventType != worlds.EventTypeStepStarted {
+	// A repeated resume returns the event it committed, as world-local's
+	// does.
+	resumed := eventType == worlds.EventTypeHookReceived && str(in.Meta, "resumeId") != ""
+	if result.AllocatedEventCount == 0 && eventType != worlds.EventTypeRunStarted && eventType != worlds.EventTypeStepStarted && !resumed {
 		return outcome{status: http.StatusConflict, code: "entity-conflict", message: "already " + string(eventType)}
 	}
 	event, err := f.store.EventsGet(ctx, worlds.EventsGetInput{RunID: runID, EventID: result.EventID})
@@ -713,6 +715,9 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		}
 	}
 	wire := map[string]any{"runId": string(event.RunID), "eventId": string(event.EventID), "eventType": string(event.EventType), "createdAt": event.CreatedAt, "specVersion": event.SpecVersion, "eventData": stored}
+	if event.ResumeID != "" {
+		wire["resumeId"] = event.ResumeID
+	}
 	if event.CorrelationID != "" {
 		wire["correlationId"] = event.CorrelationID
 	}
@@ -739,6 +744,13 @@ func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[str
 	}
 	if len(run.ExecutionContext) > 0 {
 		wire["executionContext"] = run.ExecutionContext
+	}
+	if run.StartHook != nil {
+		hook := map[string]any{"token": run.StartHook.Token, "hookId": string(run.StartHook.HookID)}
+		if run.StartHook.TokenRetentionUntil != nil {
+			hook["tokenRetentionUntil"] = *run.StartHook.TokenRetentionUntil
+		}
+		wire["startHook"] = hook
 	}
 	if len(run.Error) > 0 {
 		wire["error"] = run.Error
@@ -785,7 +797,7 @@ func (f *fakeBackend) writeHook(ctx context.Context, writer http.ResponseWriter,
 }
 
 func (f *fakeBackend) wireHook(ctx context.Context, hook worlds.Hook) map[string]any {
-	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "specVersion": hook.SpecVersion, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName, "encryptionPublicKey": hook.ResumeContext.EncryptionPublicKey, "runSpecVersion": hook.ResumeContext.RunSpecVersion}}
+	wire := map[string]any{"runId": string(hook.RunID), "hookId": string(hook.HookID), "token": hook.Token, "ownerId": "team", "projectId": "project", "environment": "production", "createdAt": hook.CreatedAt, "specVersion": hook.SpecVersion, "resumeCapabilities": map[string]any{"hookResumeDedupVersion": hookResumeDedupVersion}, "resumeContext": map[string]any{"deploymentId": hook.ResumeContext.DeploymentID, "workflowName": hook.ResumeContext.WorkflowName, "encryptionPublicKey": hook.ResumeContext.EncryptionPublicKey, "runSpecVersion": hook.ResumeContext.RunSpecVersion}}
 	if hook.TokenRetentionUntil != nil {
 		wire["tokenRetentionUntil"] = *hook.TokenRetentionUntil
 	}
@@ -864,6 +876,8 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusConflict, "hook-conflict"
 	case errors.Is(err, worlds.ErrStreamClosed):
 		return http.StatusConflict, "stream-closed"
+	case errors.Is(err, worlds.ErrStartHookRejected):
+		return http.StatusBadRequest, "start-hook-admission-rejected"
 	case errors.Is(err, worlds.ErrEventInvalid):
 		return http.StatusBadRequest, "validation-error"
 	}

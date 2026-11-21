@@ -96,7 +96,8 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	var created worlds.DataHookCreated
-	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
+	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" || input.Event.CorrelationID == string(worlds.StartHookID(input.RunID)) {
+		// The start hook's ID is the start hook's alone.
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	unlock, err := w.writeLock()

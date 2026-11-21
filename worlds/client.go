@@ -239,7 +239,7 @@ func (c worldClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 	if err != nil {
 		return err
 	}
-	_, err = ResumeHook(ctx, c.world, hook, input.Data)
+	_, err = ResumeHook(ctx, c.world, hook, input.Data, input.ResumeID)
 	return err
 }
 

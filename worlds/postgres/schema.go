@@ -41,7 +41,8 @@ CREATE TABLE go_workflow_runs (
 	encryption_public_key text NOT NULL DEFAULT '',
 	execution_context jsonb,
 	expired_at timestamptz,
-	data_purged boolean NOT NULL DEFAULT false
+	data_purged boolean NOT NULL DEFAULT false,
+	start_hook jsonb
 );
 CREATE INDEX go_workflow_runs_created_idx ON go_workflow_runs (created_at, run_id);
 CREATE INDEX go_workflow_runs_workflow_idx ON go_workflow_runs (workflow_name, created_at, run_id);
@@ -57,9 +58,13 @@ CREATE TABLE go_workflow_events (
 	data bytea,
 	created_at timestamptz NOT NULL,
 	spec_version integer NOT NULL,
+	resume_id text,
+	resume_payload_digest text,
 	PRIMARY KEY (run_id, slot)
 );
 CREATE INDEX go_workflow_events_correlation_idx ON go_workflow_events (run_id, correlation_id, slot);
+CREATE UNIQUE INDEX go_workflow_events_hook_resume_unique ON go_workflow_events (run_id, resume_id)
+	WHERE type = 'hook_received' AND resume_id IS NOT NULL;
 
 CREATE TABLE go_workflow_steps (
 	run_id text NOT NULL,
@@ -100,6 +105,16 @@ CREATE TABLE go_workflow_hooks (
 );
 CREATE INDEX go_workflow_hooks_run_idx ON go_workflow_hooks (run_id, created_at, hook_id);
 CREATE INDEX go_workflow_hooks_created_idx ON go_workflow_hooks (created_at, hook_id);
+
+-- A start hook candidate's permanent decision: accepted, or rejected because
+-- conflicting_run_id held its token.
+CREATE TABLE go_workflow_start_hook_admissions (
+	run_id text PRIMARY KEY,
+	token text NOT NULL,
+	decision text NOT NULL,
+	conflicting_run_id text,
+	created_at timestamptz NOT NULL
+);
 
 CREATE TABLE go_workflow_hook_tokens (
 	token text PRIMARY KEY,

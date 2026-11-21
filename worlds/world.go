@@ -9,6 +9,8 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +80,9 @@ type Capabilities struct {
 	// from now. The runtime reaches a later timer in hops. Zero means no
 	// limit.
 	MaxQueueDelay time.Duration `cbor:"maxQueueDelay"`
+	// HookResumeDedup reports that the World deduplicates a hook_received
+	// by its EventsCreateOptions.ResumeID.
+	HookResumeDedup bool `cbor:"hookResumeDedup"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that
@@ -404,23 +409,60 @@ func PendingWaits(ctx context.Context, world World, runID RunID) ([]string, erro
 // resumeQueueAttempts is how often ResumeHook tries to queue a recorded payload's run.
 const resumeQueueAttempts = 3
 
+// NewResumeID returns the ID of a new logical resume of a hook.
+func NewResumeID() string {
+	return ulid.MustNew(ulid.Now(), rand.Reader).String()
+}
+
+// ResumeDigest returns the hex SHA-256 of a resume's payload, which a World
+// that deduplicates resumes compares a repeat of the resume with.
+func ResumeDigest(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
 // ResumeHook appends payload to hook as a hook_received event and queues a
 // delivery so the hook's run resumes, addressed to the run's deployment. When
 // the World refuses the payload with ErrHookNotActive, it still queues the
 // delivery, because an earlier resume may have recorded its payload without
 // queueing one, and returns the error.
 //
+// resumeID names the logical resume, NewResumeID when empty. On a World that
+// deduplicates resumes it is sent with the payload's digest, so a retry of
+// the same resume, by this call or its caller, records the payload once, and
+// a write that fails retryably is sent again.
+//
 // When queueing fails after the payload is recorded, it returns an error
 // wrapping ErrResumeNotQueued.
-func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte) (EventResult, error) {
+func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte, resumeID string) (EventResult, error) {
 	data, err := EncodeHookReceived(payload, hook.ResumeContext.WorkflowName)
 	if err != nil {
 		return EventResult{}, err
 	}
-	result, err := world.EventsCreate(ctx, EventsCreateInput{
+	input := EventsCreateInput{
 		RunID: hook.RunID,
 		Event: EventsCreateEvent{EventType: EventTypeHookReceived, CorrelationID: string(hook.HookID), Data: data},
-	})
+	}
+	dedup := world.Capabilities().HookResumeDedup || hook.ResumeDedup
+	if dedup {
+		if resumeID == "" {
+			resumeID = NewResumeID()
+		}
+		input.Options.ResumeID, input.Options.ResumePayloadDigest = resumeID, ResumeDigest(payload)
+	}
+	result, err := world.EventsCreate(ctx, input)
+	for attempt := 1; dedup && err != nil && IsRetryableWorldError(err) && attempt < resumeQueueAttempts; attempt++ {
+		// The same resume converges on one event, so an uncertain write
+		// is sent again.
+		timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+		result, err = world.EventsCreate(ctx, input)
+	}
 	if err != nil && !errors.Is(err, ErrHookNotActive) {
 		return result, err
 	}
@@ -534,4 +576,20 @@ func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadO
 		return PayloadOptions{}, err
 	}
 	return PayloadOptions{Keys: keys}, nil
+}
+
+// RunIDTime returns the time a run ID was minted at: the time of its ULID,
+// with the region tag bit cleared. It reports false for a run ID that is not
+// wrun_ and a ULID.
+func RunIDTime(id RunID) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(string(id), "wrun_")
+	if !ok {
+		return time.Time{}, false
+	}
+	value, err := ulid.ParseStrict(rest)
+	if err != nil {
+		return time.Time{}, false
+	}
+	value[0] &^= 0x80
+	return time.UnixMilli(int64(value.Time())).UTC(), true
 }

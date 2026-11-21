@@ -156,7 +156,7 @@ func (w *World) BaseURL() string             { return w.baseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (*World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true, HookResumeDedup: true}
 }
 
 // HTTP returns a handler serving the client and webhook endpoints under

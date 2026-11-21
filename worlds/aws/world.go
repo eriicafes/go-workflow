@@ -165,7 +165,7 @@ func (w *World) BaseURL() string             { return w.config.BaseURL }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	capabilities := worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true}
+	capabilities := worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, InBandFence: true, MaxConcurrency: true, HookResumeDedup: true}
 	if w.scheduler == nil {
 		// Without Scheduler a delivery is due within SQS's delay limit.
 		capabilities.MaxQueueDelay = maxSQSDelay

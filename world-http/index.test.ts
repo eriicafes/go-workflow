@@ -521,6 +521,13 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 				const encoded = encode({ error: { code: "conflict", message: "taken", sentinel: "hook_conflict", conflictingRunId: "wrun_01" } });
 				return new Response(new Uint8Array(encoded), { headers: { "Content-Type": "application/cbor" } });
 			}
+			if (input.RunID === "wrun_03") {
+				const encoded = encode({ error: { code: "invalid_argument", message: "too old", sentinel: "start_hook_rejected" } });
+				return new Response(new Uint8Array(encoded), { headers: { "Content-Type": "application/cbor" } });
+			}
+			if (input.RunID === "wrun_04") {
+				return rpcResponse({ Event: { RunID: "wrun_04", EventID: "evnt_01", EventType: "run_created", Data: null }, Run: { RunID: "wrun_04", StartedAt: null, CompletedAt: null, StartHook: { Token: "tok", HookID: "hook_04" } }, Allocated: 1 });
+			}
 			return rpcResponse({ Event: { RunID: "wrun_01", EventID: "evnt_01", EventType: "run_created", Data: null }, Run: { RunID: "wrun_01", StartedAt: null, CompletedAt: null }, Allocated: 1 });
 		},
 	});
@@ -535,6 +542,9 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 	expect(inputs[0]?.StartHook).toEqual({ Token: "tok" });
 	expect(created.run?.startHook).toEqual({ token: "tok", hookId: "hook_01" });
 	await expect(create("wrun_02")).rejects.toMatchObject({ name: "HookConflictError", token: "tok", conflictingRunId: "wrun_01" });
+	await expect(create("wrun_03")).rejects.toMatchObject({ name: "WorkflowWorldError", code: "START_HOOK_ADMISSION_REJECTED" });
+	const echoed = (await create("wrun_04")) as { run?: { startHook?: { token: string; hookId: string } } };
+	expect(echoed.run?.startHook).toMatchObject({ token: "tok", hookId: "hook_04" });
 });
 
 test("raises a throttled RPC failure as the SDK's ThrottleError", async () => {

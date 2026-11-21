@@ -598,10 +598,18 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	defer unlock()
 	if ok, err := exists(w.root, runPath(input.RunID)); err != nil || ok {
-		if ok {
-			err = worlds.ErrRunAlreadyExists
+		if !ok {
+			return worlds.EventResult{}, err
 		}
-		return worlds.EventResult{}, err
+		// A repeat of an accepted start returns its run_created.
+		created, found, err := w.readEvent(input.RunID, 1)
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		if found && worlds.RepeatsAcceptedStart(created.Data, input) {
+			return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
+		}
+		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
@@ -612,15 +620,25 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
+	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now, StartHook: worlds.RunEchoStartHook(payload)}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now, SpecVersion: worlds.SpecVersion}
 	var hook *hookRecord
 	if start := input.StartHook; start != nil {
 		if start.Token == "" {
 			return worlds.EventResult{}, worlds.ErrEventInvalid
 		}
+		var decision worlds.StartHookDecision
+		if found, err := w.readOptional(startHookRejectionPath(input.RunID), &decision); err != nil || found {
+			if err == nil {
+				err = decision.Err()
+			}
+			return worlds.EventResult{}, err
+		}
+		if worlds.StartHookCandidateExpired(input.RunID, now) {
+			return worlds.EventResult{}, worlds.ErrStartHookRejected
+		}
 		// The start hook claims its token with the run, or no run is
-		// created.
+		// created, and the candidate's refusal is permanent.
 		owner, err := w.readToken(start.Token)
 		if err != nil {
 			return worlds.EventResult{}, err
@@ -630,7 +648,11 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			if err != nil {
 				return worlds.EventResult{}, err
 			}
-			return worlds.EventResult{}, &worlds.HookConflictError{RunID: previous.RunID}
+			decision := worlds.StartHookDecision{Token: start.Token, ConflictingRunID: previous.RunID}
+			if err := writeJSON(w.root, startHookRejectionPath(input.RunID), decision); err != nil {
+				return worlds.EventResult{}, err
+			}
+			return worlds.EventResult{}, decision.Err()
 		}
 		hook = &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}}
 	}
@@ -697,8 +719,18 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	now := time.Now().UTC()
-	replay, err := t.admit(input.Event, now)
-	if err != nil {
+	resumeID := ""
+	if input.Event.EventType == worlds.EventTypeHookReceived {
+		resumeID = input.Options.ResumeID
+	}
+	var replay worlds.EventID
+	if claim, ok := t.run.Resumes[resumeID]; ok && resumeID != "" {
+		// A repeat of a resume returns the event it committed.
+		if claim.Digest != input.Options.ResumePayloadDigest {
+			return worlds.EventResult{}, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, resumeID)
+		}
+		replay = claim.EventID
+	} else if replay, err = t.admit(input.Event, now); err != nil {
 		return worlds.EventResult{}, err
 	}
 	delta, err := w.delta(t.run, input.Options)
@@ -730,6 +762,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	event, err := t.append(input.Event, eventTime(input.Event, input.Options.InBandCount, now))
 	if err != nil {
 		return worlds.EventResult{}, err
+	}
+	if resumeID != "" {
+		t.appended[len(t.appended)-1].ResumeID, event.ResumeID = resumeID, resumeID
+		if t.run.Resumes == nil {
+			t.run.Resumes = map[string]resumeClaim{}
+		}
+		t.run.Resumes[resumeID] = resumeClaim{Digest: input.Options.ResumePayloadDigest, EventID: event.EventID}
 	}
 	t.advance(input.Options.InBandCount, 1)
 	if err := t.commit(); err != nil {

@@ -37,15 +37,31 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		attributes = map[string]string{}
 	}
 	// run_created takes the first position, which counts as in-band.
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now, StartHook: worlds.RunEchoStartHook(data)}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now, SpecVersion: worlds.SpecVersion}
-	items := []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))}
+	items := []ddb.TransactWriteItem{{Put: &ddb.Put{TableName: awsv2.String(w.config.TableName), Item: runItem(view), ConditionExpression: awsv2.String("attribute_not_exists(pk)")}}, put(w.config.TableName, eventItem(event, 1))}
 	if input.StartHook != nil {
+		// A candidate's decision is permanent.
+		if item, found, err := w.item(ctx, startHookDecisionKey(string(input.RunID))); err != nil {
+			return worlds.EventResult{}, err
+		} else if found && read(item, "decision") == "rejected" {
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: worlds.RunID(read(item, "conflictingRunId"))}
+		} else if !found && worlds.StartHookCandidateExpired(input.RunID, now) {
+			return worlds.EventResult{}, worlds.ErrStartHookRejected
+		}
 		hookItems, err := w.startHookItems(ctx, input, now)
+		var conflict *worlds.HookConflictError
+		if errors.As(err, &conflict) {
+			return worlds.EventResult{}, w.rejectStart(ctx, input, conflict)
+		}
+		if errors.Is(err, worlds.ErrRunAlreadyExists) {
+			return w.repeatedStart(ctx, input)
+		}
 		if err != nil {
 			return worlds.EventResult{}, err
 		}
 		items = append(items, hookItems...)
+		items = append(items, put(w.config.TableName, merge(startHookDecisionKey(string(input.RunID)), map[string]ddb.AttributeValue{"decision": avs("accepted"), "token": avs(input.StartHook.Token)})))
 	}
 	err = w.transact(ctx, items)
 	if conditional(err) {
@@ -53,16 +69,37 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			// The run may exist, or a concurrent claimant took the token.
 			if _, found, getErr := w.item(ctx, runKey(string(input.RunID))); getErr == nil && !found {
 				if item, found, getErr := w.item(ctx, tokenKey(input.StartHook.Token)); getErr == nil && found {
-					return worlds.EventResult{}, &worlds.HookConflictError{RunID: tokenFromItem(item).runID}
+					return worlds.EventResult{}, w.rejectStart(ctx, input, &worlds.HookConflictError{RunID: tokenFromItem(item).runID})
 				}
 			}
 		}
-		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
+		return w.repeatedStart(ctx, input)
 	}
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
 	return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
+}
+
+// repeatedStart returns the run_created of an accepted start that input
+// repeats, or ErrRunAlreadyExists.
+func (w *World) repeatedStart(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	created, err := w.EventsGet(ctx, worlds.EventsGetInput{RunID: input.RunID, EventID: worlds.EventIDForSlot(1)})
+	if err == nil && worlds.RepeatsAcceptedStart(created.Data, input) {
+		return worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
+	}
+	return worlds.EventResult{}, worlds.ErrRunAlreadyExists
+}
+
+// rejectStart records the refusal of a start hook candidate, which is
+// permanent, and returns it.
+func (w *World) rejectStart(ctx context.Context, input worlds.EventsCreateRunInput, conflict *worlds.HookConflictError) error {
+	item := merge(startHookDecisionKey(string(input.RunID)), map[string]ddb.AttributeValue{"decision": avs("rejected"), "token": avs(input.StartHook.Token), "conflictingRunId": avs(string(conflict.RunID))})
+	err := w.transact(ctx, []ddb.TransactWriteItem{{Put: &ddb.Put{TableName: awsv2.String(w.config.TableName), Item: item, ConditionExpression: awsv2.String("attribute_not_exists(pk)")}}})
+	if err != nil && !conditional(err) {
+		return errors.Join(conflict, err)
+	}
+	return conflict
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -97,8 +134,20 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err := fence(run, input.Options.InBandCount); err != nil {
 			return err
 		}
-		replay, err := tx.admit(ctx, run, input.Event)
-		if err != nil {
+		var resume *resumeEntry
+		if input.Event.EventType == worlds.EventTypeHookReceived && input.Options.ResumeID != "" {
+			if resume, err = tx.resume(ctx, input.RunID, input.Options.ResumeID); err != nil {
+				return err
+			}
+		}
+		var replay *worlds.EventResult
+		if resume != nil && resume.eventID != "" {
+			// A repeat of a resume returns the event it committed.
+			if resume.digest != input.Options.ResumePayloadDigest {
+				return fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, input.Options.ResumeID)
+			}
+			replay = &worlds.EventResult{EventID: resume.eventID, EventType: worlds.EventTypeHookReceived}
+		} else if replay, err = tx.admit(ctx, run, input.Event); err != nil {
 			return err
 		}
 		if replay != nil {
@@ -107,6 +156,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 			event, err := tx.append(ctx, run, input.Event, createdAt(input.Event, input.Options.InBandCount))
 			if err != nil {
 				return err
+			}
+			if resume != nil {
+				run.events[len(run.events)-1].ResumeID, event.ResumeID = input.Options.ResumeID, input.Options.ResumeID
+				resume.digest, resume.eventID, resume.created = input.Options.ResumePayloadDigest, event.EventID, true
 			}
 			advance(run, input.Options.InBandCount, 1)
 			result = tx.result(event, true)
@@ -286,7 +339,8 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	var created worlds.DataHookCreated
-	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" {
+	if err := json.Unmarshal(input.Event.Data, &created); err != nil || created.Token == "" || input.Event.CorrelationID == string(worlds.StartHookID(input.RunID)) {
+		// The start hook's ID is the start hook's alone.
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	original := input.Event
@@ -525,24 +579,26 @@ func (w *World) appendRetry(ctx context.Context, build func(*appendTx) error) er
 // Admission and materialization run against it, so a batch sees its own
 // earlier events, and commit writes every changed item in one transaction.
 type appendTx struct {
-	world  *World
-	now    time.Time
-	runs   map[worlds.RunID]*runEntry
-	steps  map[string]*stepEntry
-	hooks  map[worlds.HookID]*hookEntry
-	tokens map[string]*tokenEntry
-	waits  map[string]*waitEntry
+	world   *World
+	now     time.Time
+	runs    map[worlds.RunID]*runEntry
+	steps   map[string]*stepEntry
+	hooks   map[worlds.HookID]*hookEntry
+	tokens  map[string]*tokenEntry
+	waits   map[string]*waitEntry
+	resumes map[string]*resumeEntry
 }
 
 func newAppendTx(world *World) *appendTx {
 	return &appendTx{
-		world:  world,
-		now:    time.Now().UTC(),
-		runs:   map[worlds.RunID]*runEntry{},
-		steps:  map[string]*stepEntry{},
-		hooks:  map[worlds.HookID]*hookEntry{},
-		tokens: map[string]*tokenEntry{},
-		waits:  map[string]*waitEntry{},
+		world:   world,
+		now:     time.Now().UTC(),
+		runs:    map[worlds.RunID]*runEntry{},
+		steps:   map[string]*stepEntry{},
+		hooks:   map[worlds.HookID]*hookEntry{},
+		tokens:  map[string]*tokenEntry{},
+		waits:   map[string]*waitEntry{},
+		resumes: map[string]*resumeEntry{},
 	}
 }
 
@@ -571,6 +627,16 @@ type hookEntry struct {
 
 type tokenEntry struct {
 	seen, cur *tokenView
+}
+
+// resumeEntry is a deduplicated resume: its payload digest and the event it
+// committed, or no event when none is recorded.
+type resumeEntry struct {
+	runID    worlds.RunID
+	resumeID string
+	digest   string
+	eventID  worlds.EventID
+	created  bool
 }
 
 type waitEntry struct {
@@ -647,6 +713,11 @@ func (tx *appendTx) load(ctx context.Context, keys []map[string]ddb.AttributeVal
 				entry.view = &view
 			}
 			tx.steps[itemID(key)] = entry
+		case strings.HasPrefix(sk, "RESUME#"):
+			if _, ok := tx.resumes[itemID(key)]; ok {
+				continue
+			}
+			tx.resumes[itemID(key)] = &resumeEntry{runID: worlds.RunID(strings.TrimPrefix(pk, "RUN#")), resumeID: strings.TrimPrefix(sk, "RESUME#"), digest: read(item, "digest"), eventID: worlds.EventID(read(item, "eventId"))}
 		case strings.HasPrefix(sk, "WAIT#"):
 			if _, ok := tx.waits[itemID(key)]; ok {
 				continue
@@ -723,6 +794,16 @@ func (tx *appendTx) token(ctx context.Context, token string) (*tokenEntry, error
 		}
 	}
 	return tx.tokens[token], nil
+}
+
+func (tx *appendTx) resume(ctx context.Context, runID worlds.RunID, resumeID string) (*resumeEntry, error) {
+	key := resumeKey(string(runID), resumeID)
+	if _, ok := tx.resumes[itemID(key)]; !ok {
+		if err := tx.load(ctx, []map[string]ddb.AttributeValue{key}); err != nil {
+			return nil, err
+		}
+	}
+	return tx.resumes[itemID(key)], nil
 }
 
 func (tx *appendTx) wait(ctx context.Context, runID worlds.RunID, correlationID string) (*waitEntry, error) {
@@ -1176,6 +1257,11 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			items = append(items, ddb.TransactWriteItem{Delete: &ddb.Delete{TableName: table, Key: tokenKey(token), ConditionExpression: awsv2.String(condition), ExpressionAttributeValues: values}})
 		} else {
 			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: tokenItem(token, *entry.cur), ConditionExpression: awsv2.String(condition), ExpressionAttributeValues: values}})
+		}
+	}
+	for _, entry := range tx.resumes {
+		if entry.created {
+			items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: merge(resumeKey(string(entry.runID), entry.resumeID), map[string]ddb.AttributeValue{"digest": avs(entry.digest), "eventId": avs(string(entry.eventID))}), ConditionExpression: awsv2.String("attribute_not_exists(pk)")}})
 		}
 	}
 	for _, entry := range tx.waits {

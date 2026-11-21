@@ -293,7 +293,7 @@ func WebhookHandler(world World) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if _, err := ResumeHook(ctx, world, hook, payload); err != nil {
+		if _, err := ResumeHook(ctx, world, hook, payload, ""); err != nil {
 			status := http.StatusInternalServerError
 			switch {
 			case errors.Is(err, ErrHookForceClaimed):

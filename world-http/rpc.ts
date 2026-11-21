@@ -29,6 +29,7 @@ export namespace RPC {
 		startHook?: boolean;
 		inBandFence?: boolean;
 		maxConcurrency?: boolean;
+		hookResumeDedup?: boolean;
 	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";
 	export type EventType = string;
@@ -55,6 +56,8 @@ export namespace RPC {
 		completedAt: Date | null;
 		expiredAt?: Date | null;
 		executionContext?: Record<string, unknown> | null;
+		/** The run's start hook, with its hookId and without its metadata. */
+		startHook?: { token: string; hookId: string; tokenRetentionUntil?: Date } | null;
 	};
 	export type Step = {
 		runId: string;
@@ -81,6 +84,7 @@ export namespace RPC {
 		createdAt: Date;
 		occurredAt: Date | null;
 		specVersion: number;
+		resumeId: string;
 	};
 	export type Wait = {
 		waitId: string;

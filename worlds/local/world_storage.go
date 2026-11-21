@@ -34,6 +34,15 @@ type runRecord struct {
 	// chunk files. A run whose ExpiredAt is set commits that first, so until
 	// DataPurged its reads scrub what is left, and recovery deletes it.
 	DataPurged bool `json:"dataPurged,omitempty"`
+	// Resumes holds each deduplicated resume of the run's hooks by its ID.
+	Resumes map[string]resumeClaim `json:"resumes,omitempty"`
+}
+
+// resumeClaim is a deduplicated resume: its payload digest and the event it
+// committed.
+type resumeClaim struct {
+	Digest  string         `json:"digest"`
+	EventID worlds.EventID `json:"eventId"`
 }
 
 // stepRecord is the materialized step. InputSlot is its step_created event,
@@ -178,6 +187,11 @@ func (w *World) readRuns() ([]runRecord, error) {
 }
 
 func runPath(runID worlds.RunID) string { return path.Join("runs", fileKey(string(runID))+".json") }
+
+// startHookRejectionPath holds the refusal of a start hook candidate.
+func startHookRejectionPath(runID worlds.RunID) string {
+	return path.Join("start-hook-rejections", fileKey(string(runID))+".json")
+}
 
 func eventsDir(runID worlds.RunID) string { return path.Join("events", fileKey(string(runID))) }
 

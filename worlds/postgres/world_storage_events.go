@@ -37,15 +37,42 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 	}
 	at := now()
+	var startHook []byte
+	if echo := worlds.RunEchoStartHook(payload); echo != nil {
+		if startHook, err = json.Marshal(echo); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
+	if input.StartHook != nil {
+		// A candidate's decision is permanent.
+		var decision, conflicting string
+		err := w.pool.QueryRow(ctx, `SELECT decision, coalesce(conflicting_run_id, '') FROM go_workflow_start_hook_admissions WHERE run_id = $1`, input.RunID).Scan(&decision, &conflicting)
+		if err == nil && decision == "rejected" {
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: worlds.RunID(conflicting)}
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return worlds.EventResult{}, err
+		}
+		if errors.Is(err, pgx.ErrNoRows) && worlds.StartHookCandidateExpired(input.RunID, at) {
+			return worlds.EventResult{}, worlds.ErrStartHookRejected
+		}
+	}
+	var repeat *worlds.EventResult
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
 		// run_created takes the first position, which counts as in-band.
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, in_band_count, spec_version, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $9, $9) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, worlds.SpecVersion, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, in_band_count, spec_version, created_at, updated_at, start_hook)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $9, $9, $10) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, worlds.SpecVersion, at, startHook)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
+			// A repeat of an accepted start returns its run_created.
+			created, err := scanEvent(tx.QueryRow(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot = 1`, input.RunID))
+			if err == nil && worlds.RepeatsAcceptedStart(created.Data, input) {
+				repeat = &worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}
+				return nil
+			}
 			return worlds.ErrRunAlreadyExists
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO go_workflow_events (run_id, slot, type, correlation_id, data, created_at, spec_version) VALUES ($1, 1, $2, '', $3, $4, $5)`,
@@ -53,10 +80,26 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		if err != nil || input.StartHook == nil {
 			return err
 		}
-		return createStartHook(ctx, tx, input, at)
+		if err := createStartHook(ctx, tx, input, at); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO go_workflow_start_hook_admissions (run_id, token, decision, created_at) VALUES ($1, $2, 'accepted', $3) ON CONFLICT (run_id) DO NOTHING`, input.RunID, input.StartHook.Token, at)
+		return err
 	})
+	var conflict *worlds.HookConflictError
+	if errors.As(err, &conflict) && input.StartHook != nil {
+		// The refusal is permanent, recorded apart from the rolled-back
+		// creation.
+		if _, recordErr := w.pool.Exec(ctx, `INSERT INTO go_workflow_start_hook_admissions (run_id, token, decision, conflicting_run_id, created_at) VALUES ($1, $2, 'rejected', $3, $4) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.StartHook.Token, conflict.RunID, at); recordErr != nil {
+			return worlds.EventResult{}, errors.Join(err, recordErr)
+		}
+	}
 	if err != nil {
 		return worlds.EventResult{}, err
+	}
+	if repeat != nil {
+		return *repeat, nil
 	}
 	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: at, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
@@ -88,9 +131,18 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err := a.fence(input.Options.InBandCount); err != nil {
 			return err
 		}
-		replay, err := a.admit(ctx, input.Event)
+		resumeID := ""
+		if input.Event.EventType == worlds.EventTypeHookReceived {
+			resumeID = input.Options.ResumeID
+		}
+		replay, err := a.resumed(ctx, resumeID, input.Options.ResumePayloadDigest)
 		if err != nil {
 			return err
+		}
+		if replay == nil {
+			if replay, err = a.admit(ctx, input.Event); err != nil {
+				return err
+			}
 		}
 		delta, err := a.delta(ctx, input.Options)
 		if err != nil {
@@ -105,6 +157,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		event, err := a.append(ctx, input.Event)
 		if err != nil {
 			return err
+		}
+		if resumeID != "" {
+			if _, err := tx.Exec(ctx, `UPDATE go_workflow_events SET resume_id = $3, resume_payload_digest = $4 WHERE run_id = $1 AND slot = $2`,
+				event.RunID, int64(a.count), resumeID, input.Options.ResumePayloadDigest); err != nil {
+				return err
+			}
+			event.ResumeID = resumeID
 		}
 		a.advance(input.Options.InBandCount, 1)
 		if result, err = a.result(ctx, event, true); err != nil {
@@ -732,12 +791,12 @@ func (a *appender) expire(ctx context.Context) error {
 
 // eventColumns are the columns scanEvent reads. Data is always read, since
 // worlds.ResolveEventData keeps its metadata when payloads are omitted.
-const eventColumns = "run_id, slot, type, correlation_id, data, created_at, spec_version"
+const eventColumns = "run_id, slot, type, correlation_id, data, created_at, spec_version, coalesce(resume_id, '')"
 
 func scanEvent(row pgx.Row) (worlds.Event, error) {
 	var event worlds.Event
 	var slot int64
-	if err := row.Scan(&event.RunID, &slot, &event.EventType, &event.CorrelationID, &event.Data, &event.CreatedAt, &event.SpecVersion); err != nil {
+	if err := row.Scan(&event.RunID, &slot, &event.EventType, &event.CorrelationID, &event.Data, &event.CreatedAt, &event.SpecVersion, &event.ResumeID); err != nil {
 		return worlds.Event{}, err
 	}
 	event.EventID = worlds.EventIDForSlot(uint64(slot))
@@ -814,4 +873,32 @@ func (w *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSl
 	return worlds.FeedEvents(ctx, w, runID, afterSlot, func() (<-chan struct{}, func()) {
 		return w.notifier.wait(channelEvents, string(runID))
 	}, onEvent, onError)
+}
+
+// resumed returns the result of the hook_received the resume resumeID
+// committed, or nil when it committed none. A repeat of the resume with
+// another payload digest is refused.
+func (a *appender) resumed(ctx context.Context, resumeID, digest string) (*worlds.EventResult, error) {
+	if resumeID == "" {
+		return nil, nil
+	}
+	var slot int64
+	var committed string
+	err := a.tx.QueryRow(ctx, `SELECT slot, resume_payload_digest FROM go_workflow_events WHERE run_id = $1 AND resume_id = $2 AND type = $3`,
+		a.run.RunID, resumeID, worlds.EventTypeHookReceived).Scan(&slot, &committed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if committed != digest {
+		return nil, fmt.Errorf("%w: resume %s was sent with another payload", worlds.ErrEventInvalid, resumeID)
+	}
+	event, err := scanEvent(a.tx.QueryRow(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot = $2`, a.run.RunID, slot))
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.result(ctx, event, false)
+	return &result, err
 }

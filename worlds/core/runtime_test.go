@@ -1245,7 +1245,7 @@ func TestResumeHookReportsARecordedPayloadItCouldNotQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, payload)
+	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, payload, "")
 	if !errors.Is(err, worlds.ErrResumeNotQueued) || !errors.Is(err, errQueueUnavailable) || result.EventID == "" {
 		t.Fatalf("result = %#v, err = %v", result, err)
 	}
