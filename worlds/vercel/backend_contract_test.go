@@ -260,13 +260,17 @@ func backendContract(t *testing.T, live bool) {
 	})
 }
 
-// TestBackendAssumptionsLive checks against a real project what the World
-// assumes of the backend and cannot see from the client. Each subtest is one
+func TestBackendAssumptions(t *testing.T)     { backendAssumptions(t, false) }
+func TestBackendAssumptionsLive(t *testing.T) { backendAssumptions(t, true) }
+
+// backendAssumptions checks what the World assumes of the backend and
+// cannot see from the client, against the fake backend, which implements
+// them, or with live set against a real project. Each subtest is one
 // assumption the Vercel World's documentation lists.
-func TestBackendAssumptionsLive(t *testing.T) {
+func backendAssumptions(t *testing.T, live bool) {
 	t.Run("FenceOnlyOnV5", func(t *testing.T) {
 		// A /v4 write to a run below spec 9 is never refused by the fence.
-		world := contractBackend(t, true)
+		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v4", 8)
 		meta := map[string]any{"specVersion": 8, "correlationId": "wait_01V4FENCE", "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": 1000}
 		if _, err := contractPost(t, world, "v4", runID, "wait_created", meta, nil); err != nil {
@@ -274,7 +278,7 @@ func TestBackendAssumptionsLive(t *testing.T) {
 		}
 	})
 	t.Run("CreatedAtIsOccurredAt", func(t *testing.T) {
-		world := contractBackend(t, true)
+		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		_, seqInBand, _ := contractCounters(t, world, runID)
 		occurred := time.Now().Add(-time.Minute).Truncate(time.Millisecond).UTC()
@@ -289,7 +293,7 @@ func TestBackendAssumptionsLive(t *testing.T) {
 		}
 	})
 	t.Run("StepCreationFieldsArePersisted", func(t *testing.T) {
-		world := contractBackend(t, true)
+		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		_, seqInBand, _ := contractCounters(t, world, runID)
 		meta := map[string]any{"specVersion": 9, "correlationId": "step_01PERSISTED", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract", "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": seqInBand}
@@ -305,7 +309,7 @@ func TestBackendAssumptionsLive(t *testing.T) {
 	t.Run("StepChecksOnSpec9Runs", func(t *testing.T) {
 		// A finished run refuses a step's creation and start, and still
 		// accepts its result.
-		world := contractBackend(t, true)
+		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		_, seqInBand, _ := contractCounters(t, world, runID)
 		fenced := func(meta map[string]any) map[string]any {

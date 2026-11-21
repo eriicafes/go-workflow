@@ -148,3 +148,12 @@ func TestBackendRateLimitIsAThrottleError(t *testing.T) {
 		}
 	}
 }
+
+func TestInBandRefusalCarriesTheCounters(t *testing.T) {
+	api := decodeAPIError(http.StatusPreconditionFailed, "application/json", []byte(`{"error":"in-band-superseded","message":"stale","seq":9,"seqInBand":4}`))
+	err := classify(api, worlds.EventTypeStepCreated)
+	var superseded *worlds.InBandSupersededError
+	if !errors.Is(err, worlds.ErrInBandSuperseded) || !errors.As(err, &superseded) || superseded.EventCount != 9 || superseded.InBandCount != 4 {
+		t.Fatalf("classified 412 = %#v", err)
+	}
+}

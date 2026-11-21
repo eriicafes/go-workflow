@@ -133,9 +133,12 @@ without a topic.
 ## Storage
 
 Each run's event log is kept by Vercel's workflow API. Every run the World
-creates is a Workflow SDK spec 8 run: its events have slot-numbered IDs,
-in-band writes are fenced, hook tokens can be force-claimed, and their
-retention reserved. The backend derives the run, step, and hook views and
+creates is a spec 9 run, written through the backend's `/v5` event routes:
+its events have slot-numbered IDs in a sealed log, its flow's writes are
+in-band and fenced, hook tokens can be force-claimed, and their retention
+reserved. `run_started` attests the spec 9 executor
+(`executorSpecVersion`), and a refused in-band write is a
+`worlds.InBandSupersededError` with the run's counters. The backend derives the run, step, and hook views and
 enforces token ownership across the whole project and environment, every
 region and deployment included.
 
@@ -148,12 +151,12 @@ hooks, and streams of Go runs show in Vercel's dashboard as JS ones do.
 | --- | --- | --- |
 | `run_created` | the run's input | workflow name, deployment, attributes, public key |
 | `run_completed`, `run_failed` | the output or error | |
-| `step_created` | the step's input | step name |
-| `step_completed`, `step_failed`, `step_retrying` | the result or error | retry time |
-| `step_started` | | owner message |
+| `step_created` | the step's input | step name, workflow name, inline, creator message |
+| `step_completed`, `step_failed`, `step_retrying` | the result or error | step name, attempt, workflow name, retry time, creator message |
+| `step_started` | an inline step's input, on its creating start | step name, attempt, workflow name, inline |
 | `hook_created` | the hook's metadata | token, retention, webhook, system, forced |
-| `hook_received` | the payload | |
-| `wait_created` | | resume time |
+| `hook_received` | the payload | workflow name |
+| `wait_created` | | resume time, creator message |
 | `attr_set` | | changes and writer |
 
 Replay matches declarations by ID, and a step's retries and cancellation
