@@ -171,14 +171,15 @@ constructors belong in steps or external code.
 ## Time
 
 ```go
-func Now(ctx context.Context) (time.Time, error)
+func Now(ctx context.Context) time.Time
+func RandReader(ctx context.Context) io.Reader
 func Sleep(ctx context.Context, duration time.Duration) error
 func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Now` | W | Recorded current time in UTC. |
+| `Now` | — | The replay clock in workflow context, and `time.Now()` elsewhere. |
 | `RandReader` | W | Reader of random bytes drawn from the run's seed. Its `Read` returns `ErrNoWorkflow` outside workflow context. |
 | `Sleep` | W | Suspends the run for `duration`. |
 | `Timer` | W | Promise that settles after `duration`. |

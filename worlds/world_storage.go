@@ -499,9 +499,11 @@ type (
 	}
 	// EventResult is the result of appending one event.
 	EventResult struct {
-		// EventID and EventType identify the appended or previously admitted event.
+		// EventID and EventType identify the appended or previously admitted
+		// event, and CreatedAt is when it was appended.
 		EventID   EventID
 		EventType EventType
+		CreatedAt time.Time
 		// Events holds the events selected by EventsCreateOptions.
 		Events []Event
 		// Step is the step created by a step_created event.

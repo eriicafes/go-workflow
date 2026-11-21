@@ -150,15 +150,11 @@ the deadline and cancellation survive replay, so the timeout does not restart
 and a disarmed timer stays disarmed. Parent cancellation also stops work using
 the context.
 
-For an absolute deadline, use `workflow.WithDeadline` with a recorded time:
+For an absolute deadline, use `workflow.WithDeadline` with a time from the
+replay clock:
 
 ```go
-now, err := workflow.Now(ctx)
-if err != nil {
-	return Output{}, err
-}
-
-workCtx, cancel, err := workflow.WithDeadline(ctx, now.Add(72*time.Hour))
+workCtx, cancel, err := workflow.WithDeadline(ctx, workflow.Now(ctx).Add(72*time.Hour))
 if err != nil {
 	return Output{}, err
 }

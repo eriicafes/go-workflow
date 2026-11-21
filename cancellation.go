@@ -38,7 +38,7 @@ func WithTimeout(ctx context.Context, duration time.Duration) (context.Context, 
 // A nil cause uses context.DeadlineExceeded. Manual cancellation uses
 // context.Canceled and disarms the timer.
 func WithTimeoutCause(ctx context.Context, duration time.Duration, cause error) (context.Context, func() error, error) {
-	return WithDeadlineCause(ctx, time.Now().Add(duration), cause)
+	return WithDeadlineCause(ctx, Now(ctx).Add(duration), cause)
 }
 
 // WithDeadline creates a durable cancellation context that is cancelled at deadline.

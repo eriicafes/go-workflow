@@ -501,7 +501,7 @@ func (t *txn) load(slot int) (worlds.Event, bool, error) {
 // hook_created result carries the view as event left it, with the payload
 // already in hand.
 func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
 	if event.EventType == worlds.EventTypeHookCreated {
 		if hook := t.hooks[worlds.HookID(event.CorrelationID)]; hook != nil {
 			value := hook.Hook

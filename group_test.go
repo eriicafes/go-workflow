@@ -81,10 +81,7 @@ func TestErrGroupWaitsForAllAndReturnsFirstRecordedFailure(t *testing.T) {
 		firstFailure, laterFailure := errors.New("first failure"), errors.New("later failure")
 		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.ErrGroup
-			start, err := workflow.Now(ctx)
-			if err != nil {
-				return groupOutput{}, err
-			}
+			start := workflow.Now(ctx)
 			// Declaration order differs from failure order.
 			workflow.Go(ctx, &group, func(context.Context, struct{}) (int, error) {
 				time.Sleep(2 * time.Hour)
@@ -98,10 +95,7 @@ func TestErrGroupWaitsForAllAndReturnsFirstRecordedFailure(t *testing.T) {
 			if err := group.Wait(ctx); !errors.Is(err, firstFailure) {
 				return groupOutput{}, fmt.Errorf("group error = %v", err)
 			}
-			end, err := workflow.Now(ctx)
-			if err != nil {
-				return groupOutput{}, err
-			}
+			end := workflow.Now(ctx)
 			if end.Sub(start) < 3*time.Hour {
 				return groupOutput{}, errors.New("group returned before every member settled")
 			}
@@ -285,10 +279,7 @@ func TestGroupIncludesWorkAddedByContinuation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.WaitGroup
-			start, err := workflow.Now(ctx)
-			if err != nil {
-				return groupOutput{}, err
-			}
+			start := workflow.Now(ctx)
 			chain := workflow.Then(ctx, workflow.Timer(ctx, time.Hour), func(_ struct{}, err error) *workflow.Result[int] {
 				group.Add(workflow.Timer(ctx, time.Hour))
 				return workflow.NewResult(1, err)
@@ -297,10 +288,7 @@ func TestGroupIncludesWorkAddedByContinuation(t *testing.T) {
 			if err := group.Wait(ctx); err != nil {
 				return groupOutput{}, err
 			}
-			end, err := workflow.Now(ctx)
-			if err != nil {
-				return groupOutput{}, err
-			}
+			end := workflow.Now(ctx)
 			if end.Sub(start) < 2*time.Hour {
 				return groupOutput{}, errors.New("work added by continuation did not settle")
 			}

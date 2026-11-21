@@ -568,7 +568,7 @@ func (a *appender) advance(count *int, appended int) {
 }
 
 func (a *appender) result(ctx context.Context, event worlds.Event, created bool) (worlds.EventResult, error) {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: event.Data, InBandCount: a.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, InBandCount: a.run.InBandCount}
 	if created {
 		result.AllocatedEventCount = 1
 	}

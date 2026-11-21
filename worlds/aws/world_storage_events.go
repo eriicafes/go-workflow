@@ -964,7 +964,7 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 }
 
 func (tx *appendTx) result(event worlds.Event, created bool) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data)}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: bytes.Clone(event.Data)}
 	if created {
 		result.AllocatedEventCount = 1
 	}

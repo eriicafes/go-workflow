@@ -129,7 +129,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if response.Allocated != nil {
 		allocated = *response.Allocated
 	}
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: event.Data, AllocatedEventCount: allocated}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, AllocatedEventCount: allocated}
 	if input.Options.InBandCount != nil {
 		result.InBandCount = *input.Options.InBandCount + allocated
 	}
@@ -219,7 +219,7 @@ func (w *World) findAdmitted(ctx context.Context, input worlds.EventsCreateInput
 		if !matches || event.CorrelationID != input.Event.CorrelationID {
 			continue
 		}
-		result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: event.Data}
+		result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data}
 		if input.Options.InBandCount != nil {
 			result.InBandCount = *input.Options.InBandCount
 		}
@@ -344,7 +344,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err != nil {
 			return worlds.EventBatchResult{}, err
 		}
-		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, Data: appended.Data, AllocatedEventCount: 1}
+		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, CreatedAt: appended.CreatedAt, Data: appended.Data, AllocatedEventCount: 1}
 		allocated++
 		if item.Step != nil {
 			step, err := toStep(item.Step, worlds.ResolveDataAll)
