@@ -42,7 +42,7 @@ func stepSelect(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type <> '"+string(worlds.EventTypeStepCompleted)+"' THEN re.data END", ""
 	}
-	return "SELECT s.run_id, s.step_id, s.step_name, s.status, " + input + ", re.type, " + result + ", s.attempt, s.created_at, s.updated_at, s.started_at, s.completed_at, s.retry_after" +
+	return "SELECT s.run_id, s.step_id, s.step_name, s.status, " + input + ", re.type, " + result + ", s.attempt, s.created_at, s.updated_at, s.started_at, s.completed_at, s.retry_after, s.spec_version" +
 		" FROM go_workflow_steps s" + join + " LEFT JOIN go_workflow_events re ON re.run_id = s.run_id AND re.slot = s.result_slot" + runLive("s.run_id")
 }
 
@@ -50,7 +50,7 @@ func scanStep(row pgx.Row) (worlds.Step, error) {
 	var step worlds.Step
 	var input, result []byte
 	var resultType *worlds.EventType
-	if err := row.Scan(&step.RunID, &step.StepID, &step.StepName, &step.Status, &input, &resultType, &result, &step.Attempt, &step.CreatedAt, &step.UpdatedAt, &step.StartedAt, &step.CompletedAt, &step.RetryAfter); err != nil {
+	if err := row.Scan(&step.RunID, &step.StepID, &step.StepName, &step.Status, &input, &resultType, &result, &step.Attempt, &step.CreatedAt, &step.UpdatedAt, &step.StartedAt, &step.CompletedAt, &step.RetryAfter, &step.SpecVersion); err != nil {
 		return worlds.Step{}, err
 	}
 	if input != nil {

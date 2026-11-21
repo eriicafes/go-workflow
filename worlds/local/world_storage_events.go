@@ -252,6 +252,7 @@ func (t *txn) append(value worlds.EventsCreateEvent, now time.Time) (worlds.Even
 		CorrelationID: value.CorrelationID,
 		Data:          bytes.Clone(value.Data),
 		CreatedAt:     now,
+		SpecVersion:   worlds.EventSpecVersion(value.SpecVersion),
 	}
 	t.appended = append(t.appended, event)
 	return event, t.materialize(event)
@@ -285,7 +286,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataStepCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.StepID(event.CorrelationID)
-		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
+		t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
 	case worlds.EventTypeStepStarted:
 		if worlds.StartCreatesStep(event.Data) {
 			// An inline step is created by its first step_started, which
@@ -298,7 +299,7 @@ func (t *txn) materialize(event worlds.Event) error {
 			if current == nil {
 				var value worlds.DataStepStarted
 				_ = json.Unmarshal(event.Data, &value)
-				t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
+				t.setStep(&stepRecord{Step: worlds.Step{RunID: run.RunID, StepID: id, StepName: value.StepName, Status: worlds.StatusPending, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}, InputSlot: eventSlot(event)})
 			}
 		}
 		return t.updateStep(event, worlds.StatusRunning)
@@ -312,7 +313,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})
@@ -551,7 +552,20 @@ func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResul
 			result.Step, result.StepCreated = &value, true
 		}
 	}
+	if event.EventType == worlds.EventTypeWaitCreated || event.EventType == worlds.EventTypeWaitCompleted {
+		result.Wait = t.wait(event.CorrelationID)
+	}
 	return result
+}
+
+// wait returns the wait correlationID as the run's events and the ones
+// staged record it.
+func (t *txn) wait(correlationID string) *worlds.Wait {
+	committed, err := t.w.readEvents(t.run.RunID, 1, t.run.EventCount)
+	if err != nil {
+		return nil
+	}
+	return worlds.WaitOfEvents(t.run.RunID, correlationID, append(committed, t.appended...))
 }
 
 // delta returns the committed events selected by options.
@@ -599,7 +613,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		attributes = map[string]string{}
 	}
 	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
-	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
+	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now, SpecVersion: worlds.SpecVersion}
 	var hook *hookRecord
 	if start := input.StartHook; start != nil {
 		if start.Token == "" {
@@ -618,7 +632,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			}
 			return worlds.EventResult{}, &worlds.HookConflictError{RunID: previous.RunID}
 		}
-		hook = &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}}
+		hook = &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now}}
 	}
 	if err := w.createRun(run, event, hook); err != nil {
 		return worlds.EventResult{}, err

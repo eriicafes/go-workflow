@@ -640,7 +640,10 @@ func (e *Execution) createDeclared() {
 		switch {
 		case step.failure != nil:
 			// A step whose input did not encode fails as it is created.
-			created = append(created, e.stepEvent(worlds.EventTypeStepCreated, step.stepID, worlds.DataStepCreated{StepName: step.name, WorkflowName: e.run.WorkflowName, Inline: true, CreatorMessageID: e.delivery.MessageID}))
+			// Its step_created records a placeholder for the input, which
+			// readers show as unavailable rather than as no arguments.
+			placeholder, _ := e.EncodePayload(unserializableStepInput())
+			created = append(created, e.stepEvent(worlds.EventTypeStepCreated, step.stepID, worlds.DataStepCreated{StepName: step.name, WorkflowName: e.run.WorkflowName, Input: placeholder, Inline: true, CreatorMessageID: e.delivery.MessageID}))
 			failed = append(failed, e.stepEvent(worlds.EventTypeStepFailed, step.stepID, worlds.DataStepResult{StepName: step.name, Attempt: 1, Error: e.encodeError(step.failure)}))
 			continue
 		case step.exhausted:
@@ -1063,6 +1066,22 @@ func (e *Execution) decodeError(data []byte) *worlds.Error {
 // stepArgs is a step's input as it is recorded: its argument list.
 type stepArgs[In any] struct {
 	Args [1]In `json:"args"`
+}
+
+// unserializableStepInputMarker is the argument the input placeholder of a
+// step whose input did not encode holds, as the Workflow SDK writes it.
+const unserializableStepInputMarker = "[input unavailable: step argument serialization failed]"
+
+// unserializableStepInputPlaceholder is the input a step whose input did not
+// encode is created with: the SDK's {args, closureVars} shape with its flag.
+type unserializableStepInputPlaceholder struct {
+	Args        []string `json:"args"`
+	ClosureVars []any    `json:"closureVars"`
+	Flag        bool     `json:"__workflowUnserializableStepInput"`
+}
+
+func unserializableStepInput() unserializableStepInputPlaceholder {
+	return unserializableStepInputPlaceholder{Args: []string{unserializableStepInputMarker}, ClosureVars: []any{}, Flag: true}
 }
 
 // runFailedData returns the Data of a run_failed event for err.

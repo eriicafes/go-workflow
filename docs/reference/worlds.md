@@ -212,6 +212,7 @@ type Step struct {
 	Output      []byte
 	Error       []byte // last failed attempt
 	Attempt     int
+	SpecVersion int // of the event that created it
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
@@ -230,8 +231,9 @@ type Hook struct {
 	UpdatedAt           time.Time
 	ReceivedAt          *time.Time
 	TokenRetentionUntil *time.Time
-	ClaimedFrom         *HookForceClaim
+	ClaimedFrom         *HookForceClaim // with the previous owner run's workflow, deployment, and spec version
 	ForceClaimedBy      *HookForceClaim
+	SpecVersion         int // of the event that created it
 	DisposedAt          *time.Time
 }
 
@@ -239,8 +241,28 @@ type HookResumeContext struct {
 	DeploymentID        string
 	WorkflowName        string
 	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
+	RunSpecVersion      int
+}
+
+// Wait is returned by a wait_created or wait_completed write.
+type Wait struct {
+	WaitID      string // WaitIDOf(run, correlation ID): "<runId>-<correlationId>"
+	RunID       RunID
+	Status      WaitStatus // waiting or completed
+	ResumeAt    *time.Time
+	CompletedAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	SpecVersion int
 }
 ```
+
+Every event records the `SpecVersion` of its writer (`EventsCreateEvent.SpecVersion`,
+`worlds.SpecVersion` when zero), and a World that stores the time an event
+occurred apart from its creation returns it as `Event.OccurredAt`. A
+`wait_created` or `wait_completed` write returns the wait in
+`EventResult.Wait`; `worlds.WaitOfEvents` derives it from the wait's events.
+Run attributes are never nil.
 
 A view's payloads are in the Workflow SDK's format and may be encrypted; a
 World stores them as opaque bytes. See [Payloads](#payloads).

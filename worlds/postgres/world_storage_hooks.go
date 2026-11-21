@@ -136,11 +136,11 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 				created.ConflictingRunID = holder.runID
 				input.Event.EventType = worlds.EventTypeHookConflict
 			} else {
-				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
 				owner := runs[holder.runID]
 				if owner == nil {
 					return errClaimRetry
 				}
+				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID, WorkflowName: owner.run.WorkflowName, DeploymentID: owner.run.DeploymentID, RunSpecVersion: owner.run.SpecVersion}
 				if owner.run.Status.Terminal() {
 					if _, err := tx.Exec(ctx, `DELETE FROM go_workflow_hook_tokens WHERE token = $1`, token); err != nil {
 						return err
@@ -195,7 +195,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", h.is_webhook, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
+	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", h.is_webhook, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at, h.spec_version, h.run_spec_version"
 }
 
 // hookJoin joins the hook's hook_created event in its own run, unless resolve
@@ -210,7 +210,7 @@ func hookJoin(resolve worlds.ResolveData) string {
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
 	var metadata, claimed, taken []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt, &hook.SpecVersion, &hook.ResumeContext.RunSpecVersion); err != nil {
 		return worlds.Hook{}, err
 	}
 	if metadata != nil {

@@ -721,6 +721,7 @@ type RPCEventResult struct {
 	Run         *Run  `cbor:",omitempty"`
 	Step        *Step `cbor:",omitempty"`
 	Hook        *Hook `cbor:",omitempty"`
+	Wait        *Wait `cbor:",omitempty"`
 	StepCreated bool  `cbor:",omitempty"`
 	// Allocated is the number of positions the write allocated in the log.
 	Allocated   int
@@ -754,6 +755,7 @@ type RPCBatchEventResult struct {
 	Event   *Event `cbor:",omitempty"`
 	Run     *Run   `cbor:",omitempty"`
 	Step    *Step  `cbor:",omitempty"`
+	Wait    *Wait  `cbor:",omitempty"`
 }
 
 // rpcEventResult reads the committed event of result and the entity it
@@ -763,7 +765,7 @@ func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID
 	if err != nil {
 		return RPCEventResult{}, err
 	}
-	value := RPCEventResult{Event: &event, Hook: result.Hook, StepCreated: result.StepCreated, Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
+	value := RPCEventResult{Event: &event, Hook: result.Hook, Wait: result.Wait, StepCreated: result.StepCreated, Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
 	value.Run, value.Step, err = eventEntity(ctx, world, event, correlationID, result.Step)
 	if err != nil {
 		return RPCEventResult{}, err
@@ -821,7 +823,7 @@ func rpcEventBatch(ctx context.Context, world World, input EventsCreateBatchInpu
 		if err != nil {
 			return RPCEventBatchResult{}, err
 		}
-		value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: event.Event, Run: event.Run, Step: event.Step}
+		value.Results[index] = RPCBatchEventResult{Status: http.StatusOK, Event: event.Event, Run: event.Run, Step: event.Step, Wait: event.Wait}
 	}
 	return value, nil
 }

@@ -117,11 +117,27 @@ func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, err
 		CompletedAt: timeField(values, "completedAt"),
 		RetryAfter:  timeField(values, "retryAfter"),
 	}
+	step.SpecVersion, _ = asInt(values["specVersion"])
 	if resolve != worlds.ResolveDataNone {
 		step.Input = payloadBytes(values["input"])
 		step.Output = payloadBytes(values["output"])
 	}
 	return step, nil
+}
+
+// toWait returns the go-workflow view of a backend wait.
+func toWait(values map[string]any) *worlds.Wait {
+	wait := &worlds.Wait{
+		WaitID:      str(values, "waitId"),
+		RunID:       worlds.RunID(str(values, "runId")),
+		Status:      worlds.WaitStatus(str(values, "status")),
+		ResumeAt:    timeField(values, "resumeAt"),
+		CompletedAt: timeField(values, "completedAt"),
+		CreatedAt:   requiredTime(values, "createdAt"),
+		UpdatedAt:   requiredTime(values, "updatedAt"),
+	}
+	wait.SpecVersion, _ = asInt(values["specVersion"])
+	return wait
 }
 
 // toHook returns the go-workflow view of a backend hook.
@@ -137,7 +153,9 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 	hook.UpdatedAt = hook.CreatedAt
 	if resume, ok := values["resumeContext"].(map[string]any); ok {
 		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName"), EncryptionPublicKey: str(resume, "encryptionPublicKey")}
+		hook.ResumeContext.RunSpecVersion, _ = asInt(resume["runSpecVersion"])
 	}
+	hook.SpecVersion, _ = asInt(values["specVersion"])
 	hook.Metadata = payloadBytes(values["metadata"])
 	return hook, nil
 }

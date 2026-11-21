@@ -18,6 +18,7 @@ type createResponse struct {
 	Run         map[string]any `cbor:"run"`
 	Step        map[string]any `cbor:"step"`
 	Hook        map[string]any `cbor:"hook"`
+	Wait        map[string]any `cbor:"wait"`
 	StepCreated bool           `cbor:"stepCreated"`
 	Allocated   *int           `cbor:"allocated"`
 	// Events and HasMore are the skipped-slot report of an in-band write.
@@ -143,6 +144,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 		result.Step = &step
 		result.StepCreated = input.Event.EventType == worlds.EventTypeStepCreated && allocated > 0
+	}
+	if response.Wait != nil {
+		result.Wait = toWait(response.Wait)
 	}
 	if response.Hook != nil && event.EventType == worlds.EventTypeHookCreated {
 		hook, err := toHook(response.Hook)
@@ -375,6 +379,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 				return worlds.EventBatchResult{}, err
 			}
 			one.Step, one.StepCreated = &step, event.EventType == worlds.EventTypeStepCreated
+		}
+		if item.Wait != nil {
+			one.Wait = toWait(item.Wait)
 		}
 		result.Results[index].EventResult = one
 	}
