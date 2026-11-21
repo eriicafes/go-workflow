@@ -103,7 +103,7 @@ func TestPublishVQS(t *testing.T) {
 	}
 }
 
-func TestQueuePublishesTheDelivery(t *testing.T) {
+func TestQueueRoundTripsEveryField(t *testing.T) {
 	server := newRecorder(t, nil)
 	world := newQueueWorld(t, server)
 	stepID := worlds.StepID("step_1")
@@ -161,7 +161,7 @@ func TestQueuePublishesTheDelivery(t *testing.T) {
 	}
 }
 
-func TestQueueSerializesFlowsByRun(t *testing.T) {
+func TestQueueKeysFlowsByTheirRun(t *testing.T) {
 	server := newRecorder(t, nil)
 	world := newQueueWorld(t, server)
 	ctx := context.Background()
@@ -186,7 +186,7 @@ func TestQueueSerializesFlowsByRun(t *testing.T) {
 	}
 }
 
-func TestMessageLifetime(t *testing.T) {
+func TestMessageLifetimeClampsRetentionAndDelay(t *testing.T) {
 	for _, test := range []struct {
 		delay, retention         time.Duration
 		wantDelay, wantRetention int64
@@ -206,7 +206,7 @@ func TestMessageLifetime(t *testing.T) {
 	}
 }
 
-func TestCapabilities(t *testing.T) {
+func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	world := newQueueWorld(t, newRecorder(t, nil))
 	capabilities := world.Capabilities()
 	if !capabilities.InBandFence || !capabilities.MaxConcurrency || capabilities.MaxQueueDelay != 23*time.Hour {
@@ -433,7 +433,7 @@ func deliveryRequest(messageID, body string) *http.Request {
 	return request
 }
 
-func TestQueueConsumerRedelivers(t *testing.T) {
+func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
 	world := newQueueWorld(t, server)
 	var got worlds.QueueInput

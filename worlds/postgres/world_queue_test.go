@@ -21,7 +21,7 @@ func TestBackoff(t *testing.T) {
 	}
 }
 
-func TestQueueRoundTripsInput(t *testing.T) {
+func TestQueueRoundTripsEveryField(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
@@ -51,7 +51,7 @@ func TestQueueRoundTripsInput(t *testing.T) {
 	}
 }
 
-func TestQueueIdempotencyKey(t *testing.T) {
+func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
@@ -94,7 +94,7 @@ func TestQueueIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestQueueRetentionExpires(t *testing.T) {
+func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
@@ -118,7 +118,7 @@ func (f executorFunc) Execute(ctx context.Context, input worlds.QueueInput) erro
 	return f(ctx, input)
 }
 
-func TestRedeliveryKeepsMessage(t *testing.T) {
+func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
@@ -163,7 +163,7 @@ func TestRedeliveryKeepsMessage(t *testing.T) {
 	}
 }
 
-func TestClaimSerializesFlows(t *testing.T) {
+func TestClaimHoldsAFlowWhileAnotherOfItsRunRuns(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
@@ -210,7 +210,7 @@ func TestClaimSerializesFlows(t *testing.T) {
 
 // TestWorkersSerializeFlows runs workers in two Worlds and checks two flows
 // of one run never execute at once, while step deliveries run beside them.
-func TestWorkersSerializeFlows(t *testing.T) {
+func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	t.Parallel()
 	url, schema := testSchema(t)
 	a := testWorld(t, testPool(t, url, schema), Config{})

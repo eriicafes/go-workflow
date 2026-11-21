@@ -9,7 +9,7 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-func TestDeliverHoldsAFlowWhileAnotherHasTheLease(t *testing.T) {
+func TestQueueDeliversOneFlowOfARunAtATime(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	world := testWorld(t, dynamo, queue, nil)

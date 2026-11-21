@@ -13,7 +13,7 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-func TestCapabilities(t *testing.T) {
+func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	without := testWorld(t, newFakeDynamo(), &fakeSQS{}, nil).Capabilities()
 	if !without.InBandFence || !without.MaxConcurrency || without.MaxQueueDelay != 15*time.Minute {
 		t.Fatalf("capabilities without Scheduler = %+v", without)
@@ -106,7 +106,7 @@ func fullInput() worlds.QueueInput {
 	}
 }
 
-func TestQueueCarriesEveryField(t *testing.T) {
+func TestQueueRoundTripsEveryField(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue, schedules := newFakeDynamo(), &fakeSQS{}, newFakeScheduler()
 	world := testWorld(t, dynamo, queue, schedules)

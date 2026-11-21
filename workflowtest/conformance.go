@@ -56,6 +56,11 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"StreamsWait", conformStreamsWait},
 		{"Queue", conformQueue},
 		{"Analytics", conformAnalytics},
+		{"RunAheadOverlapsWrites", conformRunAheadOverlapsWrites},
+		{"RunAheadFoldsInertEvents", conformRunAheadFoldsInertEvents},
+		{"RunAheadFoldsUnwatchedHookPayloads", conformRunAheadFoldsUnwatchedHookPayloads},
+		{"RunAheadStopsAtPathChangingEvents", conformRunAheadStopsAtPathChangingEvents},
+		{"RunAheadStopsForAnotherTime", conformRunAheadStopsForAnotherTime},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
