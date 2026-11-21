@@ -225,17 +225,17 @@ func TestRunsCreatedInARegionAreRoutedThere(t *testing.T) {
 	world := all[0]
 	ctx := context.Background()
 	client := worlds.NewClient(world)
-	runID, err := client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: worlds.RegionSYD1.String()})
+	runID, err := client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: RegionSYD1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if region, ok := world.RegionForRunID(runID); !ok || region != worlds.RegionSYD1 {
+	if region, ok := world.RegionForRunID(runID); !ok || region != RegionSYD1 {
 		t.Fatalf("run %s region = %s, %t", runID, region, ok)
 	}
 	if _, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf"}}); err != nil {
 		t.Fatal(err)
 	}
-	if region := messageRegion(runID); region != worlds.RegionSYD1 {
+	if region := messageRegion(runID); region != RegionSYD1 {
 		t.Fatalf("first delivery routed to %s", region)
 	}
 	queue.mu.Lock()

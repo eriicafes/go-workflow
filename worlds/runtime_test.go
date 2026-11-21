@@ -1877,7 +1877,7 @@ func startsChildren(ctx context.Context, _ startsChildrenInput) (startsChildrenO
 	if err != nil {
 		return startsChildrenOutput{}, err
 	}
-	named, err := workflow.Start(ctx, deployedChildInput{}, workflow.StartOptions{Deployment: workflow.OnDeployment("dpl_named")})
+	named, err := workflow.Start(ctx, deployedChildInput{}, workflow.StartOptions{Deployment: workflow.DeploymentWithID("dpl_named")})
 	if err != nil {
 		return startsChildrenOutput{}, err
 	}
@@ -1897,17 +1897,17 @@ func runDeployment(t *testing.T, ctx context.Context, world worlds.World, id str
 	return run.DeploymentID
 }
 
-// startOnDeployments starts a run on the latest deployment, one on a named
+// startDeploymentWithIDs starts a run on the latest deployment, one on a named
 // deployment, and one with no Deployment option, and checks where each is
 // pinned.
-func startOnDeployments(t *testing.T, ctx context.Context, client context.Context, world worlds.World) {
+func startDeploymentWithIDs(t *testing.T, ctx context.Context, client context.Context, world worlds.World) {
 	t.Helper()
 	for _, test := range []struct {
 		deployment workflow.Deployment
 		want       string
 	}{
 		{workflow.LatestDeployment, "dpl_2"},
-		{workflow.OnDeployment("dpl_named"), "dpl_named"},
+		{workflow.DeploymentWithID("dpl_named"), "dpl_named"},
 		{workflow.Deployment{}, "dpl_1"},
 	} {
 		run, err := workflow.Start(client, deployedChildInput{}, workflow.StartOptions{Deployment: test.deployment})
@@ -1926,7 +1926,7 @@ func TestStartDeploymentPinsClientRuns(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
-	startOnDeployments(t, ctx, workflow.NewContext(ctx, workflow.NewClient(d1)), world)
+	startDeploymentWithIDs(t, ctx, workflow.NewContext(ctx, workflow.NewClient(d1)), world)
 	for _, queued := range world.Queued() {
 		if want := runDeployment(t, ctx, world, string(queued.RunID)); queued.DeploymentID != want {
 			t.Fatalf("delivery of %s addressed to %q, want %q", queued.RunID, queued.DeploymentID, want)
@@ -1942,7 +1942,7 @@ func TestStartDeploymentPinsHTTPClientRuns(t *testing.T) {
 	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
 	server := httptest.NewServer(worlds.HTTPHandler(d1, "/v1/workflow"))
 	defer server.Close()
-	startOnDeployments(t, ctx, workflow.NewContext(ctx, workflow.NewHTTPClient(server.URL+"/v1/workflow")), world)
+	startDeploymentWithIDs(t, ctx, workflow.NewContext(ctx, workflow.NewHTTPClient(server.URL+"/v1/workflow")), world)
 }
 
 func TestStartDeploymentPinsChildRuns(t *testing.T) {
@@ -1975,7 +1975,7 @@ func TestStartDeploymentNeedsDeploymentAffinity(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
-	for _, deployment := range []workflow.Deployment{workflow.LatestDeployment, workflow.OnDeployment("dpl_named")} {
+	for _, deployment := range []workflow.Deployment{workflow.LatestDeployment, workflow.DeploymentWithID("dpl_named")} {
 		run, err := workflow.Start(client, deployedChildInput{}, workflow.StartOptions{Deployment: deployment})
 		if err != nil {
 			t.Fatal(err)

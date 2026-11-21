@@ -493,10 +493,10 @@ func TestStartOptions(t *testing.T) {
 type regionalWorld struct{ *testworld.World }
 
 func (regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
-	if region == (worlds.Region{}) {
-		region = worlds.RegionIAD1
+	if region == "" {
+		region = "iad1"
 	}
-	return id + worlds.RunID("_"+region.String())
+	return id + worlds.RunID("_"+string(region))
 }
 
 func (w regionalWorld) Capabilities() worlds.Capabilities {
@@ -507,7 +507,7 @@ func (w regionalWorld) Capabilities() worlds.Capabilities {
 
 func (regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
 	_, code, _ := strings.Cut(strings.TrimPrefix(string(id), "wrun_"), "_")
-	return worlds.ParseRegion(code)
+	return worlds.Region(code), code != ""
 }
 
 type regionParentInput struct{}
@@ -518,7 +518,7 @@ func TestStartRegion(t *testing.T) {
 	runners := worlds.Runners(
 		workflow.Use(func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }),
 		workflow.Use(func(ctx context.Context, _ regionParentInput) (string, error) {
-			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.RegionSYD1})
+			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("syd1")})
 			if err != nil {
 				return "", err
 			}
@@ -535,18 +535,18 @@ func TestStartRegion(t *testing.T) {
 	defer cancel()
 	for name, client := range map[string]workflow.Client{"in process": workflow.NewClient(world), "over HTTP": workflow.NewHTTPClient(server.URL + "/v1/workflow")} {
 		clientCtx := workflow.NewContext(ctx, client)
-		run, err := workflow.Start(clientCtx, optionsChildInput{}, workflow.StartOptions{Region: worlds.RegionFRA1})
+		run, err := workflow.Start(clientCtx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("fra1")})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if region, _ := world.RegionForRunID(worlds.RunID(run.ID())); region != worlds.RegionFRA1 {
+		if region, _ := world.RegionForRunID(worlds.RunID(run.ID())); region != worlds.Region("fra1") {
 			t.Errorf("%s run %s region = %s, want fra1", name, run.ID(), region)
 		}
 		plain, err := workflow.Start(clientCtx, optionsChildInput{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if region, _ := world.RegionForRunID(worlds.RunID(plain.ID())); region != worlds.RegionIAD1 {
+		if region, _ := world.RegionForRunID(worlds.RunID(plain.ID())); region != worlds.Region("iad1") {
 			t.Errorf("%s run without Region %s region = %s, want the World's iad1", name, plain.ID(), region)
 		}
 	}
@@ -568,7 +568,7 @@ func TestStartRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if region, _ := world.RegionForRunID(worlds.RunID(childID)); region != worlds.RegionSYD1 {
+	if region, _ := world.RegionForRunID(worlds.RunID(childID)); region != worlds.Region("syd1") {
 		t.Errorf("child run %s region = %s, want syd1", childID, region)
 	}
 }

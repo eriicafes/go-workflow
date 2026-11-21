@@ -445,13 +445,12 @@ type Deployment = worlds.Deployment
 // LatestDeployment starts a run on the World's latest deployment.
 var LatestDeployment = worlds.LatestDeployment
 
-// Region is the region a run's data lives in. Its values are the
-// worlds.Region variables, such as worlds.RegionIAD1, and its zero value
-// leaves it to the World.
-type Region = worlds.Region
+// DeploymentWithID starts a run on the deployment id.
+func DeploymentWithID(id string) Deployment { return worlds.DeploymentWithID(id) }
 
-// OnDeployment starts a run on the deployment id.
-func OnDeployment(id string) Deployment { return worlds.OnDeployment(id) }
+// Region is the region a run's data lives in. Its values belong to the World,
+// and the empty Region leaves it to the World.
+type Region = worlds.Region
 
 // StartOptions holds the options to Start. The zero value starts a run as
 // Start without options does.
@@ -462,9 +461,9 @@ type StartOptions struct {
 	// chain, moves to new code at that boundary instead of staying on the
 	// deployment its first run started on. Use it only for runs nothing waits
 	// on the output of, since a newer deployment may return a different
-	// output. OnDeployment names one. On Worlds without deployment affinity
-	// it changes nothing. The zero value is the deployment that starts the
-	// run.
+	// output. DeploymentWithID names one. On Worlds without deployment
+	// affinity it changes nothing. The zero value is the deployment that
+	// starts the run.
 	Deployment Deployment
 	// Retention is how long the run's data is kept after it finishes.
 	// RetainNone deletes it as soon as the run finishes, recorded as the
@@ -481,10 +480,9 @@ type StartOptions struct {
 	// that does not compress, such as media or encrypted bytes.
 	NoArgumentCompression bool
 	// Region is the region the run's data lives in and its deliveries are
-	// routed to, one of the worlds.Region values such as worlds.RegionFRA1.
-	// Only a World that implements worlds.RegionalRunIDs, such as the Vercel
-	// World, uses it, by tagging the run's ID; others ignore it. The zero
-	// value leaves it to the World.
+	// routed to, one of the World's regions. Only a World that implements
+	// worlds.RegionalRunIDs uses it, by tagging the run's ID; others ignore
+	// it. The zero value leaves it to the World.
 	Region Region
 	// Hook creates a hook with the run, claiming its token. When another run
 	// holds the token, Start creates no run and returns a
@@ -525,7 +523,7 @@ type startSettings struct {
 	Latest        bool          `json:"latest,omitempty"`
 	Retention     string        `json:"retention,omitempty"`
 	ReplayedFrom  string        `json:"replayedFrom,omitempty"`
-	Region        string        `json:"region,omitempty"`
+	Region        Region        `json:"region,omitempty"`
 	HookToken     string        `json:"hookToken,omitempty"`
 	HookRetention time.Duration `json:"hookRetention,omitempty"`
 	// HookMetadata is the hook's metadata as devalue text, encrypted with
@@ -567,7 +565,7 @@ func (options StartOptions) settings() (startSettings, error) {
 		Latest:        options.Deployment.Latest(),
 		Retention:     options.Retention.String(),
 		ReplayedFrom:  options.ReplayedFromRunID,
-		Region:        options.Region.String(),
+		Region:        options.Region,
 		HookToken:     hookToken,
 		HookRetention: hookRetention,
 		HookMetadata:  hookMetadata,
@@ -597,12 +595,6 @@ func (settings startSettings) startHook(keys *worlds.RunKeys) (*worlds.StartHook
 	return hook, nil
 }
 
-// region returns the Region settings record.
-func (settings startSettings) region() Region {
-	region, _ := worlds.ParseRegion(settings.Region)
-	return region
-}
-
 // runExecutionContext returns the run's ExecutionContext, or nil when it has
 // none.
 func (settings startSettings) runExecutionContext() map[string]any {
@@ -615,7 +607,7 @@ func (settings startSettings) runExecutionContext() map[string]any {
 // deployment returns the Deployment settings record.
 func (settings startSettings) deployment() Deployment {
 	if settings.DeploymentID != "" {
-		return OnDeployment(settings.DeploymentID)
+		return DeploymentWithID(settings.DeploymentID)
 	}
 	if settings.Latest {
 		return LatestDeployment
@@ -750,7 +742,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		root = string(parent.RunID)
 	}
 	// Tagging is deterministic, so a retried attempt keeps the same ID.
-	id := worlds.RegionRunID(execution.World(), worlds.NewChildRunID(worlds.StepID(StepID(ctx))), input.Settings.region())
+	id := worlds.RegionRunID(execution.World(), worlds.NewChildRunID(worlds.StepID(StepID(ctx))), input.Settings.Region)
 	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Settings.deployment())
 	if err != nil {
 		return "", err
