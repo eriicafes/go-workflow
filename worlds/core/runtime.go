@@ -103,8 +103,12 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	// log, with run-ahead off for the rest of the delivery, once, and then
 	// hands its message on. A pass that has a repair due replays again from
 	// the log, with run-ahead still on.
-	restarts := 0
-	err := r.executeFlow(ctx, input, true)
+	// A pass that suspended lingers while the run waits on work done
+	// elsewhere, and runs again when another writer appends an event or a
+	// wait falls due (see linger.go).
+	restarts, lingered := 0, false
+	var pass *Execution
+	err := r.executeFlow(ctx, input, true, false, &pass)
 	for {
 		var stop errRunAheadStop
 		if errors.As(err, &stop) {
@@ -114,11 +118,16 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 				return worlds.Redeliver(0)
 			}
 			restarts++
-			err = r.executeFlow(ctx, input, false)
+			err = r.executeFlow(ctx, input, false, lingered, &pass)
 			continue
 		}
 		if errors.As(err, new(errRunAheadRepair)) {
-			err = r.executeFlow(ctx, input, restarts == 0)
+			err = r.executeFlow(ctx, input, restarts == 0, lingered, &pass)
+			continue
+		}
+		if err == nil && pass != nil && pass.parked && r.linger(ctx, pass) {
+			lingered = true
+			err = r.executeFlow(ctx, input, restarts == 0, lingered, &pass)
 			continue
 		}
 		break
@@ -136,7 +145,8 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 // executeFlow loads the run's log, records run_started on the run's first
 // flow, replays the runner, and turns the runner's result into a terminal run
 // event when it did not suspend.
-func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runAhead bool) error {
+func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runAhead, lingered bool, pass **Execution) error {
+	*pass = nil
 	run, events, err := r.loadRun(ctx, input.RunID)
 	if err != nil {
 		return err
@@ -152,6 +162,8 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runA
 		return err
 	}
 	execution.delivery = input
+	execution.lingered = lingered
+	*pass = execution
 	if runAhead {
 		execution.aheadDepth = r.runAheadDepth
 	}
@@ -238,7 +250,10 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	switch {
 	case context.Cause(ctx) != nil:
 		return context.Cause(ctx)
-	case errors.Is(err, errReplayComplete), errors.Is(err, errReplaySuspended):
+	case errors.Is(err, errReplayComplete):
+		return nil
+	case errors.Is(err, errReplaySuspended):
+		execution.parked = true
 		return nil
 	case errors.Is(err, errReplaySuperseded):
 		return errReplaySuperseded
@@ -283,7 +298,10 @@ func (r *Runtime) resend(execution *Execution) (err error) {
 			err = replayExit(recovered)
 		}
 	}()
-	execution.resendSteps()
+	// A pass after the delivery lingered finds what the first sent.
+	if !execution.lingered {
+		execution.resendSteps()
+	}
 	execution.completeWaitsOnWake()
 	return nil
 }
