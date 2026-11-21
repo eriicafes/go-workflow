@@ -29,7 +29,7 @@ func (w *World) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 			return fn(tx)
 		})
 		if err == nil {
-			w.announce(tx.pending)
+			w.announce(ctx, tx.pending)
 		}
 		if err == nil || attempt == txAttempts || !retryable(err) {
 			return err
