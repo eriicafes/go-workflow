@@ -44,13 +44,16 @@ func (w *cancelRaceWorld) StreamsWrite(ctx context.Context, input worlds.Streams
 	if w.failWrite.Swap(false) {
 		return errors.New("notification unavailable")
 	}
-	var data struct {
-		Cause json.RawMessage `json:"cause"`
-	}
-	if json.Unmarshal(input.Chunk, &data) == nil && len(data.Cause) != 0 {
-		w.mu.Lock()
-		w.causes = append(w.causes, worlds.DecodeError(data.Cause).Error())
-		w.mu.Unlock()
+	payloads, _ := worlds.SplitStreamFrames(input.Chunk)
+	for _, payload := range payloads {
+		var data struct {
+			Cause error `json:"cause"`
+		}
+		if worlds.DecodePayload(payload, nil, &data) == nil && data.Cause != nil {
+			w.mu.Lock()
+			w.causes = append(w.causes, data.Cause.Error())
+			w.mu.Unlock()
+		}
 	}
 	return w.World.StreamsWrite(ctx, input)
 }
@@ -106,10 +109,10 @@ func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 	var first string
 	for _, event := range events.Data {
 		var data struct {
-			Cause json.RawMessage `json:"cause"`
+			Cause error `json:"cause"`
 		}
-		if event.EventType == worlds.EventTypeHookReceived && json.Unmarshal(worlds.DecodeHookReceived(event.Data), &data) == nil && len(data.Cause) != 0 {
-			first = worlds.DecodeError(data.Cause).Error()
+		if event.EventType == worlds.EventTypeHookReceived && worlds.DecodePayload(worlds.DecodeHookReceived(event.Data), nil, &data) == nil && data.Cause != nil {
+			first = data.Cause.Error()
 			break
 		}
 	}

@@ -23,7 +23,7 @@ func TestRuntimeMarksRunsWithUnknownWorkflowsAsFailed(t *testing.T) {
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	runID := worlds.RunID("wrun_missing_workflow")
+	runID := worlds.NewRunID()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "missing"}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func deliverNext(t *testing.T, ctx context.Context, world *testworld.World, runt
 		t.Fatal(err)
 	}
 
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+	if err := world.Acknowledge(ctx, message.ID); err != nil {
 		t.Fatal(err)
 	}
 	return message.Input
@@ -284,7 +284,7 @@ func TestReplayDivergenceFailsRunWithoutReachingRunnerCode(t *testing.T) {
 
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 0 after 3 recovery replays")
+	awaitFailure(t, ctx, world, run, "after 3 recovery replays: recorded step")
 	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); !errors.Is(err, worlds.ErrCorruptedEventLog) {
 		t.Fatalf("run error = %v, want ErrCorruptedEventLog", err)
 	}
@@ -323,7 +323,7 @@ func TestReplayDivergenceRequeuesTheDivergedStepDelivery(t *testing.T) {
 
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 0 after 3 recovery replays")
+	awaitFailure(t, ctx, world, run, "after 3 recovery replays: recorded step")
 }
 
 func TestReplayDivergenceCatchesUnreachedOperations(t *testing.T) {
@@ -346,7 +346,7 @@ func TestReplayDivergenceCatchesUnreachedOperations(t *testing.T) {
 	// v2 returns after alpha without reaching the recorded beta.
 	drain(t, ctx, world, v2)
 
-	awaitFailure(t, ctx, world, run, "corrupted event log at position 1")
+	awaitFailure(t, ctx, world, run, "runner returned without reaching the recorded operation")
 }
 
 type hookedInput struct{ Token string }
@@ -560,7 +560,7 @@ func deliverStep(t *testing.T, ctx context.Context, world *testworld.World, runt
 				t.Fatal(err)
 			}
 
-			if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID}); err != nil {
+			if err := world.Acknowledge(ctx, message.ID); err != nil {
 				t.Fatal(err)
 			}
 			return
@@ -719,19 +719,21 @@ func TestDoneGivesTheSameAnswerOnEveryReplay(t *testing.T) {
 // first in-band write of its steps, as a concurrent delivery of the run would.
 type racingWorld struct {
 	*testworld.World
-	raced bool
+	raced     bool
+	otherStep string
 }
 
 func (w *racingWorld) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
 	if !w.raced && input.InBandCount != nil && input.Events[0].EventType == worlds.EventTypeStepCreated {
 		w.raced = true
 		other := input.Events[0]
-		other.CorrelationID = "step_other_flow"
+		// Another flow drew the same step ID and declared it first.
+		w.otherStep = other.CorrelationID
 		if _, err := w.World.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: other, Options: worlds.EventsCreateOptions{InBandCount: input.InBandCount}}); err != nil {
 			return worlds.EventBatchResult{}, err
 		}
 
-		stepID := worlds.StepID("step_other_flow")
+		stepID := worlds.StepID(w.otherStep)
 		if _, err := w.World.Queue(ctx, worlds.QueueInput{RunID: input.RunID, StepID: &stepID}); err != nil {
 			return worlds.EventBatchResult{}, err
 		}
@@ -772,7 +774,7 @@ func TestSupersededFlowReplaysInsteadOfDuplicatingDeclarations(t *testing.T) {
 			declared[event.CorrelationID]++
 		}
 	}
-	if len(declared) != 2 || declared["step_other_flow"] != 1 {
+	if len(declared) != 2 || declared[racing.otherStep] != 1 {
 		t.Fatalf("declared steps = %v, want the other flow's step and beta", declared)
 	}
 
@@ -819,7 +821,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	if err := runtime.Execute(ctx, delivery.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	if queued := world.QueuedMessages(); len(queued) != 1 || queued[0].Input.StepID == nil {
@@ -891,41 +893,6 @@ func (w *refusingWorld) EventsCreate(ctx context.Context, input worlds.EventsCre
 	return w.World.EventsCreate(ctx, input)
 }
 
-func TestRefusedWaitCancelsItsQueuedTimer(t *testing.T) {
-	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
-	defer cancel()
-
-	world := testworld.NewManual()
-	defer world.Close()
-
-	refusing := &refusingWorld{World: world}
-	runtime := worlds.NewRuntime(refusing, worlds.Runners(workflow.Use(sleepAnHour)))
-	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), sleeperInput{}); err != nil {
-		t.Fatal(err)
-	}
-	deliverNext(t, ctx, world, runtime)
-	if !refusing.refused {
-		t.Fatal("wait_created was not refused")
-	}
-	for _, message := range world.QueuedMessages() {
-		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
-			t.Fatalf("the refused wait left its timer queued: %#v", message.Input)
-		}
-	}
-
-	// The follow-up replays and declares the wait once.
-	deliverNext(t, ctx, world, runtime)
-	timers := 0
-	for _, message := range world.QueuedMessages() {
-		if message.Input.NotBefore != nil && time.Until(*message.Input.NotBefore) > time.Minute {
-			timers++
-		}
-	}
-	if timers != 1 {
-		t.Fatalf("timers = %d, want 1", timers)
-	}
-}
-
 type backoffInput struct{}
 type backoffOutput struct{}
 
@@ -966,7 +933,7 @@ func TestRuntimeRecordsFailedStepAfterRunCancellationWithoutRetry(t *testing.T) 
 	deliverNext(t, ctx, world, runtime)
 	delivery := deliverNext(t, ctx, world, runtime)
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
-	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeError(step.Error), cause) {
+	if err != nil || step.Status != worlds.StatusFailed || step.RetryAfter != nil || step.Attempt != 1 || !errors.Is(worlds.DecodeErrorPayload(step.Error, nil), cause) {
 		t.Fatalf("late failure = %#v, err=%v", step, err)
 	}
 	for _, message := range world.QueuedMessages() {
@@ -1001,7 +968,7 @@ func TestSuspendingFlowLeavesARetryThatIsNotDueQueuedOnce(t *testing.T) {
 	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: worlds.RunID(run.ID())}); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: flow.MessageID}); err != nil {
+	if err := world.Acknowledge(ctx, flow.MessageID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1037,7 +1004,7 @@ func TestEarlyTimerDeliveryQueuesItsReplacement(t *testing.T) {
 	if err := runtime.Execute(ctx, timer.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: timer.ID}); err != nil {
+	if err := world.Acknowledge(ctx, timer.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1085,7 +1052,7 @@ func TestRedeliveredStepQueuesTheFlowItFailedToQueue(t *testing.T) {
 	if err := runtime.Execute(ctx, step.Input); err != nil {
 		t.Fatal(err)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: step.ID}); err != nil {
+	if err := world.Acknowledge(ctx, step.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1221,7 +1188,11 @@ func TestResumeHookReportsARecordedPayloadItCouldNotQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, []byte(`"value"`))
+	payload, err := worlds.EncodePayload("value", worlds.PayloadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := worlds.ResumeHook(ctx, queueOutage{world}, hook, payload)
 	if !errors.Is(err, worlds.ErrResumeNotQueued) || !errors.Is(err, errQueueUnavailable) || result.EventID == "" {
 		t.Fatalf("result = %#v, err = %v", result, err)
 	}
@@ -1243,11 +1214,11 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 		worlds.FatalError{Cause: cause},
 		worlds.RetryableError{Cause: cause, After: time.Minute},
 	} {
-		data, marshalErr := json.Marshal(worlds.NewError(err))
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
+		data, encodeErr := worlds.EncodeErrorPayload(err, worlds.PayloadOptions{})
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
 		}
-		decoded := worlds.DecodeError(data)
+		decoded := worlds.DecodeErrorPayload(data, nil)
 		var fatal worlds.FatalError
 		var retryable worlds.RetryableError
 		switch {
@@ -1256,7 +1227,8 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 				t.Fatalf("fatal = %v, cause = %v", fatal, fatal.Cause)
 			}
 		case errors.As(decoded, &retryable):
-			if retryable.Error() != "boom" || retryable.After != time.Minute || !errors.Is(retryable, cause) {
+			// The SDK records when to retry, so the delay shrinks as time passes.
+			if retryable.Error() != "boom" || retryable.After <= 59*time.Second || retryable.After > time.Minute || !errors.Is(retryable, cause) {
 				t.Fatalf("retryable = %v, cause = %v", retryable, retryable.Cause)
 			}
 		default:
@@ -1369,7 +1341,7 @@ func TestFlowRunsTheFirstStepsInlineAndQueuesTheRest(t *testing.T) {
 	if promoted, queued := inlineSteps(t, ctx, world, runID), len(stepDeliveries(world)); promoted != 3 || queued != 7 {
 		t.Fatalf("inline=%d queued=%d, want 3 and 7", promoted, queued)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	drain(t, ctx, world, runtime)
@@ -1426,7 +1398,7 @@ func TestPromotedStepQueuesItsRetryAsAStepDelivery(t *testing.T) {
 	if len(retries) != 1 || retries[0].IdempotencyKey != "retry:"+string(*retries[0].StepID)+":1" {
 		t.Fatalf("step deliveries = %#v, want the retry", retries)
 	}
-	if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+	if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
 	drain(t, ctx, world, runtime)
@@ -1496,7 +1468,7 @@ func TestStepDeliveryTakesOverAPromotedStepAfterItsLease(t *testing.T) {
 		runner, started := crashingStepRunner(&attempts)
 		world, runtime, runID, delivery := startInline(t, ctx, runner, inlineInput{})
 		crash(t, ctx, runtime, delivery.Input, started)
-		if err := world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: delivery.ID}); err != nil {
+		if err := world.Acknowledge(ctx, delivery.ID); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1890,29 +1862,28 @@ type latestWorld struct {
 
 func (w latestWorld) LatestDeploymentID(context.Context) (string, error) { return w.latest, nil }
 
-type latestChildInput struct {
-	workflow.Struct[struct{}]
-	workflow.StartOnLatest
-}
-
-type pinnedChildInput struct{ workflow.Struct[struct{}] }
+type deployedChildInput struct{ workflow.Struct[struct{}] }
 
 type startsChildrenInput struct {
 	workflow.Struct[startsChildrenOutput]
 }
 
-type startsChildrenOutput struct{ Latest, Pinned string }
+type startsChildrenOutput struct{ Latest, Named, Pinned string }
 
 func startsChildren(ctx context.Context, _ startsChildrenInput) (startsChildrenOutput, error) {
-	latest, err := workflow.Start(ctx, latestChildInput{})
+	latest, err := workflow.Start(ctx, deployedChildInput{}, workflow.StartOptions{Deployment: workflow.LatestDeployment})
 	if err != nil {
 		return startsChildrenOutput{}, err
 	}
-	pinned, err := workflow.Start(ctx, pinnedChildInput{})
+	named, err := workflow.Start(ctx, deployedChildInput{}, workflow.StartOptions{Deployment: workflow.DeploymentWithID("dpl_named")})
 	if err != nil {
 		return startsChildrenOutput{}, err
 	}
-	return startsChildrenOutput{Latest: latest.ID(), Pinned: pinned.ID()}, nil
+	pinned, err := workflow.Start(ctx, deployedChildInput{})
+	if err != nil {
+		return startsChildrenOutput{}, err
+	}
+	return startsChildrenOutput{Latest: latest.ID(), Named: named.ID(), Pinned: pinned.ID()}, nil
 }
 
 func runDeployment(t *testing.T, ctx context.Context, world worlds.World, id string) string {
@@ -1924,28 +1895,36 @@ func runDeployment(t *testing.T, ctx context.Context, world worlds.World, id str
 	return run.DeploymentID
 }
 
-func TestStartOnLatestPinsClientRunsToTheLatestDeployment(t *testing.T) {
+// startDeploymentWithIDs starts a run on the latest deployment, one on a named
+// deployment, and one with no Deployment option, and checks where each is
+// pinned.
+func startDeploymentWithIDs(t *testing.T, ctx context.Context, client context.Context, world worlds.World) {
+	t.Helper()
+	for _, test := range []struct {
+		deployment workflow.Deployment
+		want       string
+	}{
+		{workflow.LatestDeployment, "dpl_2"},
+		{workflow.DeploymentWithID("dpl_named"), "dpl_named"},
+		{workflow.Deployment{}, "dpl_1"},
+	} {
+		run, err := workflow.Start(client, deployedChildInput{}, workflow.StartOptions{Deployment: test.deployment})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := runDeployment(t, ctx, world, run.ID()); got != test.want {
+			t.Fatalf("run deployment = %q, want %s", got, test.want)
+		}
+	}
+}
+
+func TestStartDeploymentPinsClientRuns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
 	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
-	client := workflow.NewContext(ctx, workflow.NewClient(d1))
-
-	latest, err := workflow.Start(client, latestChildInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned, err := workflow.Start(client, pinnedChildInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := runDeployment(t, ctx, world, latest.ID()); got != "dpl_2" {
-		t.Fatalf("marked run deployment = %q, want dpl_2", got)
-	}
-	if got := runDeployment(t, ctx, world, pinned.ID()); got != "dpl_1" {
-		t.Fatalf("unmarked run deployment = %q, want dpl_1", got)
-	}
+	startDeploymentWithIDs(t, ctx, workflow.NewContext(ctx, workflow.NewClient(d1)), world)
 	for _, queued := range world.Queued() {
 		if want := runDeployment(t, ctx, world, string(queued.RunID)); queued.DeploymentID != want {
 			t.Fatalf("delivery of %s addressed to %q, want %q", queued.RunID, queued.DeploymentID, want)
@@ -1953,7 +1932,7 @@ func TestStartOnLatestPinsClientRunsToTheLatestDeployment(t *testing.T) {
 	}
 }
 
-func TestStartOnLatestPinsHTTPClientRunsToTheLatestDeployment(t *testing.T) {
+func TestStartDeploymentPinsHTTPClientRuns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	world := testworld.NewManual()
@@ -1961,25 +1940,10 @@ func TestStartOnLatestPinsHTTPClientRunsToTheLatestDeployment(t *testing.T) {
 	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
 	server := httptest.NewServer(worlds.HTTPHandler(d1, "/v1/workflow"))
 	defer server.Close()
-	client := workflow.NewContext(ctx, workflow.NewHTTPClient(server.URL+"/v1/workflow"))
-
-	latest, err := workflow.Start(client, latestChildInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned, err := workflow.Start(client, pinnedChildInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := runDeployment(t, ctx, world, latest.ID()); got != "dpl_2" {
-		t.Fatalf("marked run deployment = %q, want dpl_2", got)
-	}
-	if got := runDeployment(t, ctx, world, pinned.ID()); got != "dpl_1" {
-		t.Fatalf("unmarked run deployment = %q, want dpl_1", got)
-	}
+	startDeploymentWithIDs(t, ctx, workflow.NewContext(ctx, workflow.NewHTTPClient(server.URL+"/v1/workflow")), world)
 }
 
-func TestStartOnLatestPinsChildRunsToTheLatestDeployment(t *testing.T) {
+func TestStartDeploymentPinsChildRuns(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	world := testworld.NewManual()
@@ -1996,25 +1960,81 @@ func TestStartOnLatestPinsChildRunsToTheLatestDeployment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := runDeployment(t, ctx, world, output.Latest); got != "dpl_2" {
-		t.Fatalf("marked child deployment = %q, want dpl_2", got)
-	}
-	if got := runDeployment(t, ctx, world, output.Pinned); got != "dpl_1" {
-		t.Fatalf("unmarked child deployment = %q, want dpl_1", got)
+	for id, want := range map[string]string{output.Latest: "dpl_2", output.Named: "dpl_named", output.Pinned: "dpl_1"} {
+		if got := runDeployment(t, ctx, world, id); got != want {
+			t.Fatalf("child deployment = %q, want %s", got, want)
+		}
 	}
 }
 
-func TestStartOnLatestNeedsDeploymentAffinity(t *testing.T) {
+func TestStartDeploymentNeedsDeploymentAffinity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
+	client := workflow.NewContext(ctx, workflow.NewClient(world))
+	for _, deployment := range []workflow.Deployment{workflow.LatestDeployment, workflow.DeploymentWithID("dpl_named")} {
+		run, err := workflow.Start(client, deployedChildInput{}, workflow.StartOptions{Deployment: deployment})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := runDeployment(t, ctx, world, run.ID()); got != world.DeploymentID() {
+			t.Fatalf("run deployment = %q, want the World's own %q", got, world.DeploymentID())
+		}
+	}
+}
 
-	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), latestChildInput{})
-	if err != nil {
+func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := worlds.NewRuntime(world, worlds.Runners())
+
+	// A flow past the cap fails its run without replaying it.
+	flowCap, flowAtCap := worlds.NewRunID(), worlds.NewRunID()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: flowCap, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := runDeployment(t, ctx, world, run.ID()); got != world.DeploymentID() {
-		t.Fatalf("run deployment = %q, want the World's own %q", got, world.DeploymentID())
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: flowCap, Attempt: worlds.MaxDeliveries + 1}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: flowCap})
+	if err != nil || run.Status != worlds.StatusFailed || !strings.Contains(string(run.Error), "maximum attempts") {
+		t.Fatalf("run past the cap = %#v err=%v", run, err)
+	}
+	// The cap itself still executes.
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: flowAtCap, WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: flowAtCap, Attempt: worlds.MaxDeliveries}); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := world.RunsGet(ctx, worlds.RunsGetInput{RunID: flowAtCap}); strings.Contains(string(run.Error), "maximum attempts") {
+		t.Fatalf("run at the cap failed for its attempts: %#v", run)
+	}
+
+	// A step past the cap fails, and a flow is queued to observe it.
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_step_cap", WorkflowName: "w"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []worlds.EventsCreateEvent{
+		{EventType: worlds.EventTypeRunStarted},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step_a", Data: []byte(`{"stepName":"a"}`)},
+	} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_step_cap", Event: event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stepID := worlds.StepID("step_a")
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: "wrun_step_cap", StepID: &stepID, Attempt: worlds.MaxDeliveries + 1}); err != nil {
+		t.Fatal(err)
+	}
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: "wrun_step_cap", StepID: stepID})
+	if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
+		t.Fatalf("step past the cap = %#v err=%v", step, err)
+	}
+	queued := world.Queued()
+	if len(queued) == 0 || queued[len(queued)-1].RunID != "wrun_step_cap" || queued[len(queued)-1].StepID != nil {
+		t.Fatalf("queued after the failed step = %#v", queued)
 	}
 }

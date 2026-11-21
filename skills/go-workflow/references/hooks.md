@@ -64,16 +64,17 @@ disposal releases the token immediately. Use an intentional lifecycle instead.
 registers a random public token. Webhooks expose `Request(ctx)`, not `Next` or
 `GetConflict`. Their absolute URL uses the World's public BaseURL.
 
-`Request(ctx)` returns `*WebhookRequest[T]`, which embeds `*http.Request` and
-has `JSON() (T, error)`. It is serializable as a step input, including as a
-struct field. Pass the request into a step for signature verification and
-response work. Use the actual step context for I/O; the reconstructed embedded
-HTTP request does not automatically carry it.
+A webhook takes any number of requests, as in the Workflow SDK; call
+`Request(ctx)` again for the next. It returns `*WebhookRequest[T]`, the SDK's
+`Request`, with `Method`, `URL`, and `Header`. Its body is a stream of the run,
+so `Body(ctx)` and `JSON(ctx)` are step-only: pass the request into a step,
+which is also where signature verification belongs. It is serializable as a
+step input, including as a struct field.
 
 For `WebhookOption{Manual: true}`, call `request.RespondWith(ctx, response)`
-inside a step and return its error. Repeating an identical response is
-idempotent; a different second response fails. Static responses and the default
-202 complete at receipt; manual responses complete when recorded.
+inside a step and return its error. The request answers with the first
+response written, so a retried attempt's response is ignored. A static
+`Response` answers every request; the default is 202.
 
 Defer disposal after checking the creation error so an abandoned webhook is
 also cleaned up when the runner exits:
@@ -88,7 +89,10 @@ request, err := webhook.Request(ctx)
 if err != nil {
 	return Approval{}, err
 }
-return request.JSON()
+// The request body is a stream of the run, read in a step.
+return workflow.Step(ctx, func(ctx context.Context, request *workflow.WebhookRequest[Approval]) (Approval, error) {
+	return request.JSON(ctx)
+}, request)
 ```
 
 Keep this defer in the workflow runner, not in a helper that returns the

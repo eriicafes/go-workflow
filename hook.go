@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -57,10 +56,19 @@ func (d HookDefinition[T]) Create(ctx context.Context) *Hook[T] {
 		minRetention:   d.minRetention,
 		force:          d.force,
 		executionState: execution,
-		position:       execution.NextPosition(),
+		declared:       execution.NextHookID(),
 	}
 	if hook.token == "" {
-		hook.token = worlds.NewRunHookToken(execution.Run(), hook.position)
+		hook.token = execution.NextHookToken()
+	}
+	if id, ok := execution.OpenStartHook(hook.token); ok {
+		// The run's start hook was created with the run, so nothing is
+		// registered for it, and options only a write could apply are
+		// refused.
+		hook.id, hook.registered = id, true
+		if hook.minRetention > 0 || hook.force {
+			hook.err = ErrStartHookOptions
+		}
 	}
 	return hook
 }
@@ -73,12 +81,16 @@ func CreateHook[T any](ctx context.Context, options ...HookOption) *Hook[T] {
 
 // Hook receives repeated typed payloads addressed by its token.
 type Hook[T any] struct {
-	token          string
-	id             worlds.HookID
-	registered     bool
-	position       int
-	disposed       bool
-	webhook        *worlds.Webhook
+	token      string
+	id         worlds.HookID
+	registered bool
+	// declared is the ID drawn for the hook when it was created, which
+	// registration records.
+	declared worlds.HookID
+	disposed bool
+	// isWebhook and metadata make the hook a webhook with its settings.
+	isWebhook      bool
+	metadata       []byte
 	minRetention   time.Duration
 	force          bool
 	received       worlds.EventID
@@ -89,13 +101,14 @@ type Hook[T any] struct {
 	ClaimedFrom *worlds.HookForceClaim
 }
 
-func (h *Hook[T]) create(execution *worlds.Execution, position int, token string) {
+func (h *Hook[T]) create(execution *worlds.Execution, token string) {
 	h.registered, h.executionState = true, execution
 	result := worlds.DurableHook[T](worlds.DurableHookOptions{
 		Execution:    execution,
-		Position:     &position,
+		ID:           h.declared,
 		Token:        token,
-		Webhook:      h.webhook,
+		IsWebhook:    h.isWebhook,
+		Metadata:     h.metadata,
 		MinRetention: h.minRetention,
 		Force:        h.force,
 	})
@@ -138,7 +151,7 @@ func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
 		return true, ErrHookNotActive, nil
 	}
 	if !h.registered {
-		h.create(execution, h.position, h.token)
+		h.create(execution, h.token)
 	}
 	if h.err != nil {
 		// Wait until replay reaches the conflict event so Select cannot choose
@@ -166,12 +179,18 @@ func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 		if execution, ok := workflowExecutionFromContext(ctx); ok && h.executionState == execution && h.err == nil && !h.disposed {
 			if outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received); outcome.Received {
 				h.received = outcome.EventID
+				if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok {
+					h.executionState.AdvanceClock(event.CreatedAt)
+				}
 			}
 		}
 		return zero, err
 	}
 	outcome := worlds.HookOutcome[T](h.executionState, h.id, h.received)
 	h.received = outcome.EventID
+	if event, ok := h.executionState.SettledEvent(string(outcome.EventID)); ok && outcome.Received {
+		h.executionState.AdvanceClock(event.CreatedAt)
+	}
 	return outcome.Data, outcome.Err
 }
 
@@ -206,7 +225,7 @@ func (h *Hook[T]) GetConflict(ctx context.Context) (*Run[any], error) {
 		return nil, ErrHookNotActive
 	}
 	if !h.registered {
-		h.create(execution, h.position, h.token)
+		h.create(execution, h.token)
 	}
 	if h.conflict == "" {
 		return nil, h.err
@@ -277,9 +296,11 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 	return &Hook[T]{token: token, id: hook.HookID, ClaimedFrom: hook.ClaimedFrom}, true, nil
 }
 
-// ResumeHook resumes the active hook with token, sending value as its payload
-// encoded as JSON, and queues a delivery so its run resumes. It uses the
-// Client in ctx and returns ErrHookNotFound when no active hook has the token.
+// ResumeHook resumes the active hook with token, sending value as its
+// payload, and queues a delivery so its run resumes. The payload is sealed
+// to the run's public key when its payloads are encrypted, so the caller
+// cannot read the run back. It uses the Client in ctx and returns
+// ErrHookNotFound when no active hook has the token.
 // It is for steps and external callers; workflow context returns ErrNotInStep.
 func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
@@ -289,7 +310,15 @@ func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(value)
+	hook, err := client.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
+	if err != nil {
+		return err
+	}
+	options, err := worlds.HookPayloadOptions(ctx, client, hook)
+	if err != nil {
+		return err
+	}
+	payload, err := worlds.EncodePayload(value, options)
 	if err != nil {
 		return fmt.Errorf("workflow: encode hook payload: %w", err)
 	}

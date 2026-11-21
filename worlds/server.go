@@ -1,23 +1,12 @@
 package worlds
 
 import (
-	"context"
 	"crypto/subtle"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"path"
 	"strings"
-	"time"
 )
 
-const (
-	defaultHTTPPrefix           = "/v1/workflow"
-	webhookRequestMaxBytes      = 128 << 10
-	webhookResponsePollInterval = 50 * time.Millisecond
-)
+const defaultHTTPPrefix = "/v1/workflow"
 
 // HTTPPrefixPath returns the path HTTPHandler serves under for prefix: a
 // leading slash and no trailing slash, or /v1/workflow when prefix is empty.
@@ -32,17 +21,17 @@ func HTTPPrefixPath(prefix string) string {
 type HTTPOption func(*httpOptions)
 
 type httpOptions struct {
-	rpc func(http.Handler) http.Handler
+	client func(http.Handler) http.Handler
 }
 
-// WithRPCToken makes the RPC endpoint answer 401 unless a request carries
-// token as a bearer token, such as WORKFLOW_HTTP_TOKEN, which world-http
-// sends. An empty token refuses every RPC request, so an unset secret never
-// opens the endpoint. Webhooks are unaffected: the hook token in their URL
+// WithClientToken makes the client endpoints, RPC and the stream socket,
+// answer 401 unless a request carries token as a bearer token, such as
+// WORKFLOW_HTTP_TOKEN, which world-http sends. An empty token refuses every
+// client request, so an unset secret never opens them. Webhooks are unaffected: the hook token in their URL
 // authorizes them, since their callers can't send your credentials.
-func WithRPCToken(token string) HTTPOption {
+func WithClientToken(token string) HTTPOption {
 	want := []byte("Bearer " + token)
-	return WithRPCMiddleware(func(next http.Handler) http.Handler {
+	return WithClientMiddleware(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if token == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
@@ -54,41 +43,45 @@ func WithRPCToken(token string) HTTPOption {
 	})
 }
 
-// WithRPCMiddleware wraps only the RPC endpoint in middleware, such as a
-// session or IP check, and leaves webhooks reachable by their callers.
+// WithClientMiddleware wraps the client endpoints, RPC and the stream socket,
+// in middleware, such as a session or IP check, and leaves webhooks reachable
+// by their callers.
 // Several wrap in order, the first outermost.
-func WithRPCMiddleware(middleware func(http.Handler) http.Handler) HTTPOption {
+func WithClientMiddleware(middleware func(http.Handler) http.Handler) HTTPOption {
 	return func(o *httpOptions) {
-		if o.rpc == nil {
-			o.rpc = middleware
+		if o.client == nil {
+			o.client = middleware
 			return
 		}
-		outer := o.rpc
-		o.rpc = func(next http.Handler) http.Handler { return outer(middleware(next)) }
+		outer := o.client
+		o.client = func(next http.Handler) http.Handler { return outer(middleware(next)) }
 	}
 }
 
 // HTTPHandler returns the mux that exposes world to clients and
-// webhook callers. It serves RPCHandler at POST <prefix>/rpc and
-// WebhookHandler at <prefix>/webhooks/{token}. An empty prefix uses
+// webhook callers. It serves the client endpoints, RPCHandler at
+// POST <prefix>/rpc and StreamSocketHandler at
+// GET <prefix>/websockets/v1/runs/{runId}/streams/{name}, and WebhookHandler
+// at <prefix>/webhooks/{token}. An empty prefix uses
 // /v1/workflow. It does not execute deliveries. Worlds can register their own
 // routes, such as delivery callbacks, on the returned mux.
 //
-// The RPC endpoint can read and change every run and is unauthenticated
-// unless options protect it, with WithRPCToken or WithRPCMiddleware.
+// The client endpoints can read and change every run and are unauthenticated
+// unless options protect them, with WithClientToken or WithClientMiddleware.
 func HTTPHandler(world World, prefix string, options ...HTTPOption) *http.ServeMux {
 	var o httpOptions
 	for _, option := range options {
 		option(&o)
 	}
-	rpc := RPCHandler(world)
-	if o.rpc != nil {
-		rpc = o.rpc(rpc)
+	rpc, socket := RPCHandler(world), StreamSocketHandler(world)
+	if o.client != nil {
+		rpc, socket = o.client(rpc), o.client(socket)
 	}
 	mux := http.NewServeMux()
 	prefix = HTTPPrefixPath(prefix)
 	mux.Handle(prefix+"/webhooks/{token}", WebhookHandler(world))
 	mux.Handle("POST "+prefix+"/rpc", rpc)
+	mux.Handle("GET "+prefix+streamSocketRoute, socket)
 	return mux
 }
 
@@ -104,163 +97,4 @@ func RPCHandler(world World) http.Handler {
 		}
 		handleRPC(w, r, world)
 	})
-}
-
-// WebhookHandler records a webhook request as a hook_received event and queues
-// a delivery for the run that owns the webhook. It responds 404 when no active
-// webhook owns the token, 405 for a method the webhook does not accept, 413
-// when the body exceeds 128 KiB, and otherwise the webhook's Response, the
-// response the runner records for a manual webhook, or 202 Accepted.
-//
-// The token is read from a {token} path wildcard when the handler is mounted
-// with one, otherwise from the last path segment. Mount it at
-// <prefix>/webhooks/{token} to match the URLs webhooks are created with.
-func WebhookHandler(world World) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.PathValue("token")
-		if token == "" {
-			token = path.Base(r.URL.Path)
-		}
-		if token == "" || token == "/" || token == "." {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
-			return
-		}
-		hook, err := world.HooksGetByToken(r.Context(), HooksGetByTokenInput{Token: token})
-		if errors.Is(err, ErrHookNotFound) {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if hook.Webhook == nil {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
-			return
-		}
-		if hook.Webhook.Method != "" && r.Method != hook.Webhook.Method {
-			w.Header().Set("Allow", hook.Webhook.Method)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, webhookRequestMaxBytes))
-		if err != nil {
-			var maxBytesError *http.MaxBytesError
-			if errors.As(err, &maxBytesError) {
-				http.Error(w, ErrWebhookRequestTooLarge.Error(), http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, fmt.Errorf("workflow: read webhook body: %w", err).Error(), http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-
-		payload, err := json.Marshal(WebhookReceivedEventData{
-			Request: &WebhookRequest{
-				Method: r.Method,
-				URL:    r.URL.String(),
-				Header: map[string][]string(r.Header.Clone()),
-				Body:   body,
-			},
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		result, err := ResumeHook(r.Context(), world, hook, payload)
-		if errors.Is(err, ErrRunTerminal) || errors.Is(err, ErrHookNotActive) {
-			owner, lookupErr := world.HooksGetByToken(r.Context(), HooksGetByTokenInput{Token: token})
-			if lookupErr == nil && owner.HookID != hook.HookID {
-				http.Error(w, ErrHookForceClaimed.Error(), http.StatusServiceUnavailable)
-				return
-			}
-			if lookupErr != nil && !errors.Is(lookupErr, ErrHookNotFound) {
-				http.Error(w, lookupErr.Error(), http.StatusInternalServerError)
-				return
-			}
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
-			return
-		}
-		if err != nil {
-			status := http.StatusInternalServerError
-			if errors.Is(err, ErrHookForceClaimed) {
-				status = http.StatusServiceUnavailable
-			}
-			http.Error(w, err.Error(), status)
-			return
-		}
-		if hook.Webhook.Manual {
-			response, err := waitWebhookResponse(r.Context(), world, hook.RunID, hook.HookID, result.EventID)
-			if err != nil {
-				status := http.StatusInternalServerError
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					status = http.StatusGatewayTimeout
-				}
-				if errors.Is(err, ErrHookNotActive) || errors.Is(err, ErrRunTerminal) {
-					status = http.StatusGone
-				}
-				http.Error(w, err.Error(), status)
-				return
-			}
-			writeWebhookResponse(w, response)
-			return
-		}
-		if hook.Webhook.Response != nil {
-			// Receiving the request already deactivated this webhook atomically.
-			writeWebhookResponse(w, *hook.Webhook.Response)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
-	})
-}
-
-func waitWebhookResponse(ctx context.Context, world World, runID RunID, hookID HookID, receivedEventID EventID) (WebhookResponse, error) {
-	cursor := string(receivedEventID)
-	for {
-		result, err := world.EventsList(ctx, EventsListInput{RunID: runID, Pagination: Pagination{Cursor: cursor}})
-		if err != nil {
-			return WebhookResponse{}, err
-		}
-		for _, event := range result.Data {
-			if event.EventType == EventTypeRunCompleted || event.EventType == EventTypeRunFailed || event.EventType == EventTypeRunCancelled {
-				return WebhookResponse{}, ErrRunTerminal
-			}
-			if event.EventType == EventTypeHookDisposed && event.CorrelationID == string(hookID) {
-				return WebhookResponse{}, ErrHookNotActive
-			}
-			if event.EventType != EventTypeHookReceived || event.CorrelationID != string(hookID) {
-				continue
-			}
-			data, ok := DecodeWebhookReceived(event.Data)
-			if !ok {
-				return WebhookResponse{}, fmt.Errorf("workflow: decode manual webhook response of event %s", event.EventID)
-			}
-			if data.Response != nil && data.ResponseTo == receivedEventID {
-				return *data.Response, nil
-			}
-		}
-		if result.HasMore {
-			cursor = result.Cursor
-			continue
-		}
-		timer := time.NewTimer(webhookResponsePollInterval)
-		select {
-		case <-ctx.Done():
-			return WebhookResponse{}, ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-func writeWebhookResponse(writer http.ResponseWriter, response WebhookResponse) {
-	for key, values := range response.Header {
-		for _, value := range values {
-			writer.Header().Add(key, value)
-		}
-	}
-	if response.Status == 0 {
-		response.Status = http.StatusOK
-	}
-	writer.WriteHeader(response.Status)
-	_, _ = writer.Write(response.Body)
 }

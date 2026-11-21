@@ -3,6 +3,7 @@ package workflowtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -13,7 +14,9 @@ import (
 func conformRunCreate(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformRunID("create")
-	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"team": "a"}})
+	source := "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	executionContext := map[string]any{worlds.ExecutionContextReplayedFromRunID: source}
+	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{"team": "a"}, ExecutionContext: executionContext})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +35,9 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 	if run.RunID != runID || run.WorkflowName != "conformance" || run.Status != worlds.StatusPending || string(run.Input) != `"input"` || run.Attributes["team"] != "a" || run.CreatedAt.IsZero() || run.StartedAt != nil {
 		t.Fatalf("run = %#v", run)
 	}
+	if run.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != source {
+		t.Fatalf("run executionContext = %#v", run.ExecutionContext)
+	}
 	stripped, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if err != nil || stripped.Input != nil {
 		t.Fatalf("ResolveDataNone run = %#v err=%v", stripped, err)
@@ -43,11 +49,8 @@ func conformRunCreate(t *testing.T, world worlds.World) {
 	if len(events) != 1 || events[0].EventType != worlds.EventTypeRunCreated || events[0].RunID != runID || events[0].CreatedAt.IsZero() {
 		t.Fatalf("events = %#v", events)
 	}
-	var data struct {
-		WorkflowName string          `json:"workflowName"`
-		Input        json.RawMessage `json:"input"`
-	}
-	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` {
+	var data worlds.DataRunCreated
+	if err := json.Unmarshal(events[0].Data, &data); err != nil || data.WorkflowName != "conformance" || string(data.Input) != `"input"` || data.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != source {
 		t.Fatalf("run_created data = %s err=%v", events[0].Data, err)
 	}
 
@@ -121,7 +124,7 @@ func conformRunsWaitForTerminalStatus(t *testing.T, world worlds.World) {
 	}
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"done"}`)}})
+		_, _ = world.EventsCreate(context.Background(), worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"ImRvbmUi"}`)}})
 	}()
 	run, err = world.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: 10 * time.Second})
 	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `"done"` {
@@ -210,5 +213,154 @@ func conformAttributes(t *testing.T, world worlds.World) {
 	if world.Capabilities().SetAttributes {
 		err = world.RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{RunID: runID, Changes: []worlds.RunsAttributeChange{{Key: "zone", Value: &tier}}})
 		conformExpect(t, err, worlds.ErrRunTerminal, "attributes on terminal run")
+	}
+}
+
+func conformDeleteData(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+
+	// Every World deletes the data of a run created with $retention "0" as
+	// it finishes.
+	purged := conformRunID("retain_none")
+	attributes := map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String(), "tier": "gold"}
+	create := worlds.EventsCreateRunInput{RunID: purged, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: attributes}
+	if world.Capabilities().StartHook {
+		// A start hook's metadata is user data too.
+		create.StartHook = &worlds.StartHook{Token: fmt.Sprintf("conformance-delete-start-%s", purged), Metadata: []byte(`"start-metadata"`)}
+	}
+	if _, err := world.EventsCreateRun(ctx, create); err != nil {
+		t.Fatal(err)
+	}
+	token := fmt.Sprintf("conformance-delete-%s", purged)
+	conformAppend(t, world, purged, worlds.EventTypeRunStarted, "", nil)
+	conformAppend(t, world, purged, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "work", Input: []byte(`"step-input"`)})
+	conformAppend(t, world, purged, worlds.EventTypeStepStarted, "step_a", nil)
+	conformAppend(t, world, purged, worlds.EventTypeStepCompleted, "step_a", worlds.DataStepResult{Result: []byte(`"step-output"`)})
+	conformAppend(t, world, purged, worlds.EventTypeStepCreated, "step_b", worlds.DataStepCreated{StepName: "late", Input: []byte(`"late-input"`)})
+	conformAppend(t, world, purged, worlds.EventTypeStepStarted, "step_b", nil)
+	conformAppend(t, world, purged, worlds.EventTypeHookCreated, "hook_a", worlds.DataHookCreated{Token: token, Metadata: []byte(`"metadata"`)})
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "out", Chunk: []byte("chunk")}); err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, purged, worlds.EventTypeRunCompleted, "", worlds.DataRunCompleted{Output: []byte(`"output"`)})
+	// A step still running when the run finished settles after it, and what
+	// it brought is deleted too.
+	conformAppend(t, world, purged, worlds.EventTypeStepCompleted, "step_b", worlds.DataStepResult{Result: []byte(`"late-output"`)})
+	conformExpectDataDeleted(t, world, purged)
+	if hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"}); err == nil && (hook.Metadata != nil || hook.Token != token) {
+		t.Fatalf("deleted run's hook = %+v", hook)
+	}
+	if create.StartHook != nil {
+		if hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: worlds.StartHookID(purged)}); err == nil && hook.Metadata != nil {
+			t.Fatalf("deleted run's start hook metadata = %s", hook.Metadata)
+		}
+		if start := worlds.RunStartHook(conformAllEvents(t, world, purged)[0].Data); start == nil || start.Metadata != nil || start.Token != create.StartHook.Token {
+			t.Fatalf("deleted run's run_created start hook = %+v", start)
+		}
+	}
+	err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "out", Chunk: []byte("more")})
+	conformExpect(t, err, worlds.ErrStreamClosed, "write to a deleted run's stream")
+	err = world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: purged, Name: "new", Chunk: []byte("more")})
+	conformExpect(t, err, worlds.ErrStreamClosed, "new stream of a deleted run")
+
+	// RunsDeleteDataMany is optional.
+	if !world.Capabilities().DeleteData {
+		_, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{purged}})
+		conformExpect(t, err, errors.ErrUnsupported, "RunsDeleteDataMany without DeleteData")
+		return
+	}
+
+	// A retention other than RetainNone keeps the data, until
+	// RunsDeleteDataMany deletes it.
+	kept := conformRunID("retain_kept")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: kept, WorkflowName: "conformance", Input: []byte(`"input"`), Attributes: map[string]string{worlds.RetentionAttribute: "86400"}}); err != nil {
+		t.Fatal(err)
+	}
+	conformAppend(t, world, kept, worlds.EventTypeRunStarted, "", nil)
+	conformAppend(t, world, kept, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "work", Input: []byte(`"step-input"`)})
+	conformAppend(t, world, kept, worlds.EventTypeRunCompleted, "", worlds.DataRunCompleted{Output: []byte(`"output"`)})
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: kept})
+	if err != nil || run.ExpiredAt != nil || string(run.Output) != `"output"` {
+		t.Fatalf("kept run = %+v, err=%v", run, err)
+	}
+	running := conformCreateRun(t, world, "retain_running")
+	conformAppend(t, world, running, worlds.EventTypeRunStarted, "", nil)
+	missing := conformRunID("retain_missing")
+
+	result, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{kept, purged, running, missing}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []worlds.DeleteDataResult{
+		{RunID: kept, Outcome: worlds.DeleteDataDeleted},
+		{RunID: purged, Outcome: worlds.DeleteDataAlreadyDeleted},
+		{RunID: running, Outcome: worlds.DeleteDataSkipped, Reason: worlds.DeleteDataRunNotTerminal, Status: worlds.StatusRunning},
+		{RunID: missing, Outcome: worlds.DeleteDataNotFound},
+	}
+	wantSummary := worlds.DeleteDataSummary{Requested: 4, Deleted: 1, AlreadyDeleted: 1, Skipped: 1, NotFound: 1}
+	if len(result.Results) != len(want) || result.Summary != wantSummary {
+		t.Fatalf("RunsDeleteDataMany = %+v", result)
+	}
+	for index := range want {
+		if result.Results[index] != want[index] {
+			t.Fatalf("result %d = %+v, want %+v", index, result.Results[index], want[index])
+		}
+	}
+	conformExpectDataDeleted(t, world, kept)
+	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: running}); err != nil || run.ExpiredAt != nil {
+		t.Fatalf("running run = %+v, err=%v", run, err)
+	}
+
+	_, err = world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{})
+	conformExpect(t, err, worlds.ErrDeleteDataInvalid, "RunsDeleteDataMany without run IDs")
+	_, err = world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{kept, kept}})
+	conformExpect(t, err, worlds.ErrDeleteDataInvalid, "RunsDeleteDataMany with a repeated run ID")
+}
+
+// conformExpectDataDeleted checks that a run's data is gone and its records
+// stay: the run with its attributes, its steps with their names, its events
+// with their metadata, and its streams, empty and closed.
+func conformExpectDataDeleted(t *testing.T, world worlds.World, runID worlds.RunID) {
+	t.Helper()
+	ctx := context.Background()
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.ExpiredAt == nil || run.Input != nil || run.Output != nil || run.Error != nil || !run.Status.Terminal() {
+		t.Fatalf("deleted run = %+v, err=%v", run, err)
+	}
+	if !worlds.RunDataExpired(run, time.Now()) {
+		t.Fatalf("deleted run expires at %v, after now", run.ExpiredAt)
+	}
+	if run.Attributes[worlds.RetentionAttribute] == worlds.RetainNone.String() && run.Attributes["tier"] != "gold" {
+		t.Fatalf("deleted run attributes = %#v", run.Attributes)
+	}
+	steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: runID})
+	if err != nil || len(steps.Data) == 0 {
+		t.Fatalf("deleted run steps = %+v, err=%v", steps, err)
+	}
+	for _, step := range steps.Data {
+		if step.StepName == "" || step.Input != nil || step.Output != nil || step.Error != nil {
+			t.Fatalf("deleted run step = %+v", step)
+		}
+	}
+	for _, event := range conformAllEvents(t, world, runID) {
+		if payload := worlds.EventPayload(event); payload != nil {
+			t.Fatalf("deleted run %s event payload = %s", event.EventType, payload)
+		}
+		if event.EventType == worlds.EventTypeStepCreated {
+			var created worlds.DataStepCreated
+			if json.Unmarshal(event.Data, &created) != nil || created.StepName == "" {
+				t.Fatalf("deleted run step_created data = %s", event.Data)
+			}
+		}
+	}
+	names, err := world.StreamsList(ctx, worlds.StreamsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: name})
+		if err != nil || len(chunks.Data) != 0 || !chunks.Done {
+			t.Fatalf("deleted run stream %q = %+v, err=%v", name, chunks, err)
+		}
 	}
 }

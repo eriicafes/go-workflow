@@ -48,6 +48,10 @@ type Client interface {
 	RunsWaitForTerminalStatus(context.Context, RunsWaitForTerminalStatusInput) (Run, error)
 	// RunsSetAttributes applies attribute changes to a run.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
+	// RunsDeleteDataMany deletes the data of finished runs. It returns an
+	// error wrapping errors.ErrUnsupported when the World does not delete
+	// run data.
+	RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error)
 
 	// StepsGet returns a step of a run. It returns ErrStepNotFound when
 	// the step does not exist.
@@ -63,10 +67,9 @@ type Client interface {
 	StreamsGetInfo(context.Context, StreamsGetInfoInput) (StreamInfo, error)
 	// StreamsList returns the names of a run's streams.
 	StreamsList(context.Context, StreamsListInput) ([]string, error)
-	// StreamsCreateWriteSession creates an exclusive writer session for a
-	// stream. It returns ErrStreamLocked while another session holds the
-	// stream.
-	StreamsCreateWriteSession(context.Context, StreamsCreateWriteSessionInput) (StreamWriteSession, error)
+	// StreamsOpenWriter returns a writer for a stream, which other writers
+	// of the stream do not wait for.
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
 
 	// HooksGet returns hook metadata by ID. It returns ErrHookNotFound when
 	// the hook does not exist.
@@ -89,14 +92,13 @@ type Client interface {
 	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
 	// returns the number of waits it settled.
 	RunsWake(context.Context, ClientRunsWakeInput) (int, error)
-	// StreamsWrite appends a chunk to a stream. It returns
-	// ErrStreamLocked while a writer holds the stream.
+	// StreamsWrite appends a chunk to a stream. It returns ErrStreamClosed
+	// when the stream is closed.
 	StreamsWrite(context.Context, StreamsWriteInput) error
 	// StreamsWriteMulti appends several chunks to a stream. It returns
-	// ErrStreamLocked while a writer holds the stream.
+	// ErrStreamClosed when the stream is closed.
 	StreamsWriteMulti(context.Context, StreamsWriteMultiInput) error
-	// StreamsClose closes a stream. It returns ErrStreamLocked while a
-	// writer holds the stream.
+	// StreamsClose closes a stream for every writer.
 	StreamsClose(context.Context, StreamsCloseInput) error
 	// HooksResume resumes the hook with input.Token with the payload
 	// input.Data, as ResumeHook does. It returns ErrHookNotFound when no
@@ -104,19 +106,30 @@ type Client interface {
 	HooksResume(context.Context, ClientHooksResumeInput) error
 	// Spec returns the RPC protocol version and capabilities of the World.
 	Spec(context.Context) (ClientSpec, error)
+	// RunKeys returns the keys of a run's payloads, or nil when they are not
+	// encrypted, as the World's EncryptionKeys resolves them.
+	RunKeys(context.Context, RunKeysInput) (*RunKeys, error)
+	// RunsNewID returns the ID of a new run in input.Region, as the World
+	// mints it: tagged with its region by a World that implements
+	// RegionalRunIDs, and a plain run ID otherwise.
+	RunsNewID(context.Context, ClientRunsNewIDInput) (RunID, error)
+	// RunsStartDeployment returns the deployment a new run starts on, as
+	// StartDeploymentID does, so its payloads can be encrypted for it
+	// before it is created.
+	RunsStartDeployment(context.Context, ClientRunsStartDeploymentInput) (string, error)
 }
 
 // ClientSpec describes the World a Client calls.
 type ClientSpec struct {
-	// SpecVersion is the World's RPC protocol version.
-	SpecVersion int `cbor:"specVersion"`
+	// RPCVersion is the RPC protocol version of the server.
+	RPCVersion int `cbor:"rpcVersion"`
 	// Capabilities reports the optional behavior the World implements.
 	Capabilities Capabilities `cbor:"capabilities"`
 }
 
 // CreateRun creates a run and queues its first delivery. It fills an empty
-// RunID, and an empty DeploymentID as StartDeploymentID does for
-// input.Latest. When the run already exists and is still pending, as after a
+// RunID, and an empty DeploymentID as StartDeploymentID does, for
+// LatestDeployment when input.Latest. When the run already exists and is still pending, as after a
 // create whose queueing failed, it queues the delivery again and returns the
 // run's ID with ErrRunAlreadyExists.
 func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (RunID, error) {
@@ -124,7 +137,11 @@ func CreateRun(ctx context.Context, world World, input ClientRunsCreateInput) (R
 		input.RunID = NewRunID()
 	}
 	if input.DeploymentID == "" {
-		deploymentID, err := StartDeploymentID(ctx, world, input.Latest)
+		deployment := Deployment{}
+		if input.Latest {
+			deployment = LatestDeployment
+		}
+		deploymentID, err := StartDeploymentID(ctx, world, deployment)
 		if err != nil {
 			return "", err
 		}
@@ -167,6 +184,10 @@ func (c worldClient) RunsSetAttributes(ctx context.Context, input RunsSetAttribu
 	return c.world.RunsSetAttributes(ctx, input)
 }
 
+func (c worldClient) RunsDeleteDataMany(ctx context.Context, input RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
+	return c.world.RunsDeleteDataMany(ctx, input)
+}
+
 func (c worldClient) StepsGet(ctx context.Context, input StepsGetInput) (Step, error) {
 	return c.world.StepsGet(ctx, input)
 }
@@ -187,8 +208,8 @@ func (c worldClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return c.world.StreamsList(ctx, input)
 }
 
-func (c worldClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
-	return c.world.StreamsCreateWriteSession(ctx, input)
+func (c worldClient) StreamsOpenWriter(ctx context.Context, input StreamsOpenWriterInput) (StreamWriter, error) {
+	return OpenStreamWriter(ctx, c.world, input)
 }
 
 func (c worldClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
@@ -236,7 +257,19 @@ func (c worldClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 }
 
 func (c worldClient) Spec(context.Context) (ClientSpec, error) {
-	return ClientSpec{SpecVersion: c.world.SpecVersion(), Capabilities: c.world.Capabilities()}, nil
+	return ClientSpec{RPCVersion: RPCVersion, Capabilities: c.world.Capabilities()}, nil
+}
+
+func (c worldClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
+	return RunKeysFor(ctx, c.world, input.RunID, input.DeploymentID)
+}
+
+func (c worldClient) RunsNewID(_ context.Context, input ClientRunsNewIDInput) (RunID, error) {
+	return newRunID(c.world, input), nil
+}
+
+func (c worldClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
+	return StartDeploymentID(ctx, c.world, input.deployment())
 }
 
 // maxHTTPWait caps how long one RPC request may block in
@@ -267,6 +300,11 @@ type httpClient struct {
 	client   *http.Client
 	mutex    sync.Mutex
 	spec     *ClientSpec
+	// socketDeclinedUntil is when the client next tries a stream socket
+	// after the server declined one.
+	socketDeclinedUntil time.Time
+	// runKeys caches the keys of runs' payloads by run ID.
+	runKeys sync.Map
 }
 
 func (c *httpClient) call(ctx context.Context, method string, input, output any) error {
@@ -278,8 +316,8 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 		}
 		raw = encoded
 	}
-	specVersion := SpecVersion
-	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw, SpecVersion: &specVersion})
+	rpcVersion := RPCVersion
+	body, err := rpcEncoding.Marshal(RPCRequest{Method: method, Input: raw, RPCVersion: &rpcVersion})
 	if err != nil {
 		return err
 	}
@@ -335,6 +373,12 @@ func (c *httpClient) RunsSetAttributes(ctx context.Context, input RunsSetAttribu
 	return c.call(ctx, "runs.setAttributes", input, nil)
 }
 
+func (c *httpClient) RunsDeleteDataMany(ctx context.Context, input RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error) {
+	var output RunsDeleteDataManyResult
+	err := c.call(ctx, "runs.deleteDataMany", input, &output)
+	return output, err
+}
+
 func (c *httpClient) StepsGet(ctx context.Context, input StepsGetInput) (Step, error) {
 	var output Step
 	err := c.call(ctx, "steps.get", input, &output)
@@ -366,12 +410,35 @@ func (c *httpClient) StreamsList(ctx context.Context, input StreamsListInput) ([
 	return output, err
 }
 
-func (c *httpClient) StreamsCreateWriteSession(ctx context.Context, input StreamsCreateWriteSessionInput) (StreamWriteSession, error) {
-	var id StreamID
-	if err := c.call(ctx, "streams.createWriteSession", input, &id); err != nil {
-		return nil, err
+// streamSocketRetryAfter is how long a client that a server declined a
+// stream socket writes through RPC before it tries again.
+const streamSocketRetryAfter = 5 * time.Minute
+
+// StreamsOpenWriter returns a writer that writes through the server's stream
+// socket once it opens, and through RPC calls until then, or when the server
+// declines it.
+func (c *httpClient) StreamsOpenWriter(ctx context.Context, input StreamsOpenWriterInput) (StreamWriter, error) {
+	direct := newDirectStreamWriter(c, input)
+	c.mutex.Lock()
+	declined := time.Now().Before(c.socketDeclinedUntil)
+	c.mutex.Unlock()
+	if declined || input.WriterID == "" {
+		return direct, nil
 	}
-	return httpStreamWriteSession{client: c, runID: input.RunID, name: input.Name, id: id}, nil
+	target, err := StreamSocketURL(c.endpoint, input.RunID, input.Name, input.WriterID)
+	if err != nil {
+		return direct, nil
+	}
+	return OpenStreamSocketWriter(ctx, StreamSocketOptions{
+		URL:        target,
+		HTTPClient: c.client,
+		Fallback:   direct,
+		OnDecline: func() {
+			c.mutex.Lock()
+			c.socketDeclinedUntil = time.Now().Add(streamSocketRetryAfter)
+			c.mutex.Unlock()
+		},
+	}), nil
 }
 
 func (c *httpClient) HooksGet(ctx context.Context, input HooksGetInput) (Hook, error) {
@@ -422,6 +489,37 @@ func (c *httpClient) HooksResume(ctx context.Context, input ClientHooksResumeInp
 
 // Spec calls client.spec once and returns its result from then on, since a
 // World's spec does not change while it serves.
+func (c *httpClient) RunKeys(ctx context.Context, input RunKeysInput) (*RunKeys, error) {
+	if cached, ok := c.runKeys.Load(input.RunID); ok {
+		return cached.(*RunKeys), nil
+	}
+	var key []byte
+	if err := c.call(ctx, "runs.encryptionKey", input, &key); err != nil {
+		return nil, err
+	}
+	var keys *RunKeys
+	if key != nil {
+		var err error
+		if keys, err = NewRunKeys(key); err != nil {
+			return nil, err
+		}
+	}
+	c.runKeys.Store(input.RunID, keys)
+	return keys, nil
+}
+
+func (c *httpClient) RunsNewID(ctx context.Context, input ClientRunsNewIDInput) (RunID, error) {
+	var id RunID
+	err := c.call(ctx, "client.runs.newId", input, &id)
+	return id, err
+}
+
+func (c *httpClient) RunsStartDeployment(ctx context.Context, input ClientRunsStartDeploymentInput) (string, error) {
+	var deploymentID string
+	err := c.call(ctx, "client.runs.startDeployment", input, &deploymentID)
+	return deploymentID, err
+}
+
 func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -434,24 +532,6 @@ func (c *httpClient) Spec(ctx context.Context) (ClientSpec, error) {
 	}
 	c.spec = &output
 	return output, nil
-}
-
-type httpStreamWriteSession struct {
-	client *httpClient
-	runID  RunID
-	name   string
-	id     StreamID
-}
-
-func (s httpStreamWriteSession) ID() StreamID { return s.id }
-func (s httpStreamWriteSession) Write(ctx context.Context, input StreamWriteSessionWriteInput) error {
-	return s.client.call(ctx, "streams.writeSession", StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks}, nil)
-}
-func (s httpStreamWriteSession) Close(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: true}, nil)
-}
-func (s httpStreamWriteSession) Release(ctx context.Context) error {
-	return s.client.call(ctx, "streams.closeWriteSession", StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id}, nil)
 }
 
 type httpAnalytics struct{ client *httpClient }
@@ -494,6 +574,12 @@ type rpcClientError struct {
 }
 
 func newRPCClientError(failure RPCError) error {
+	if failure.Sentinel == "hook_conflict" && failure.ConflictingRunID != "" {
+		return &HookConflictError{RunID: failure.ConflictingRunID}
+	}
+	if failure.Sentinel == "throttled" {
+		return &ThrottleError{Cause: rpcClientError{RPCError: failure}, After: failure.RetryAfter}
+	}
 	err := rpcClientError{RPCError: failure}
 	for _, sentinel := range rpcSentinels {
 		if sentinel.name == failure.Sentinel {

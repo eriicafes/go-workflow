@@ -11,7 +11,7 @@ import (
 func TestLatestDeploymentID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	all, _ := newWorlds(t, redisTCPConfig(), 2)
+	all, _, _ := newWorlds(t, 2)
 	old, production := all[0], all[1]
 	old.config.DeploymentID, production.config.DeploymentID = "dpl_old", "dpl_production"
 	server := httptest.NewServer(HTTP(production))
@@ -48,12 +48,13 @@ func TestLatestDeploymentID(t *testing.T) {
 }
 
 func TestLatestDeploymentOnlyInProduction(t *testing.T) {
-	config := redisTCPConfig()
-	config.DeploymentID = "dpl_1"
 	for env, want := range map[string]bool{"production": true, "preview": false, "": false} {
 		t.Setenv("VERCEL_ENV", env)
-		world, _ := newWorlds(t, config, 1)
-		if got := world[0].latestURL != ""; got != want {
+		world, err := New(Config{BaseURL: "https://app.example.com/v1/workflow", Topic: "workflow", DeploymentID: "dpl_1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := world.latestURL != ""; got != want {
 			t.Errorf("VERCEL_ENV=%q: looks up the latest deployment = %v, want %v", env, got, want)
 		}
 	}

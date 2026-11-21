@@ -33,6 +33,16 @@ type StorageRuns interface {
 	// whose Capabilities report SetAttributes as false ignores the call and
 	// returns nil.
 	RunsSetAttributes(context.Context, RunsSetAttributesInput) error
+	// A World deletes a run's data as the run finishes when the run's
+	// RetentionAttribute is RetainNone's, as RunsDeleteDataMany does.
+	//
+	// RunsDeleteDataMany deletes the data of finished runs: their payloads,
+	// the payloads in their events, their hooks' metadata, and their streams'
+	// chunks, leaving each stream empty and closed. The run, step, event, and
+	// hook records stay, and the run's ExpiredAt is set. It returns one
+	// result per RunID, in order. A World whose Capabilities report
+	// DeleteData as false returns an error wrapping errors.ErrUnsupported.
+	RunsDeleteDataMany(context.Context, RunsDeleteDataManyInput) (RunsDeleteDataManyResult, error)
 }
 
 // StorageSteps reads the steps of a run.
@@ -72,8 +82,12 @@ type StorageEvents interface {
 	// running step is not a repeat. It appends a new attempt, so a delivery can
 	// take over a step whose previous delivery died.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
-	// EventsCreateBatch appends Events to a run in order, atomically. It appends
-	// none of them when any event is invalid or cannot be admitted.
+	// EventsCreateBatch appends Events to a run in order, as one in-band
+	// write when InBandCount is set. It appends none of them when any event
+	// is invalid. When one cannot be admitted it returns that refusal, and
+	// the events of other steps, hooks, and waits in the batch may still be
+	// appended, so the runtime replays whatever the log holds. A refused
+	// in-band write appends none of them.
 	EventsCreateBatch(context.Context, EventsCreateBatchInput) (EventBatchResult, error)
 	// EventsGet returns the event identified by RunID and EventID. It returns
 	// ErrEventNotFound when the event does not exist. It applies ResolveData to
@@ -133,6 +147,38 @@ type (
 		// Value is the new value. Nil deletes the attribute.
 		Value *string `json:"value"`
 	}
+	// RunsDeleteDataManyInput holds the arguments to RunsDeleteDataMany:
+	// one to MaxDeleteDataRunIDs unique run IDs.
+	RunsDeleteDataManyInput struct {
+		RunIDs []RunID
+	}
+	// RunsDeleteDataManyResult is the result of RunsDeleteDataMany: one
+	// result per requested run, in order, and a count of each outcome.
+	RunsDeleteDataManyResult struct {
+		Summary DeleteDataSummary
+		Results []DeleteDataResult
+	}
+	// DeleteDataSummary counts the outcomes of RunsDeleteDataMany.
+	DeleteDataSummary struct {
+		Requested      int
+		Deleted        int
+		AlreadyDeleted int
+		Skipped        int
+		NotCreated     int
+		NotFound       int
+		Failed         int
+	}
+	// DeleteDataResult is the outcome of deleting one run's data. Reason and
+	// Status are set for DeleteDataSkipped, and Code and Retryable for
+	// DeleteDataFailed.
+	DeleteDataResult struct {
+		RunID     RunID
+		Outcome   DeleteDataOutcome
+		Reason    string `cbor:",omitempty"`
+		Status    Status `cbor:",omitempty"`
+		Code      string `cbor:",omitempty"`
+		Retryable bool   `cbor:",omitempty"`
+	}
 	// RunsSetAttributesInput holds the arguments to RunsSetAttributes.
 	RunsSetAttributesInput struct {
 		RunID   RunID
@@ -140,6 +186,9 @@ type (
 		// Writer names what set the attributes. Nil records a workflow
 		// writer.
 		Writer *AttributeWriter
+		// AllowReservedAttributes records that the writer permitted keys
+		// with the reserved prefix.
+		AllowReservedAttributes bool
 	}
 )
 
@@ -150,6 +199,8 @@ const (
 	// RootRunIDAttribute holds the ID of the run at the root of a child run's
 	// lineage.
 	RootRunIDAttribute = "$rootRunId"
+	// RetentionAttribute holds a run's data retention. See Retention.
+	RetentionAttribute = "$retention"
 )
 
 // Run is the view of one run derived from its event log.
@@ -157,17 +208,21 @@ type Run struct {
 	RunID        RunID
 	WorkflowName string
 	Status       Status
-	// Input is the JSON-encoded workflow input.
+	// Input is the run's argument list, [input], as a payload.
 	Input []byte
-	// Output is the JSON-encoded workflow output of a completed run.
+	// Output is the output payload of a completed run.
 	Output []byte
-	// Error is the JSON-encoded Error of a failed run. DecodeError
+	// Error is the error payload of a failed run. DecodeErrorPayload
 	// decodes it.
 	Error      []byte
 	Attributes map[string]string
 	// DeploymentID is the deployment the run is pinned to, recorded when the
 	// run is created. Empty means the run is not pinned.
 	DeploymentID string
+	// EncryptionPublicKey is the run's public key in base64, which writers
+	// outside the run seal payloads to. It is empty when the run's payloads
+	// are not encrypted.
+	EncryptionPublicKey string
 	// InBandCount counts the events appended by in-band writes, those the
 	// run's orchestrator fences with EventsCreateOptions.InBandCount. A flow
 	// starts from it and passes it with each in-band write.
@@ -176,6 +231,13 @@ type Run struct {
 	UpdatedAt   time.Time
 	StartedAt   *time.Time
 	CompletedAt *time.Time
+	// ExecutionContext is plain-text metadata about how the run was started.
+	// See EventsCreateRunInput.
+	ExecutionContext map[string]any
+	// ExpiredAt is when the run's data was deleted, or is deleted for a
+	// World's retention. Once it has passed, the run's payloads are gone and
+	// Run.Value returns ErrRunExpired. See RunDataExpired.
+	ExpiredAt *time.Time
 }
 
 type (
@@ -202,12 +264,12 @@ type Step struct {
 	// Status is pending before the first attempt starts and again while a
 	// retry is scheduled.
 	Status Status
-	// Input is the JSON-encoded step input.
+	// Input is the step's arguments, {args: [input]}, as a payload.
 	Input []byte
-	// Output is the JSON-encoded output of a completed step.
+	// Output is the output payload of a completed step.
 	Output []byte
 	// Error is the JSON-encoded Error of the last failed attempt.
-	// DecodeError decodes it.
+	// DecodeErrorPayload decodes it.
 	Error []byte
 	// Attempt is the number of attempts started so far.
 	Attempt     int
@@ -238,20 +300,6 @@ type (
 		RunID       RunID
 		ResolveData ResolveData
 	}
-	// WebhookRequest is an HTTP request received by a webhook.
-	WebhookRequest struct {
-		Method string              `json:"method"`
-		URL    string              `json:"url"`
-		Header map[string][]string `json:"header"`
-		Body   []byte              `json:"body"`
-	}
-	// WebhookResponse is an HTTP response returned to a webhook caller. A zero
-	// Status is sent as 200.
-	WebhookResponse struct {
-		Status int                 `json:"status"`
-		Header map[string][]string `json:"header,omitempty"`
-		Body   []byte              `json:"body,omitempty"`
-	}
 	// HookForceClaim names the hook that took a token with a forced claim.
 	HookForceClaim struct {
 		RunID  RunID  `json:"runId"`
@@ -259,26 +307,16 @@ type (
 	}
 )
 
-// Webhook configures how a webhook answers HTTP requests to its URL.
-type Webhook struct {
-	// Method is the HTTP method the webhook accepts. Empty accepts any
-	// method.
-	Method string `json:"method,omitempty"`
-	// Manual makes the webhook wait for the workflow to record a response
-	// and send that to the caller.
-	Manual bool `json:"manual,omitempty"`
-	// Response is sent to every caller when set, and the hook is disposed
-	// after the first request. When neither Manual nor Response is set, callers
-	// receive 202 Accepted.
-	Response *WebhookResponse `json:"response,omitempty"`
-}
-
 // Hook is the view of one hook derived from its run's event log.
 // HookResumeContext is the part of a hook's run that addresses the
 // deliveries its payloads queue: the run's deployment and workflow.
 type HookResumeContext struct {
 	DeploymentID string
 	WorkflowName string
+	// EncryptionPublicKey is the run's public key in base64, which a
+	// payload sent to the hook is sealed to. It is empty when the run's
+	// payloads are not encrypted.
+	EncryptionPublicKey string
 }
 
 type Hook struct {
@@ -288,14 +326,12 @@ type Hook struct {
 	ResumeContext HookResumeContext
 	HookID        HookID
 	Token         string
-	// Metadata is the JSON-encoded metadata recorded when the hook was
-	// created.
+	// Metadata is the hook's metadata payload, recorded when it was created.
+	// A webhook's holds how it responds, as WebhookMetadata.
 	Metadata []byte
-	// Webhook is set when the hook is a webhook.
-	Webhook *Webhook
-	// WebhookEventID is the hook_received event that recorded the webhook
-	// request.
-	WebhookEventID EventID
+	// IsWebhook reports that the hook is a webhook, which HTTP requests to
+	// its URL resume.
+	IsWebhook bool
 	// TokenRetentionUntil is the earliest time terminal-run cleanup may release
 	// the token, or nil when there is no retention reservation. Active runs
 	// keep their tokens beyond it; explicit disposal always releases them
@@ -376,12 +412,25 @@ type (
 	EventsCreateRunInput struct {
 		RunID        RunID
 		WorkflowName string
-		// Input is the JSON-encoded workflow input.
+		// Input is the run's argument list, [input], as a payload.
 		Input      []byte
 		Attributes map[string]string
 		// DeploymentID pins the run to a deployment. Empty leaves the run
 		// unpinned. The World records it in run_created and on the Run.
 		DeploymentID string
+		// EncryptionPublicKey is the run's public key in base64, set when its
+		// payloads are encrypted. The World records it in run_created, on the
+		// Run, and in the ResumeContext of the run's hooks.
+		EncryptionPublicKey string
+		// ExecutionContext is plain-text metadata about how the run was
+		// started, such as ExecutionContextReplayedFromRunID. The World
+		// records it in run_created and on the Run.
+		ExecutionContext map[string]any
+		// StartHook, on a World with Capabilities().StartHook, creates the
+		// run's start hook in the same write as the run, claiming its token.
+		// When another run holds the token, no run is created and the World
+		// returns a *HookConflictError naming that run.
+		StartHook *StartHook
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
 	EventsCreateInput struct {
@@ -453,9 +502,11 @@ type (
 	}
 	// EventResult is the result of appending one event.
 	EventResult struct {
-		// EventID and EventType identify the appended or previously admitted event.
+		// EventID and EventType identify the appended or previously admitted
+		// event, and CreatedAt is when it was appended.
 		EventID   EventID
 		EventType EventType
+		CreatedAt time.Time
 		// Events holds the events selected by EventsCreateOptions.
 		Events []Event
 		// Step is the step created by a step_created event.
@@ -506,4 +557,72 @@ func EventSlot(id EventID) (uint64, error) {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
 	return slot, nil
+}
+
+// MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes.
+const MaxDeleteDataRunIDs = 100
+
+// DeleteDataOutcome is the outcome of deleting one run's data.
+type DeleteDataOutcome string
+
+const (
+	// DeleteDataDeleted reports that the call deleted the run's data.
+	DeleteDataDeleted DeleteDataOutcome = "deleted"
+	// DeleteDataAlreadyDeleted reports that the run's data was already
+	// gone, and whatever an earlier deletion left was deleted.
+	DeleteDataAlreadyDeleted DeleteDataOutcome = "already_deleted"
+	// DeleteDataSkipped reports that the run has not finished, so nothing
+	// was deleted. Its Reason is DeleteDataRunNotTerminal.
+	DeleteDataSkipped DeleteDataOutcome = "skipped"
+	// DeleteDataNotCreated reports a run cancelled before it was created.
+	// go-workflow creates a run before queueing it, so its Worlds never
+	// report it.
+	DeleteDataNotCreated DeleteDataOutcome = "not_created"
+	// DeleteDataNotFound reports that no run has the ID.
+	DeleteDataNotFound DeleteDataOutcome = "not_found"
+	// DeleteDataFailed reports that the deletion did not complete. Deleting
+	// is idempotent, so retrying finishes it.
+	DeleteDataFailed DeleteDataOutcome = "failed"
+)
+
+// DeleteDataRunNotTerminal is the Reason of a DeleteDataSkipped result.
+const DeleteDataRunNotTerminal = "run_not_terminal"
+
+// CheckDeleteDataInput returns ErrDeleteDataInvalid unless input names one
+// to MaxDeleteDataRunIDs unique run IDs.
+func CheckDeleteDataInput(input RunsDeleteDataManyInput) error {
+	if len(input.RunIDs) == 0 || len(input.RunIDs) > MaxDeleteDataRunIDs {
+		return fmt.Errorf("%w: %d run IDs, want 1 to %d", ErrDeleteDataInvalid, len(input.RunIDs), MaxDeleteDataRunIDs)
+	}
+	seen := make(map[RunID]bool, len(input.RunIDs))
+	for _, id := range input.RunIDs {
+		if seen[id] {
+			return fmt.Errorf("%w: run ID %s repeated", ErrDeleteDataInvalid, id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
+// NewDeleteDataResult returns the result of RunsDeleteDataMany for results,
+// counting their outcomes.
+func NewDeleteDataResult(results []DeleteDataResult) RunsDeleteDataManyResult {
+	summary := DeleteDataSummary{Requested: len(results)}
+	for _, result := range results {
+		switch result.Outcome {
+		case DeleteDataDeleted:
+			summary.Deleted++
+		case DeleteDataAlreadyDeleted:
+			summary.AlreadyDeleted++
+		case DeleteDataSkipped:
+			summary.Skipped++
+		case DeleteDataNotCreated:
+			summary.NotCreated++
+		case DeleteDataNotFound:
+			summary.NotFound++
+		case DeleteDataFailed:
+			summary.Failed++
+		}
+	}
+	return RunsDeleteDataManyResult{Summary: summary, Results: results}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +26,11 @@ func (e *pointerError) Error() string { return e.Reason + e.hidden }
 
 func roundTripError(t *testing.T, err error) *worlds.Error {
 	t.Helper()
-	data, marshalErr := json.Marshal(worlds.NewError(err))
-	if marshalErr != nil {
-		t.Fatal(marshalErr)
+	data, encodeErr := worlds.EncodeErrorPayload(err, worlds.PayloadOptions{})
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
 	}
-	return worlds.DecodeError(data)
+	return worlds.DecodeErrorPayload(data, nil)
 }
 
 func TestStepErrorMatchesChainAfterRoundTrip(t *testing.T) {
@@ -67,8 +68,8 @@ func TestStepErrorKeepsRecordedChainWhenWrapped(t *testing.T) {
 	}
 }
 
-func TestDecodeStepErrorAcceptsPlainMessages(t *testing.T) {
-	if err := worlds.DecodeError([]byte("boom")); err.Error() != "boom" {
+func TestDecodeStepErrorReportsInvalidPayloads(t *testing.T) {
+	if err := worlds.DecodeErrorPayload([]byte("boom"), nil); !strings.Contains(err.Error(), "invalid payload") {
 		t.Fatalf("message = %q", err.Error())
 	}
 }
@@ -111,6 +112,24 @@ func TestRetryableErrorRecordsMarkerAndCauseInErrorChain(t *testing.T) {
 		}
 		if !matched || !errors.Is(decoded, errSentinel) || decoded.Error() != "outer: sentinel" {
 			t.Fatalf("retryable marker=%v decoded=%v", matched, decoded)
+		}
+	}
+}
+
+func TestDeliveryRetryDelayWaitsForAThrottle(t *testing.T) {
+	throttle := &worlds.ThrottleError{After: time.Minute}
+	for _, test := range []struct {
+		err  error
+		want time.Duration
+	}{
+		{errors.New("failed"), 5 * time.Second},
+		{throttle, time.Minute},
+		{&worlds.ThrottleError{After: time.Second}, 5 * time.Second},
+		{&worlds.ThrottleError{}, 5 * time.Second},
+		{fmt.Errorf("deliver: %w", throttle), time.Minute},
+	} {
+		if got := worlds.DeliveryRetryDelay(test.err, 5*time.Second); got != test.want {
+			t.Errorf("DeliveryRetryDelay(%v) = %v, want %v", test.err, got, test.want)
 		}
 	}
 }

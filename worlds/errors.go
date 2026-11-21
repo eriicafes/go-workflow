@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"time"
 )
 
@@ -40,14 +41,14 @@ var (
 	ErrHookConflict = errors.New("workflow: hook token is already claimed")
 	// ErrHookForceClaimed reports that another hook took over this hook's token.
 	ErrHookForceClaimed = errors.New("workflow: hook token was force claimed")
-	// ErrStreamLocked reports that a stream write conflicts with its writer session.
-	ErrStreamLocked = errors.New("workflow: stream namespace is already being written")
+	// ErrMaxDeliveriesExceeded is the error of a run or step whose delivery
+	// was attempted more than MaxDeliveries times.
+	ErrMaxDeliveriesExceeded = errors.New("workflow: delivery exceeded the maximum attempts")
+	// ErrStreamClosed reports a write to a closed stream.
+	ErrStreamClosed = errors.New("workflow: stream is closed")
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
 	// malformed or names an unknown event type.
 	ErrEventInvalid = errors.New("workflow: event is invalid")
-	// ErrQueueMessageNotFound is returned by QueueCancel when no pending
-	// delivery has the requested message ID.
-	ErrQueueMessageNotFound = errors.New("workflow: queue message not found")
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
 	ErrWebhookRequestTooLarge = errors.New("workflow: webhook request is too large")
@@ -67,6 +68,22 @@ var (
 	// while the run was in flight. The run fails without running its
 	// compensations, since they would replay against the same log.
 	ErrCorruptedEventLog = errors.New("workflow: corrupted event log")
+	// ErrRunExpired is returned when reading the result of a run whose data
+	// was deleted.
+	ErrRunExpired = errors.New("workflow: run data expired")
+	// ErrThrottled is returned when a World refuses a request for its rate
+	// limit. A *ThrottleError carries how long it asked to wait.
+	ErrThrottled = errors.New("workflow: rate limited")
+	// ErrStartHookOptions is the error of a hook that opens its run's start
+	// hook (see Execution.OpenStartHook) with MinRetention or Force, which
+	// only the start can set.
+	ErrStartHookOptions = errors.New("workflow: a hook opening the run's start hook takes no MinRetention or Force; set the retention on StartOptions.Hook")
+	// ErrAttributeInvalid is returned for run attributes outside the limits
+	// CheckAttributes enforces.
+	ErrAttributeInvalid = errors.New("workflow: invalid run attribute")
+	// ErrDeleteDataInvalid is returned by RunsDeleteDataMany for a request
+	// without one to MaxDeleteDataRunIDs unique run IDs.
+	ErrDeleteDataInvalid = errors.New("workflow: invalid delete data request")
 
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")
@@ -90,23 +107,23 @@ func (e deliveryError) Unwrap() error { return e.cause }
 
 // replayDivergenceError identifies a declaration that does not match the event log.
 type replayDivergenceError struct {
-	Position int
-	Reason   string
+	CorrelationID string
+	Reason        string
 }
 
 func (e replayDivergenceError) Error() string {
-	return fmt.Sprintf("workflow: replay diverged at position %d: %s", e.Position, e.Reason)
+	return fmt.Sprintf("workflow: replay diverged at %s: %s", e.CorrelationID, e.Reason)
 }
 
 // corruptedEventLogError records replay divergence after recovery attempts fail.
 type corruptedEventLogError struct {
-	Position        int
+	CorrelationID   string
 	Reason          string
 	RecoveryReplays int
 }
 
 func (e corruptedEventLogError) Error() string {
-	return fmt.Sprintf("%s at position %d after %d recovery replays: %s", ErrCorruptedEventLog, e.Position, e.RecoveryReplays, e.Reason)
+	return fmt.Sprintf("%s at %s after %d recovery replays: %s", ErrCorruptedEventLog, e.CorrelationID, e.RecoveryReplays, e.Reason)
 }
 
 func (e corruptedEventLogError) Unwrap() error { return ErrCorruptedEventLog }
@@ -189,23 +206,6 @@ func NewError(err error) *Error {
 		return nil
 	}
 	return &Error{message: err.Error(), chain: appendErrorChain(nil, err)}
-}
-
-// DecodeError decodes an Error encoded with json.Marshal. Data that is
-// not an encoded Error becomes an Error whose message is data.
-func DecodeError(data []byte) *Error {
-	var value Error
-	if err := json.Unmarshal(data, &value); err != nil || (value.message == "" && value.chain == nil) {
-		return &Error{message: string(data)}
-	}
-	return &value
-}
-
-func encodeError(err error) []byte {
-	// Encoding cannot fail, because NewError keeps only the JSON that an
-	// error in the chain encoded successfully.
-	data, _ := json.Marshal(NewError(err))
-	return data
 }
 
 // Error returns the original error's message.
@@ -322,4 +322,144 @@ func errorTypeName(t reflect.Type) string {
 		return prefix + t.String()
 	}
 	return prefix + t.PkgPath() + "." + t.Name()
+}
+
+var (
+	fatalErrorTypeName     = errorTypeName(reflect.TypeFor[FatalError]())
+	retryableErrorTypeName = errorTypeName(reflect.TypeFor[RetryableError]())
+)
+
+// encodeErrorNode returns err as an Error value: each error of its chain is
+// an Error whose name is its Go type, with its JSON encoding as data and the
+// next error as its cause. FatalError and RetryableError are encoded under
+// those names.
+func encodeErrorNode(err error) (any, error) {
+	chain := NewError(err).chain
+	var next any
+	for i := len(chain) - 1; i >= 0; i-- {
+		cause := chain[i]
+		object := &dvObject{}
+		typ := "Error"
+		switch cause.Type {
+		case fatalErrorTypeName:
+			typ = "FatalError"
+		case retryableErrorTypeName:
+			typ = "RetryableError"
+		default:
+			object.set("name", cause.Type)
+		}
+		object.set("message", cause.Message)
+		object.set("stack", dvUndefined{})
+		if next != nil {
+			object.set("cause", next)
+		}
+		switch {
+		case typ == "RetryableError":
+			var data struct{ After time.Duration }
+			_ = json.Unmarshal(cause.Data, &data)
+			object.set("retryAfter", dvNumber(strconv.FormatInt(time.Now().Add(data.After).UnixMilli(), 10)))
+		case typ == "Error" && len(cause.Data) > 0:
+			data, err := jsonNode(cause.Data)
+			if err != nil {
+				return nil, err
+			}
+			object.set("data", data)
+		}
+		next = dvTyped{typ, object}
+	}
+	return next, nil
+}
+
+// decodeErrorNode returns the Error an Error value records, reading its
+// causes as its chain.
+func decodeErrorNode(node any) (error, error) {
+	if message, ok := node.(string); ok {
+		return &Error{message: message, chain: []errorCause{{Type: "Error", Message: message}}}, nil
+	}
+	var chain []errorCause
+	for node != nil {
+		typed, ok := node.(dvTyped)
+		if !ok || !isErrorType(typed.typ) {
+			break
+		}
+		object, ok := typed.value.(*dvObject)
+		if !ok {
+			return nil, fmt.Errorf("%w: %s is not an object", ErrPayloadInvalid, typed.typ)
+		}
+		cause := errorCause{Type: typed.typ}
+		if name, ok := object.get("name"); ok {
+			if text, ok := name.(string); ok && text != "" {
+				cause.Type = text
+			}
+		}
+		switch typed.typ {
+		case "FatalError":
+			cause.Type = fatalErrorTypeName
+		case "RetryableError":
+			cause.Type = retryableErrorTypeName
+			if at, ok := object.get("retryAfter"); ok {
+				if text, ok := numberText(at); ok {
+					if ms, err := strconv.ParseFloat(text, 64); err == nil {
+						after := max(time.Until(time.UnixMilli(int64(ms))), 0)
+						cause.Data, _ = json.Marshal(struct{ After time.Duration }{after})
+					}
+				}
+			}
+		}
+		if message, ok := object.get("message"); ok {
+			cause.Message, _ = message.(string)
+		}
+		if data, ok := object.get("data"); ok {
+			encoded, err := nodeJSON(data)
+			if err != nil {
+				return nil, err
+			}
+			cause.Data = encoded
+		}
+		chain = append(chain, cause)
+		node, _ = object.get("cause")
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("%w: cannot decode %s as an error", ErrPayloadInvalid, nodeKind(node))
+	}
+	return &Error{message: chain[0].Message, chain: chain}, nil
+}
+
+// HookConflictError is ErrHookConflict naming the run that holds the token.
+type HookConflictError struct{ RunID RunID }
+
+func (e *HookConflictError) Error() string {
+	return fmt.Sprintf("%s by run %s", ErrHookConflict, e.RunID)
+}
+
+func (e *HookConflictError) Is(target error) bool { return target == ErrHookConflict }
+
+// ThrottleError is ErrThrottled with how long the World asked the caller to
+// wait, as a Retry-After header gives it. A zero After means it did not say.
+type ThrottleError struct {
+	Cause error
+	After time.Duration
+}
+
+func (e *ThrottleError) Error() string {
+	if e.Cause == nil {
+		return ErrThrottled.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrThrottled, e.Cause)
+}
+
+func (e *ThrottleError) Unwrap() error { return e.Cause }
+
+func (e *ThrottleError) Is(target error) bool { return target == ErrThrottled }
+
+// DeliveryRetryDelay returns how long a World waits before retrying a
+// delivery that failed with err: backoff, or longer when err is a
+// *ThrottleError asking for more, so a retry does not run into the same rate
+// limit.
+func DeliveryRetryDelay(err error, backoff time.Duration) time.Duration {
+	var throttle *ThrottleError
+	if errors.As(err, &throttle) && throttle.After > backoff {
+		return throttle.After
+	}
+	return backoff
 }

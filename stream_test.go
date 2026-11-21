@@ -2,11 +2,13 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
+	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
 )
 
@@ -32,7 +34,7 @@ func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
 	if _, err := run.Value(ctx); err != nil {
 		t.Fatal(err)
 	}
-	writer, release, err := run.Writer(ctx)
+	writer, err := run.Writer(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,10 +44,7 @@ func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
 	if _, err := writer.Write([]byte(" world")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := release(); err != nil {
+	if err := writer.CloseStream(); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := run.Reader(ctx, workflow.ReaderOption{StartIndex: 1})
@@ -96,7 +95,7 @@ func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := "audit"
-	writer, release, err := run.Writer(ctx, workflow.WriterOption{Name: name})
+	writer, err := run.Writer(ctx, workflow.WriterOption{Name: name})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,17 +104,14 @@ func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := writer.Close(); err != nil {
+	if err := writer.CloseStream(); err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Close(); err != nil {
+	if err := writer.CloseStream(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := writer.Write([]byte("later")); err == nil {
 		t.Fatal("closed writer accepted another write")
-	}
-	if err := release(); err != nil {
-		t.Fatal(err)
 	}
 	reader, err := run.Reader(ctx, workflow.ReaderOption{Name: name, StartIndex: -2})
 	if err != nil {
@@ -130,17 +126,14 @@ func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 func TestStepStreamReaderAndWriterUseTheActiveStep(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, _ streamStepInput) (streamStepOutput, error) {
 		return workflow.Step(ctx, func(ctx context.Context, _ struct{}) (streamStepOutput, error) {
-			writer, release, err := workflow.Writer(ctx)
+			writer, err := workflow.Writer(ctx)
 			if err != nil {
 				return streamStepOutput{}, err
 			}
 			if _, err := writer.Write([]byte("step stream")); err != nil {
 				return streamStepOutput{}, err
 			}
-			if err := writer.Close(); err != nil {
-				return streamStepOutput{}, err
-			}
-			if err := release(); err != nil {
+			if err := writer.CloseStream(); err != nil {
 				return streamStepOutput{}, err
 			}
 			reader, err := workflow.Reader(ctx)
@@ -161,5 +154,84 @@ func TestStepStreamReaderAndWriterUseTheActiveStep(t *testing.T) {
 	output, err := run.Value(ctx)
 	if err != nil || output.Data != "step stream" {
 		t.Fatalf("step stream output = %#v, %v", output, err)
+	}
+}
+
+type interleaveInput struct{}
+type interleaveOutput struct{ Data string }
+
+func (interleaveInput) Workflow(interleaveOutput) {}
+
+// TestWritersDoNotWaitForEachOther checks that writers of one stream write at
+// once, that Close leaves the stream open for the others, and that a step
+// stores what it wrote when it returns without closing its writer.
+func TestWritersDoNotWaitForEachOther(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ interleaveInput) (interleaveOutput, error) {
+		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
+			first, err := workflow.Writer(ctx)
+			if err != nil {
+				return struct{}{}, err
+			}
+			second, err := workflow.Writer(ctx)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if _, err := first.Write([]byte("a")); err != nil {
+				return struct{}{}, err
+			}
+			if err := first.Flush(); err != nil {
+				return struct{}{}, err
+			}
+			if _, err := second.Write([]byte("b")); err != nil {
+				return struct{}{}, err
+			}
+			if err := first.Close(); err != nil {
+				return struct{}{}, err
+			}
+			// second is still open: the step stores its chunk on return.
+			return struct{}{}, nil
+		}, struct{}{})
+		return interleaveOutput{}, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, interleaveInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The stream is still open, so another writer can continue it.
+	writer, err := run.Writer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.CloseStream(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := run.Reader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "abc" {
+		t.Fatalf("stream = %q, %v", data, err)
+	}
+
+	// A writer of a closed stream learns it from the store of its writes.
+	late, err := run.Writer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := late.Write([]byte("late")); err != nil && !errors.Is(err, worlds.ErrStreamClosed) {
+		t.Fatal(err)
+	}
+	if err := late.Flush(); !errors.Is(err, worlds.ErrStreamClosed) {
+		t.Fatalf("flush to a closed stream = %v, want ErrStreamClosed", err)
 	}
 }

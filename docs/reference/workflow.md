@@ -171,16 +171,28 @@ constructors belong in steps or external code.
 ## Time
 
 ```go
-func Now(ctx context.Context) (time.Time, error)
+func Now(ctx context.Context) time.Time
+func RandReader(ctx context.Context) io.Reader
 func Sleep(ctx context.Context, duration time.Duration) error
 func Timer(ctx context.Context, duration time.Duration) *Result[struct{}]
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Now` | W | Recorded current time in UTC. |
+| `Now` | W, S, O | The replay clock in workflow context, and `time.Now()` elsewhere. |
+| `RandReader` | W | Reader of random bytes drawn from the run's seed. Its `Read` returns `ErrNoWorkflow` outside workflow context. |
 | `Sleep` | W | Suspends the run for `duration`. |
 | `Timer` | W | Promise that settles after `duration`. |
+
+## Attributes
+
+```go
+func SetAttributes(ctx context.Context, attributes map[string]*string, options ...SetAttributesOptions) error
+```
+
+| Function | Context | Description |
+| --- | --- | --- |
+| `SetAttributes` | W, S | Changes the run's attributes as one `attr_set` event, in key order. A nil value deletes its key. In workflow context the write draws an `attr_` ID from the run's seed. |
 
 ## Runs
 
@@ -205,7 +217,7 @@ func (r *Run[Out]) Exists(ctx context.Context) (bool, error)
 func (r *Run[Out]) WorkflowName(ctx context.Context) (string, error)
 func (r *Run[Out]) WakeUp(ctx context.Context, options ...WakeOptions) (int, error)
 func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamReader, error)
-func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error)
+func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error)
 ```
 
 | Method | Description |
@@ -297,13 +309,12 @@ func CreateWebhook[T any](ctx context.Context, options ...WebhookOption) (*Webho
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `CreateWebhook` | W | Creates a webhook with a random token. |
+| `CreateWebhook` | W | Creates a webhook with a token drawn from the run's seed. |
 
 ```go
 type WebhookOption struct {
-	Method   string         // empty accepts any method
-	Response *http.Response // static response, body up to 128 KiB
-	Manual   bool           // hold the request until RespondWith
+	Response *http.Response // static response to every request, body up to 128 KiB
+	Manual   bool           // hold each request until a step calls RespondWith
 }
 ```
 
@@ -321,37 +332,53 @@ func (w *Webhook[T]) Dispose(ctx context.Context)
 | --- | --- | --- |
 | `URL` | W | Absolute endpoint URL. |
 | `Token`, `ID` | W | Hook identity. |
-| `Request` | W | Waits for the request. |
+| `Request` | W | Waits for the next request. A webhook takes any number. |
 | `Dispose` | W | Durable disposal, deactivating the endpoint. Panics on failure, including when deferred. |
 
 ### WebhookRequest
 
 ```go
-func (r *WebhookRequest[T]) JSON() (T, error)
+type WebhookRequest[T any] struct {
+	Method string
+	URL    string
+	Header http.Header
+	// the body's stream and response stream are unexported
+}
+
+func (r *WebhookRequest[T]) Body(ctx context.Context) ([]byte, error)
+func (r *WebhookRequest[T]) JSON(ctx context.Context) (T, error)
 func (r *WebhookRequest[T]) RespondWith(ctx context.Context, response *http.Response) error
 ```
 
-Embeds the incoming HTTP request and implements JSON serialization for step input, preserving raw body and response origin.
+The Workflow SDK's `Request`. Its body is a stream of the run, so it is read
+in a step; pass the request to the step as its input.
 
 | Method | Context | Description |
 | --- | --- | --- |
-| `JSON` | W, S | Parses the recorded body without consuming it. |
-| `RespondWith` | S | Records a manual response, idempotently for the same content. |
+| `Body` | S | Reads the request body. |
+| `JSON` | S | Decodes the request body as `T`. |
+| `RespondWith` | S | Sends a manual webhook's response. The request answers with the first one sent. |
 
 ## Streams
 
 ```go
-func Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error)
+func Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error)
 func Reader(ctx context.Context, options ...ReaderOption) (StreamReader, error)
 ```
 
 | Function | Context | Description |
 | --- | --- | --- |
-| `Writer` | S | Writer for a stream of the current run, plus a release function. |
+| `Writer` | S | Writer for a stream of the current run, closed when the step returns. |
 | `Reader` | S | Reader from `StartIndex`. Negative indexes count from the end. |
 
 ```go
 type WriterOption struct{ Name string } // empty is the default stream
+type StreamWriter interface {
+	io.Writer           // buffers one chunk per Write
+	io.Closer           // stores what is buffered and gives up the writer
+	Flush() error       // waits until buffered chunks are stored
+	CloseStream() error // stores what is buffered and closes the stream for every writer
+}
 type ReaderOption struct {
 	Name       string // empty is the default stream
 	StartIndex int    // first chunk; negative counts back from the end

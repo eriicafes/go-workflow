@@ -7,7 +7,6 @@ import (
 	"time"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddb "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -33,23 +32,24 @@ func TestRetentionRequiresScheduler(t *testing.T) {
 	}
 }
 
-func TestScheduleExpiryByWorkflow(t *testing.T) {
+func TestScheduleExpiry(t *testing.T) {
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	world := testWorld(t, dynamo, queue, newFakeScheduler())
-	world.config.Retention = time.Hour
-	world.config.Retentions = map[string]time.Duration{"short": 5 * time.Minute, "kept": 0}
-	completed := time.Now()
-	for _, workflow := range []string{"short", "kept"} {
-		run := worlds.Run{RunID: worlds.RunID("wrun_" + workflow), WorkflowName: workflow, CompletedAt: &completed}
-		if err := world.scheduleExpiry(context.Background(), run); err != nil {
+	ctx := context.Background()
+	due := time.Now().Add(5 * time.Minute)
+	for _, run := range []worlds.Run{
+		{RunID: "wrun_short", WorkflowName: "short", ExpiredAt: &due},
+		{RunID: "wrun_kept", WorkflowName: "kept"},
+	} {
+		if err := world.scheduleExpiry(ctx, run); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if dynamo.has("expire-wrun_kept") {
-		t.Error("a run of a workflow kept forever was scheduled to expire")
+		t.Error("a run without ExpiredAt was scheduled to expire")
 	}
-	record, found, err := world.queueRecord(context.Background(), "expire-wrun_short")
-	if err != nil || !found || record.notBefore == nil || !record.notBefore.Equal(completed.Add(5*time.Minute)) {
+	record, found, err := world.queueRecord(ctx, "expire-wrun_short")
+	if err != nil || !found || record.notBefore == nil || !record.notBefore.Equal(due) {
 		t.Fatalf("short run's expiry = %+v, %v, %v", record, found, err)
 	}
 	if len(queue.messages) != 1 {
@@ -61,67 +61,51 @@ func TestScheduleExpiryByWorkflow(t *testing.T) {
 func TestExpireRun(t *testing.T) {
 	dynamo, queue, schedules := newFakeDynamo(), &fakeSQS{}, newFakeScheduler()
 	world := testWorld(t, dynamo, queue, schedules)
-	world.config.Retention = time.Hour
 	ctx := context.Background()
 
-	done := seedRun(t, dynamo, "wrun_done", "hook_done", "token_done", nil)
+	expired := time.Now().Add(-time.Minute)
+	done := seedRun(t, dynamo, "wrun_done", "hook_done", "token_done", &expired)
 	kept := seedRun(t, dynamo, "wrun_kept", "hook_kept", "token_kept", nil)
-	retainUntil := time.Now().Add(2 * time.Hour)
-	retained := seedRun(t, dynamo, "wrun_retained", "hook_retained", "token_retained", &retainUntil)
 
-	// The retention has passed, so the delivery is sent now.
-	finished := worlds.Run{RunID: "wrun_done", WorkflowName: "retention", CompletedAt: awsv2.Time(time.Now().Add(-2 * time.Hour))}
-	if err := world.scheduleExpiry(ctx, finished); err != nil {
+	if err := world.queueExpiry(ctx, "wrun_done", "retention", expired); err != nil {
 		t.Fatal(err)
 	}
-	if !dynamo.has("expire-wrun_done") || len(queue.messages) != 1 {
-		t.Fatalf("expiry record %v, %d messages", dynamo.has("expire-wrun_done"), len(queue.messages))
-	}
-	// Scheduling it again, as a retried append does, replaces the record.
-	if err := world.scheduleExpiry(ctx, finished); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody), 1); err != nil {
 		t.Fatal(err)
-	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(queue.messages[0].MessageBody)); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range done {
-		if dynamo.items[id] != nil {
-			t.Errorf("%s was not deleted", id)
-		}
 	}
 	if dynamo.has("expire-wrun_done") {
 		t.Error("the expiry record was not deleted")
 	}
-	for _, id := range kept {
+	// The run's items stay, as in the Workflow SDK, without its payloads.
+	for _, id := range done {
 		if dynamo.items[id] == nil {
-			t.Errorf("%s of another run was deleted", id)
+			t.Errorf("%s was deleted", id)
 		}
 	}
-
-	// A retained token reschedules the expiry for when its retention ends.
-	if err := world.queueExpiry(ctx, "wrun_retained", "retention", time.Now().Add(-time.Minute)); err != nil {
-		t.Fatal(err)
+	event := eventFromItem(dynamo.items[done[1]])
+	if payload := worlds.EventPayload(event); payload != nil {
+		t.Errorf("expired run's run_created payload = %s", payload)
 	}
-	body, _ := json.Marshal(queueMessage{ID: "expire-wrun_retained", Input: worlds.QueueInput{RunID: "wrun_retained", WorkflowName: "retention"}})
-	if err := world.deliver(ctx, nil, string(body)); err != nil {
-		t.Fatal(err)
+	if !readBool(dynamo.items[done[0]], "dataPurged") {
+		t.Error("the expired run is not marked purged")
 	}
-	for _, id := range retained {
-		if dynamo.items[id] == nil {
-			t.Errorf("%s with a retained token was deleted", id)
-		}
+	if dynamo.items[itemID(chunkKey("wrun_done", "out", 0))] != nil {
+		t.Error("the expired run's stream chunk was not deleted")
 	}
-	record, found, err := world.queueRecord(ctx, "expire-wrun_retained")
-	if err != nil || !found || record.notBefore == nil || record.notBefore.Sub(retainUntil).Abs() > time.Second {
-		t.Fatalf("rescheduled record = %+v, %v, %v", record, found, err)
+	if meta, err := world.streamMeta(ctx, "wrun_done", "out"); err != nil || meta.count != 0 || !meta.closed {
+		t.Errorf("expired run's stream = %+v, %v", meta, err)
 	}
-	if schedules.schedules[scheduleName("expire-wrun_retained")] == nil {
-		t.Fatal("the rescheduled expiry has no schedule")
+	if payload := worlds.EventPayload(eventFromItem(dynamo.items[kept[1]])); string(payload) != `"input"` {
+		t.Errorf("another run's payload = %s", payload)
+	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_done"})
+	if err != nil || run.ExpiredAt == nil || run.Input != nil {
+		t.Fatalf("expired run = %+v, %v", run, err)
 	}
 }
 
 // TestRetentionDynamo finishes runs on DynamoDB Local and checks that their
-// expiry deletes them.
+// expiry deletes their data.
 func TestRetentionDynamo(t *testing.T) {
 	client := dynamoClient(t)
 	queue, schedules := &fakeSQS{}, newFakeScheduler()
@@ -142,69 +126,73 @@ func TestRetentionDynamo(t *testing.T) {
 	}
 	for _, event := range []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeRunStarted},
-		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step", Data: []byte(`{"stepName":"step","input":1}`)},
+		{EventType: worlds.EventTypeStepCreated, CorrelationID: "step", Data: []byte(`{"stepName":"step","input":"aW5wdXQ="}`)},
 		{EventType: worlds.EventTypeHookCreated, CorrelationID: "hook", Data: []byte(`{"token":"token"}`)},
-		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"ok"}`)},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"b2s="}`)},
 	} {
 		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event}); err != nil {
 			t.Fatalf("EventsCreate(%s): %v", event.EventType, err)
 		}
 	}
+	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.ExpiredAt == nil || run.ExpiredAt.Sub(*run.CompletedAt) != time.Hour || run.Output == nil {
+		t.Fatalf("finished run = %+v, %v", run, err)
+	}
 	schedule := schedules.schedules[scheduleName("expire-"+string(runID))]
 	if schedule == nil {
 		t.Fatal("finishing the run scheduled no expiry")
 	}
-	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input)); err != nil {
+	if err := world.deliver(ctx, nil, awsv2.ToString(schedule.Target.Input), 1); err != nil {
 		t.Fatal(err)
 	}
 	// The record is due in an hour, so the delivery is sent on, not run.
-	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || run.Status != worlds.StatusCompleted {
+	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || run.Output == nil {
 		t.Fatalf("run before its expiry = %+v, %v", run, err)
 	}
 
-	if _, err := world.expireRun(ctx, worlds.QueueInput{RunID: runID, WorkflowName: "retention"}); err != nil {
+	if err := world.expireRun(ctx, worlds.QueueInput{RunID: runID, WorkflowName: "retention"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err == nil {
-		t.Fatal("the expired run is still readable")
+	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	if err != nil || run.Status != worlds.StatusCompleted || run.Input != nil || run.Output != nil || !worlds.RunDataExpired(run, time.Now()) {
+		t.Fatalf("expired run = %+v, %v", run, err)
 	}
-	var left int
-	err = world.query(ctx, &dynamodb.QueryInput{
-		KeyConditionExpression:    awsv2.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]ddb.AttributeValue{":pk": avs(runPartitionKey(string(runID)))},
-	}, func(map[string]ddb.AttributeValue) bool { left++; return true })
-	if err != nil || left != 0 {
-		t.Fatalf("%d items left in the run partition, %v", left, err)
-	}
-	if _, found, err := world.item(ctx, tokenKey("token")); err != nil || found {
-		t.Fatalf("token item left: %v, %v", found, err)
-	}
-	page, err := world.RunsList(ctx, worlds.RunsListInput{})
-	if err != nil || len(page.Data) != 0 {
-		t.Fatalf("RunsList = %v, %v", page.Data, err)
+	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step"})
+	if err != nil || step.StepName != "step" || step.Input != nil {
+		t.Fatalf("expired run's step = %+v, %v", step, err)
 	}
 }
 
-// seedRun stores a finished run's view, an event, a step, a hook, and its
-// token, and returns their item IDs.
-func seedRun(t *testing.T, dynamo *fakeDynamo, runID, hookID, token string, retainUntil *time.Time) []string {
+// seedRun stores a finished run's view, its run_created event with a
+// payload, a step, a hook, its token, and a stream chunk, and returns their
+// item IDs: the run's view first, then its event.
+func seedRun(t *testing.T, dynamo *fakeDynamo, runID, hookID, token string, expiredAt *time.Time) []string {
 	t.Helper()
 	now := time.Now()
-	hook, err := hookItem(worlds.Hook{HookID: worlds.HookID(hookID), RunID: worlds.RunID(runID), Token: token, CreatedAt: now, UpdatedAt: now, TokenRetentionUntil: retainUntil})
+	hook, err := hookItem(worlds.Hook{HookID: worlds.HookID(hookID), RunID: worlds.RunID(runID), Token: token, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := json.Marshal(worlds.DataRunCreated{WorkflowName: "retention", Input: []byte(`"input"`)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	items := []map[string]ddb.AttributeValue{
-		runItem(runView{Run: worlds.Run{RunID: worlds.RunID(runID), WorkflowName: "retention", Status: worlds.StatusCompleted, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}}),
-		eventItem(worlds.Event{RunID: worlds.RunID(runID), EventID: "evnt_1", EventType: worlds.EventTypeRunCreated, CreatedAt: now}, 1),
+		runItem(runView{Run: worlds.Run{RunID: worlds.RunID(runID), WorkflowName: "retention", Status: worlds.StatusCompleted, CreatedAt: now, UpdatedAt: now, CompletedAt: &now, ExpiredAt: expiredAt}, eventCount: 1}),
+		eventItem(worlds.Event{RunID: worlds.RunID(runID), EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: created, CreatedAt: now}, 1),
 		stepItem(stepView{Step: worlds.Step{RunID: worlds.RunID(runID), StepID: "step", StepName: "step", Status: worlds.StatusCompleted, CreatedAt: now, UpdatedAt: now}}),
 		hook,
-		tokenItem(token, tokenView{hookID: worlds.HookID(hookID), runID: worlds.RunID(runID), retainUntil: retainUntil}),
+		tokenItem(token, tokenView{hookID: worlds.HookID(hookID), runID: worlds.RunID(runID)}),
+		merge(streamKey(runID, "out"), map[string]ddb.AttributeValue{"name": avs("out"), "count": avn(1), "closed": avbool(false)}),
+		merge(chunkKey(runID, "out", 0), map[string]ddb.AttributeValue{"data": avb([]byte("chunk"))}),
 	}
-	ids := make([]string, len(items))
+	ids := make([]string, len(items)-1)
 	for i, item := range items {
-		ids[i] = itemID(item)
-		dynamo.items[ids[i]] = item
+		id := itemID(item)
+		dynamo.items[id] = item
+		if i < len(ids) {
+			ids[i] = id
+		}
 	}
 	return ids
 }

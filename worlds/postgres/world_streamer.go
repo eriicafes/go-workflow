@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -18,121 +17,6 @@ const (
 	streamRetryAfter  = 50 * time.Millisecond
 )
 
-type streamWriteSession struct {
-	mu     sync.Mutex
-	world  *World
-	runID  worlds.RunID
-	name   string
-	id     worlds.StreamID
-	closed bool
-}
-
-func (s *streamWriteSession) ID() worlds.StreamID { return s.id }
-
-func (s *streamWriteSession) Write(ctx context.Context, input worlds.StreamWriteSessionWriteInput) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return worlds.ErrRunTerminal
-	}
-	return s.world.StreamsWriteSession(ctx, worlds.StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks})
-}
-
-func (s *streamWriteSession) Close(ctx context.Context) error   { return s.close(ctx, true) }
-func (s *streamWriteSession) Release(ctx context.Context) error { return s.close(ctx, false) }
-
-func (s *streamWriteSession) close(ctx context.Context, closeStream bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.world.StreamsCloseWriteSession(ctx, worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: closeStream}); err != nil {
-		return err
-	}
-	s.closed = true
-	return nil
-}
-
-func (w *World) StreamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
-	// One conditional upsert takes the session.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	id := worlds.NewStreamID()
-	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_streams (run_id, name, session) VALUES ($1, $2, $3)
-			ON CONFLICT (run_id, name) DO UPDATE SET session = excluded.session, sequence = 0
-			WHERE go_workflow_streams.session IS NULL AND NOT go_workflow_streams.closed`, input.RunID, input.Name, id)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 1 {
-			return nil
-		}
-		var closed bool
-		if err := tx.QueryRow(ctx, `SELECT closed FROM go_workflow_streams WHERE run_id = $1 AND name = $2`, input.RunID, input.Name).Scan(&closed); err != nil {
-			return err
-		}
-		if closed {
-			return worlds.ErrRunTerminal
-		}
-		return worlds.ErrStreamLocked
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &streamWriteSession{world: w, runID: input.RunID, name: input.Name, id: id}, nil
-}
-
-func (w *World) StreamsWriteSession(ctx context.Context, input worlds.StreamsWriteSessionInput) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return w.inTx(ctx, func(tx pgx.Tx) error {
-		var closed bool
-		var session *string
-		var sequence int
-		var count int64
-		err := tx.QueryRow(ctx, `SELECT closed, session, sequence, chunk_count FROM go_workflow_streams WHERE run_id = $1 AND name = $2 FOR UPDATE`, input.RunID, input.Name).
-			Scan(&closed, &session, &sequence, &count)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return worlds.ErrStreamLocked
-		}
-		if err != nil {
-			return err
-		}
-		if closed || session == nil || *session != string(input.SessionID) || sequence != input.Sequence {
-			return worlds.ErrStreamLocked
-		}
-		if err := insertChunks(ctx, tx, input.RunID, input.Name, count, input.Chunks); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE go_workflow_streams SET sequence = sequence + 1, chunk_count = chunk_count + $3 WHERE run_id = $1 AND name = $2`,
-			input.RunID, input.Name, len(input.Chunks)); err != nil {
-			return err
-		}
-		return notifyStream(ctx, tx, input.RunID, input.Name)
-	})
-}
-
-func (w *World) StreamsCloseWriteSession(ctx context.Context, input worlds.StreamsCloseWriteSessionInput) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE go_workflow_streams SET session = NULL, sequence = 0, closed = closed OR $4
-			WHERE run_id = $1 AND name = $2 AND session = $3`, input.RunID, input.Name, input.SessionID, input.Close)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return worlds.ErrStreamLocked
-		}
-		return notifyStream(ctx, tx, input.RunID, input.Name)
-	})
-}
-
 func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
 	return w.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
@@ -142,17 +26,26 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		return err
 	}
 	return w.inTx(ctx, func(tx pgx.Tx) error {
+		// The run's row lock orders the write against a purge of its data,
+		// and a deleted run's streams take no more data.
+		var expired bool
+		err := tx.QueryRow(ctx, `SELECT coalesce(expired_at <= now(), false) FROM go_workflow_runs WHERE run_id = $1 FOR SHARE`, input.RunID).Scan(&expired)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if expired {
+			return worlds.ErrStreamClosed
+		}
 		var closed bool
-		var session *string
 		var count int64
-		err := tx.QueryRow(ctx, `INSERT INTO go_workflow_streams (run_id, name) VALUES ($1, $2)
+		err = tx.QueryRow(ctx, `INSERT INTO go_workflow_streams (run_id, name) VALUES ($1, $2)
 			ON CONFLICT (run_id, name) DO UPDATE SET run_id = excluded.run_id
-			RETURNING closed, session, chunk_count`, input.RunID, input.Name).Scan(&closed, &session, &count)
+			RETURNING closed, chunk_count`, input.RunID, input.Name).Scan(&closed, &count)
 		if err != nil {
 			return err
 		}
-		if closed || session != nil {
-			return worlds.ErrStreamLocked
+		if closed {
+			return worlds.ErrStreamClosed
 		}
 		if err := insertChunks(ctx, tx, input.RunID, input.Name, count, input.Chunks); err != nil {
 			return err
@@ -170,13 +63,9 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 		return err
 	}
 	return w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_streams (run_id, name, closed) VALUES ($1, $2, true)
-			ON CONFLICT (run_id, name) DO UPDATE SET closed = true WHERE go_workflow_streams.session IS NULL`, input.RunID, input.Name)
-		if err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO go_workflow_streams (run_id, name, closed) VALUES ($1, $2, true)
+			ON CONFLICT (run_id, name) DO UPDATE SET closed = true`, input.RunID, input.Name); err != nil {
 			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return worlds.ErrStreamLocked
 		}
 		return notifyStream(ctx, tx, input.RunID, input.Name)
 	})
@@ -224,7 +113,11 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string, start, limit int) (worlds.StreamChunksResult, bool, error) {
 	var closed bool
 	var count int64
-	err := w.pool.QueryRow(ctx, `SELECT closed, chunk_count FROM go_workflow_streams WHERE run_id = $1 AND name = $2`, runID, name).Scan(&closed, &count)
+	// A run whose expired_at has passed reads as empty and closed, before
+	// Worker deletes its chunks.
+	err := w.pool.QueryRow(ctx, `SELECT s.closed OR coalesce(r.expired_at <= now(), false), CASE WHEN r.expired_at <= now() THEN 0 ELSE s.chunk_count END
+		FROM go_workflow_streams s LEFT JOIN go_workflow_runs r ON r.run_id = s.run_id
+		WHERE s.run_id = $1 AND s.name = $2`, runID, name).Scan(&closed, &count)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return worlds.StreamChunksResult{}, false, err
 	}

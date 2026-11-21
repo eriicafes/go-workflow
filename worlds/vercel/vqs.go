@@ -9,11 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -21,12 +24,15 @@ import (
 var errDeliveryGone = errors.New("workflow/vercel: queue message is no longer available")
 
 const (
-	// vqsMaxDelay is the longest Vqs-Delay-Seconds and Vqs-Retention-Seconds.
-	vqsMaxDelay = 7 * 24 * time.Hour
-	// vqsMaxQueueDelay is the longest delay published to Vercel Queues, so a
-	// message keeps a day of retention after it becomes visible. Longer delays
-	// are delivered in hops, or go through QStash when it is configured.
-	vqsMaxQueueDelay = 6 * 24 * time.Hour
+	// vqsMaxQueueDelay is the longest delay published to Vercel Queues: a
+	// message keeps Vercel's default retention of 24 hours, so it is still
+	// retained for an hour after it becomes visible.
+	// Longer delays are delivered in hops.
+	vqsMaxQueueDelay = 23 * time.Hour
+	// vqsMinRetry is the shortest visibility timeout Vercel Queues accepts.
+	vqsMinRetry = 5 * time.Second
+	// vqsMaxRetry is the longest backoff of a failed delivery.
+	vqsMaxRetry = 15 * time.Minute
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
 	vqsLease          = 5 * time.Minute
@@ -35,13 +41,33 @@ const (
 	vqsPayloadMaxSize = 1 << 20
 )
 
-// vqsMessage is the Vercel Queue payload. The delivery itself is the Redis
-// queue record it names.
-type vqsMessage struct {
-	ID string `json:"id"`
+// queueURL returns the Vercel Queues API root of region: Config.QueueURL when
+// it was set, and region's own host otherwise. Through Vercel's API proxy,
+// the x-vercel-queue-region header names the region the proxy forwards to.
+func (w *World) queueURL(region worlds.Region) (string, http.Header) {
+	var header http.Header
+	if w.api.proxy {
+		header = http.Header{"X-Vercel-Queue-Region": {string(region)}}
+	}
+	if w.config.QueueURL != "" {
+		return w.config.QueueURL, header
+	}
+	return "https://" + string(region) + ".vercel-queue.com/api/v3", header
 }
 
-func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte, header http.Header) (*http.Response, error) {
+// messageRegion returns the region a message of runID is sent to: the region
+// its run ID carries, else that of VERCEL_REGION, else iad1.
+func messageRegion(runID worlds.RunID) worlds.Region {
+	rest, _ := strings.CutPrefix(string(runID), runIDPrefix)
+	if value, err := ulid.ParseStrict(rest); err == nil && value[0]&runIDTagBit != 0 {
+		if region, ok := runRegion(runID); ok {
+			return region
+		}
+	}
+	return envRegion()
+}
+
+func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, path string, body []byte, header http.Header) (*http.Response, error) {
 	token, err := w.config.OIDCToken(ctx)
 	if err != nil {
 		return nil, err
@@ -50,12 +76,15 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, w.config.QueueURL+path, reader)
+	base, routing := w.queueURL(region)
+	request, err := http.NewRequestWithContext(ctx, method, base+path, reader)
 	if err != nil {
 		return nil, err
 	}
-	for key, values := range header {
-		request.Header[key] = values
+	for _, values := range []http.Header{routing, header} {
+		for key, value := range values {
+			request.Header[key] = value
+		}
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
@@ -67,32 +96,30 @@ func (w *World) vqsRequest(ctx context.Context, method, path string, body []byte
 	return w.http.Do(request)
 }
 
-// publishVQS sends messageID to topic, or to Config.Topic when it is empty,
+// publishVQS sends message to its topic, or to Config.Topic when it has none,
 // addressed to deploymentID when it is set. key is the idempotency key, the
-// message ID itself or, for a hop of a long timer, unique to that hop, so only a
-// retried publish of the same message is dropped. Runtime idempotency keys are
-// reused across distinct deliveries and Vercel would silently drop those for up
-// to 24 hours.
-func (w *World) publishVQS(ctx context.Context, messageID, key, topic string, delay time.Duration, deploymentID string) error {
+// message ID itself or, for a hop of a long timer, unique to that hop, so only
+// a retried publish of the same message is dropped. Runtime idempotency keys
+// are reused across distinct deliveries and Vercel would silently drop those
+// for up to 24 hours.
+func (w *World) publishVQS(ctx context.Context, message queueMessage, key string, delay time.Duration, deploymentID string) error {
+	topic := message.Topic
 	if topic == "" {
 		topic = w.config.Topic
 	}
-	body, err := json.Marshal(vqsMessage{ID: messageID})
+	body, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 	header := http.Header{}
 	header.Set("Vqs-Idempotency-Key", key)
-	// Retain every message for the maximum so a delayed or failing delivery
-	// is not dropped before its record is processed.
-	header.Set("Vqs-Retention-Seconds", strconv.Itoa(int(vqsMaxDelay/time.Second)))
 	if seconds := delaySeconds(delay); seconds > 0 {
 		header.Set("Vqs-Delay-Seconds", strconv.FormatInt(seconds, 10))
 	}
 	if deploymentID != "" {
 		header.Set("Vqs-Deployment-Id", deploymentID)
 	}
-	response, err := w.vqsRequest(ctx, http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
+	response, err := w.vqsRequest(ctx, messageRegion(message.RunID), http.MethodPost, "/topic/"+url.PathEscape(topic), body, header)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: publish queue message: %w", err)
 	}
@@ -116,6 +143,9 @@ type vqsDelivery struct {
 	// VisibilityDeadline is when the current lease expires, when known.
 	VisibilityDeadline time.Time
 	Body               []byte
+	// Region is the region of the queue that delivered the message, which
+	// its lease is renewed and released in.
+	Region worlds.Region
 }
 
 // parseDelivery reads a push delivery. Binary-mode deliveries (ce-type
@@ -161,6 +191,12 @@ func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	if delivery.Topic == "" || delivery.ConsumerGroup == "" || delivery.MessageID == "" {
 		return vqsDelivery{}, errors.New("workflow/vercel: invalid queue delivery")
 	}
+	// Leases live in the region whose queue delivered the message, which
+	// Vercel names in ce-vqsregion, as @vercel/queue routes its acks.
+	var ok bool
+	if delivery.Region, ok = knownRegion(worlds.Region(request.Header.Get("Ce-Vqsregion"))); !ok {
+		delivery.Region = envRegion()
+	}
 	if delivery.ReceiptHandle == "" {
 		return w.receiveByID(request.Context(), delivery)
 	}
@@ -175,7 +211,7 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 	header := http.Header{}
 	header.Set("Accept", "application/x-ndjson")
 	header.Set("Vqs-Visibility-Timeout-Seconds", strconv.Itoa(int(vqsLease/time.Second)))
-	response, err := w.vqsRequest(ctx, http.MethodPost, w.consumerPath(delivery)+"/id/"+url.PathEscape(delivery.MessageID), nil, header)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPost, w.consumerPath(delivery)+"/id/"+url.PathEscape(delivery.MessageID), nil, header)
 	if err != nil {
 		return vqsDelivery{}, fmt.Errorf("workflow/vercel: receive queue message: %w", err)
 	}
@@ -209,7 +245,7 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 
 // acknowledge removes the delivery from its consumer group.
 func (w *World) acknowledge(ctx context.Context, delivery vqsDelivery) error {
-	response, err := w.vqsRequest(ctx, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, nil)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodDelete, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), nil, nil)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: acknowledge queue message: %w", err)
 	}
@@ -227,7 +263,7 @@ func (w *World) setVisibility(ctx context.Context, delivery vqsDelivery, timeout
 	if err != nil {
 		return err
 	}
-	response, err := w.vqsRequest(ctx, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, nil)
+	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPatch, w.consumerPath(delivery)+"/lease/"+url.PathEscape(delivery.ReceiptHandle), body, nil)
 	if err != nil {
 		return fmt.Errorf("workflow/vercel: extend queue lease: %w", err)
 	}
@@ -251,11 +287,15 @@ func delaySeconds(delay time.Duration) int64 {
 	return int64((delay + time.Second - 1) / time.Second)
 }
 
-// retryDelay backs off failed deliveries from 5 seconds to 5 minutes.
+// retryDelay backs off failed deliveries: a second doubling with each
+// delivery up to 15 minutes, with up to 25% jitter either way, and never less
+// than the 5 seconds Vercel Queues accepts.
 func retryDelay(deliveryCount int) time.Duration {
-	delay := 5 * time.Second
-	for range min(max(deliveryCount-1, 0), 6) {
+	delay := time.Second
+	for range min(max(deliveryCount-1, 0), 10) {
 		delay *= 2
 	}
-	return min(delay, 5*time.Minute)
+	delay = min(delay, vqsMaxRetry)
+	jitter := time.Duration((rand.Float64()*2 - 1) * 0.25 * float64(delay))
+	return max(delay+jitter, vqsMinRetry)
 }

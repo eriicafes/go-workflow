@@ -66,12 +66,13 @@ lambdaurl.Start(awsworld.HTTP(world))
 | Field | Meaning |
 | --- | --- |
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
+| `EncryptionKey` | Optional. 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
 | `TableName` | Required. DynamoDB table, laid out as `CreateTable` creates it. |
 | `QueueURL` | Required. SQS standard queue that carries deliveries of unrouted workflows. |
 | `Queues` | Optional. Further queues by name, standard or FIFO. See [Queue routing](#queue-routing). |
 | `Routes` | Optional. Workflow name to queue name, built with `Routes` and `Route`. |
 | `Scheduler` | Optional. Delivers work due more than 15 minutes ahead, and every delayed delivery to a FIFO queue. |
-| `Retention`, `Retentions` | Optional. How long finished runs are kept, by default and per workflow. Over 15 minutes requires `Scheduler`. See [Retention](#retention). |
+| `Retention`, `Retentions` | Optional. How long finished runs keep their data, by default and per workflow. Over 15 minutes requires `Scheduler`. See [Retention](#retention). |
 
 `SchedulerConfig` requires `Client`, `TargetARN` (the queue's ARN), and
 `RoleARN` (the role Scheduler assumes to send to the queue). `Group` defaults to
@@ -138,8 +139,12 @@ early is sent again with the remaining delay. Otherwise it executes the
 delivery, extending the message's visibility every 30 seconds while it runs,
 and deletes the record on success. On failure it reports the message in
 `BatchItemFailures` so SQS redelivers only that message, after a backoff that
-doubles from one second with each receive up to 15 minutes. Configure a
-dead-letter queue to collect deliveries that keep failing.
+doubles from one second with each receive up to 15 minutes, or the wait a
+`*worlds.ThrottleError` asks for when that is longer, up to 12 hours. The receive count
+is the delivery's attempt, so after 48 the runtime fails the run or step and
+the message is deleted. Give the dead-letter queue a `max_receive_count` above
+48, as the Terraform module does, so it only collects messages the runtime
+could not settle.
 
 Lambda runs the handler with the invocation's deadline. Once a batch is
 halfway to it, the handler starts no further messages and reports them in
@@ -161,25 +166,38 @@ deletes every message, so failed deliveries are not retried.
 `Scheduler` can be omitted when the World only serves HTTP requests, or when no
 delay is longer than 15 minutes.
 
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` writes the run, its `run_created`, the hook
+`hook_<run ULID>` and its `TOKEN#` item in one transaction, conditioned on the
+token being unheld. When another run holds it, nothing is written and it
+returns a `*worlds.HookConflictError` naming that run.
+
 ## Retention
 
-With `Config.Retention` set, appending a run's `run_completed`, `run_failed`
-or `run_cancelled` also queues an expiry delivery due its workflow's retention
-(`Config.Retentions`, else `Retention`) later, as a
-`QUEUE#expire-<runID>` record published like any delivery (through Scheduler
-beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
-ID is fixed per run, so an append retried after publishing failed schedules
-it again rather than twice, and a retried append of a terminal event does so
-too.
+A run's data is deleted as the Workflow SDK deletes it: the run, step, event,
+hook and token items stay with their IDs, statuses, timestamps and attributes,
+the payloads in the run's `EVENT#` items are removed, and its streams' chunk
+items are deleted, leaving each `STREAM#` item empty and closed. The run's
+`expiredAt` is set first, so its payloads read as gone before they are
+deleted, and `dataPurged` is set last.
 
-When the delivery is due, the `Queue` handler deletes the run's hooks (found
-through `HOOKS#<runID>` on `list_group`), the tokens they still own, and every
-item of the `RUN#<runID>` partition with `BatchWriteItem`, the run's view last,
-so a cleanup cut short is retried by SQS while the run still exists. Index
-entries are attributes of these items, so the run leaves `RunsList` and
-`HooksList` with them. A hook whose token retention has not ended defers the
-expiry until it ends. Runs that are still pending or running never expire,
-and runs that finished before `Retention` was set are kept.
+- **`$retention: "0"`.** The commit that finishes the run sets `expiredAt`,
+  and the process that appended it deletes the data right after. If that
+  fails, it queues an expiry delivery to finish it.
+- **`RunsDeleteDataMany`.** Deletes a finished run's data on demand.
+- **`Config.Retention`.** The commit that finishes the run sets `expiredAt` to
+  its completion time plus its workflow's retention (`Config.Retentions`, else
+  `Retention`), and the append queues an expiry delivery due then, as a
+  `QUEUE#expire-<runID>` record published like any delivery (through Scheduler
+  beyond 15 minutes, so `New` requires `Scheduler` for a longer retention). Its
+  ID is fixed per run, so a retried append schedules it again rather than
+  twice. The `Queue` handler deletes the data when it is due, and SQS retries a
+  deletion cut short. Changing the retention applies to runs that finish
+  afterwards.
+
+A step that settles after its run's data was deleted has its result scrubbed as
+it lands, and a deleted run's streams refuse writes.
 
 ## Table
 
@@ -266,7 +284,7 @@ and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP
 | `deletion_protection` | `true` | Table deletion protection. |
 | `visibility_timeout_seconds` | `360` | Keep above the worker Lambda timeout. |
 | `message_retention_seconds` | `1209600` | Queue and dead-letter retention (14 days). |
-| `max_receive_count` | `10` | Deliveries before a message moves to the dead-letter queue. |
+| `max_receive_count` | `50` | Deliveries before a message moves to the dead-letter queue. Must exceed the runtime's 48, so it fails the run first. |
 | `enable_scheduler` | `true` | Create the schedule group and Scheduler role. |
 | `worker_function_name` | `null` | Worker Lambda. Setting it creates the event source mapping. |
 | `batch_size` | `10` | Messages per worker invocation. |
@@ -280,9 +298,9 @@ and, with the scheduler enabled, `WORKFLOW_QUEUE_ARN`, `WORKFLOW_SCHEDULER_GROUP
 Both roles need, on the table and its indexes (`<table-arn>` and
 `<table-arn>/index/*`): `dynamodb:GetItem`, `PutItem`, `UpdateItem`,
 `DeleteItem`, `Query`, and `BatchGetItem`. Both need `sqs:SendMessage` on the
-queue. With `Retention`, the worker also needs `dynamodb:BatchWriteItem` to
-delete expired runs, and the API role needs `scheduler:CreateSchedule` if it
-cancels runs, since a finished run schedules its own expiry.
+queue. Both need `dynamodb:BatchWriteItem` to delete a finished run's stream
+chunks, and with `Retention` the API role needs `scheduler:CreateSchedule` if
+it cancels runs, since a finished run schedules its own expiry.
 
 The worker also needs `sqs:ReceiveMessage`, `DeleteMessage`,
 `ChangeMessageVisibility`, and `GetQueueAttributes`, and, with `Scheduler`, `scheduler:CreateSchedule` and

@@ -30,6 +30,7 @@ pool and leaves it open on `Close`.
 | Config | Default | Meaning |
 |---|---|---|
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. Webhook URLs are built from it. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](https://go-workflow.vercel.app/guide/encryption). |
 | `URL` | required by `Open` | Connection string. |
 | `PollInterval` | 250ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
@@ -70,7 +71,7 @@ the connection string or pool config to use a dedicated schema.
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
 | `go_workflow_hook_tokens` | Token ownership; the primary key makes a token single-owner. |
 | `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
-| `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
+| `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
 The event log is the only copy of payloads. The run, step, and hook views
@@ -113,8 +114,7 @@ increments `attempts`, then executes each with the runtime:
 - shutdown releases the lease so another worker picks the row up immediately.
 
 Delivery is at least once. The runtime's event admission makes duplicate
-deliveries inert. `QueueCancel` deletes the row; a row cancelled while being
-executed is simply not found when the worker settles it.
+deliveries inert.
 
 ## Retention
 

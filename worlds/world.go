@@ -9,8 +9,6 @@ package worlds
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -20,10 +18,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 )
-
-// SpecVersion is the RPC protocol version implemented by this package. A
-// World returns it from its SpecVersion method.
-const SpecVersion = 1
 
 // World is the backend a run is recorded in. It provides event storage, a
 // delivery queue, and streams. The runtime, the client, and HTTPHandler all
@@ -40,8 +34,6 @@ type World interface {
 	Analytics() Analytics
 	// Capabilities reports the optional behavior this World implements.
 	Capabilities() Capabilities
-	// SpecVersion returns the RPC protocol version implemented by this World.
-	SpecVersion() int
 	// DeploymentID returns the deployment whose code this World's deliveries
 	// execute, or "" when the World has no deployments. Runs created through
 	// the World's Client record it, and the Runtime enforces it only when
@@ -50,29 +42,66 @@ type World interface {
 }
 
 // Capabilities reports optional World behavior. A capability being false does
-// not remove a method from World. Unsupported attribute writes are successful
-// no-ops, while Analytics returns nil.
-//
-// DeploymentAffinity reports that the World's deployments are atomic and its
-// queue can address a delivery to one, as Vercel's can. Runs created through
-// the World's Client are then pinned to World.DeploymentID, and the Runtime
-// replays a run only on the deployment it is pinned to, re-routing other
-// deliveries there.
+// not remove a method from World.
 type Capabilities struct {
-	Analytics          bool `cbor:"analytics"`
-	SetAttributes      bool `cbor:"setAttributes"`
+	// Analytics reports that the World collects analytics, so Analytics
+	// returns them rather than nil.
+	Analytics bool `cbor:"analytics"`
+	// SetAttributes reports that the World stores attribute writes. Without
+	// it, they are successful no-ops.
+	SetAttributes bool `cbor:"setAttributes"`
+	// DeploymentAffinity reports that the World's deployments are atomic and
+	// its queue can address a delivery to one. Runs created through the
+	// World's Client are then pinned to World.DeploymentID, and the Runtime
+	// replays a run only on the deployment it is pinned to, re-routing other
+	// deliveries there.
 	DeploymentAffinity bool `cbor:"deploymentAffinity"`
+	// DeleteData reports that the World implements RunsDeleteDataMany, which
+	// is optional.
+	DeleteData bool `cbor:"deleteData"`
+	// StartHook reports that EventsCreateRun creates a run's StartHook with
+	// it.
+	StartHook bool `cbor:"startHook"`
+	// RegionalRunIDs reports that the World implements RegionalRunIDs, so
+	// clients ask it for new run IDs (Client.RunsNewID).
+	RegionalRunIDs bool `cbor:"regionalRunIds"`
 }
 
 // LatestDeployments is implemented by a World with deployment affinity that
-// tracks its newest deployment. Runs of workflows marked
-// workflow.StartOnLatest are pinned to LatestDeploymentID instead of the
-// deployment that starts them, so a chain of runs that each start the next
-// moves to new code as it is deployed.
+// tracks its newest deployment. Runs started with LatestDeployment are pinned
+// to LatestDeploymentID instead of the deployment that starts them, so a chain
+// of runs that each start the next moves to new code as it is deployed.
 type LatestDeployments interface {
 	// LatestDeploymentID returns the newest deployment this World's
 	// deployment knows of, or "" when it tracks none.
 	LatestDeploymentID(context.Context) (string, error)
+}
+
+// Region is the region a run's data lives in and its deliveries are routed
+// to. Its values belong to the World that uses it, and the empty Region
+// leaves it to the World. Only a World that implements RegionalRunIDs uses
+// it; the others ignore it.
+type Region string
+
+// RegionalRunIDs is implemented by a World whose run IDs carry the region the
+// run's data lives in.
+type RegionalRunIDs interface {
+	// RegionRunID returns id tagged with region, or with the World's own
+	// region for the empty Region. It is deterministic, so a child run's ID
+	// derived from its start step stays the same across attempts.
+	RegionRunID(id RunID, region Region) RunID
+	// RegionForRunID returns the region a run's data lives in, from its ID
+	// alone, and false when id is not a run ID.
+	RegionForRunID(id RunID) (Region, bool)
+}
+
+// RegionRunID returns id tagged with region when world implements
+// RegionalRunIDs, and id unchanged otherwise.
+func RegionRunID(world World, id RunID, region Region) RunID {
+	if regional, ok := world.(RegionalRunIDs); ok {
+		return regional.RegionRunID(id, region)
+	}
+	return id
 }
 
 // NormalizeBaseURL validates an HTTP handler's public URL and removes its
@@ -160,62 +189,41 @@ type HookID string
 // the prefix "wait_".
 type WaitID string
 
-// StreamID identifies a stream writer session. Generated stream IDs have the
-// prefix "strm_".
-type StreamID string
-
 // EventID identifies an event within its run's event log. It encodes the
 // event's position in the log (see EventIDForSlot and EventSlot).
 type EventID string
 
-// NewChildRunID returns the ID of the run started by step stepID. It shares the
-// step ID's ULID, so every attempt of the step derives the same run ID.
+// NewRunID returns a new run ID: wrun_ and a ULID.
+func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
+
+// NewChildRunID returns the run ID of the run started by step stepID: wrun_
+// and the step ID's ULID, so every attempt of the step derives the same ID.
 func NewChildRunID(stepID StepID) RunID {
 	return RunID("wrun_" + strings.TrimPrefix(string(stepID), "step_"))
 }
 
-// NewRunID returns a new unique run ID.
-func NewRunID() RunID { return RunID("wrun_" + ulid.Make().String()) }
+// NewStreamName returns a new stream name: strm_ and a ULID.
+func NewStreamName() string { return "strm_" + ulid.Make().String() }
 
-// NewStepID returns a new unique step ID.
-func NewStepID() StepID { return StepID("step_" + ulid.Make().String()) }
+// NewWriterID returns a new stream writer ID: wrtr_ and a ULID.
+func NewWriterID() string { return "wrtr_" + ulid.Make().String() }
 
-// NewHookID returns a new unique hook ID.
-func NewHookID() HookID { return HookID("hook_" + ulid.Make().String()) }
+// hookTokenAlphabet is Nano ID's URL alphabet, whose 64 characters each take
+// six bits of a random byte.
+const hookTokenAlphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
 
-// NewWaitID returns a new unique wait ID.
-func NewWaitID() WaitID { return WaitID("wait_" + ulid.Make().String()) }
-
-// NewStreamID returns a new unique stream writer session ID.
-func NewStreamID() StreamID { return StreamID("strm_" + ulid.Make().String()) }
-
-const hookTokenAlphabet = "useandom-26T19834_0v5b7qw9zxcgfkrljAIJPVYKhpGUCXW"
-
-// NewRunHookToken returns a 21-character token derived from the run and hook
-// declaration position. It stays the same across replays, including retries
-// before the hook registration is committed.
-func NewRunHookToken(run Run, position int) string {
-	seed := sha256.Sum256(fmt.Appendf(nil, "%s:%s:%s:hook:%d", run.RunID, run.WorkflowName, run.DeploymentID, position))
-	return base64.RawURLEncoding.EncodeToString(seed[:])[:21]
-}
-
-// NewHookToken returns a new random hook token, which is a 21-character Nano
-// ID.
+// NewHookToken returns a new hook token: 21 random characters of Nano ID's
+// URL alphabet.
 func NewHookToken() string {
-	bytes := make([]byte, 21)
-	limit := 256 - 256%len(hookTokenAlphabet)
-	for index := 0; index < len(bytes); {
-		var random [1]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			panic(err)
-		}
-		if int(random[0]) >= limit {
-			continue
-		}
-		bytes[index] = hookTokenAlphabet[int(random[0])%len(hookTokenAlphabet)]
-		index++
+	var random [21]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		panic(err)
 	}
-	return string(bytes)
+	token := make([]byte, len(random))
+	for index, value := range random {
+		token[index] = hookTokenAlphabet[value&63]
+	}
+	return string(token)
 }
 
 type (
@@ -383,14 +391,42 @@ func RunDeploymentID(ctx context.Context, world World, runID RunID) (string, err
 	return run.DeploymentID, err
 }
 
-// StartDeploymentID returns the deployment a new run is pinned to: the
-// World's latest deployment when latest is true and the World implements
-// LatestDeployments and knows one, otherwise World.DeploymentID.
-func StartDeploymentID(ctx context.Context, world World, latest bool) (string, error) {
-	if tracker, ok := world.(LatestDeployments); ok && latest && world.Capabilities().DeploymentAffinity {
-		id, err := tracker.LatestDeploymentID(ctx)
-		if err != nil || id != "" {
-			return id, err
+// Deployment is the deployment a new run starts on. Its zero value is the
+// deployment that starts the run.
+type Deployment struct {
+	id     string
+	latest bool
+}
+
+// LatestDeployment starts a run on the World's latest deployment.
+var LatestDeployment = Deployment{latest: true}
+
+// DeploymentWithID starts a run on the deployment id. An empty id is the
+// zero Deployment.
+func DeploymentWithID(id string) Deployment { return Deployment{id: id} }
+
+// ID returns the deployment DeploymentWithID named, or "" for the current or
+// latest deployment.
+func (d Deployment) ID() string { return d.id }
+
+// Latest reports whether d is LatestDeployment.
+func (d Deployment) Latest() bool { return d.latest }
+
+// StartDeploymentID returns the deployment a new run is pinned to. On a World
+// with DeploymentAffinity, that is the deployment DeploymentWithID named, or
+// for LatestDeployment the World's latest one when it implements
+// LatestDeployments and knows one. Otherwise it is World.DeploymentID, so on
+// Worlds without deployments the option changes nothing.
+func StartDeploymentID(ctx context.Context, world World, deployment Deployment) (string, error) {
+	if world.Capabilities().DeploymentAffinity {
+		if deployment.id != "" {
+			return deployment.id, nil
+		}
+		if tracker, ok := world.(LatestDeployments); ok && deployment.latest {
+			id, err := tracker.LatestDeploymentID(ctx)
+			if err != nil || id != "" {
+				return id, err
+			}
 		}
 	}
 	return world.DeploymentID(), nil
@@ -410,4 +446,19 @@ func RunDelivery(ctx context.Context, world World, runID RunID) (QueueInput, err
 	}
 	input.WorkflowName = run.WorkflowName
 	return input, nil
+}
+
+// HookPayloadOptions returns how a payload sent to hook from outside its run
+// is written: sealed to the run's public key, or, for a run that published
+// none, encrypted with the run's key from client, or unencrypted when the run
+// has no key.
+func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadOptions, error) {
+	if publicKey := DecodePublicKey(hook.ResumeContext.EncryptionPublicKey); publicKey != nil {
+		return PayloadOptions{SealTo: publicKey}, nil
+	}
+	keys, err := client.RunKeys(ctx, RunKeysInput{RunID: hook.RunID, DeploymentID: hook.ResumeContext.DeploymentID})
+	if err != nil {
+		return PayloadOptions{}, err
+	}
+	return PayloadOptions{Keys: keys}, nil
 }

@@ -17,12 +17,12 @@ installed contract. `go doc github.com/eriicafes/go-workflow/workflowtest`
 describes the public conformance test entry points.
 
 `World` embeds `Storage`, `Queue`, and `Streamer` and exposes BaseURL,
-Analytics, Capabilities, SpecVersion, and DeploymentID. A World with
-deployment affinity can implement `worlds.LatestDeployments` so runs of
-workflows marked `workflow.StartOnLatest` start on its newest deployment.
+Analytics, Capabilities, and DeploymentID. A World with
+deployment affinity can implement `worlds.LatestDeployments` so runs started
+with `workflow.LatestDeployment` start on its newest deployment, and
+`worlds.StreamWriterOpener` to hold a connection for each stream writer.
 Report supported optional capabilities. Unsupported attribute writes are
-successful no-ops;
-unsupported analytics returns nil.
+successful no-ops; unsupported analytics returns nil.
 
 Read [backend contracts](references/contracts.md) for the transaction,
 ownership, delivery, stream, and retention invariants. Reuse the SDK's exported `Data*`
@@ -39,14 +39,14 @@ For storage shared between processes, also run
 at the same isolated data.
 
 Add targeted tests for changed semantics: concurrent fenced appends, contested
-hook claims, stale stream writers, and delivery failures after a committed
+hook claims, concurrent stream writers, and delivery failures after a committed
 append are useful boundaries. Verify that retrying a delivery recovers from a
 committed write whose acknowledgement was lost. Assert recorded outcomes and
 invariants rather than exactly-once callback execution.
 
 Exercise runtime integration with `testworld.NewManual` when precise delivery
-control is needed. A consumer sets `input.MessageID` to the message's ID,
-calls `Runtime.Execute(ctx, input)`, acknowledges on nil, and retries on error.
+control is needed. A consumer sets `input.MessageID` to the message's ID and
+`input.Attempt` to its 1-based delivery count, calls `Runtime.Execute(ctx, input)`, acknowledges on nil, and retries on error.
 Persist and redeliver the original QueueInput including its recovery counters
 and deployment metadata, with the same message ID on every redelivery.
 

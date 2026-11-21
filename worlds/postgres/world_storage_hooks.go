@@ -105,7 +105,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		}
 		runs := map[worlds.RunID]*appender{}
 		for _, id := range ids {
-			run, err := lockRun(ctx, tx, id)
+			run, err := w.lockRun(ctx, tx, id)
 			if errors.Is(err, worlds.ErrRunNotFound) && id != input.RunID {
 				continue
 			}
@@ -195,7 +195,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.token, " + metadata + ", h.webhook, h.webhook_event_id, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
+	return "h.hook_id, h.run_id, h.workflow_name, h.deployment_id, h.encryption_public_key, h.token, " + metadata + ", h.is_webhook, h.created_at, h.updated_at, h.received_at, h.token_retention_until, h.claimed_from, h.force_claimed_by, h.disposed_at"
 }
 
 // hookJoin joins the hook's hook_created event in its own run, unless resolve
@@ -204,17 +204,24 @@ func hookJoin(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		return ""
 	}
-	return " LEFT JOIN go_workflow_events me ON me.run_id = h.run_id AND me.slot = h.created_slot"
+	return " LEFT JOIN go_workflow_events me ON me.run_id = h.run_id AND me.slot = h.created_slot" + runLive("h.run_id")
 }
 
 func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
-	var metadata, webhook, claimed, taken []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.Token, &metadata, &webhook, &hook.WebhookEventID, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
+	var metadata, claimed, taken []byte
+	if err := row.Scan(&hook.HookID, &hook.RunID, &hook.ResumeContext.WorkflowName, &hook.ResumeContext.DeploymentID, &hook.ResumeContext.EncryptionPublicKey, &hook.Token, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.UpdatedAt, &hook.ReceivedAt, &hook.TokenRetentionUntil, &claimed, &taken, &hook.DisposedAt); err != nil {
 		return worlds.Hook{}, err
 	}
 	if metadata != nil {
-		hook.Metadata = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeHookCreated, Data: metadata})
+		if hook.HookID == worlds.StartHookID(hook.RunID) {
+			// A start hook's created slot is its run's run_created.
+			if start := worlds.RunStartHook(metadata); start != nil {
+				hook.Metadata = start.Metadata
+			}
+		} else {
+			hook.Metadata = worlds.EventPayload(worlds.Event{EventType: worlds.EventTypeHookCreated, Data: metadata})
+		}
 	}
 	if len(claimed) > 0 {
 		if err := json.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
@@ -223,12 +230,6 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 	}
 	if len(taken) > 0 {
 		if err := json.Unmarshal(taken, &hook.ForceClaimedBy); err != nil {
-			return worlds.Hook{}, err
-		}
-	}
-	if webhook != nil {
-		hook.Webhook = &worlds.Webhook{}
-		if err := json.Unmarshal(webhook, hook.Webhook); err != nil {
 			return worlds.Hook{}, err
 		}
 	}

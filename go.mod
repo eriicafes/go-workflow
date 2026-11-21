@@ -8,12 +8,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.42.1
 	github.com/aws/aws-sdk-go-v2/service/scheduler v1.25.3
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.41.0
+	github.com/coder/websocket v1.8.14
 	github.com/digitallysavvy/go-ai v0.5.2
 	github.com/eriicafes/go-dev v0.3.0
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/klauspost/compress v1.20.5
 	github.com/oklog/ulid/v2 v2.1.1
-	github.com/redis/go-redis/v9 v9.7.3
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
@@ -27,7 +28,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.10.15 // indirect
 	github.com/aws/smithy-go v1.28.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

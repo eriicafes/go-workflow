@@ -40,16 +40,21 @@ type Config struct {
 	// it, queueing such a delivery returns an error.
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
-	// fails, or is cancelled. Finishing a run queues a delivery due Retention
-	// later, which deletes its run partition and its hooks. A run with a hook
-	// whose token retention has not ended is kept until it ends. Zero keeps
-	// runs forever. Retention over 15 minutes, the SQS delay limit, requires
-	// Scheduler.
+	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
+	// delivery due then, which deletes its data: the run, step, event, hook,
+	// and token items stay, and its streams are left empty and closed. Zero
+	// keeps the data. A run created with $retention "0" loses its data as it
+	// finishes, whatever Retention is. Retention over 15 minutes, the SQS
+	// delay limit, requires Scheduler.
 	Retention time.Duration
 	// Retentions overrides Retention for the workflows it names, by workflow
 	// name, as worlds.Retentions builds it. Zero keeps that workflow's runs
 	// forever. Any retention over 15 minutes requires Scheduler.
 	Retentions map[string]time.Duration
+	// EncryptionKey, 32 random bytes, encrypts every run's payloads with a
+	// key derived from it for the run. Empty leaves payloads unencrypted.
+	// Changing it leaves earlier runs' payloads unreadable.
+	EncryptionKey []byte
 }
 
 // QueueConfig is an SQS queue that deliveries can be routed to.
@@ -113,6 +118,9 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 	if config.BaseURL == "" || config.TableName == "" || config.QueueURL == "" {
 		return nil, errors.New("workflow/aws: base URL, table name, and queue URL are required")
 	}
+	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
+		return nil, err
+	}
 	baseURL, err := worlds.NormalizeBaseURL(config.BaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("workflow/aws: invalid base URL: %w", err)
@@ -151,16 +159,15 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 // supplied clients, which the caller keeps owning.
 func (*World) Close()                        {}
 func (w *World) BaseURL() string             { return w.config.BaseURL }
-func (*World) SpecVersion() int              { return worlds.SpecVersion }
 func (*World) DeploymentID() string          { return "" }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true}
 }
 
-// HTTP returns a handler serving the RPC and webhook endpoints under
-// /v1/workflow. Its RPC endpoint is unauthenticated unless options protect
-// it, such as worlds.WithRPCToken.
+// HTTP returns a handler serving the client and webhook endpoints under
+// /v1/workflow. Its client endpoints are unauthenticated unless options
+// protect them, such as worlds.WithClientToken.
 func HTTP(world *World, options ...worlds.HTTPOption) http.Handler {
 	return HTTPPrefix(world, "", options...)
 }
@@ -188,4 +195,10 @@ func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.
 	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
 		return world.consume(ctx, runtime, event), nil
 	}
+}
+
+// EncryptionKeyForRun returns the key of a run's payloads, derived from
+// Config.EncryptionKey, or nil when the World has none.
+func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
+	return worlds.ConfiguredRunKey(w.config.EncryptionKey, runID)
 }

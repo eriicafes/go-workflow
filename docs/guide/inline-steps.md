@@ -91,8 +91,7 @@ An inline step records `step_created` and `step_started` in one write,
 followed by the attempt's outcome. Storage failures retry the delivery. The
 [event reference](/reference/events) describes the recorded events.
 
-`workflow.Now` uses an inline step with one attempt. Most `Run` methods also
-use inline steps when called in workflow context, so their reads and changes
+Most `Run` methods use inline steps when called in workflow context, so their reads and changes
 are preserved across replay. See [Starting and Reading Runs](/guide/runs#in-workflow-context).
 
 A step delivery cannot execute an unsettled inline step while replaying toward

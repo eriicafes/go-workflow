@@ -5,77 +5,14 @@ import (
 	"context"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
 type memoryStream struct {
-	chunks   [][]byte
-	closed   bool
-	session  worlds.StreamID
-	sequence int
-}
-
-type streamWriteSession struct {
-	mu     sync.Mutex
-	world  *World
-	runID  worlds.RunID
-	name   string
-	id     worlds.StreamID
+	chunks [][]byte
 	closed bool
-}
-
-func (s *streamWriteSession) ID() worlds.StreamID { return s.id }
-
-func (w *World) StreamsCreateWriteSession(ctx context.Context, input worlds.StreamsCreateWriteSessionInput) (worlds.StreamWriteSession, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	defer w.notify()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	stream := w.streamLocked(input.RunID, input.Name)
-	if stream.closed {
-		return nil, worlds.ErrRunTerminal
-	}
-	if stream.session != "" {
-		return nil, worlds.ErrStreamLocked
-	}
-	id := worlds.NewStreamID()
-	stream.session = id
-	return &streamWriteSession{world: w, runID: input.RunID, name: input.Name, id: id}, nil
-}
-
-func (s *streamWriteSession) Write(ctx context.Context, input worlds.StreamWriteSessionWriteInput) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return worlds.ErrRunTerminal
-	}
-	return s.world.StreamsWriteSession(ctx, worlds.StreamsWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Sequence: input.Sequence, Chunks: input.Chunks})
-}
-
-func (s *streamWriteSession) Close(ctx context.Context) error {
-	return s.close(ctx, true)
-}
-
-func (s *streamWriteSession) Release(ctx context.Context) error {
-	return s.close(ctx, false)
-}
-
-func (s *streamWriteSession) close(ctx context.Context, closeStream bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.world.StreamsCloseWriteSession(ctx, worlds.StreamsCloseWriteSessionInput{RunID: s.runID, Name: s.name, SessionID: s.id, Close: closeStream}); err != nil {
-		return err
-	}
-	s.closed = true
-	return nil
 }
 
 func (m *World) streamLocked(runID worlds.RunID, name string) *memoryStream {
@@ -88,49 +25,7 @@ func (m *World) streamLocked(runID worlds.RunID, name string) *memoryStream {
 	return m.streams[runID][name]
 }
 
-func (m *World) StreamsWriteSession(ctx context.Context, input worlds.StreamsWriteSessionInput) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	defer m.notify()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	stream := m.streamLocked(input.RunID, input.Name)
-	if stream.closed || stream.session != input.SessionID {
-		return worlds.ErrStreamLocked
-	}
-	if input.Sequence != stream.sequence {
-		return worlds.ErrStreamLocked
-	}
-	for _, chunk := range input.Chunks {
-		stream.chunks = append(stream.chunks, bytes.Clone(chunk))
-	}
-	stream.sequence++
-	return nil
-}
-
-func (m *World) StreamsCloseWriteSession(ctx context.Context, input worlds.StreamsCloseWriteSessionInput) error {
-	// Release the writer lease. Close controls whether the stream is also
-	// closed.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	defer m.notify()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	stream := m.streamLocked(input.RunID, input.Name)
-	if stream.session != input.SessionID {
-		return worlds.ErrStreamLocked
-	}
-	stream.closed = stream.closed || input.Close
-	stream.session = ""
-	stream.sequence = 0
-	return nil
-}
-
 func (m *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
-	// Direct writes serve the client. Workflow writers always use a session,
-	// which is the exclusive path.
 	return m.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
 
@@ -141,9 +36,13 @@ func (m *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if worlds.RunDataExpired(m.runs[input.RunID], time.Now()) {
+		// A deleted run's streams take no more data.
+		return worlds.ErrStreamClosed
+	}
 	stream := m.streamLocked(input.RunID, input.Name)
-	if stream.closed || stream.session != "" {
-		return worlds.ErrStreamLocked
+	if stream.closed {
+		return worlds.ErrStreamClosed
 	}
 	for _, chunk := range input.Chunks {
 		stream.chunks = append(stream.chunks, bytes.Clone(chunk))
@@ -156,9 +55,6 @@ func (m *World) StreamsClose(_ context.Context, input worlds.StreamsCloseInput) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	stream := m.streamLocked(input.RunID, input.Name)
-	if stream.session != "" {
-		return worlds.ErrStreamLocked
-	}
 	stream.closed = true
 	return nil
 }

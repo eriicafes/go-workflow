@@ -27,7 +27,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	data, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	data, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -36,10 +36,26 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
+	view := runView{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, eventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: data, CreatedAt: now}
-	err = w.transact(ctx, []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))})
+	items := []ddb.TransactWriteItem{put(w.config.TableName, runItem(view)), put(w.config.TableName, eventItem(event, 1))}
+	if input.StartHook != nil {
+		hookItems, err := w.startHookItems(ctx, input, now)
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		items = append(items, hookItems...)
+	}
+	err = w.transact(ctx, items)
 	if conditional(err) {
+		if input.StartHook != nil {
+			// The run may exist, or a concurrent claimant took the token.
+			if _, found, getErr := w.item(ctx, runKey(string(input.RunID))); getErr == nil && !found {
+				if item, found, getErr := w.item(ctx, tokenKey(input.StartHook.Token)); getErr == nil && found {
+					return worlds.EventResult{}, &worlds.HookConflictError{RunID: tokenFromItem(item).runID}
+				}
+			}
+		}
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	if err != nil {
@@ -748,13 +764,6 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(requested.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return nil, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return nil, worlds.ErrHookNotActive
-		}
 
 	case worlds.EventTypeHookDisposed:
 		entry, err := tx.hook(ctx, worlds.HookID(requested.CorrelationID))
@@ -797,8 +806,26 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 		Data:          bytes.Clone(requested.Data),
 		CreatedAt:     time.Now().UTC(),
 	}
+	if worlds.RunDataExpired(run.view.Run, event.CreatedAt) {
+		// A step still running when its run's data was deleted settles after
+		// it. What it brought is deleted as it lands.
+		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
 	run.events = append(run.events, event)
-	return event, tx.materialize(ctx, run, event)
+	if err := tx.materialize(ctx, run, event); err != nil {
+		return event, err
+	}
+	if finishes(event.EventType) && run.view.ExpiredAt == nil {
+		// The run's data expires with the commit that finishes it under
+		// $retention "0", or at its workflow's retention after it.
+		if worlds.ReadRunRetention(run.view.Attributes) == worlds.RetainNone {
+			run.view.ExpiredAt = &event.CreatedAt
+		} else if retention := worlds.RetentionFor(tx.world.config.Retention, tx.world.config.Retentions, run.view.WorkflowName); retention > 0 {
+			expires := event.CreatedAt.Add(retention)
+			run.view.ExpiredAt = &expires
+		}
+	}
+	return event, nil
 }
 
 func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds.Event) error {
@@ -857,7 +884,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName}, HookID: id, Token: data.Token, Metadata: data.Metadata, Webhook: data.Webhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -873,18 +900,6 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		hook := entry.hook
 		entry.dirty = true
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		data, ok := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && ok {
-			if data.Request != nil {
-				hook.WebhookEventID = event.EventID
-			}
-			if data.Response != nil && data.ResponseTo == hook.WebhookEventID {
-				return tx.completeHook(ctx, hook, now)
-			}
-		}
-		if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-			return tx.completeHook(ctx, hook, now)
-		}
 	case worlds.EventTypeHookDisposed:
 		entry, err := tx.hook(ctx, worlds.HookID(event.CorrelationID))
 		if err != nil || entry.hook == nil {
@@ -949,7 +964,7 @@ func (tx *appendTx) updateStep(ctx context.Context, event worlds.Event, status w
 }
 
 func (tx *appendTx) result(event worlds.Event, created bool) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data)}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: bytes.Clone(event.Data)}
 	if created {
 		result.AllocatedEventCount = 1
 	}
@@ -983,6 +998,12 @@ func (tx *appendTx) commit(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", worlds.ErrEventInvalid, err)
 		}
 		set, remove := runUpdate(run.view)
+		if run.seenStatus.Terminal() {
+			// Only the commit finishing a run sets its expiredAt. A later
+			// append leaves it, so it cannot write back a deadline a purge
+			// has since moved to now.
+			delete(set, "expiredAt")
+		}
 		if run.view.Status == run.seenStatus {
 			// status is projected into the indexes, so leaving it out keeps
 			// ordinary appends from writing to them.
@@ -1096,4 +1117,43 @@ func sortedKeys[V any](values map[string]V) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// startHookItems returns the writes creating a run's start hook with the run:
+// its hook item, naming run_created as its created event, and its token item,
+// conditioned on the token being as read. It returns a *HookConflictError
+// naming the run holding the token.
+func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRunInput, now time.Time) ([]ddb.TransactWriteItem, error) {
+	start := input.StartHook
+	if start.Token == "" {
+		return nil, worlds.ErrEventInvalid
+	}
+	tx := newAppendTx(w)
+	tx.now = now
+	token, err := tx.token(ctx, start.Token)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.releaseLapsed(ctx, token); err != nil {
+		return nil, err
+	}
+	if token.cur != nil {
+		if token.cur.runID == input.RunID {
+			// A retried create of a run that already holds its token.
+			return nil, worlds.ErrRunAlreadyExists
+		}
+		return nil, &worlds.HookConflictError{RunID: token.cur.runID}
+	}
+	id := worlds.StartHookID(input.RunID)
+	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		return nil, err
+	}
+	hook["createdEventId"] = avs(string(worlds.EventIDForSlot(1)))
+	condition, values := tokenCondition(token.seen)
+	table := awsv2.String(w.config.TableName)
+	return []ddb.TransactWriteItem{
+		put(w.config.TableName, hook),
+		{Put: &ddb.Put{TableName: table, Item: tokenItem(start.Token, tokenView{hookID: id, runID: input.RunID}), ConditionExpression: awsv2.String(condition), ExpressionAttributeValues: values}},
+	}, nil
 }

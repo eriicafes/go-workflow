@@ -12,6 +12,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// RPCVersion is the version of the RPC protocol HTTPHandler serves and the
+// HTTP client speaks.
+const RPCVersion = 1
+
 // RPCContentType is the content type accepted and returned by HTTPHandler's
 // RPC endpoint.
 const RPCContentType = "application/cbor"
@@ -22,9 +26,9 @@ type RPCRequest struct {
 	Method string `cbor:"method"`
 	// Input is the CBOR-encoded input of the operation.
 	Input cbor.RawMessage `cbor:"input"`
-	// SpecVersion is the client's RPC protocol version. When set and
-	// different from the World's, the request fails with invalid_argument.
-	SpecVersion *int `cbor:"specVersion,omitempty"`
+	// RPCVersion is the client's RPC protocol version. When set and
+	// different from RPCVersion, the request fails with invalid_argument.
+	RPCVersion *int `cbor:"rpcVersion,omitempty"`
 }
 
 // RPCResponse is the CBOR envelope returned by an HTTPHandler RPC endpoint.
@@ -42,6 +46,12 @@ type RPCError struct {
 	// Sentinel names the sentinel error the failure matches, such as
 	// run_not_found, so a client can return that error.
 	Sentinel string `cbor:"sentinel,omitempty"`
+	// ConflictingRunID names the run holding a hook token, for a
+	// hook_conflict failure of a *HookConflictError.
+	ConflictingRunID RunID `cbor:"conflictingRunId,omitempty"`
+	// RetryAfter is how long a throttled failure of a *ThrottleError asks
+	// the caller to wait, or zero when the World did not say.
+	RetryAfter time.Duration `cbor:"retryAfter,omitempty"`
 }
 
 // maxRPCWait caps how long one RPC request may block in a World wait, so a
@@ -62,12 +72,11 @@ var rpcSentinels = []struct {
 	{"step_not_found", "not_found", ErrStepNotFound},
 	{"event_not_found", "not_found", ErrEventNotFound},
 	{"hook_not_found", "not_found", ErrHookNotFound},
-	{"queue_message_not_found", "not_found", ErrQueueMessageNotFound},
 	{"event_invalid", "invalid_argument", ErrEventInvalid},
 	{"run_already_exists", "conflict", ErrRunAlreadyExists},
 	{"run_terminal", "conflict", ErrRunTerminal},
 	{"step_not_startable", "conflict", ErrStepNotStartable},
-	{"stream_locked", "conflict", ErrStreamLocked},
+	{"stream_closed", "conflict", ErrStreamClosed},
 	{"hook_conflict", "conflict", ErrHookConflict},
 	{"hook_not_active", "conflict", ErrHookNotActive},
 	{"hook_force_claimed", "conflict", ErrHookForceClaimed},
@@ -78,18 +87,21 @@ var rpcSentinels = []struct {
 	{"deployment_unavailable", "internal", ErrDeploymentUnavailable},
 	{"deployment_mismatch", "internal", ErrDeploymentMismatch},
 	{"corrupted_event_log", "internal", ErrCorruptedEventLog},
+	{"delete_data_invalid", "invalid_argument", ErrDeleteDataInvalid},
+	{"unsupported", "unimplemented", errors.ErrUnsupported},
+	{"throttled", "resource_exhausted", ErrThrottled},
 	{"cancelled", "cancelled", context.Canceled},
 	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
 }
 
-// specVersionMismatchError reports incompatible RPC protocol versions.
-type specVersionMismatchError struct {
+// rpcVersionMismatchError reports incompatible RPC protocol versions.
+type rpcVersionMismatchError struct {
 	client int
 	server int
 }
 
-func (e specVersionMismatchError) Error() string {
-	return fmt.Sprintf("workflow: RPC spec version does not match world: client=%d server=%d", e.client, e.server)
+func (e rpcVersionMismatchError) Error() string {
+	return fmt.Sprintf("workflow: RPC version does not match server: client=%d server=%d", e.client, e.server)
 }
 
 func handleRPC(writer http.ResponseWriter, request *http.Request, world World) {
@@ -131,8 +143,8 @@ func writeRPC(writer http.ResponseWriter, response RPCResponse) {
 }
 
 func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.RawMessage, error) {
-	if request.SpecVersion != nil && *request.SpecVersion != world.SpecVersion() {
-		return nil, specVersionMismatchError{client: *request.SpecVersion, server: world.SpecVersion()}
+	if request.RPCVersion != nil && *request.RPCVersion != RPCVersion {
+		return nil, rpcVersionMismatchError{client: *request.RPCVersion, server: RPCVersion}
 	}
 	switch request.Method {
 	case "world.deploymentId":
@@ -178,6 +190,16 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
+	case "runs.deleteDataMany":
+		input, err := decodeRPC[RunsDeleteDataManyInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		value, err := world.RunsDeleteDataMany(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(value)
 	case "steps.get":
 		input, err := decodeRPC[StepsGetInput](request.Input)
 		if err != nil {
@@ -322,15 +344,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 			return nil, err
 		}
 		return encodeRPC(value)
-	case "queue.cancel":
-		input, err := decodeRPC[QueueCancelInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.QueueCancel(ctx, input); err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
 	case "streams.write":
 		input, err := decodeRPC[StreamsWriteInput](request.Input)
 		if err != nil {
@@ -338,34 +351,6 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		}
 		err = world.StreamsWrite(ctx, input)
 		if err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
-	case "streams.createWriteSession":
-		input, err := decodeRPC[StreamsCreateWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		session, err := world.StreamsCreateWriteSession(ctx, input)
-		if err != nil {
-			return nil, err
-		}
-		return encodeRPC(session.ID())
-	case "streams.writeSession":
-		input, err := decodeRPC[StreamsWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.StreamsWriteSession(ctx, input); err != nil {
-			return nil, err
-		}
-		return encodeRPC(struct{}{})
-	case "streams.closeWriteSession":
-		input, err := decodeRPC[StreamsCloseWriteSessionInput](request.Input)
-		if err != nil {
-			return nil, err
-		}
-		if err := world.StreamsCloseWriteSession(ctx, input); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
@@ -570,8 +555,36 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		default:
 			return nil, fmt.Errorf("%w: unknown analytics method %q", errRPCInvalidInput, request.Method)
 		}
+	case "runs.encryptionKey":
+		input, err := decodeRPC[RunKeysInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		var key []byte
+		if provider, ok := world.(EncryptionKeys); ok {
+			if key, err = provider.EncryptionKeyForRun(ctx, input.RunID, input.DeploymentID); err != nil {
+				return nil, err
+			}
+		}
+		return encodeRPC(key)
+	case "client.runs.newId":
+		input, err := decodeRPC[ClientRunsNewIDInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(newRunID(world, input))
+	case "client.runs.startDeployment":
+		input, err := decodeRPC[ClientRunsStartDeploymentInput](request.Input)
+		if err != nil {
+			return nil, err
+		}
+		deploymentID, err := StartDeploymentID(ctx, world, input.deployment())
+		if err != nil {
+			return nil, err
+		}
+		return encodeRPC(deploymentID)
 	case "client.spec":
-		return encodeRPC(ClientSpec{SpecVersion: world.SpecVersion(), Capabilities: world.Capabilities()})
+		return encodeRPC(ClientSpec{RPCVersion: RPCVersion, Capabilities: world.Capabilities()})
 	case "client.runs.create":
 		input, err := decodeRPC[ClientRunsCreateInput](request.Input)
 		if err != nil {
@@ -657,8 +670,30 @@ type (
 	ClientRunsCreateInput struct {
 		EventsCreateRunInput
 		// Latest pins a run with no DeploymentID to the World's latest
-		// deployment, for a workflow marked workflow.StartOnLatest.
+		// deployment, as LatestDeployment does.
 		Latest bool
+	}
+	// RunKeysInput holds the arguments to Client.RunKeys and the
+	// runs.encryptionKey RPC method, which answers with the World's key for
+	// the run.
+	RunKeysInput struct {
+		RunID        RunID
+		DeploymentID string
+	}
+	// ClientRunsStartDeploymentInput holds the arguments to
+	// Client.RunsStartDeployment and the client.runs.startDeployment RPC
+	// method.
+	ClientRunsStartDeploymentInput struct {
+		// DeploymentID names the deployment, as DeploymentWithID does, and
+		// Latest asks for LatestDeployment.
+		DeploymentID string
+		Latest       bool
+	}
+	// ClientRunsNewIDInput holds the arguments to Client.RunsNewID and the
+	// client.runs.newId RPC method. Region is a Region's code, or "" to
+	// leave it to the World.
+	ClientRunsNewIDInput struct {
+		Region Region
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
 	// method, which cancels the run.
@@ -805,6 +840,10 @@ func rpcErrorStatus(code string) int {
 		return http.StatusBadRequest
 	case "conflict":
 		return http.StatusConflict
+	case "unimplemented":
+		return http.StatusNotImplemented
+	case "resource_exhausted":
+		return http.StatusTooManyRequests
 	}
 	return http.StatusInternalServerError
 }
@@ -812,11 +851,20 @@ func rpcErrorStatus(code string) int {
 func newRPCError(err error) *RPCError {
 	for _, sentinel := range rpcSentinels {
 		if errors.Is(err, sentinel.err) {
-			return &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
+			failure := &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
+			var conflict *HookConflictError
+			if errors.As(err, &conflict) {
+				failure.ConflictingRunID = conflict.RunID
+			}
+			var throttle *ThrottleError
+			if errors.As(err, &throttle) {
+				failure.RetryAfter = throttle.After
+			}
+			return failure
 		}
 	}
-	var specVersionMismatch specVersionMismatchError
-	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &specVersionMismatch) {
+	var rpcVersionMismatch rpcVersionMismatchError
+	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &rpcVersionMismatch) {
 		return &RPCError{Code: "invalid_argument", Message: err.Error()}
 	}
 	return &RPCError{Code: "internal", Message: err.Error()}
@@ -846,4 +894,21 @@ var rpcEncoding = func() cbor.EncMode {
 func encodeRPC(value any) (cbor.RawMessage, error) {
 	encoded, err := rpcEncoding.Marshal(value)
 	return cbor.RawMessage(encoded), err
+}
+
+// NewClientRunsStartDeploymentInput returns the RPC input naming deployment.
+func NewClientRunsStartDeploymentInput(deployment Deployment) ClientRunsStartDeploymentInput {
+	return ClientRunsStartDeploymentInput{DeploymentID: deployment.id, Latest: deployment.latest}
+}
+
+func (input ClientRunsStartDeploymentInput) deployment() Deployment {
+	if input.DeploymentID != "" {
+		return DeploymentWithID(input.DeploymentID)
+	}
+	return Deployment{latest: input.Latest}
+}
+
+// newRunID returns the ID of a new run of world in input's region.
+func newRunID(world World, input ClientRunsNewIDInput) RunID {
+	return RegionRunID(world, NewRunID(), input.Region)
 }

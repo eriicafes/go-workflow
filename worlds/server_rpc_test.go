@@ -57,9 +57,9 @@ func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
 	assertRPCError(t, response, "not_found")
 }
 
-func TestRPCRejectsMismatchedSpecVersion(t *testing.T) {
-	version := worlds.SpecVersion + 1
-	body, err := cbor.Marshal(rpcRequest{Method: "client.spec", SpecVersion: &version})
+func TestRPCRejectsMismatchedRPCVersion(t *testing.T) {
+	version := worlds.RPCVersion + 1
+	body, err := cbor.Marshal(rpcRequest{Method: "client.spec", RPCVersion: &version})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(time.Minute).UTC()
-	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt, QueueMessageID: "message"})
+	payload, err := json.Marshal(worlds.DataWaitCreated{ResumeAt: dueAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestRPCCapsWaits(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
+func TestHTTPHandlerWithClientTokenProtectsClientEndpoints(t *testing.T) {
 	body, err := cbor.Marshal(rpcRequest{Method: "client.spec"})
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +367,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 		return response.Code
 	}
 
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("secret"))
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("secret"))
 	for authorization, want := range map[string]int{
 		"":              http.StatusUnauthorized,
 		"Bearer wrong":  http.StatusUnauthorized,
@@ -378,7 +378,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 			t.Errorf("Authorization %q: status = %d, want %d", authorization, got, want)
 		}
 	}
-	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCToken("")), "Bearer "); got != http.StatusUnauthorized {
+	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("")), "Bearer "); got != http.StatusUnauthorized {
 		t.Errorf("empty token: status = %d, want 401", got)
 	}
 
@@ -390,7 +390,7 @@ func TestHTTPHandlerWithRPCTokenProtectsOnlyRPC(t *testing.T) {
 	}
 }
 
-func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
+func TestHTTPHandlerWithClientMiddlewareWrapsInOrder(t *testing.T) {
 	var order []string
 	mark := func(name string) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler {
@@ -400,7 +400,7 @@ func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
 			})
 		}
 	}
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithRPCMiddleware(mark("outer")), worlds.WithRPCMiddleware(mark("inner")))
+	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientMiddleware(mark("outer")), worlds.WithClientMiddleware(mark("inner")))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", nil))
 	if len(order) != 2 || order[0] != "outer" || order[1] != "inner" {
 		t.Fatalf("order = %v", order)
@@ -409,5 +409,61 @@ func TestHTTPHandlerWithRPCMiddlewareWrapsInOrder(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/webhooks/missing", nil))
 	if len(order) != 0 {
 		t.Fatalf("webhook ran RPC middleware: %v", order)
+	}
+}
+
+// noDeleteWorld is a World that does not delete run data.
+type noDeleteWorld struct{ *testworld.World }
+
+func (noDeleteWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, errors.ErrUnsupported
+}
+
+func TestRPCDeletesRunData(t *testing.T) {
+	ctx := context.Background()
+	world := testworld.NewManual()
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_delete", WorkflowName: "wf", Input: []byte(`"input"`)}); err != nil {
+		t.Fatal(err)
+	}
+	for _, eventType := range []worlds.EventType{worlds.EventTypeRunStarted, worlds.EventTypeRunCancelled} {
+		if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_delete", Event: worlds.EventsCreateEvent{EventType: eventType}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete", "wrun_missing"}})
+	want := worlds.RunsDeleteDataManyResult{
+		Summary: worlds.DeleteDataSummary{Requested: 2, Deleted: 1, NotFound: 1},
+		Results: []worlds.DeleteDataResult{{RunID: "wrun_delete", Outcome: worlds.DeleteDataDeleted}, {RunID: "wrun_missing", Outcome: worlds.DeleteDataNotFound}},
+	}
+	if err != nil || result.Summary != want.Summary || len(result.Results) != 2 || result.Results[0] != want.Results[0] || result.Results[1] != want.Results[1] {
+		t.Fatalf("delete = %+v, %v", result, err)
+	}
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_delete"})
+	if err != nil || run.ExpiredAt == nil || run.Input != nil {
+		t.Fatalf("deleted run = %+v, %v", run, err)
+	}
+	if _, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{}); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("empty delete error = %v", err)
+	}
+	unsupported := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(noDeleteWorld{world}, "")))
+	if _, err := unsupported.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_delete"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("unsupported delete error = %v", err)
+	}
+}
+
+// throttledWorld is a World that refuses deletions for its rate limit.
+type throttledWorld struct{ *testworld.World }
+
+func (throttledWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	return worlds.RunsDeleteDataManyResult{}, &worlds.ThrottleError{Cause: errors.New("busy"), After: 3 * time.Second}
+}
+
+func TestRPCCarriesThrottling(t *testing.T) {
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(throttledWorld{testworld.NewManual()}, "")))
+	_, err := client.RunsDeleteDataMany(context.Background(), worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_1"}})
+	var throttle *worlds.ThrottleError
+	if !errors.Is(err, worlds.ErrThrottled) || !errors.As(err, &throttle) || throttle.After != 3*time.Second {
+		t.Fatalf("throttled error = %v", err)
 	}
 }

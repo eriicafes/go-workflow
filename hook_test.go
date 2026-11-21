@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -33,7 +34,7 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 		if hook.ID() != "" || hook.Token() != input.Token {
 			return hookResumeOutput{}, errors.New("unclaimed hook identity changed")
 		}
-		if _, err := workflow.Now(ctx); err != nil {
+		if _, err := workflow.InlineStep(ctx, nothing, struct{}{}); err != nil {
 			return hookResumeOutput{}, err
 		}
 		if hook.ID() != "" {
@@ -358,9 +359,11 @@ func TestHookRegistersOnlyWhenUsedAndKeepsTokenAfterInterruptedCommit(t *testing
 			if err := json.Unmarshal(event.Data, &created); err != nil {
 				t.Fatal(err)
 			}
-			if err := json.Unmarshal(created.Input, &capturedToken); err != nil {
+			var args struct{ Args [1]string }
+			if err := worlds.DecodePayload(created.Input, nil, &args); err != nil {
 				t.Fatal(err)
 			}
+			capturedToken = args.Args[0]
 			stepID = worlds.StepID(event.CorrelationID)
 		}
 	}
@@ -805,3 +808,53 @@ func TestHookValuesBreakAndNextShareTheReplayCursor(t *testing.T) {
 		t.Fatalf("disposals=%d", disposals)
 	}
 }
+
+type startHookBindingInput struct {
+	Token     string
+	Retention bool
+}
+
+func (startHookBindingInput) Workflow(string) {}
+
+func TestOnlyTheFirstHookOpensTheStartHook(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, input startHookBindingInput) (string, error) {
+		if input.Retention {
+			// Only the start sets the start hook's retention.
+			_, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour}).Next(ctx)
+			return "", err
+		}
+		first := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+		// A second hook with the token is created as any hook is, and
+		// conflicts with the start hook the first one opened.
+		owner, err := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).GetConflict(ctx)
+		if err != nil || owner == nil {
+			return "", fmt.Errorf("second hook conflict = %v, %v", owner, err)
+		}
+		value, err := first.Next(ctx)
+		return value + ":" + owner.ID(), err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+
+	run, err := workflow.Start(ctx, startHookBindingInput{Token: "bind-once"}, workflow.StartOptions{Hook: &workflow.StartHook{Token: "bind-once"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workflow.ResumeHook(ctx, "bind-once", "value"); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := run.Value(ctx); err != nil || value != "value:"+run.ID() {
+		t.Fatalf("run value = %q, %v", value, err)
+	}
+
+	retained, err := workflow.Start(ctx, startHookBindingInput{Token: "bind-retained", Retention: true}, workflow.StartOptions{Hook: &workflow.StartHook{Token: "bind-retained"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := retained.Value(ctx); !errors.Is(err, workflow.ErrStartHookOptions) {
+		t.Fatalf("hook with MinRetention opening the start hook error = %v", err)
+	}
+}
+
+func nothing(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }

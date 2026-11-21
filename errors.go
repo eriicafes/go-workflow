@@ -18,6 +18,16 @@ var (
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
 	// ErrRunCancelled is returned when awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
+	// ErrInvalidStartOptions is returned by Start for StartOptions it cannot
+	// use, such as a ReplayedFromRunID that is not a run ID.
+	ErrInvalidStartOptions = errors.New("workflow: invalid start options")
+	// ErrStartHookOptions is the error of a hook that opens its run's start
+	// hook with HookOption.MinRetention or Force, which only
+	// StartOptions.Hook can set.
+	ErrStartHookOptions = worlds.ErrStartHookOptions
+	// ErrRunExpired is returned when awaiting a run whose data was deleted,
+	// such as a run started with RetainNone.
+	ErrRunExpired = worlds.ErrRunExpired
 	// ErrResumeNotQueued reports that a hook payload was recorded but its run was not queued.
 	ErrResumeNotQueued = worlds.ErrResumeNotQueued
 	// ErrRunNotFinished reports that a run is still waiting or running.

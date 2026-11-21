@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"runtime"
 	"slices"
@@ -40,7 +41,9 @@ func Step[In, Out any](ctx context.Context, fn func(context.Context, In) (Out, e
 // promise for its result without waiting for it. Outside workflow context, the
 // promise fails with ErrNoWorkflow.
 //
-// The step is identified by fn's function name and its position in the runner.
+// The step is identified by fn's function name and the ID it draws from the
+// run's seed, so the runner must declare its steps in the same order on every
+// replay.
 // It is retried on error according to options, where the last option applies
 // and the default allows 3 retries. fn is executed at least once and should be
 // idempotent.
@@ -147,7 +150,7 @@ func Timer(ctx context.Context, duration time.Duration) *Result[struct{}] {
 	}
 	wait := worlds.DurableWait(ctx, worlds.DurableWaitOptions{
 		Execution: execution,
-		DueAt:     time.Now().Add(duration),
+		DueAt:     execution.Now().Add(duration),
 	})
 	return &Result[struct{}]{
 		err:     wait.Err,
@@ -188,23 +191,37 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 	})
 }
 
-// Now returns the current time in UTC, recorded the first time it runs so that
-// replay returns the same time. In workflow context, a runner reads time only
-// through Now, never time.Now. Now returns ErrNoWorkflow outside workflow
-// context, including step context, where time.Now is safe to use.
-func Now(ctx context.Context) (time.Time, error) {
+// Now returns the current time. In workflow context it returns the replay
+// clock: the run's creation time, moved forward to the creation time of each
+// step result, timer, hook registration, hook payload, and cancellation as it
+// is delivered to the runner, so every replay reads the same time at the same
+// point and nothing is recorded. A runner reads time only through Now, never
+// time.Now. Elsewhere, including step context, it returns time.Now().
+func Now(ctx context.Context) time.Time {
+	if execution, ok := workflowExecutionFromContext(ctx); ok {
+		return execution.Now()
+	}
+	return time.Now()
+}
+
+// RandReader returns a reader of random bytes for workflow code. Each byte is
+// drawn from the run's seed, which also draws its step, timer, and hook IDs,
+// so every replay reads the same bytes in the same order. In workflow
+// context, a runner reads randomness only through RandReader, never
+// crypto/rand or math/rand. Outside workflow context, including step context,
+// where crypto/rand is safe to use, its Read returns ErrNoWorkflow.
+func RandReader(ctx context.Context) io.Reader {
 	execution, ok := workflowExecutionFromContext(ctx)
 	if !ok {
-		return time.Time{}, ErrNoWorkflow
+		return errorReader{ErrNoWorkflow}
 	}
-	durable := worlds.DurableInlineStep(ctx, worlds.DurableInlineStepOptions{
-		Execution: execution,
-		Name:      "now",
-	}, func(context.Context, struct{}) (time.Time, error) {
-		return time.Now().UTC(), nil
-	}, struct{}{})
-	return stepResult(execution, durable).Value(ctx)
+	return execution.RandReader()
 }
+
+// errorReader is a reader whose Read returns err.
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
 
 // Map starts one background step per input, returning results in input order.
 func Map[In, Out any](ctx context.Context, step func(context.Context, In) (Out, error), inputs []In) []*Result[Out] {

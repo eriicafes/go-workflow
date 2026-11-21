@@ -19,8 +19,6 @@ type World interface {
 	Analytics() Analytics
 	// Capabilities reports the optional behavior this World implements.
 	Capabilities() Capabilities
-	// SpecVersion returns the RPC protocol version implemented by this World.
-	SpecVersion() int
 	// DeploymentID returns the deployment whose code this World's deliveries
 	// execute, or "" when the World has no deployments.
 	DeploymentID() string
@@ -31,7 +29,7 @@ type World interface {
 | --- | --- |
 | [`Storage`](/reference/worlds#storage) | Append-only event logs and the run, step, and hook views derived from them. |
 | [`Queue`](/reference/worlds#queue) | Durable deliveries with a not-before time. |
-| [`Streamer`](/reference/worlds#streamer) | Named, ordered byte streams with exclusive writer sessions. |
+| [`Streamer`](/reference/worlds#streamer) | Named, ordered byte streams that any number of writers append to. |
 | [`Analytics`](/reference/worlds#analytics) | Optional reporting queries across runs. |
 
 ## Key requirements

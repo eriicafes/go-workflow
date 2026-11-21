@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -25,6 +24,17 @@ func conformEventDeltas(t *testing.T, world worlds.World) {
 	plain := conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", nil)
 	if plain.EventID != worlds.EventIDForSlot(3) || len(plain.Events) != 0 {
 		t.Fatalf("delta without options = %#v", plain)
+	}
+	// Each result carries the appended event's stored creation time.
+	listed, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []worlds.EventResult{started, plain} {
+		slot, _ := worlds.EventSlot(result.EventID)
+		if result.CreatedAt.IsZero() || int(slot) > len(listed.Data) || !result.CreatedAt.Equal(listed.Data[slot-1].CreatedAt) {
+			t.Fatalf("result %s CreatedAt = %v, want the stored event's", result.EventID, result.CreatedAt)
+		}
 	}
 	since, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_b"}, Options: worlds.EventsCreateOptions{SinceCursor: string(worlds.EventIDForSlot(1))}})
 	if err != nil {
@@ -141,9 +151,9 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
 
 	token := "fence:" + string(runID)
-	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &one}})
 	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
-	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, nil, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
+	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &three}})
 	if err != nil || claimed.InBandCount != 4 || inBandCount() != 4 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
 	}
@@ -185,33 +195,26 @@ func conformBatch(t *testing.T, world worlds.World) {
 		{EventType: worlds.EventTypeStepStarted, CorrelationID: "step_missing"},
 	}})
 	conformExpect(t, err, worlds.ErrStepNotStartable, "batch with rejected event")
-	if _, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_b"}); !errors.Is(err, worlds.ErrStepNotFound) {
-		t.Fatalf("rejected batch leaked step_b: %v", err)
-	}
-	if events := conformAllEvents(t, world, runID); len(events) != 4 {
-		t.Fatalf("events after rejected batch = %d, want 4", len(events))
-	}
+	// A refused event may leave the others appended, but an invalid batch
+	// appends nothing.
+	before := len(conformAllEvents(t, world, runID))
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunCreated}}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "batch with run_created")
+	if events := conformAllEvents(t, world, runID); len(events) != before {
+		t.Fatalf("events after invalid batch = %d, want %d", len(events), before)
+	}
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "w"}, {EventType: worlds.EventTypeRunStarted}}})
 	conformExpect(t, err, worlds.ErrEventInvalid, "batch with replayed event")
-	if events := conformAllEvents(t, world, runID); len(events) != 4 {
-		t.Fatalf("events after invalid batches = %d, want 4", len(events))
-	}
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: "wrun_missing", Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeRunStarted}}})
 	conformExpect(t, err, worlds.ErrRunNotFound, "batch for missing run")
 	completed, err := world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, Events: []worlds.EventsCreateEvent{
 		{EventType: worlds.EventTypeStepCompleted, CorrelationID: "step_a"},
-		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"out"}`)},
+		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"Im91dCI="}`)},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "late"},
 	}})
 	conformExpect(t, err, worlds.ErrRunTerminal, "batch appending after its own terminal event")
 	if completed.Events != nil {
 		t.Fatalf("failed batch returned results: %#v", completed)
-	}
-	run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-	if err != nil || run.Status != worlds.StatusRunning {
-		t.Fatalf("run after rejected terminal batch = %#v err=%v", run, err)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,7 +39,8 @@ func ExecutionFromContext(ctx context.Context) (*Execution, bool) {
 }
 
 // Execution holds a delivery's run, event log, and target step. Durable operations
-// match declarations by position and read recorded outcomes. Results become
+// draw their IDs from the run's seed, match declarations by ID, and read
+// recorded outcomes. Results become
 // visible as Wait walks the event log.
 type Execution struct {
 	world  World
@@ -50,12 +53,20 @@ type Execution struct {
 	delivery QueueInput
 	// result holds the target step's outcome for the runtime to persist.
 	result *DataStepResult
-	// index maps declaration positions to indexes in events.
-	index map[int]int
+	// keys encrypts and opens the run's payloads. It is nil when the run's
+	// payloads are not encrypted.
+	keys *RunKeys
+	// seed draws the run's correlation IDs, hook tokens, and random values.
+	seed *runSeed
+	// index maps the ULID of each recorded declaration to its index in
+	// events, and reached holds the ULIDs this replay has declared.
+	index   map[string]int
+	reached map[string]bool
+	// clock is the replay clock workflow code reads: the run's creation time,
+	// moved forward to the creation time of each outcome delivered to it.
+	clock time.Time
 	// rollbacks holds compensations in registration order.
 	rollbacks []func(context.Context, *Execution) error
-	// next is the next declaration position to reserve.
-	next int
 	// horizon is the number of events the walk has passed. A result at a
 	// smaller index is visible to the runner.
 	horizon int
@@ -65,6 +76,12 @@ type Execution struct {
 	// inBand is the run's InBandCount as of the last write this replay saw,
 	// which fences a flow's writes.
 	inBand int
+	// startHook is the run's start hook, decoded once by StartHook, and
+	// startHookBound reports that a hook of this replay has opened it (see
+	// OpenStartHook).
+	startHook      *StartHook
+	startHookRead  bool
+	startHookBound bool
 	// continuations holds callbacks that react as replay delivers events.
 	continuations []func()
 	// suspended marks a runtime exit before the workflow body finishes.
@@ -91,14 +108,21 @@ type Execution struct {
 	inlineUntil time.Time
 }
 
-func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) *Execution {
+func newExecution(ctx context.Context, world World, run Run, events []Event, target *StepID) (*Execution, error) {
+	seed, err := newRunSeed(run)
+	if err != nil {
+		return nil, err
+	}
 	execution := &Execution{
+		clock:     time.UnixMilli(int64(seed.time)).UTC(),
 		world:     world,
 		ctx:       ctx,
 		run:       run,
 		events:    events,
 		target:    target,
-		index:     make(map[int]int),
+		seed:      seed,
+		index:     make(map[string]int),
+		reached:   make(map[string]bool),
 		settles:   make(map[string]int),
 		inBand:    run.InBandCount,
 		startedAt: time.Now(),
@@ -109,7 +133,7 @@ func newExecution(ctx context.Context, world World, run Run, events []Event, tar
 	for index, event := range events {
 		execution.trackEvent(index, event)
 	}
-	return execution
+	return execution, nil
 }
 
 func (e *Execution) trackEvent(index int, event Event) {
@@ -124,16 +148,13 @@ func (e *Execution) trackEvent(index int, event Event) {
 		return
 	case EventTypeHookConflict:
 		e.settles[event.CorrelationID] = index
-		// A conflict also records the declaration, so index its position below.
-	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated:
+		// A conflict also records the declaration, so index it below.
+	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeAttrSet:
 	default:
 		return
 	}
-	var data struct {
-		Position *int `json:"position"`
-	}
-	if json.Unmarshal(event.Data, &data) == nil && data.Position != nil {
-		e.index[*data.Position] = index
+	if _, key, ok := strings.Cut(event.CorrelationID, "_"); ok {
+		e.index[key] = index
 	}
 }
 
@@ -151,6 +172,32 @@ func (e *Execution) Context() context.Context {
 // Run returns the run as loaded at the start of the delivery.
 func (e *Execution) Run() Run {
 	return e.run
+}
+
+// OpenStartHook reports whether a hook declared with token opens the run's
+// start hook, and returns its ID. The first hook declared with the start
+// hook's token opens it, and nothing is recorded for it. Whether a hook opens
+// it depends only on the hooks declared before it, so every replay decides it
+// the same way. A later hook with the token is created as any hook is, and
+// conflicts with the start hook.
+func (e *Execution) OpenStartHook(token string) (HookID, bool) {
+	if e.startHookBound || token == "" {
+		return "", false
+	}
+	if hook := e.StartHook(); hook == nil || hook.Token != token {
+		return "", false
+	}
+	e.startHookBound = true
+	return StartHookID(e.run.RunID), true
+}
+
+// StartHook returns the start hook the run's run_created records, or nil.
+// It decodes run_created once per execution.
+func (e *Execution) StartHook() *StartHook {
+	if !e.startHookRead && len(e.events) > 0 && e.events[0].EventType == EventTypeRunCreated {
+		e.startHook, e.startHookRead = RunStartHook(e.events[0].Data), true
+	}
+	return e.startHook
 }
 
 // TargetStepID returns the step a step delivery executes. It reports false
@@ -190,27 +237,75 @@ func (e *Execution) GetTargetResult() (DataStepResult, bool) {
 	return result, true
 }
 
-// NextPosition returns the position of the next operation the runner declares
-// and advances the counter. Positions are recorded in event data so each replay
-// matches an operation to its recorded events. This is why a runner must
-// declare its operations in the same order on every replay.
-func (e *Execution) NextPosition() int {
-	position := e.next
-	e.next++
-	return position
-}
+// NextStepID draws the ID of the next step the runner declares: step_ and the
+// run's next correlation ULID.
+func (e *Execution) NextStepID() StepID { return StepID("step_" + e.seed.ulid()) }
 
-// unreachedPosition reports the lowest position of a recorded operation that the
-// replay has not reached. A runner that returns with such an operation left
-// over has diverged from its event log.
-func (e *Execution) unreachedPosition() (int, bool) {
-	lowest, found := 0, false
-	for position := range e.index {
-		if position >= e.next && (!found || position < lowest) {
-			lowest, found = position, true
+// NextWaitID draws the ID of the next timer the runner declares: wait_ and
+// the run's next correlation ULID.
+func (e *Execution) NextWaitID() WaitID { return WaitID("wait_" + e.seed.ulid()) }
+
+// NextHookID draws the ID of the next hook the runner declares: hook_ and the
+// run's next correlation ULID, drawing again on the ID of the run's start
+// hook, which no other hook may take.
+func (e *Execution) NextHookID() HookID {
+	id := HookID("hook_" + e.seed.ulid())
+	if e.StartHook() != nil {
+		for id == StartHookID(e.run.RunID) {
+			id = HookID("hook_" + e.seed.ulid())
 		}
 	}
-	return lowest, found
+	return id
+}
+
+// NextHookToken draws the token of the next hook the runner declares without
+// one.
+func (e *Execution) NextHookToken() string { return e.seed.hookToken() }
+
+// Now returns the replay clock, in whole milliseconds: the run's creation
+// time, read from its ID, moved forward to the creation time of each outcome
+// delivered to workflow code, so every replay reads the same time at the same
+// point.
+func (e *Execution) Now() time.Time { return e.clock }
+
+// AdvanceClock moves the replay clock forward to at, the creation time of an
+// event delivered to workflow code, in whole milliseconds. It never moves the
+// clock back.
+func (e *Execution) AdvanceClock(at time.Time) {
+	if at = at.Truncate(time.Millisecond).UTC(); at.After(e.clock) {
+		e.clock = at
+	}
+}
+
+// RandReader returns a reader of bytes drawn from the run's seed, each the
+// floor of a drawn value times 256.
+func (e *Execution) RandReader() io.Reader { return e.seed }
+
+// declared marks the operation with id as reached and returns the index of
+// its recorded declaration, matched by ULID so an operation of another kind
+// recorded with it is reported too. Because IDs come from the run's seed, a
+// runner must declare its operations in the same order on every replay.
+func (e *Execution) declared(id string) (int, bool) {
+	_, key, _ := strings.Cut(id, "_")
+	e.reached[key] = true
+	index, ok := e.index[key]
+	return index, ok
+}
+
+// unreached reports the earliest recorded declaration that the replay has
+// not reached. A runner that returns with such an operation left over has
+// diverged from its event log.
+func (e *Execution) unreached() (string, bool) {
+	lowest := -1
+	for key, index := range e.index {
+		if !e.reached[key] && (lowest < 0 || index < lowest) {
+			lowest = index
+		}
+	}
+	if lowest < 0 {
+		return "", false
+	}
+	return e.events[lowest].CorrelationID, true
 }
 
 // InBandCount returns the count that fences a write made by this replay, for
@@ -334,7 +429,7 @@ func (e *Execution) CreateEvent(event EventsCreateEvent, mapError func(error) er
 	if result.Data != nil {
 		data = result.Data
 	}
-	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data})
+	e.merge(result, Event{RunID: e.run.RunID, EventID: result.EventID, EventType: result.EventType, CorrelationID: event.CorrelationID, Data: data, CreatedAt: result.CreatedAt})
 	return result
 }
 
@@ -362,6 +457,13 @@ func (e *Execution) advance() bool {
 		}
 	}
 	e.horizon++
+	switch event := e.events[e.horizon-1]; event.EventType {
+	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeWaitCompleted, EventTypeHookCreated, EventTypeHookConflict:
+		// The walk delivers a step's result, a timer, and a hook's
+		// registration outcome as it passes them, and a hook's payload when
+		// a consumer takes it.
+		e.AdvanceClock(event.CreatedAt)
+	}
 	for _, fn := range e.continuations {
 		fn()
 	}
@@ -560,7 +662,7 @@ func (e *Execution) recordStepResult(stepID StepID, result DataStepResult) (Even
 	if err != nil {
 		return Event{}, err
 	}
-	event := Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data}
+	event := Event{RunID: e.run.RunID, EventID: created.EventID, EventType: input.Event.EventType, CorrelationID: string(stepID), Data: input.Event.Data, CreatedAt: created.CreatedAt}
 	inBand := e.inBand
 	e.merge(created, event)
 	e.inBand = inBand
@@ -580,4 +682,52 @@ func (e *Execution) finishSteps() error {
 // stepKey identifies stepID of the run in Runtime.running.
 func (e *Execution) stepKey(stepID StepID) string {
 	return string(e.run.RunID) + "/" + string(stepID)
+}
+
+// EncodePayload encodes value as a payload of the run, encrypted when the
+// run's payloads are.
+func (e *Execution) EncodePayload(value any) ([]byte, error) {
+	return EncodePayload(value, PayloadOptions{Keys: e.keys})
+}
+
+// DecodePayload decodes a payload of the run into value, a pointer.
+func (e *Execution) DecodePayload(data []byte, value any) error {
+	return DecodePayload(data, e.keys, value)
+}
+
+// encodeError encodes err as an error payload of the run.
+func (e *Execution) encodeError(err error) []byte {
+	// An Error value always encodes.
+	data, _ := EncodeErrorPayload(err, PayloadOptions{Keys: e.keys})
+	return data
+}
+
+// decodeError decodes an error payload of the run.
+func (e *Execution) decodeError(data []byte) *Error {
+	return DecodeErrorPayload(data, e.keys)
+}
+
+// stepArgs is a step's input as it is recorded: its argument list.
+type stepArgs[In any] struct {
+	Args [1]In `json:"args"`
+}
+
+// runFailedData returns the Data of a run_failed event for err.
+func (e *Execution) runFailedData(err error) []byte {
+	// An Error value always encodes.
+	data, _ := EncodeRunFailed(err, PayloadOptions{Keys: e.keys})
+	return data
+}
+
+// StreamFrame returns chunk as a frame of the run's stream, encrypted when
+// the run's payloads are.
+func (e *Execution) StreamFrame(chunk []byte) ([]byte, error) {
+	return EncodeStreamFrame(chunk, e.keys, nil)
+}
+
+// WriteWebhookResponse writes response as the response to request, a manual
+// webhook's request to the run, as WriteWebhookResponse does with the run's
+// keys.
+func (e *Execution) WriteWebhookResponse(ctx context.Context, request WebhookRequest, response WebhookResponse) error {
+	return WriteWebhookResponse(ctx, e.world, e.run.RunID, request, response, e.keys)
 }

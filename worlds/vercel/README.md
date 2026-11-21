@@ -1,75 +1,42 @@
 # Vercel world
 
-`vercelworld` stores the workflow event log and its views in Redis and delivers
-work through Vercel Queues. Timers longer than six days are delivered in hops
-of up to six days on Vercel Queues, or carried by QStash when it is configured.
+`vercelworld` stores runs in Vercel's managed workflow storage, the
+backend the [Workflow SDK](https://workflow-sdk.dev) uses on Vercel, and
+delivers work through Vercel Queues. There is no database to provision:
+storage is scoped to the deployment's project and environment, and the
+deployment's OIDC token authenticates every request.
 
 | Service | Role |
 | --- | --- |
-| Redis (Upstash, TCP or REST) | Event log, run/step/hook views, hook tokens, streams, queue records |
-| Vercel Queues | Delivery of every queued item; delays up to 6 days, in hops for longer timers |
-| QStash (optional) | Timers longer than 6 days, handed back to Vercel Queues when due |
+| Vercel workflow storage | Event log, run, step, and hook views, hook tokens, and streams |
+| Vercel Queues | Delivers queued items with delays up to 23 hours, in hops for longer timers |
 
-## Entrypoints
-
-- `vercelworld.Queue(world, runners)`: the Vercel Queues push consumer. It
-  executes workflows and steps.
-- `vercelworld.HTTP(world)`: the RPC endpoint (`/v1/workflow/rpc`), token
-  webhooks (`/v1/workflow/webhooks/{token}`), and, when QStash is configured,
-  the signed timer route `/v1/workflow/callbacks/qstash`.
-- `vercelworld.HTTPPrefix(world, prefix)`: the same routes under `prefix`.
-  `Config.BaseURL` must end with the same prefix.
-- `vercelworld.RPC(world)` and `vercelworld.Webhook(world)`: the RPC or webhook
-  endpoint alone, for callers that mount their own routes.
-- `vercelworld.QStash(world)`: the signed timer callback alone. Requires
-  `Config.QStash`; mount it at `POST <Config.BaseURL>/callbacks/qstash`.
-
-The basic example deploys `cmd/worker/vercel/queue` (consumer) and
-`cmd/worker/vercel/api` (HTTP). When the code that starts workflows has the
-World in process, pass it to `workflow.NewContext`; no HTTP function is needed.
-
-## Configuration
+## Usage
 
 ```go
 world, err := vercelworld.New(vercelworld.Config{
-	BaseURL:  os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
-	RedisURL: os.Getenv("REDIS_URL"),         // rediss://default:password@host:6379
-	QueueURL: os.Getenv("VERCEL_QUEUE_URL"),  // https://iad1.vercel-queue.com/api/v3
-	Topic:    os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
+	BaseURL: os.Getenv("WORKFLOW_BASE_URL"), // https://workflows.example.com/v1/workflow
+	Topic:   os.Getenv("VERCEL_WORKFLOW_QUEUE_TOPIC"),
 })
+if err != nil {
+	log.Fatal(err)
+}
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`; webhook URLs are built from it. |
-| `RedisURL` | TCP transport. `rediss://` uses TLS (minimum TLS 1.2); `redis://` is plain TCP. |
-| `RedisRESTURL`, `RedisRESTToken` | Upstash REST transport, used when `RedisURL` is empty. |
-| `QueueURL` | Required. Regional Vercel Queues API root including `/api/v3`. |
-| `Topic` | Required. Topic deliveries of unrouted workflows are published to. |
-| `Topics` | Further topics by queue name. |
-| `Routes` | The queue of each routed workflow, built with `worlds.Routes(worlds.Route[W]("queue"), ...)`. Its deliveries are published to the queue's topic, which the queue record keeps for QStash timers. `Queue(world, runners)` consumes whichever topics its function is triggered by. |
-| `OIDCToken` | Function returning the Vercel OIDC token, called for every Queues request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
-| `DeploymentID` | Deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. Runs are pinned to the deployment that starts them, and every delivery is published to the run's deployment. |
-| `Prefix` | Redis key prefix, default `go-workflow`. |
-| `Retention` | How long a finished run's data is kept (see [Retention](#retention)). Zero, the default, keeps runs forever. |
-| `Retentions` | `Retention` per workflow name, from `worlds.Retentions`. Zero keeps that workflow's runs. |
-| `QStash` | Optional long-timer configuration (below). |
-| `HTTPClient` | Client for Redis REST, Vercel Queues and QStash. Default `http.DefaultClient`. |
+Deploy two functions:
 
-Vercel rotates OIDC tokens, so `OIDCToken` is called for every Queues request.
-`vercelworld.OIDCTokenFromEnv(name)` returns a function that reads the
-environment variable `name` on each call; the default reads
-`VERCEL_OIDC_TOKEN`. Pass your own function to read the token elsewhere.
+```go
+// The queue consumer function.
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
+```
 
-Each publish sends `Vqs-Deployment-Id` set to the deployment of the delivery's
-run, so a webhook or hook resume handled by a newer deployment still returns
-to the run's own. QStash timers keep that deployment in their queue record. A
-delivery that reaches another deployment anyway is re-routed up to three times,
-and the run fails with `worlds.ErrDeploymentMismatch` after that, or as soon as
-Vercel answers `502` with `Vqs-Error-Code: consumer_discovery_failed` for a
-deleted deployment.
+```go
+// The client-facing function.
+log.Fatal(http.ListenAndServe(":8081", vercelworld.HTTP(world)))
+```
 
-Deploy the consumer with a `queue/v2beta` trigger for the topic:
+Give the consumer a `queue/v2beta` trigger for the topic:
 
 ```json
 {
@@ -81,178 +48,236 @@ Deploy the consumer with a `queue/v2beta` trigger for the topic:
 }
 ```
 
+When the code that starts workflows has the World in process, pass it to
+`workflow.NewClient`. The HTTP function is then needed only for webhooks,
+clients in other processes, or `workflow.LatestDeployment`, which needs the
+[deployment route](#latest-deployment).
+
+## Configuration
+
+| Field | Meaning |
+| --- | --- |
+| `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
+| `Topic` | Required. Topic deliveries of unrouted workflows are published to. |
+| `Topics`, `Routes` | Further topics by queue name, and the queue of each routed workflow. See [routing](#routing-workflows-to-topics). |
+| `QueueURL` | A Vercel Queues API root including `/api/v3` that every queue request goes to. Empty routes each message to its region's `https://<region>.vercel-queue.com/api/v3`. Through the API proxy (`Token`), requests name the region in `x-vercel-queue-region`. See [regions](#regions). |
+| `OIDCToken` | Returns the deployment's OIDC token for each request. Default `OIDCTokenFromEnv(DefaultOIDCTokenEnv)`. |
+| `Token`, `ProjectID`, `TeamID`, `Environment` | A Vercel access token and the project it acts in, for using the storage from outside a deployment. See [outside a deployment](#outside-a-deployment). |
+| `BackendURL` | Root of the workflow API. Default `https://vercel-workflow.com/api`, or `https://api.vercel.com/v1/workflow` with `Token`. |
+| `HTTPClient` | Client for the workflow API and Vercel Queues. Default `http.DefaultClient`. |
+| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](https://go-workflow.vercel.app/guide/replay#pinning-runs-to-a-deployment) and [latest deployment](#latest-deployment). |
+
+`New` does not contact Vercel.
+
+Vercel rotates OIDC tokens, so `OIDCToken` is called for every request.
+`vercelworld.OIDCTokenFromEnv(name)` reads the environment variable `name` on
+each call. The default reads `VERCEL_OIDC_TOKEN`.
+
+When a deployment ID is set, Queues requests send `Vqs-Deployment-Id`. A
+delivery is published to its run's deployment, or to this World's when the run
+has none.
+
+### Outside a deployment
+
+A script, a CLI, or the [web UI](https://go-workflow.vercel.app/tooling/web-ui) behind
+[world-http](https://go-workflow.vercel.app/tooling/world-http) can read and write the same storage with a
+Vercel access token:
+
+```go
+world, err := vercelworld.New(vercelworld.Config{
+	BaseURL:     "https://workflows.example.com/v1/workflow",
+	Topic:       "workflow",
+	Token:       os.Getenv("VERCEL_TOKEN"),
+	ProjectID:   "prj_...",
+	TeamID:      "team_...",
+	Environment: "production",
+})
+```
+
+Requests then go through Vercel's API proxy for that project and environment.
+Starting runs from there still publishes to Vercel Queues, which needs an OIDC
+token, such as the one `vercel env pull` writes to `VERCEL_OIDC_TOKEN`.
+
+## Routing workflows to topics
+
+```go
+world, err := vercelworld.New(vercelworld.Config{
+	// BaseURL...
+	Topic:  "workflow",
+	Topics: map[string]string{"backfill": "workflow-backfill"},
+	Routes: worlds.Routes(worlds.Route[workflows.Backfill]("backfill")),
+})
+```
+
+Every delivery of a routed workflow's runs is published to its queue's topic,
+and other workflows' to `Topic`. The message keeps the topic, so the hops of a
+long timer stay on it. `Queue(world, runners)` consumes whichever topics its
+function is triggered by, so give each topic its own trigger, with its own
+concurrency, or one function several triggers. `New` rejects a route to a queue
+without a topic.
+
+## Entry points
+
+- **`Queue(world, runners)`**: the Vercel Queues push consumer. It executes
+  workflows and steps.
+- **`HTTP(world, options...)`**: the RPC endpoint, token webhooks, and the
+  [deployment route](#latest-deployment) `/v1/workflow/deployment`. Options
+  such as `worlds.WithClientToken` protect the client endpoints.
+- **`HTTPPrefix(world, prefix)`**: the same routes under `prefix`.
+- **`RPC(world)`**: the RPC endpoint alone. Mount it at
+  `POST <Config.BaseURL>/rpc`.
+- **`Webhook(world)`**: the token webhooks alone. Mount it at
+  `<Config.BaseURL>/webhooks/{token}`.
+- **`Deployment(world)`**: the deployment route alone. Mount it at
+  `GET <Config.BaseURL>/deployment`.
+
 ## Storage
 
-Every mutation is one Lua script. That covers creating a run, appending an
-event or a batch (admission, the append and every view update), claiming a
-hook (including a forced takeover), putting or deleting a queue record, and
-each stream operation. A script runs atomically, so the World is equally safe
-over TCP and REST, and any number of instances can share one database. Scripts
-are sent with `EVALSHA` and fall back to `EVAL` on `NOSCRIPT`.
+Each run's event log is kept by Vercel's workflow API. Every run the World
+creates is a Workflow SDK spec 8 run: its events have slot-numbered IDs,
+in-band writes are fenced, hook tokens can be force-claimed, and their
+retention reserved. The backend derives the run, step, and hook views and
+enforces token ownership across the whole project and environment, every
+region and deployment included.
 
-Scripts derive their keys from the prefix, so the database must not be a
-Redis Cluster. Upstash regional and global databases are fine.
+go-workflow's events have the Workflow SDK's shape, so the backend keeps each
+as it keeps a JS run's event: its metadata, such as a step's name or a wait's
+resume time, and its payload, already in the SDK's format. The runs, steps,
+hooks, and streams of Go runs show in Vercel's dashboard as JS ones do.
 
-| Key (prefix `p`) | Type | Contents |
+| Event | Payload | Metadata |
 | --- | --- | --- |
-| `p:run:<run>` | hash | Run view, `count` (event count), creation `score` |
-| `p:attrs:<run>` | hash | Run attributes |
-| `p:events:<run>` | list | Event records; index = slot − 1 |
-| `p:last:<run>` | hash | Last slot per event type (and correlation ID), used for idempotent replays |
-| `p:corr:<run>:<hex(cid)>` | zset | Slots of one correlation ID |
-| `p:corrs:<run>` | set | `hex(cid)` of every correlation ID of the run, so retention can find their keys |
-| `p:steps:<run>`, `p:steporder:<run>` | hash, zset | Step JSON; step IDs ordered by creation slot |
-| `p:hook:<hook>`, `p:token:<token>` | string | Hook JSON; owning hook of a token |
-| `p:hooks`, `p:runhooks:<run>` | zset | Hook IDs by creation |
-| `p:runs`, `p:runs:wf:<name>`, `p:runs:status:<s>`, `p:runs:wfstatus:<s>:<name>` | zset | Run IDs by creation |
-| `p:streams:<run>` | set | Stream names |
-| `p:stream:<run>:<hex(name)>`, `p:chunks:<run>:<hex(name)>` | hash, list | Stream session state; base64 chunks |
-| `p:queue:<id>` | string | Queue record |
-| `p:expiring` | zset | Finished runs by the time their data expires (ms), with their workflow, status, and hooks, for removal from the indexes |
+| `run_created` | the run's input | workflow name, deployment, attributes, public key |
+| `run_completed`, `run_failed` | the output or error | |
+| `step_created` | the step's input | step name |
+| `step_completed`, `step_failed`, `step_retrying` | the result or error | retry time |
+| `step_started` | | owner message |
+| `hook_created` | the hook's metadata | token, retention, webhook, system, forced |
+| `hook_received` | the payload | |
+| `wait_created` | | resume time |
+| `attr_set` | | changes and writer |
 
-Encoding works as follows:
+Replay matches declarations by ID, and a step's retries and cancellation
+contexts come from the replay that declares it, so a wait needs only its
+resume time.
 
-- Binary payloads are stored as base64, so every value is valid UTF-8 for the
-  REST API.
-- Event data is parsed in Go. Only the fields admission and the views need are
-  passed to Lua, as a JSON descriptor, so Lua never parses user bytes.
-- Timestamps are Unix microseconds taken from the writer's clock.
-- Creation scores are microsecond timestamps made strictly increasing by
-  `p:order`. They are unique, so list cursors (`RunsList`, `StepsList`,
-  `HooksList`) are the last score and stay stable.
-- Event cursors are event IDs.
+| Contract | On Vercel |
+| --- | --- |
+| Batches | One request and one fenced allocation. As the contract allows, the backend keeps the events it admitted when another is refused, and the runtime replays whatever the log holds. |
+| Repeated transitions | The backend refuses them as conflicts. The World finds and returns the event that admitted the transition, as the contract asks. |
+| Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. |
+| Stream reads | Cursors are chunk indexes. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. The default stream, whose name is empty, is stored as `_default`. |
+| `RunsList` by several statuses | The backend filters by one status, so the World reads a page of each and merges them by creation time. |
+| Hooks | `HooksGet` reads the hook and its events, for when it received a payload or was disposed. |
+| Analytics | Not supported. `Capabilities().Analytics` is false. |
+| Retention | Vercel's plan decides how long runs are kept. |
 
-Token retention expires lazily: on a claim, on a conflicting `hook_created`, and
-in `HooksGetByToken`. Redis also expires the token key a minute after retention
-ends, as a backstop.
+## Encryption
 
-`RunsWaitForTerminalStatus` and `StreamsGetChunks` poll with a backoff from
-50 ms to 500 ms, because REST has no blocking reads.
+The World encrypts payloads as the Workflow SDK does on Vercel, with no
+configuration. With a project ID, from `Config.ProjectID` or
+`VERCEL_PROJECT_ID`, a run's key is:
 
-## Retention
+- in a Vercel Function, for a run of this deployment, derived from the
+  deployment's key, `VERCEL_DEPLOYMENT_KEY`, with HKDF-SHA256 and
+  `{projectId}|{runId}`;
+- otherwise, such as for a run of another deployment, read from Vercel's API,
+  `GET https://api.vercel.com/v1/workflow/run-key/{deploymentId}`, with
+  `Config.Token`, `VERCEL_TOKEN`, or the deployment's OIDC token, and
+  `Config.TeamID`.
 
-With `Config.Retention` set, the script that appends a run's
-`run_completed`, `run_failed`, or `run_cancelled` sets every key of that run to
-expire at `completedAt` plus its workflow's retention (`Config.Retentions`,
-else `Retention`) with `PEXPIREAT`: its view, attributes,
-event log, `last` and correlation keys, steps, hooks, and streams. Redis then
-deletes them on its own, with no sweep over the data. A hook kept by its
-token's retention expires when that ends instead, if later. The expiry is an
-absolute time, so writes that still reach a finished run, such as a late step
-result, reapply it rather than extend it, and stream keys created then take
-the run's remaining time.
+Without a deployment key, or a project ID, payloads are not encrypted. See
+[Data Format and Encryption](https://go-workflow.vercel.app/guide/encryption).
 
-Index sorted sets cannot expire per member, so the same script also adds the
-run to `p:expiring`. Each `EventsCreateRun` removes up to 100 runs whose data
-is gone from `p:runs`, its workflow and status indexes, and its hooks from
-`p:hooks`. Until then, `RunsList` skips a listed run whose data has expired.
+## Long timers
 
-Runs that are still pending or running never expire, however old, and runs
-that finished before `Retention` was set are kept.
+The World publishes with Vercel Queues' default retention of 24 hours and, as
+the Workflow SDK does, delays of up to 23 hours, so every message is still
+retained for an hour after it becomes visible. A delivery due later is
+published with a 23-hour delay, and when it arrives more than an hour early the
+consumer
+publishes a new message for the rest of the delay, then acknowledges the old
+one. Each hop's idempotency key is the delivery's message ID and the incoming
+Vercel message ID, so a hop retried after a crash is dropped.
 
-## Queue and timers
+When the deployment a delivery is pinned to has been deleted, the next hop
+goes to the current deployment instead, whose runtime fails the run with
+`worlds.ErrDeploymentMismatch`.
 
-`Queue` writes the record `p:queue:<ULID>` first and then publishes `{"id":
-"<ULID>"}`. If the publish fails, the record is deleted and the error is
-returned.
+## Latest deployment
 
-- Delays up to 7 days go to Vercel Queues as `POST {QueueURL}/topic/{topic}`,
-  the topic of the workflow's route or `Topic`.
-  The request sets `Vqs-Delay-Seconds`, rounded up, and
-  `Vqs-Retention-Seconds: 604800`, so a delayed or retried message outlives
-  its delay. `Vqs-Idempotency-Key` is the message ID. Runtime idempotency keys
-  are reused across distinct deliveries, and Vercel would silently drop a
-  repeat for up to 24 hours.
-- Delays over 6 days go to QStash when `Config.QStash` is set, and the QStash
-  message ID is stored on the record. Otherwise the message is published with
-  a 6-day delay, and the consumer publishes the next hop.
+In a production deployment, runs started with
+[`workflow.LatestDeployment`](https://go-workflow.vercel.app/guide/replay#moving-chains-to-the-latest-deployment)
+start on the deployment the production domain serves, instead of the
+deployment that starts them.
 
-`QueueCancel` deletes the record and any pending QStash message. A Vercel
-Queues message cannot be recalled; its delivery finds no record and is
-acknowledged.
+- **Asked of the production domain.** The World requests
+  `GET <BaseURL>/deployment`, which answers with the deployment serving it.
+  Vercel routes the request to the current production deployment, so the
+  answer follows new deployments and rollbacks.
+- **Needs the deployment route.** `BaseURL` must be on the production domain,
+  with `HTTP(world)` or `Deployment(world)` mounted there. `Deployment` serves
+  the route alone, without exposing the RPC endpoint. Without the route,
+  marked runs stay on the deployment that starts them.
+- **Reused for an hour.** Each process reuses the answer for an hour, so a
+  chain that hands off within that hour may start one more run on the
+  previous deployment before it moves.
+- **Production only.** Previews and custom environments keep marked runs on
+  the deployment that starts them, since their `BaseURL` names another
+  deployment or is protected. So does a failed request, which is logged.
+
+## Queue delivery
+
+`Queue` publishes the whole delivery as the message: `POST
+{QueueURL}/topic/{Topic}` with `Vqs-Delay-Seconds`,
+the delivery's message ID as
+`Vqs-Idempotency-Key`. Nothing is stored for it.
 
 The consumer handles each delivery as follows:
 
-1. It parses the push request: a binary `com.vercel.queue.v2beta` CloudEvent
-   (`ce-vqs*` headers, payload in the body) or a structured `v1beta` one.
-   Deliveries without a receipt handle are claimed with `ReceiveMessageById`.
-2. It loads the record. A missing record is acknowledged without running.
-3. If the record's `NotBefore` is within an hour, it extends the lease
-   (`PATCH .../lease/{receiptHandle}`) instead of failing. If it is later, it
-   publishes a new message for the rest of the delay (at most 6 days, with
-   idempotency key `{recordID}:{vercelMessageID}`) and acknowledges this one.
-4. It runs `worlds.NewRuntime(world, runners).Execute`, renewing the lease
-   every minute.
-5. On success it deletes the record and acknowledges the message
-   (`DELETE .../lease/{receiptHandle}`).
-6. On failure it sets the visibility to a backoff of 5 s to 5 min and answers
-   500, so Vercel redelivers. A delivery for a run that no longer exists is
-   dropped.
-
-### Long timers with QStash
-
-```go
-config := vercelworld.Config{
-	QStash: &vercelworld.QStashConfig{
-		Token:             os.Getenv("QSTASH_TOKEN"),
-		CurrentSigningKey: os.Getenv("QSTASH_CURRENT_SIGNING_KEY"),
-		NextSigningKey:    os.Getenv("QSTASH_NEXT_SIGNING_KEY"),
-	},
-}
-```
-
-The timer is published to `<BaseURL>/callbacks/qstash` with
-`Upstash-Not-Before`. That URL must be HTTPS. When QStash calls it:
-
-1. `HTTP(world)` verifies the `Upstash-Signature` JWT: HS256 with the current
-   or next signing key, issuer `Upstash`, subject equal to that URL, within its
-   `nbf`/`exp` window, and a body SHA-256 that matches.
-2. It publishes the record to Vercel Queues with the remaining delay.
-3. It clears the stored QStash message ID.
+1. Parses the push request: a binary `com.vercel.queue.v2beta` CloudEvent or a
+   structured `v1beta` one.
+2. If the delivery is due within an hour, extends the lease instead of
+   failing. If it is due later, publishes the next hop and acknowledges this
+   one.
+3. Executes the delivery, renewing the lease every minute.
+4. On success acknowledges the message.
+5. On failure sets the visibility to the Workflow SDK's backoff, a second
+   doubling with each delivery up to 15 minutes with 25% jitter, and at least
+   the 5 seconds Vercel Queues accepts, and answers `500`, so Vercel
+   redelivers. A delivery for a run that no longer exists is dropped. The
+   delivery count is the delivery's `Attempt`, so the runtime gives up after
+   48 deliveries.
 
 ## Security
 
-- **`Queue`** must be deployed only as a queue-triggered function. Vercel
-  documents these functions as having no public URL: only Vercel's queue
-  infrastructure can invoke them. So the handler does not authenticate
-  deliveries. It does not compare bearer tokens, because the old check against
-  its own OIDC token is not the documented model. A delivery only names a Redis
-  record, so a forged one can at most run an already-queued item early.
-- **The QStash route** is public, and it rejects any request without a valid
-  QStash signature for its exact URL.
-- **`HTTP` / `RPC`** perform no authentication or per-run authorization. Keep
-  them internal, or put your own authentication in front of them.
-- **Webhooks** are authorized only by the token in the URL. Treat that URL as a
-  bearer capability. Verify the provider's signature and replay protection
-  inside the workflow.
+- **`Queue`** must be deployed only as a queue-triggered function. Vercel does
+  not expose such functions publicly, so the handler does not authenticate
+  deliveries.
+- **The client endpoints** (RPC and the stream socket) are unauthenticated
+  unless `HTTP` is given `worlds.WithClientToken` or
+  `worlds.WithClientMiddleware`. Without them, keep them internal or put your
+  own authentication in front of them.
+- **Webhooks** are authorized only by the token in the URL.
+- **The deployment route** is public and read-only: it answers with the
+  serving deployment's ID and nothing else.
+- **Storage** is reachable only with the deployment's OIDC token or a Vercel
+  access token for the project.
 
-## Verified against the Vercel docs (October 2026)
-
-| Page | What was confirmed |
-| --- | --- |
-| [Queues API](https://vercel.com/docs/queues/api) | Regional `https://{region}.vercel-queue.com/api/v3`. `POST /topic/{topic}` with `Authorization: Bearer <OIDC token>` and a raw body. Headers `Vqs-Delay-Seconds` (max 7 days, capped at the TTL), `Vqs-Retention-Seconds` (60 s to 7 days, default 24 h), `Vqs-Idempotency-Key`, and `Vqs-Deployment-Id`. Responses 201 `{"messageId"}` or 202 deferred. `ReceiveMessageById`, `DELETE .../lease/{receiptHandle}` to acknowledge, and `PATCH .../lease/{receiptHandle}` with `visibilityTimeoutSeconds` (max 3600). |
-| [Queues concepts](https://vercel.com/docs/queues/concepts) | Push consumers use `queue/v2beta` triggers and are not reachable from the internet. Delivery is at least once. The deduplication window is `min(retention, 24 h)`. A failed delivery is retried after its lease expires. |
-| [Queues SDK](https://vercel.com/docs/queues/sdk), plus the published `@vercel/queue` source (read only, because the docs do not document the raw push request) | The binary `ce-*` headers. The structured `v1beta` fallback. Acknowledging via `DELETE` lease and retrying via `PATCH` visibility. |
-| [OIDC](https://vercel.com/docs/oidc) | In Functions the token arrives in the `x-vercel-oidc-token` header. It is reused for up to 90 minutes and expires after 2 hours. `VERCEL_OIDC_TOKEN_FILE` and `VERCEL_OIDC_TOKEN` are the other sources. |
-
-Vercel Queues is in public beta and the push request format is defined by the
-SDK, so recheck these details when upgrading.
+> [!NOTE]
+> Vercel documents its workflow storage only through the Workflow SDK, so the
+> World follows the protocol of `@workflow/world-vercel`. Vercel Queues is in
+> public beta. Recheck both when upgrading.
 
 ## Tests
 
-The tests expect Redis at `redis://localhost:6379` (`REDIS_URL`) and an
-Upstash-compatible REST endpoint at `http://localhost:8079` with token `local`
-(`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`), and run the
-`workflowtest` conformance suites over both transports:
-
 ```sh
-docker network create workflow-redis
-docker run -d --name redis --network workflow-redis -p 6379:6379 redis
-docker run -d --network workflow-redis -p 8079:80 -e SRH_MODE=env \
-  -e SRH_TOKEN=local -e SRH_CONNECTION_STRING=redis://redis:6379 \
-  hiett/serverless-redis-http
 go test -race ./worlds/vercel/...
 ```
 
-Each test uses a unique prefix and deletes its keys afterwards. With `luajit`
-on `PATH`, every Lua script is also compile-checked.
+The tests run the conformance suites and end-to-end workflows against an
+in-process imitation of the workflow API, which keeps an event only as the
+backend does. Set `WORKFLOW_VERCEL_LIVE_OIDC_TOKEN` (a deployment's OIDC
+token), or `WORKFLOW_VERCEL_LIVE_TOKEN` with `VERCEL_PROJECT_ID` and
+`VERCEL_TEAM_ID`, to also run the end-to-end workflows against Vercel's
+storage.

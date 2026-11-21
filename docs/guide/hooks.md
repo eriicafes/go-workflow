@@ -48,8 +48,9 @@ hook := workflow.CreateHook[workflows.Approval](ctx, workflow.HookOption{
 defer hook.Dispose(ctx)
 ```
 
-Omit `Token` to generate one. The token is available immediately and remains
-stable across replay, even if a delivery stops before registration.
+Omit `Token` to generate one: 21 characters of Nano ID's alphabet drawn from
+the run's seed after the hook's ID. The token is available immediately and
+remains stable across replay, even if a delivery stops before registration.
 
 ## Registering before starting work
 

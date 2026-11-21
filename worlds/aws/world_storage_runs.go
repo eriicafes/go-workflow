@@ -87,3 +87,36 @@ func runsIndex(workflowName string, status []worlds.Status) indexQuery {
 	}
 	return indexQuery{index: listIndex, partition: "RUNS", status: status}
 }
+
+func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	if err := worlds.CheckDeleteDataInput(input); err != nil {
+		return worlds.RunsDeleteDataManyResult{}, err
+	}
+	results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+	for index, id := range input.RunIDs {
+		results[index] = worlds.DeleteDataResult{RunID: id}
+		item, found, err := w.item(ctx, runKey(string(id)))
+		switch {
+		case err != nil:
+			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
+			continue
+		case !found:
+			results[index].Outcome = worlds.DeleteDataNotFound
+			continue
+		}
+		if status := runFromItem(item).Status; !status.Terminal() {
+			results[index].Outcome, results[index].Reason, results[index].Status = worlds.DeleteDataSkipped, worlds.DeleteDataRunNotTerminal, status
+			continue
+		}
+		alreadyExpired, err := w.purgeRun(ctx, id)
+		switch {
+		case err != nil:
+			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
+		case alreadyExpired:
+			results[index].Outcome = worlds.DeleteDataAlreadyDeleted
+		default:
+			results[index].Outcome = worlds.DeleteDataDeleted
+		}
+	}
+	return worlds.NewDeleteDataResult(results), nil
+}

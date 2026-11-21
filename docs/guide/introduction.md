@@ -66,7 +66,7 @@ break these rules. [How Replay Works](/guide/replay) explains the model in detai
 | [`worlds`](/reference/worlds) | The World contract, the runtime, the client, and the HTTP server. |
 | [`worlds/local`](/worlds/local) | JSON files on disk, in-process delivery. |
 | [`worlds/postgres`](/worlds/postgres) | PostgreSQL with LISTEN/NOTIFY workers. |
-| [`worlds/vercel`](/worlds/vercel) | Redis, Vercel Queues, optional QStash. |
+| [`worlds/vercel`](/worlds/vercel) | Vercel workflow storage, Vercel Queues. |
 | [`worlds/aws`](/worlds/aws) | DynamoDB, SQS, optional EventBridge Scheduler. |
 | [`worlds/testworld`](/worlds/testworld) | In-memory World for tests. |
 | [`workflowtest`](/worlds/custom#conformance) | Conformance suites for World implementations. |

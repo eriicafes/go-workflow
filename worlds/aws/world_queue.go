@@ -92,32 +92,6 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
-	// Deleting the record makes a delivery already in flight acknowledge
-	// without running. Any schedule is deleted too.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	result, err := w.dynamo.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName:           awsv2.String(w.config.TableName),
-		Key:                 queueKey(input.MessageID),
-		ConditionExpression: awsv2.String("attribute_exists(pk)"),
-		ReturnValues:        ddb.ReturnValueAllOld,
-	})
-	if conditional(err) {
-		return worlds.ErrQueueMessageNotFound
-	}
-	if err != nil {
-		return err
-	}
-	// A World without Scheduler cannot delete the schedule. When it fires,
-	// the consumer finds no record and acknowledges it.
-	if schedule := read(result.Attributes, "schedule"); schedule != "" && w.scheduler != nil {
-		return w.deleteSchedule(ctx, schedule)
-	}
-	return nil
-}
-
 func (w *World) queueRecord(ctx context.Context, id string) (queueRecord, bool, error) {
 	item, found, err := w.item(ctx, queueKey(id))
 	if err != nil || !found {

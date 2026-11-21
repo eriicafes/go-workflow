@@ -40,10 +40,12 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"Batch", conformBatch},
 		{"EventsList", conformEventsList},
 		{"Attributes", conformAttributes},
+		{"DeleteData", conformDeleteData},
 		{"HookTokens", conformHookTokens},
 		{"HooksForce", conformHooksForce},
 		{"HooksRetention", conformHooksRetention},
 		{"HookDisposal", conformHookDisposal},
+		{"StartHook", conformStartHook},
 		{"Webhooks", conformWebhooks},
 		{"Waits", conformWaits},
 		{"Streams", conformStreams},
@@ -74,9 +76,9 @@ func ConformanceShared(t *testing.T, newPair func(t *testing.T) (worlds.World, w
 		a, b := newPair(t)
 		conformConcurrentHookClaims(t, a, b)
 	})
-	t.Run("SharedStreamSessions", func(t *testing.T) {
+	t.Run("SharedStreams", func(t *testing.T) {
 		a, b := newPair(t)
-		conformSharedStreamSessions(t, a, b)
+		conformSharedStreams(t, a, b)
 	})
 }
 
@@ -165,8 +167,8 @@ func conformAllEvents(t *testing.T, world worlds.World, runID worlds.RunID) []wo
 	}
 }
 
-func conformHookData(token string, webhook *worlds.Webhook, retention time.Duration) worlds.DataHookCreated {
-	data := worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), IsWebhook: webhook != nil, Webhook: webhook}
+func conformHookData(token string, webhook bool, retention time.Duration) worlds.DataHookCreated {
+	data := worlds.DataHookCreated{Token: token, Metadata: []byte("meta"), IsWebhook: webhook}
 	if retention > 0 {
 		until := time.Now().UTC().Add(retention)
 		data.TokenRetentionUntil = &until
@@ -183,14 +185,14 @@ func conformClaim(world worlds.World, runID worlds.RunID, hookID worlds.HookID, 
 }
 
 func conformIdentity(t *testing.T, world worlds.World) {
-	if world.SpecVersion() != worlds.SpecVersion {
-		t.Fatalf("SpecVersion = %d", world.SpecVersion())
-	}
 	normalized, err := worlds.NormalizeBaseURL(world.BaseURL())
 	if err != nil || normalized != world.BaseURL() {
 		t.Fatalf("BaseURL %q is not normalized: %v", world.BaseURL(), err)
 	}
 	if world.Capabilities().Analytics != (world.Analytics() != nil) {
 		t.Fatalf("Capabilities().Analytics = %v but Analytics() = %v", world.Capabilities().Analytics, world.Analytics())
+	}
+	if _, regional := world.(worlds.RegionalRunIDs); world.Capabilities().RegionalRunIDs != regional {
+		t.Fatalf("Capabilities().RegionalRunIDs = %v but implements worlds.RegionalRunIDs = %v", world.Capabilities().RegionalRunIDs, regional)
 	}
 }

@@ -161,7 +161,7 @@ The web UI talks to the World through the [world-http adapter](/tooling/world-ht
 ::: warning
 Mounting `HTTP(world)` exposes the unauthenticated RPC endpoint on the
 application's port. That's fine on your machine. In production, keep it off
-public routes or [protect the RPC path](/worlds/#protecting-the-rpc-path).
+public routes or [protect the client endpoints](/worlds/#protecting-the-client-endpoints).
 :::
 
 ## Splitting later

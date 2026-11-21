@@ -111,29 +111,34 @@ func conformConcurrentHookClaims(t *testing.T, a, b worlds.World) {
 	}
 }
 
-func conformSharedStreamSessions(t *testing.T, a, b worlds.World) {
+func conformSharedStreams(t *testing.T, a, b worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, a, "shared_stream")
-	session, err := a.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "out"})
+	input := worlds.StreamsOpenWriterInput{RunID: runID, Name: "out", WriterID: worlds.NewWriterID()}
+	first, err := worlds.OpenStreamWriter(ctx, a, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.StreamsCreateWriteSession(ctx, worlds.StreamsCreateWriteSessionInput{RunID: runID, Name: "out"})
-	conformExpect(t, err, worlds.ErrStreamLocked, "session from second instance")
-	if err := session.Write(ctx, worlds.StreamWriteSessionWriteInput{Sequence: 0, Chunks: [][]byte{[]byte("x")}}); err != nil {
+	// Writers on different instances do not wait for each other.
+	second, err := worlds.OpenStreamWriter(ctx, b, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Write(ctx, [][]byte{[]byte("x")}); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		_ = session.Write(context.Background(), worlds.StreamWriteSessionWriteInput{Sequence: 1, Chunks: [][]byte{[]byte("y")}})
+		_ = second.Write(context.Background(), [][]byte{[]byte("y")})
 	}()
-	chunks, err := b.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out", Cursor: "1", Wait: 10 * time.Second})
+	chunks, err := a.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out", Cursor: "1", Wait: 10 * time.Second})
 	if err != nil || len(chunks.Data) != 1 || string(chunks.Data[0].Data) != "y" {
-		t.Fatalf("chunks seen by second instance = %#v err=%v", chunks, err)
+		t.Fatalf("chunks of the second instance's writer = %#v err=%v", chunks, err)
 	}
-	if err := session.Close(ctx); err != nil {
+	if err := first.CloseStream(ctx); err != nil {
 		t.Fatal(err)
 	}
+	conformExpect(t, second.Write(ctx, [][]byte{[]byte("z")}), worlds.ErrStreamClosed, "write after another instance closed the stream")
 	info, err := b.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: runID, Name: "out"})
 	if err != nil || !info.Done || info.TailIndex != 1 {
 		t.Fatalf("stream info from second instance = %#v err=%v", info, err)

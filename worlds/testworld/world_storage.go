@@ -3,7 +3,6 @@ package testworld
 import (
 	"bytes"
 	"maps"
-	"slices"
 	"strconv"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -67,6 +66,11 @@ func (m *World) hookPayloadLocked(hook worlds.Hook, resolve worlds.ResolveData) 
 		if event.EventType == worlds.EventTypeHookCreated && event.CorrelationID == string(hook.HookID) {
 			hook.Metadata = worlds.EventPayload(event)
 		}
+		if event.EventType == worlds.EventTypeRunCreated && hook.HookID == worlds.StartHookID(hook.RunID) {
+			if start := worlds.RunStartHook(event.Data); start != nil {
+				hook.Metadata = start.Metadata
+			}
+		}
 	}
 	return hook
 }
@@ -74,6 +78,7 @@ func (m *World) hookPayloadLocked(hook worlds.Hook, resolve worlds.ResolveData) 
 func cloneRun(value worlds.Run) worlds.Run {
 	value.Input, value.Output, value.Error = bytes.Clone(value.Input), bytes.Clone(value.Output), bytes.Clone(value.Error)
 	value.Attributes = maps.Clone(value.Attributes)
+	value.ExecutionContext = maps.Clone(value.ExecutionContext)
 	return value
 }
 
@@ -82,26 +87,8 @@ func cloneEvent(value worlds.Event) worlds.Event {
 	return value
 }
 
-func cloneWebhook(value *worlds.Webhook) *worlds.Webhook {
-	if value == nil {
-		return nil
-	}
-	result := *value
-	if value.Response != nil {
-		response := *value.Response
-		response.Body = bytes.Clone(value.Response.Body)
-		response.Header = maps.Clone(value.Response.Header)
-		for key, values := range response.Header {
-			response.Header[key] = slices.Clone(values)
-		}
-		result.Response = &response
-	}
-	return &result
-}
-
 func cloneHook(value worlds.Hook) worlds.Hook {
 	value.Metadata = bytes.Clone(value.Metadata)
-	value.Webhook = cloneWebhook(value.Webhook)
 	if value.TokenRetentionUntil != nil {
 		until := *value.TokenRetentionUntil
 		value.TokenRetentionUntil = &until

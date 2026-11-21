@@ -14,24 +14,36 @@ Write to a stream from a **step** with `workflow.Writer`:
 
 ```go
 func writeProgress(ctx context.Context, count int) (struct{}, error) {
-	writer, release, err := workflow.Writer(ctx, workflow.WriterOption{Name: "progress"})
+	writer, err := workflow.Writer(ctx, workflow.WriterOption{Name: "progress"})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 
 	_, err = fmt.Fprintf(writer, "found %d sources\n", count)
 	return struct{}{}, err
 }
 ```
 
-Call `release` when the step is done writing so a retry or another step can
-continue the stream. Call `writer.Close()` only when the stream is complete.
-Closing it ends the stream for all writers and lets readers reach `io.EOF`.
+`Writer` returns a `workflow.StreamWriter`, an `io.WriteCloser` with two more
+methods:
 
-A stream has **one writer at a time**. `Writer` waits while another writer
-holds the stream name, and continues once the current writer releases or closes
-it.
+| Method | Description |
+| --- | --- |
+| `Write` | Buffers one chunk and returns. The writer stores buffered chunks together in the background. |
+| `Flush` | Waits until every buffered chunk is stored. |
+| `Close` | Stores what is buffered and gives up the writer, leaving the stream open for other writers. |
+| `CloseStream` | Stores what is buffered, then closes the stream for every writer, so readers reach `io.EOF`. |
+
+A failed store is reported by a later `Write`, `Flush`, `Close`, or
+`CloseStream`. When the step function returns, its writers are closed before
+the step's result is recorded, so a completed step's chunks are stored and a
+failed store fails the step.
+
+As in the Workflow SDK, writers **do not wait for each other**. Several steps,
+or retries of one, can write the same stream at once: each writer's chunks stay
+in order, and different writers' chunks interleave. Call `CloseStream` once the
+stream is complete, from the writer that finishes it.
 
 Omit `WriterOption` to write the run's default stream.
 
@@ -109,12 +121,23 @@ mux.HandleFunc("GET /reports/{id}/progress", func(w http.ResponseWriter, r *http
 })
 ```
 
-`Run.Writer` writes a run's stream from outside the run, with the same
-single-writer rules.
+`Run.Writer` writes a run's stream from outside the run, alongside its other
+writers.
 
 ## Under the hood
 
-Streams are stored as ordered chunks. A writer holds an exclusive **write
-session** on the stream, and each write carries a sequence number so a stale
-session or out-of-order write fails with `worlds.ErrStreamLocked`. See the
-[`Streamer` interface](/reference/worlds#streamer) for the World contract.
+Streams are stored as ordered chunks, with no exclusive writers. A writer
+stores its buffered chunks through the World's
+[`StreamWriter`](/reference/worlds#streamer): over a socket held for the
+writer's lifetime where the World offers one, as the HTTP client and the Vercel
+World do, and otherwise one request per batch of chunks.
+
+Streams are stored under the Workflow SDK's names: a run's default stream is
+`strm_<ULID>_user`, from its `wrun_<ULID>` run ID, and a named stream adds `_`
+and its name in base64url, so `progress` is `strm_<ULID>_user_cHJvZ3Jlc3M`.
+
+Each chunk is stored as the Workflow SDK stores a value of a stream: a frame
+holding the chunk as a `Uint8Array` payload, encrypted with the run's key when
+its payloads are, or sealed to the run's public key when written from outside
+it with `Run.Writer`. SDK tools such as the Workflow web UI read Go streams as
+they read JS ones. See [Data Format and Encryption](/guide/encryption).

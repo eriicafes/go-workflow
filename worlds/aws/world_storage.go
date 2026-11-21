@@ -161,7 +161,14 @@ func runItem(view runView) map[string]ddb.AttributeValue {
 	})
 	setTime(item, "startedAt", run.StartedAt)
 	setTime(item, "completedAt", run.CompletedAt)
+	setTime(item, "expiredAt", run.ExpiredAt)
+	if len(run.ExecutionContext) > 0 {
+		// It is valid JSON, decoded from or built for run_created.
+		encoded, _ := json.Marshal(run.ExecutionContext)
+		item["executionContext"] = avs(string(encoded))
+	}
 	setString(item, "deploymentId", run.DeploymentID)
+	setString(item, "encryptionPublicKey", run.EncryptionPublicKey)
 	setString(item, "startedEventId", string(view.startedEventID))
 	setString(item, "cancelledEventId", string(view.cancelledEventID))
 	setString(item, "resultEventId", string(view.resultEventID))
@@ -175,18 +182,25 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 			attributes[name] = readAttr(value)
 		}
 	}
+	var executionContext map[string]any
+	if encoded := read(item, "executionContext"); encoded != "" {
+		_ = json.Unmarshal([]byte(encoded), &executionContext)
+	}
 	return runView{
 		Run: worlds.Run{
-			RunID:        worlds.RunID(read(item, "runId")),
-			WorkflowName: read(item, "workflowName"),
-			Status:       worlds.Status(read(item, "status")),
-			Attributes:   attributes,
-			DeploymentID: read(item, "deploymentId"),
-			InBandCount:  int(readInt(item, "inBandCount")),
-			CreatedAt:    readTime(item, "createdAt"),
-			UpdatedAt:    readTime(item, "updatedAt"),
-			StartedAt:    readTimePtr(item, "startedAt"),
-			CompletedAt:  readTimePtr(item, "completedAt"),
+			ExecutionContext:    executionContext,
+			RunID:               worlds.RunID(read(item, "runId")),
+			WorkflowName:        read(item, "workflowName"),
+			Status:              worlds.Status(read(item, "status")),
+			Attributes:          attributes,
+			DeploymentID:        read(item, "deploymentId"),
+			EncryptionPublicKey: read(item, "encryptionPublicKey"),
+			InBandCount:         int(readInt(item, "inBandCount")),
+			CreatedAt:           readTime(item, "createdAt"),
+			UpdatedAt:           readTime(item, "updatedAt"),
+			StartedAt:           readTimePtr(item, "startedAt"),
+			CompletedAt:         readTimePtr(item, "completedAt"),
+			ExpiredAt:           readTimePtr(item, "expiredAt"),
 		},
 		eventCount:       int(readInt(item, "eventCount")),
 		startedEventID:   worlds.EventID(read(item, "startedEventId")),
@@ -200,7 +214,7 @@ func runFromItem(item map[string]ddb.AttributeValue) runView {
 // leaves them, and the indexes, untouched unless status changes.
 func runUpdate(view runView) (set map[string]ddb.AttributeValue, remove []string) {
 	item := runItem(view)
-	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
+	for _, name := range []string{"pk", "sk", "runId", "workflowName", "deploymentId", "encryptionPublicKey", "executionContext", "createdAt", "list_pk", "list_sk", "list_group_pk", "list_group_sk"} {
 		delete(item, name)
 	}
 	for _, name := range []string{"resultEventId", "startedAt", "completedAt", "startedEventId", "cancelledEventId"} {
@@ -265,14 +279,10 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		"list_group_pk": avs("HOOKS#" + string(hook.RunID)),
 		"list_group_sk": avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
 	})
-	if hook.Webhook != nil {
-		webhook, err := json.Marshal(hook.Webhook)
-		if err != nil {
-			return nil, err
-		}
-		item["webhook"] = avs(string(webhook))
+	setString(item, "encryptionPublicKey", hook.ResumeContext.EncryptionPublicKey)
+	if hook.IsWebhook {
+		item["isWebhook"] = &ddb.AttributeValueMemberBOOL{Value: true}
 	}
-	setString(item, "webhookEventId", string(hook.WebhookEventID))
 	setTime(item, "receivedAt", hook.ReceivedAt)
 	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
 	setTime(item, "disposedAt", hook.DisposedAt)
@@ -290,10 +300,9 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	hook := worlds.Hook{
 		RunID:               worlds.RunID(read(item, "runId")),
-		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName")},
+		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName"), EncryptionPublicKey: read(item, "encryptionPublicKey")},
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),
-		WebhookEventID:      worlds.EventID(read(item, "webhookEventId")),
 		CreatedAt:           readTime(item, "createdAt"),
 		UpdatedAt:           readTime(item, "updatedAt"),
 		ReceivedAt:          readTimePtr(item, "receivedAt"),
@@ -310,11 +319,8 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 			return worlds.Hook{}, err
 		}
 	}
-	if value := read(item, "webhook"); value != "" {
-		hook.Webhook = new(worlds.Webhook)
-		if err := json.Unmarshal([]byte(value), hook.Webhook); err != nil {
-			return worlds.Hook{}, fmt.Errorf("workflow/aws: decode hook %s webhook: %w", hook.HookID, err)
-		}
+	if value, ok := item["isWebhook"].(*ddb.AttributeValueMemberBOOL); ok {
+		hook.IsWebhook = value.Value
 	}
 	return hook, nil
 }

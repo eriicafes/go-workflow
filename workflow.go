@@ -43,14 +43,17 @@
 package workflow
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -111,36 +114,6 @@ type Struct[Out any] struct{}
 
 // Workflow declares Out as the output of the workflow that embeds Struct.
 func (Struct[Out]) Workflow(Out) {}
-
-// StartOnLatest marks a workflow, when embedded in the workflow struct, whose
-// new runs start on the World's latest deployment instead of the deployment
-// that starts them:
-//
-//	type CheckIns struct {
-//		workflow.Struct[CheckInsResult]
-//		workflow.StartOnLatest
-//		UserID string
-//	}
-//
-// A run never moves once started, so its event log is only ever replayed by
-// the code that wrote it. A workflow that starts its next run before it
-// finishes, such as a daily chain, moves to new code at that boundary instead
-// of staying on the deployment its first run started on until the deployment
-// is deleted. Mark only workflows nothing waits on the output of, since a
-// newer deployment may return a different output. On Worlds without
-// deployment affinity, or that do not implement worlds.LatestDeployments, it
-// changes nothing.
-//
-// It has no fields, so it adds nothing to the workflow's JSON input.
-type StartOnLatest struct{}
-
-func (StartOnLatest) startOnLatest() {}
-
-// startsOnLatest reports whether input's workflow embeds StartOnLatest.
-func startsOnLatest(input any) bool {
-	_, ok := input.(interface{ startOnLatest() })
-	return ok
-}
 
 // Run is a handle to a run of a workflow whose output type is Out. Start and
 // Get return one. A Run has an independent lifetime; use Cancel to cancel it.
@@ -291,8 +264,8 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 }
 
 // Value returns the output of the run once it has finished. It returns the
-// run's error as an *Error when the run failed and ErrRunCancelled when it was
-// cancelled.
+// run's error as an *Error when the run failed, ErrRunCancelled when it was
+// cancelled, and ErrRunExpired when its data was deleted.
 //
 // In workflow context, Value reads the run once and returns ErrRunNotFinished
 // when the run had not finished, so replay stays deterministic. In step context
@@ -324,13 +297,21 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 		return zero, worlds.ErrRunNotFound
 	case !run.Status.Terminal():
 		return zero, ErrRunNotFinished
+	case run.Status != worlds.StatusCancelled && worlds.RunDataExpired(run, time.Now()):
+		return zero, ErrRunExpired
+	}
+	keys, err := r.client.RunKeys(ctx, worlds.RunKeysInput{RunID: run.RunID, DeploymentID: run.DeploymentID})
+	if err != nil {
+		return zero, err
+	}
+	switch {
 	case run.Status == worlds.StatusCompleted:
 	case len(run.Error) != 0:
-		return zero, worlds.DecodeError(run.Error)
+		return zero, worlds.DecodeErrorPayload(run.Error, keys)
 	default:
 		return zero, ErrRunCancelled
 	}
-	if err := json.Unmarshal(run.Output, &zero); err != nil {
+	if err := worlds.DecodePayload(run.Output, keys, &zero); err != nil {
 		return zero, fmt.Errorf("workflow: decode run output: %w", err)
 	}
 	return zero, nil
@@ -346,6 +327,11 @@ func runValue(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 		return worlds.Run{}, nil
 	}
 	run.Input = nil
+	// The recorded run keeps ExpiredAt only once it has passed, so a replay
+	// reaches the same answer later.
+	if !worlds.RunDataExpired(run, time.Now()) {
+		run.ExpiredAt = nil
+	}
 	return run, err
 }
 
@@ -384,16 +370,48 @@ func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamR
 }
 
 // Writer returns a writer for the run's stream, for step context and for use
-// outside a run. It waits until no other writer holds the stream name. Close
-// closes the stream for all writers, while the returned release function only
-// gives up this writer's hold so another writer can continue the stream.
-// Writer returns ErrNotInStep in workflow context.
-func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (io.WriteCloser, func() error, error) {
+// outside a run. Writers of a stream do not wait for each other. Close
+// stores what is buffered and gives up the writer, leaving the stream open,
+// while CloseStream closes the stream for every writer. Writer returns
+// ErrNotInStep in workflow context.
+func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
-		return nil, nil, ErrNotInStep
+		return nil, ErrNotInStep
 	}
-	opts := writerOption(options)
-	return newStreamWriter(ctx, r.client, r.id, opts.Name, string(worlds.NewStreamID()))
+	frame, err := outsideStreamFrame(ctx, r.client, r.id)
+	if err != nil {
+		return nil, err
+	}
+	return newStreamWriter(ctx, r.client, r.id, writerOption(options).Name, frame)
+}
+
+// Use registers fn as the runner of workflow In. Pass the returned Runner to
+// worlds.Runners so the runtime can execute the workflow. The workflow name is
+// the package path and type name of In. fn replays on every delivery, so it
+// must be deterministic. It does side effects only through steps and reads
+// time only through Now.
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
+	name := worlds.WorkflowName[In]()
+	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
+		execution, ok := worlds.ExecutionFromContext(ctx)
+		if !ok {
+			return nil, ErrNoWorkflow
+		}
+		// The input is the workflow's argument list.
+		var args [1]In
+		if err := execution.DecodePayload(raw, &args); err != nil {
+			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
+		}
+		output, err := fn(ctx, args[0])
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := execution.EncodePayload(output)
+		if err != nil {
+			return nil, fmt.Errorf("workflow: encode %s output: %w", name, err)
+		}
+		return encoded, nil
+	})
 }
 
 // Get returns a handle to the run with runID, using the Client in ctx. It does
@@ -407,58 +425,313 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error) {
 	return &Run[Out]{id: worlds.RunID(runID), client: client}, nil
 }
 
+// Retention is how long a finished run's data is kept, as the run's
+// $retention attribute records it. Its zero value is RetainDefault.
+type Retention = worlds.Retention
+
+var (
+	// RetainDefault leaves a run's data to the World's retention.
+	RetainDefault = worlds.RetainDefault
+	// RetainNone deletes a run's data as soon as the run finishes. Its
+	// metadata, such as its ID, status, and attributes, is kept, and
+	// Run.Value returns ErrRunExpired.
+	RetainNone = worlds.RetainNone
+)
+
+// Deployment is the deployment a new run starts on. Its zero value is the
+// deployment that starts the run.
+type Deployment = worlds.Deployment
+
+// LatestDeployment starts a run on the World's latest deployment.
+var LatestDeployment = worlds.LatestDeployment
+
+// DeploymentWithID starts a run on the deployment id.
+func DeploymentWithID(id string) Deployment { return worlds.DeploymentWithID(id) }
+
+// Region is the region a run's data lives in. Its values belong to the World,
+// and the empty Region leaves it to the World.
+type Region = worlds.Region
+
+// StartOptions holds the options to Start. The zero value starts a run as
+// Start without options does.
+type StartOptions struct {
+	// Deployment is the deployment the run starts on and stays pinned to.
+	// LatestDeployment starts it on the World's latest deployment, so a
+	// workflow that starts its next run before it finishes, such as a daily
+	// chain, moves to new code at that boundary instead of staying on the
+	// deployment its first run started on. Use it only for runs nothing waits
+	// on the output of, since a newer deployment may return a different
+	// output. DeploymentWithID names one. On Worlds without deployment
+	// affinity it changes nothing. The zero value is the deployment that
+	// starts the run.
+	Deployment Deployment
+	// Retention is how long the run's data is kept after it finishes.
+	// RetainNone deletes it as soon as the run finishes, recorded as the
+	// $retention attribute, and wins over one in Attributes. The zero value,
+	// RetainDefault, leaves it to the World.
+	Retention Retention
+	// Attributes are plain-text attributes set on the run as it is created,
+	// within the limits worlds.CheckAttributes enforces.
+	Attributes map[string]string
+	// AllowReservedAttributes permits keys in Attributes that start with "$",
+	// which are reserved for framework and library code.
+	AllowReservedAttributes bool
+	// NoArgumentCompression stores the run's input uncompressed, for input
+	// that does not compress, such as media or encrypted bytes.
+	NoArgumentCompression bool
+	// Region is the region the run's data lives in and its deliveries are
+	// routed to, one of the World's regions. Only a World that implements
+	// worlds.RegionalRunIDs uses it, by tagging the run's ID; others ignore
+	// it. The zero value leaves it to the World.
+	Region Region
+	// Hook creates a hook with the run, claiming its token. When another run
+	// holds the token, Start creates no run and returns a
+	// *worlds.HookConflictError naming it. The workflow opens the hook with
+	// CreateHook and the same token. It needs a World with
+	// Capabilities().StartHook.
+	Hook *StartHook
+	// ReplayedFromRunID is the ID of the run this run replays, wrun_ and a
+	// ULID. It is recorded in the run's ExecutionContext, so tools such as
+	// the Workflow web UI link the replay to its source.
+	ReplayedFromRunID string
+}
+
+var errNoStartHooks = fmt.Errorf("workflow: StartOptions.Hook: the World does not create start hooks: %w", errors.ErrUnsupported)
+
+// StartHook is a hook Start creates with its run. See StartOptions.Hook.
+type StartHook struct {
+	// Token is the hook's token. It must not be empty.
+	Token string
+	// MinRetention keeps the token unavailable for at least this long from
+	// Start, even after the run ends. Disposing the hook releases it at
+	// once.
+	MinRetention time.Duration
+	// Metadata is stored with the hook, as a payload of the run.
+	Metadata any
+}
+
+func startOptions(values []StartOptions) StartOptions {
+	if len(values) == 0 {
+		return StartOptions{}
+	}
+	return values[len(values)-1]
+}
+
+// startSettings are StartOptions as a child run's start step records them.
+type startSettings struct {
+	DeploymentID  string        `json:"deploymentId,omitempty"`
+	Latest        bool          `json:"latest,omitempty"`
+	Retention     string        `json:"retention,omitempty"`
+	ReplayedFrom  string        `json:"replayedFrom,omitempty"`
+	Region        Region        `json:"region,omitempty"`
+	HookToken     string        `json:"hookToken,omitempty"`
+	HookRetention time.Duration `json:"hookRetention,omitempty"`
+	// HookMetadata is the hook's metadata as devalue text, encrypted with
+	// the run's keys once they are known.
+	HookMetadata  []byte            `json:"hookMetadata,omitempty"`
+	Attributes    map[string]string `json:"attributes,omitempty"`
+	NoCompression bool              `json:"noCompression,omitempty"`
+}
+
+// settings checks options and returns them as a start step records them.
+func (options StartOptions) settings() (startSettings, error) {
+	if err := worlds.CheckAttributes(options.Attributes, options.AllowReservedAttributes); err != nil {
+		return startSettings{}, err
+	}
+	if id := options.ReplayedFromRunID; id != "" {
+		// It names a run, so it must be shaped as a run ID.
+		rest, ok := strings.CutPrefix(id, "wrun_")
+		if _, err := ulid.ParseStrict(rest); !ok || err != nil {
+			return startSettings{}, fmt.Errorf("%w: ReplayedFromRunID %.64q is not wrun_ and a ULID", ErrInvalidStartOptions, id)
+		}
+	}
+	var hookToken string
+	var hookRetention time.Duration
+	var hookMetadata []byte
+	if hook := options.Hook; hook != nil {
+		if hook.Token == "" {
+			return startSettings{}, fmt.Errorf("%w: Hook needs a token", ErrInvalidStartOptions)
+		}
+		hookToken, hookRetention = hook.Token, hook.MinRetention
+		if hook.Metadata != nil {
+			var err error
+			if hookMetadata, err = worlds.MarshalDevalue(hook.Metadata); err != nil {
+				return startSettings{}, fmt.Errorf("workflow: encode hook metadata: %w", err)
+			}
+		}
+	}
+	return startSettings{
+		DeploymentID:  options.Deployment.ID(),
+		Latest:        options.Deployment.Latest(),
+		Retention:     options.Retention.String(),
+		ReplayedFrom:  options.ReplayedFromRunID,
+		Region:        options.Region,
+		HookToken:     hookToken,
+		HookRetention: hookRetention,
+		HookMetadata:  hookMetadata,
+		Attributes:    options.Attributes,
+		NoCompression: options.NoArgumentCompression,
+	}, nil
+}
+
+// startHook returns the run's start hook, its metadata encrypted with keys,
+// or nil when it has none.
+func (settings startSettings) startHook(keys *worlds.RunKeys) (*worlds.StartHook, error) {
+	if settings.HookToken == "" {
+		return nil, nil
+	}
+	hook := &worlds.StartHook{Token: settings.HookToken}
+	if settings.HookRetention > 0 {
+		until := time.Now().UTC().Add(settings.HookRetention)
+		hook.TokenRetentionUntil = &until
+	}
+	if settings.HookMetadata != nil {
+		metadata, err := worlds.EncodeDevaluePayload(settings.HookMetadata, worlds.PayloadOptions{Keys: keys})
+		if err != nil {
+			return nil, err
+		}
+		hook.Metadata = metadata
+	}
+	return hook, nil
+}
+
+// runExecutionContext returns the run's ExecutionContext, or nil when it has
+// none.
+func (settings startSettings) runExecutionContext() map[string]any {
+	if settings.ReplayedFrom == "" {
+		return nil
+	}
+	return map[string]any{worlds.ExecutionContextReplayedFromRunID: settings.ReplayedFrom}
+}
+
+// deployment returns the Deployment settings record.
+func (settings startSettings) deployment() Deployment {
+	if settings.DeploymentID != "" {
+		return DeploymentWithID(settings.DeploymentID)
+	}
+	if settings.Latest {
+		return LatestDeployment
+	}
+	return Deployment{}
+}
+
+// attributes returns the run's attributes: lineage, then the caller's, which
+// may replace it with AllowReservedAttributes, then the retention.
+func (settings startSettings) attributes(lineage map[string]string) map[string]string {
+	if len(lineage) == 0 && len(settings.Attributes) == 0 && settings.Retention == "" {
+		return nil
+	}
+	attributes := make(map[string]string, len(lineage)+len(settings.Attributes)+1)
+	maps.Copy(attributes, lineage)
+	maps.Copy(attributes, settings.Attributes)
+	if settings.Retention != "" {
+		attributes[worlds.RetentionAttribute] = settings.Retention
+	}
+	return attributes
+}
+
 // Start starts a run of workflow In with input and returns a handle to the run
 // without waiting for it. It needs only the workflow type, not its runner.
+// options set its retention, attributes, and how its input is stored.
+// Attributes outside the limits of worlds.CheckAttributes return
+// worlds.ErrAttributeInvalid.
 //
 // Called in workflow context, Start starts a child run in a step, so replay
 // returns the same run. The child run carries
 // worlds.ParentRunIDAttribute and worlds.RootRunIDAttribute. Cancellation of ctx
 // does not cancel the child; use Run.Cancel explicitly. Called elsewhere,
 // it uses the Client in ctx and returns ErrNoClient when ctx carries none.
-func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In) (*Run[Out], error) {
+func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, options ...StartOptions) (*Run[Out], error) {
 	name := worlds.WorkflowName[In]()
 	client, err := clientFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(input)
+	settings, err := startOptions(options).settings()
 	if err != nil {
-		return nil, fmt.Errorf("workflow: encode %s input: %w", name, err)
+		return nil, err
 	}
-	latest := startsOnLatest(input)
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		id, err := InlineStep(execution.Context(), startChild, childStartInput{WorkflowName: name, Input: raw, Latest: latest})
+		if settings.HookToken != "" && !execution.World().Capabilities().StartHook {
+			return nil, errNoStartHooks
+		}
+		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Settings: settings})
 		if err != nil {
 			return nil, err
 		}
 		return &Run[Out]{id: id, client: client}, nil
 	}
-	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{
-		EventsCreateRunInput: worlds.EventsCreateRunInput{WorkflowName: name, Input: raw},
-		Latest:               latest,
-	})
+	// The client caches the World's capabilities, so this costs a request
+	// once per client.
+	spec, err := client.Spec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if settings.HookToken != "" && !spec.Capabilities.StartHook {
+		return nil, errNoStartHooks
+	}
+	// The input is encrypted with the run's key, so the run's ID and
+	// deployment are settled first. A World with regional run IDs mints the
+	// ID, tagged with the run's region.
+	runID := worlds.NewRunID()
+	if spec.Capabilities.RegionalRunIDs {
+		if runID, err = client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: settings.Region}); err != nil {
+			return nil, err
+		}
+	}
+	deploymentID, err := client.RunsStartDeployment(ctx, worlds.NewClientRunsStartDeploymentInput(settings.deployment()))
+	if err != nil {
+		return nil, err
+	}
+	keys, err := client.RunKeys(ctx, worlds.RunKeysInput{RunID: runID, DeploymentID: deploymentID})
+	if err != nil {
+		return nil, err
+	}
+	create, err := runCreateInput(runID, deploymentID, name, input, keys, settings)
+	if err != nil {
+		return nil, err
+	}
+	create.Attributes = settings.attributes(nil)
+	create.ExecutionContext = settings.runExecutionContext()
+	if create.StartHook, err = settings.startHook(keys); err != nil {
+		return nil, err
+	}
+	id, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: create})
 	if err != nil {
 		return nil, err
 	}
 	return &Run[Out]{id: id, client: client}, nil
 }
 
-type childStartInput struct {
-	WorkflowName string
-	Input        json.RawMessage
-	// Latest pins the child to the World's latest deployment, for a
-	// workflow marked StartOnLatest.
-	Latest bool `json:",omitempty"`
+// runCreateInput returns the run_created input of a run of input, its
+// argument list encrypted with keys when they are set.
+func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input In, keys *worlds.RunKeys, settings startSettings) (worlds.EventsCreateRunInput, error) {
+	encoded, err := worlds.EncodePayload([1]In{input}, worlds.PayloadOptions{Keys: keys, NoCompression: settings.NoCompression})
+	if err != nil {
+		return worlds.EventsCreateRunInput{}, fmt.Errorf("workflow: encode %s input: %w", name, err)
+	}
+	create := worlds.EventsCreateRunInput{RunID: runID, WorkflowName: name, Input: encoded, DeploymentID: deploymentID}
+	if keys != nil {
+		create.EncryptionPublicKey = worlds.EncodePublicKey(keys.PublicKey)
+	}
+	return create, nil
+}
+
+type childStartInput[In any] struct {
+	WorkflowName string `json:"workflowName"`
+	Input        In     `json:"input"`
+	// Settings are the child's StartOptions.
+	Settings startSettings `json:"settings,omitzero"`
 }
 
 // startChild is the inline step Start uses in workflow context. It creates the
-// child run, pinned to the deployment executing the parent, or to the latest
-// deployment for a workflow marked StartOnLatest, and queues its first
+// child run, pinned to the deployment executing the parent, or to the one its
+// StartOptions.Deployment names, and queues its first
 // delivery. The child run ID comes from worlds.NewChildRunID, so a retried
 // attempt finds the run an earlier attempt created and queues its first
 // delivery again, to the deployment it was pinned to, while it has not
 // started.
-func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error) {
+func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.RunID, error) {
 	execution, ok := worlds.ExecutionFromContext(ctx)
 	if !ok {
 		return "", ErrNoWorkflow
@@ -468,21 +741,29 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 	if root == "" {
 		root = string(parent.RunID)
 	}
-	id := worlds.NewChildRunID(worlds.StepID(StepID(ctx)))
-	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Latest)
+	// Tagging is deterministic, so a retried attempt keeps the same ID.
+	id := worlds.RegionRunID(execution.World(), worlds.NewChildRunID(worlds.StepID(StepID(ctx))), input.Settings.Region)
+	deploymentID, err := worlds.StartDeploymentID(ctx, execution.World(), input.Settings.deployment())
 	if err != nil {
 		return "", err
 	}
-	_, err = execution.World().EventsCreateRun(ctx, worlds.EventsCreateRunInput{
-		RunID:        id,
-		DeploymentID: deploymentID,
-		WorkflowName: input.WorkflowName,
-		Input:        input.Input,
-		Attributes: map[string]string{
-			worlds.ParentRunIDAttribute: string(parent.RunID),
-			worlds.RootRunIDAttribute:   root,
-		},
+	keys, err := worlds.RunKeysFor(ctx, execution.World(), id, deploymentID)
+	if err != nil {
+		return "", err
+	}
+	create, err := runCreateInput(id, deploymentID, input.WorkflowName, input.Input, keys, input.Settings)
+	if err != nil {
+		return "", err
+	}
+	create.Attributes = input.Settings.attributes(map[string]string{
+		worlds.ParentRunIDAttribute: string(parent.RunID),
+		worlds.RootRunIDAttribute:   root,
 	})
+	create.ExecutionContext = input.Settings.runExecutionContext()
+	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
+		return "", err
+	}
+	_, err = execution.World().EventsCreateRun(ctx, create)
 	if errors.Is(err, worlds.ErrRunAlreadyExists) {
 		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})
 		if err != nil || run.Status != worlds.StatusPending {
@@ -498,26 +779,127 @@ func startChild(ctx context.Context, input childStartInput) (worlds.RunID, error
 	return id, nil
 }
 
-// Use registers fn as the runner of workflow In. Pass the returned Runner to
-// worlds.Runners so the runtime can execute the workflow. The workflow name is
-// the package path and type name of In. fn replays on every delivery, so it
-// must be deterministic. It does side effects only through steps and reads
-// time only through Now.
-func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
-	name := worlds.WorkflowName[In]()
-	return worlds.NewRunner(name, func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
-		var input In
-		if err := json.Unmarshal(raw, &input); err != nil {
-			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
+// DeleteRunsResult is the result of DeleteRuns: one result per run, in the
+// order of the run IDs, and a count of each outcome.
+type DeleteRunsResult = worlds.RunsDeleteDataManyResult
+
+// Delays DeleteRuns waits in a step before sending retryable failures again,
+// and before the step retries them.
+const (
+	deleteRunsResendDelay = time.Second
+	deleteRunsRetryDelay  = 10 * time.Second
+)
+
+// DeleteRuns deletes the data of one to 100 finished runs, using the Client
+// in ctx: their inputs, outputs, and errors, the payloads of their steps,
+// events, and hooks, and their streams' chunks. It cannot be undone. The
+// runs, steps, events, and hooks stay, with their IDs, names, statuses,
+// timestamps, and attributes, and a run's Run.Value then returns
+// ErrRunExpired.
+//
+// A run that has not finished is skipped and left running. Each run's
+// outcome is in the result. Called in a step, DeleteRuns sends retryable
+// failures again once, and returns a RetryableError for those that still
+// fail, so the step retries them; elsewhere they are returned for the caller
+// to retry. It returns an error wrapping errors.ErrUnsupported when the
+// World does not delete run data, and ErrNotInStep in workflow code.
+func DeleteRuns(ctx context.Context, runIDs ...string) (DeleteRunsResult, error) {
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		return DeleteRunsResult{}, ErrNotInStep
+	}
+	_, inStep := stepExecutionFromContext(ctx)
+	// Inside a step, a request that cannot succeed fails the step rather
+	// than being retried.
+	fatal := func(err error) error {
+		if inStep {
+			return FatalError(err)
 		}
-		output, err := fn(ctx, input)
-		if err != nil {
-			return nil, err
+		return err
+	}
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return DeleteRunsResult{}, err
+	}
+	ids := make([]worlds.RunID, len(runIDs))
+	for index, id := range runIDs {
+		ids[index] = worlds.RunID(id)
+	}
+	if err := worlds.CheckDeleteDataInput(worlds.RunsDeleteDataManyInput{RunIDs: ids}); err != nil {
+		return DeleteRunsResult{}, fatal(err)
+	}
+	spec, err := client.Spec(ctx)
+	if err != nil {
+		return DeleteRunsResult{}, err
+	}
+	if !spec.Capabilities.DeleteData {
+		return DeleteRunsResult{}, fatal(fmt.Errorf("workflow: the World does not delete run data: %w", errors.ErrUnsupported))
+	}
+	results, err := deleteRunData(ctx, client, ids)
+	failed := 0
+	if err == nil && inStep {
+		retryable := func(result worlds.DeleteDataResult) bool {
+			return result.Outcome == worlds.DeleteDataFailed && result.Retryable
 		}
-		encoded, err := json.Marshal(output)
-		if err != nil {
-			return nil, fmt.Errorf("workflow: encode %s output: %w", name, err)
+		var retry []int
+		for index, result := range results {
+			if retryable(result) {
+				retry = append(retry, index)
+			}
 		}
-		return encoded, nil
-	})
+		if len(retry) > 0 {
+			// Send only the failed runs again, once, since a step retry
+			// sends the whole batch.
+			timer := time.NewTimer(deleteRunsResendDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return DeleteRunsResult{}, ctx.Err()
+			case <-timer.C:
+			}
+			again := make([]worlds.RunID, len(retry))
+			for position, index := range retry {
+				again[position] = results[index].RunID
+			}
+			var resent []worlds.DeleteDataResult
+			if resent, err = deleteRunData(ctx, client, again); err == nil {
+				for position, index := range retry {
+					// deleteRunData answers in the order it was asked.
+					if results[index] = resent[position]; retryable(results[index]) {
+						failed++
+					}
+				}
+			}
+		}
+	}
+	if err != nil {
+		// In a step, a World's rate limit retries the step after the wait
+		// the World asked for, or deleteRunsRetryDelay when it did not say.
+		var throttle *worlds.ThrottleError
+		if inStep && errors.As(err, &throttle) {
+			err = RetryableError(err, cmp.Or(throttle.After, deleteRunsRetryDelay))
+		}
+		return DeleteRunsResult{}, err
+	}
+	if failed > 0 {
+		return worlds.NewDeleteDataResult(results), RetryableError(fmt.Errorf("workflow: deleting the data of %d runs failed and will be retried", failed), deleteRunsRetryDelay)
+	}
+	return worlds.NewDeleteDataResult(results), nil
+}
+
+// deleteRunData deletes the data of ids and checks the World answered each
+// one, in order.
+func deleteRunData(ctx context.Context, client Client, ids []worlds.RunID) ([]worlds.DeleteDataResult, error) {
+	result, err := client.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: ids})
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Results) != len(ids) {
+		return nil, fmt.Errorf("workflow: delete run data returned %d results for %d runs", len(result.Results), len(ids))
+	}
+	for index, id := range ids {
+		if result.Results[index].RunID != id {
+			return nil, fmt.Errorf("workflow: delete run data returned run %s where %s was expected", result.Results[index].RunID, id)
+		}
+	}
+	return result.Results, nil
 }

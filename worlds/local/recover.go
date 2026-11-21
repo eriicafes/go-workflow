@@ -11,8 +11,7 @@ import (
 
 // recoverLocked restores the commit invariants after an interrupted process.
 // Event files past a run's EventCount are discarded with the views they
-// touched, partially created runs are removed, and stream sessions, which only
-// live as long as the process that opened them, are released.
+// touched, and partially created runs are removed.
 func (w *World) recoverLocked() error {
 	if err := w.recoverHandoff(); err != nil {
 		return err
@@ -33,6 +32,32 @@ func (w *World) recoverLocked() error {
 				return err
 			}
 		}
+		if run.ExpiredAt != nil && !run.DataPurged && worlds.RunDataExpired(run.Run, time.Now()) {
+			if err := w.purgeData(run); err != nil {
+				return err
+			}
+		}
+	}
+	// A start hook written for a run whose run file was never written
+	// claims nothing.
+	hooks, err := w.readHooks()
+	if err != nil {
+		return err
+	}
+	for _, hook := range hooks {
+		if committed[fileKey(string(hook.RunID))] || hook.HookID != worlds.StartHookID(hook.RunID) {
+			continue
+		}
+		if owner, err := w.readToken(hook.Token); err != nil {
+			return err
+		} else if owner != nil && owner.HookID == hook.HookID {
+			if err := remove(w.root, tokenPath(hook.Token)); err != nil {
+				return err
+			}
+		}
+		if err := remove(w.root, hookPath(hook.HookID)); err != nil {
+			return err
+		}
 	}
 	for _, parent := range []string{"events", "steps"} {
 		dirs, err := listDirs(w.root, parent)
@@ -47,7 +72,7 @@ func (w *World) recoverLocked() error {
 			}
 		}
 	}
-	return w.releaseStreamSessions()
+	return nil
 }
 
 // hookHandoff is a write-ahead decision spanning both owners' event logs.
@@ -216,36 +241,6 @@ func (w *World) rebuildRun(runID worlds.RunID) error {
 	for index := len(discarded) - 1; index >= 0; index-- {
 		if err := remove(w.root, path.Join(dir, discarded[index])); err != nil {
 			return err
-		}
-	}
-	return nil
-}
-
-func (w *World) releaseStreamSessions() error {
-	runs, err := listDirs(w.root, "streams")
-	if err != nil {
-		return err
-	}
-	for _, run := range runs {
-		names, err := listDirs(w.root, path.Join("streams", run))
-		if err != nil {
-			return err
-		}
-		// The default stream's key is empty, so its meta.json is in the run's
-		// directory itself.
-		for _, name := range append(names, "") {
-			metaPath := path.Join("streams", run, name, "meta.json")
-			var meta streamMeta
-			ok, err := w.readOptional(metaPath, &meta)
-			if err != nil {
-				return err
-			}
-			if ok && meta.Session != "" {
-				meta.Session, meta.Sequence = "", 0
-				if err := writeJSON(w.root, metaPath, meta); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	return nil

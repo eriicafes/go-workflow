@@ -33,6 +33,7 @@ client := workflow.NewClient(world)
 | --- | --- | --- |
 | `Dir` | required by `Open` | Storage directory. Created with `0700` permissions. |
 | `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
 
 ## Lifecycle
 
@@ -40,8 +41,7 @@ client := workflow.NewClient(world)
   **`New(root, config, runners)`** borrows a caller-owned `*os.Root`, which the
   caller closes after `Close`. Neither reads any state.
 - **`Prepare(ctx)`** takes an exclusive `flock` on `locks/world.lock`, validates
-  `version.json`, recovers interrupted writes, releases stream write sessions
-  left by the previous process, and begins delivering every persisted queue
+  `version.json`, recovers interrupted writes, and begins delivering every persisted queue
   item. It returns `ErrInUse` when another World, in this or another process,
   holds the directory. Cancelling `ctx` stops delivery.
 - **Methods that read or write data require a prepared World.**
@@ -75,7 +75,7 @@ events/<run>/<eventID>.json                one file per event; IDs are slot-padd
 steps/<run>/<step>.json                    step views
 hooks/<hook>.json                          hook views
 tokens/<token>.json                        {hookId, tokenRetentionUntil}: token ownership
-streams/<run>/<name>/meta.json             {name, closed, session, sequence, count}
+streams/<run>/<name>/meta.json             {name, closed, count}
 streams/<run>/<name>/<%010d>.json          one file per chunk
 queue/<messageID>.json                     durable delivery (ULID IDs)
 queue-keys/<run+key>.json                  idempotency key -> pending message ID
@@ -109,16 +109,39 @@ until it is restarted.
 Streams commit through `meta.json`: chunk files at or past `count` are ignored
 and overwritten by the next write.
 
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` writes the hook `hook_<run ULID>` and its
+token file before the run file, which commits them with the run, and refuses
+with a `*worlds.HookConflictError` when another run holds the token. `Prepare`
+removes a start hook and token whose run file was never written.
+
+## Deleting run data
+
+A run created with `$retention: "0"` loses its data when it finishes, and
+`RunsDeleteDataMany` deletes a finished run's data on demand, as the Workflow
+SDK's local World does. The run, step, event and hook records stay; the
+payloads in the run's event files go, and its streams are left empty and
+closed.
+
+The append that finishes the run commits its `ExpiredAt` with it, so the data
+is unreadable from that commit on. The event and chunk files are scrubbed next,
+and the run file records `dataPurged`. If that is interrupted, reads keep
+scrubbing what is left, and `Prepare` finishes the purge. A step that settles
+after its run's data was deleted has its result scrubbed as it lands, and a
+deleted run's streams refuse writes.
+
 ## Queue
 
 `Queue` writes `queue/<id>.json` and schedules it in an in-process timer heap
 ordered by `NotBefore`. Each due delivery runs in its own goroutine, and its
 record is deleted on success. A failed delivery is retried with exponential
-backoff from 100 ms up to 30 s.
+backoff from 100 ms up to 30 s, or after the wait a `*worlds.ThrottleError`
+asks for when that is longer.
 
 `IdempotencyKey` deduplicates per run while the delivery is pending. The key is
 released when delivery starts, so work queued during a delivery is never
-dropped. `QueueCancel` deletes the record.
+dropped.
 
 `RunsWaitForTerminalStatus` and `StreamsGetChunks` wait on an in-process change
 notification instead of polling.

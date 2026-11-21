@@ -86,17 +86,6 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
-	tag, err := w.pool.Exec(ctx, `DELETE FROM go_workflow_queue WHERE id = $1`, input.MessageID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return worlds.ErrQueueMessageNotFound
-	}
-	return nil
-}
-
 type delivery struct {
 	id       string
 	attempts int
@@ -224,7 +213,7 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 		}
 	}()
 	input := item.input
-	input.MessageID = item.id
+	input.MessageID, input.Attempt = item.id, item.attempts
 	err := runtime.Execute(executeCtx, input)
 	stopRenew()
 	<-renewed
@@ -238,7 +227,7 @@ func (w *World) deliver(ctx context.Context, runtime *worlds.Runtime, item deliv
 	case ctx.Err() != nil:
 		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL WHERE id = $1 AND attempts = $2`, item.id, item.attempts)
 	default:
-		delay := backoff(item.attempts)
+		delay := worlds.DeliveryRetryDelay(err, backoff(item.attempts))
 		log.Printf("workflow/postgres: delivery %s for run %s failed (attempt %d, retry in %v): %v", item.id, item.input.RunID, item.attempts, delay, err)
 		_, updateErr = w.pool.Exec(finish, `UPDATE go_workflow_queue SET lease_until = NULL, not_before = now() + make_interval(secs => $3) WHERE id = $1 AND attempts = $2`,
 			item.id, item.attempts, delay.Seconds())

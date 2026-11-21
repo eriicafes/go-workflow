@@ -243,7 +243,7 @@ data "aws_iam_policy_document" "worker" {
     for_each = var.enable_scheduler ? [1] : []
     content {
       sid       = "Schedules"
-      actions   = ["scheduler:CreateSchedule", "scheduler:DeleteSchedule"]
+      actions   = ["scheduler:CreateSchedule"]
       resources = [local.schedule_arn]
     }
   }
@@ -266,7 +266,7 @@ data "aws_iam_policy_document" "worker" {
 data "aws_iam_policy_document" "api" {
   statement {
     sid       = "Table"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchGetItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem"]
     resources = [aws_dynamodb_table.workflows.arn, "${aws_dynamodb_table.workflows.arn}/index/*"]
   }
 
@@ -274,15 +274,6 @@ data "aws_iam_policy_document" "api" {
     sid       = "Queue"
     actions   = ["sqs:SendMessage"]
     resources = local.queue_arns
-  }
-
-  dynamic "statement" {
-    for_each = var.enable_scheduler ? [1] : []
-    content {
-      sid       = "CancelSchedules"
-      actions   = ["scheduler:DeleteSchedule"]
-      resources = [local.schedule_arn]
-    }
   }
 }
 

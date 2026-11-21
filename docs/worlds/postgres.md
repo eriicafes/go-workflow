@@ -37,12 +37,13 @@ context before calling `Close`.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
 | `URL` | required by `Open` | Connection string. |
 | `PollInterval` | 250 ms | Longest sleep of workers and waiters when no notification arrives. |
 | `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
 | `Routes` | none | The queue of each routed workflow. See [routing](#routing-workflows-to-queues). |
-| `Retention`, `Retentions` | keep forever | How long finished runs are kept, by default and per workflow. See [retention](#retention). |
+| `Retention`, `Retentions` | keep forever | How long finished runs keep their data, by default and per workflow. See [retention](#retention). |
 
 ## Entry points
 
@@ -77,7 +78,7 @@ connection string or pool config to use a dedicated schema.
 | `go_workflow_hooks` | Hook view, including webhook settings and retention. |
 | `go_workflow_hook_tokens` | Token ownership. The primary key makes a token single-owner. |
 | `go_workflow_queue` | Pending deliveries with `not_before`, `attempts`, and `lease_until`. |
-| `go_workflow_streams` | Stream state: `closed`, writer `session`, `sequence`, `chunk_count`. |
+| `go_workflow_streams` | Stream state: `closed` and `chunk_count`. |
 | `go_workflow_stream_chunks` | Stream chunks keyed by `(run_id, name, idx)`. |
 
 Payloads are `bytea`, attributes are `jsonb`, and timestamps are `timestamptz`
@@ -122,21 +123,40 @@ increments `attempts`, and executes each:
 
 - success deletes the row.
 - failure keeps it and sets `not_before` to now plus a capped exponential
-  backoff (1 s, 2 s, 4 s, … up to 5 minutes), and logs the error.
+  backoff (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
+  `*worlds.ThrottleError` asks for when that is longer, and logs the error.
 - shutdown releases the lease so another worker picks the row up immediately.
+
+## Start hooks
+
+`EventsCreateRun` with a `StartHook` creates the hook `hook_<run ULID>` and
+claims its token in the transaction that creates the run. When another run
+holds the token, the transaction rolls back and returns a
+`*worlds.HookConflictError` naming it.
 
 ## Retention
 
-With `Config.Retention` set, each `Worker` deletes expired runs in the
-background: at start and then every minute, in batches of 100, until no
-expired run is left. One statement per batch picks runs that completed,
-failed or were cancelled longer ago than their workflow's retention
-(`Config.Retentions`, else `Retention`) and deletes their events,
-steps, hooks and the tokens those hooks own, queued deliveries, streams and
-chunks, and finally the runs, so a batch is all or nothing. Its `FOR UPDATE
-SKIP LOCKED` lets every worker sharing the database run it without waiting on
-each other. A run with a hook whose token retention has not ended is kept
-until it ends, and runs that are still pending or running never expire.
+A run's data is deleted as the Workflow SDK deletes it: the run, step, event
+and hook rows stay with their IDs, statuses, timestamps and attributes, the
+payloads in the run's events are removed, and its streams' chunks are deleted,
+leaving each stream empty and closed. The run's `expired_at` is set and
+`data_purged` records that its rows no longer hold its data. Reads hide a run's
+payloads once `expired_at` has passed.
+
+- **`$retention: "0"`.** The append that finishes the run deletes its data in
+  the same transaction, before waiters are notified.
+- **`RunsDeleteDataMany`.** Deletes a finished run's data on demand, one
+  transaction per run.
+- **`Config.Retention`.** When a run finishes, its `expired_at` is set to its
+  completion time plus its workflow's retention (`Config.Retentions`, else
+  `Retention`). Each `Worker` deletes the data of runs past it in the
+  background: at start and then every minute, in batches of 100 with
+  `FOR UPDATE SKIP LOCKED`, so workers sharing the database do not wait on
+  each other. Changing the retention applies to runs that finish afterwards.
+
+Every writer takes the run's row lock first, so a step that settles after its
+run's data was deleted has its result scrubbed as it lands, and a stream write
+to a deleted run is refused.
 
 ## LISTEN/NOTIFY
 

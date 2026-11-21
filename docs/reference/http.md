@@ -1,18 +1,38 @@
 # HTTP Endpoints
 
 `worlds.HTTPHandler(world, prefix)`, which every World package wraps as
-`HTTP(world)`, serves two endpoints under a prefix (default `/v1/workflow`).
+`HTTP(world)`, serves three endpoints under a prefix (default `/v1/workflow`).
 It does not execute deliveries.
 
 | Route | Handler | Purpose |
 | --- | --- | --- |
 | `POST <prefix>/rpc` | `worlds.RPCHandler` | CBOR RPC for clients and tools |
+| `GET <prefix>/websockets/v1/runs/{runId}/streams/{name}` | `worlds.StreamSocketHandler` | stream writes over a WebSocket |
 | `<prefix>/webhooks/{token}` | `worlds.WebhookHandler` | webhook requests |
 
-The Vercel World adds `POST <prefix>/callbacks/qstash` when QStash is
-configured. `vercelworld.QStash(world)` exposes that callback separately.
-Callback routes under `<prefix>/callbacks/` are where a World mounts endpoints
-specific to it.
+The Vercel World adds `GET <prefix>/deployment`, which answers with the
+deployment serving it. `vercelworld.Deployment(world)` exposes that route
+separately. Callback routes under `<prefix>/callbacks/` are where a World
+mounts endpoints specific to it.
+
+## Stream socket
+
+The stream socket carries one writer's writes to a stream, in the Workflow
+SDK's v1 stream socket protocol, behind the same protection as RPC. The
+`writerId` query parameter (`wrtr_` and a ULID) is required. Every message is a
+frame: a big-endian u32 meta length, CBOR meta, a u32 body length, and the
+body.
+
+| Client message | Meta | Body |
+| --- | --- | --- |
+| write | `{ type: "write", reqId, chunkSeq, numChunks }` | each chunk as a u32 length and its bytes |
+| close | `{ type: "close", reqId }` | empty; closes the stream for every writer |
+
+The server answers each with `{ type: "write_ack" | "close_ack", reqId }` or
+`{ type: "error", reqId, status, message }`, where `409` means the stream is
+closed. `workflow.NewHTTPClient` and the `world-http` adapter open the socket
+for each writer and write through RPC while it opens and when it is declined or
+fails, so a server that does not serve it still works.
 
 ## RPC
 
@@ -23,42 +43,48 @@ and the [`world-http` adapter](/tooling/world-http) use it.
   `415`), a body of at most 8 MiB:
 
   ```
-  { method: string, input: <cbor>, specVersion?: int }
+  { method: string, input: <cbor>, rpcVersion?: int }
   ```
 
 - **Response:** `200` with `Content-Type: application/cbor`, including when the
   method fails:
 
   ```
-  { output?: <cbor>, error?: { code: string, message: string, sentinel?: string } }
+  { output?: <cbor>, error?: { code: string, message: string, sentinel?: string,
+    conflictingRunId?: string, retryAfter?: int } }
   ```
 
   Error codes are `not_found`, `invalid_argument`, `conflict`, `cancelled`,
-  `deadline_exceeded`, and `internal`. `sentinel` names the `worlds` sentinel
-  error the failure matches, such as `run_not_found`, so `workflow.NewHTTPClient`
-  returns errors that match `errors.Is` as they would in process.
+  `deadline_exceeded`, `unimplemented`, `resource_exhausted`, and `internal`.
+  `sentinel` names the `worlds` sentinel error the failure matches, such as
+  `run_not_found`, so `workflow.NewHTTPClient` returns errors that match
+  `errors.Is` as they would in process. A `hook_conflict` failure names the run
+  holding the token in `conflictingRunId`, and a `throttled` failure, a World's
+  rate limit, the nanoseconds to wait in `retryAfter`, which the client returns
+  as `*worlds.HookConflictError` and `*worlds.ThrottleError`.
 
 - **Waits:** `runs.waitForTerminalStatus` and `streams.getChunks` wait at most
   30 seconds per request. Clients repeat the request to wait longer.
 
-- **Spec version:** when `specVersion` is set and differs from the World's
-  (`worlds.SpecVersion`, currently `1`), the request fails with
+- **RPC version:** when `rpcVersion` is set and differs from the server's
+  (`worlds.RPCVersion`, currently `1`), the request fails with
   `invalid_argument`. Clients call `client.spec` first, which returns
-  `{ specVersion, capabilities }`.
+  `{ rpcVersion, capabilities }`.
 
 ### Methods
 
 | Group | Methods |
 | --- | --- |
 | World | `world.deploymentId` |
-| Runs | `runs.get`, `runs.list`, `runs.waitForTerminalStatus`, `runs.setAttributes` |
+| Runs | `runs.get`, `runs.list`, `runs.waitForTerminalStatus`, `runs.setAttributes`, `runs.deleteDataMany` |
 | Steps | `steps.get`, `steps.list` |
 | Events | `events.create`, `events.createRun`, `events.createBatch`, `events.get`, `events.list`, `events.listByCorrelationID` |
 | Hooks | `hooks.get`, `hooks.getByToken`, `hooks.list` |
-| Queue | `queue.queue`, `queue.queueBatch`, `queue.cancel` |
-| Streams | `streams.write`, `streams.createWriteSession`, `streams.writeSession`, `streams.closeWriteSession`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
+| Queue | `queue.queue`, `queue.queueBatch` |
+| Streams | `streams.write`, `streams.writeMulti`, `streams.close`, `streams.getChunks`, `streams.getInfo`, `streams.list` |
 | Analytics | `analytics.runs.get`, `analytics.runs.list`, `analytics.attributes.list`, `analytics.steps.get`, `analytics.steps.list`, `analytics.events.get`, `analytics.events.getMany`, `analytics.events.list`, `analytics.events.listByCorrelationId`, `analytics.hooks.get`, `analytics.hooks.list`, `analytics.waits.get`, `analytics.waits.list` |
-| Client | `client.spec`, `client.runs.create`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
+| Keys | `runs.encryptionKey` |
+| Client | `client.spec`, `client.runs.newId`, `client.runs.create`, `client.runs.startDeployment`, `client.runs.cancel`, `client.runs.wake`, `client.streams.write`, `client.streams.writeMulti`, `client.streams.close`, `client.hooks.resume` |
 
 Most methods return the World's Go types. The event writes return the Workflow
 SDK's result shapes instead: `events.create` and `events.createRun` return
@@ -70,31 +96,29 @@ Other batch failures are returned as the request's error. A run
 created without an ID is given one.
 
 ::: danger Unauthenticated
-The RPC endpoint can start runs, append events, and read every payload. Never
-expose it publicly unless `worlds.WithRPCToken` or `worlds.WithRPCMiddleware`
-[protects it](/worlds/#protecting-the-rpc-path).
+The client endpoints can start runs, append events, and read every payload.
+Never expose them publicly unless `worlds.WithClientToken` or
+`worlds.WithClientMiddleware` [protects them](/worlds/#protecting-the-client-endpoints).
 :::
 
 ## Webhooks
 
 `<prefix>/webhooks/{token}` resumes the webhook that owns `token` with the
-request.
+request, as the Workflow SDK's webhook handler does: it writes the body to a
+byte stream of the run, resumes the hook with the SDK's `Request`, sealed to
+the run's public key when its payloads are encrypted, and queues a delivery so
+the run resumes. A webhook takes any number of requests.
 
 | Situation | Response |
 | --- | --- |
 | No active webhook owns the token, or its run finished | `404 Not Found` |
-| Method differs from `WebhookOption.Method` | `405 Method Not Allowed` with `Allow` |
 | Body over 128 KiB | `413 Request Entity Too Large` |
 | Default webhook | `202 Accepted` |
-| `WebhookOption.Response` set | that response |
-| `WebhookOption.Manual` | Waits for a step to call `WebhookRequest.RespondWith`. |
+| `WebhookOption.Response` set | that response, to every request |
+| `WebhookOption.Manual` | The first response a step writes with `WebhookRequest.RespondWith` to the request's response stream. |
 | Manual response times out | `504 Gateway Timeout` |
-| Webhook disposed or run terminated while waiting for a response | `410 Gone` |
 | Storage failure while waiting for a response | `500 Internal Server Error` |
 | Ownership changes during the request | Retryable `503 Service Unavailable`. The request is not forwarded to the new owner. |
-
-The request's method, URL, headers, and body are recorded in a `hook_received`
-event and a delivery is queued so the run resumes.
 
 The token is the only authorization. Serve `WebhookHandler` (or a World's
 `Webhook(world)`) publicly on its own if you need webhooks but want to keep RPC

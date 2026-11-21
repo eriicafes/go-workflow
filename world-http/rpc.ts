@@ -17,7 +17,7 @@ export namespace RPC {
 	// @workflow/world SDK entities.
 	/** The RPC server's protocol version and capabilities, from `client.spec`. */
 	export type Spec = {
-		specVersion: number;
+		rpcVersion: number;
 		capabilities: Capabilities;
 	};
 	/** The optional behavior the RPC server's World implements. */
@@ -25,6 +25,8 @@ export namespace RPC {
 		analytics: boolean;
 		setAttributes: boolean;
 		deploymentAffinity?: boolean;
+		deleteData?: boolean;
+		startHook?: boolean;
 	};
 	export type Status = "pending" | "running" | "completed" | "failed" | "cancelled";
 	export type EventType = string;
@@ -42,11 +44,14 @@ export namespace RPC {
 		error: Uint8Array;
 		attributes: Record<string, string>;
 		deploymentId: string;
+		encryptionPublicKey?: string;
 		inBandCount: number;
 		createdAt: Date;
 		updatedAt: Date;
 		startedAt: Date | null;
 		completedAt: Date | null;
+		expiredAt?: Date | null;
+		executionContext?: Record<string, unknown> | null;
 	};
 	export type Step = {
 		runId: string;
@@ -139,6 +144,9 @@ export namespace RPC {
 		code: string;
 		message: string;
 		sentinel?: string;
+		conflictingRunId?: string;
+		/** Nanoseconds a throttled failure asks the caller to wait. */
+		retryAfter?: number;
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
@@ -207,13 +215,21 @@ export class HTTPWorldError extends Error {
 	readonly status?: number;
 	/** The Go sentinel error the server reported, such as run_not_found. */
 	readonly sentinel?: string;
+	/** The run holding a hook token, for a hook_conflict failure. */
+	readonly conflictingRunId?: string;
+	/** Seconds a throttled failure asks the caller to wait, when it says. */
+	readonly retryAfter?: number;
 
-	constructor(code: string, message: string, status?: number, sentinel?: string) {
+	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string, retryAfter?: number) {
 		super(message);
-		this.name = "HTTPWorldError";
+		// A throttled failure is named as the Workflow SDK's ThrottleError,
+		// which its callers recognize by name and read retryAfter from.
+		this.name = sentinel === "throttled" ? "ThrottleError" : "HTTPWorldError";
 		this.code = code;
 		this.status = status;
 		this.sentinel = sentinel;
+		this.conflictingRunId = conflictingRunId;
+		this.retryAfter = retryAfter;
 	}
 }
 
@@ -223,6 +239,8 @@ const rpcErrorStatus: Record<string, number> = {
 	not_found: 404,
 	invalid_argument: 400,
 	conflict: 409,
+	unimplemented: 501,
+	resource_exhausted: 429,
 	cancelled: 499,
 	deadline_exceeded: 504,
 };
@@ -231,7 +249,7 @@ export class RPCClient {
 	readonly baseURL: string;
 	readonly fetch: typeof globalThis.fetch;
 	readonly headers: HeadersInit;
-	specVersion?: number;
+	rpcVersion?: number;
 
 	constructor(options: ClientOptions) {
 		const { baseURL, fetch: fetchImplementation = globalThis.fetch, headers = {} } = options;
@@ -250,7 +268,7 @@ export class RPCClient {
 		const encodedBody = encode({
 			method,
 			input: toWire(input),
-			...(this.specVersion === undefined ? {} : { specVersion: this.specVersion }),
+			...(this.rpcVersion === undefined ? {} : { rpcVersion: this.rpcVersion }),
 		});
 		const body = new Uint8Array(encodedBody.byteLength);
 		body.set(encodedBody);
@@ -283,8 +301,9 @@ export class RPCClient {
 			);
 		}
 		if (envelope.error) {
-			const { code, message, sentinel } = envelope.error;
-			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel);
+			const { code, message, sentinel, conflictingRunId, retryAfter } = envelope.error;
+			const seconds = retryAfter ? Math.ceil(retryAfter / 1e9) : undefined;
+			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId, seconds);
 		}
 		if (envelope.output === undefined) {
 			return undefined as T;
@@ -293,7 +312,7 @@ export class RPCClient {
 	}
 }
 
-const opaqueMapKeys = new Set(["attributes", "header"]);
+const opaqueMapKeys = new Set(["attributes", "header", "executionContext"]);
 
 // Go names workflows and steps by package path and identifier, such as
 // "example.com/app/flows.Publish", while the Workflow SDK parses names shaped

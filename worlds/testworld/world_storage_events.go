@@ -84,17 +84,33 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 		return worlds.EventResult{}, worlds.ErrRunAlreadyExists
 	}
 	now := time.Now().UTC()
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	if input.StartHook != nil {
+		if input.StartHook.Token == "" {
+			return worlds.EventResult{}, worlds.ErrEventInvalid
+		}
+		// The start hook claims its token with the run, or no run is
+		// created.
+		m.expireTokenLocked(input.StartHook.Token, now)
+		if owner := m.tokens[input.StartHook.Token]; owner != "" {
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: m.hooks[owner].RunID}
+		}
+	}
+	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: maps.Clone(input.Attributes), DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}
 	if run.Attributes == nil {
 		run.Attributes = make(map[string]string)
 	}
 	m.runs[input.RunID] = run
 	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, AllocatedEventCount: 1}, nil
+	if hook := input.StartHook; hook != nil {
+		id := worlds.StartHookID(input.RunID)
+		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}
+		m.tokens[hook.Token] = id
+	}
+	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1}, nil
 }
 
 func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreateBatchInput) (worlds.EventBatchResult, error) {
@@ -212,11 +228,14 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 }
 
 type memoryCheckpoint struct {
-	runs   map[worlds.RunID]worlds.Run
-	events map[worlds.RunID][]worlds.Event
-	steps  map[worlds.RunID]map[worlds.StepID]worlds.Step
-	hooks  map[worlds.HookID]worlds.Hook
-	tokens map[string]worlds.HookID
+	// streams holds each stream's state, which a purge of a run the batch
+	// finished changes.
+	streams map[*memoryStream]memoryStream
+	runs    map[worlds.RunID]worlds.Run
+	events  map[worlds.RunID][]worlds.Event
+	steps   map[worlds.RunID]map[worlds.StepID]worlds.Step
+	hooks   map[worlds.HookID]worlds.Hook
+	tokens  map[string]worlds.HookID
 }
 
 func (m *World) checkpointLocked() memoryCheckpoint {
@@ -239,11 +258,20 @@ func (m *World) checkpointLocked() memoryCheckpoint {
 	for token, id := range m.tokens {
 		checkpoint.tokens[token] = id
 	}
+	checkpoint.streams = map[*memoryStream]memoryStream{}
+	for _, streams := range m.streams {
+		for _, stream := range streams {
+			checkpoint.streams[stream] = *stream
+		}
+	}
 	return checkpoint
 }
 
 func (m *World) restoreLocked(checkpoint memoryCheckpoint) {
 	m.runs, m.events, m.steps, m.hooks, m.tokens = checkpoint.runs, checkpoint.events, checkpoint.steps, checkpoint.hooks, checkpoint.tokens
+	for stream, state := range checkpoint.streams {
+		*stream = state
+	}
 }
 
 // admitLocked implements the state-based queue fence. A duplicate start is
@@ -296,7 +324,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 	if requested.EventType == worlds.EventTypeWaitCompleted {
 		for _, event := range m.events[runID] {
 			if event.EventType == worlds.EventTypeWaitCompleted && event.CorrelationID == requested.CorrelationID {
-				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType}, true, nil
+				return worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt}, true, nil
 			}
 		}
 	}
@@ -307,13 +335,6 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			if hook.ForceClaimedBy != nil {
 				return worlds.EventResult{}, false, worlds.ErrHookForceClaimed
 			}
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
-		}
-		received, _ := worlds.DecodeWebhookReceived(requested.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return worlds.EventResult{}, false, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
 			return worlds.EventResult{}, false, worlds.ErrHookNotActive
 		}
 	}
@@ -341,7 +362,7 @@ func (m *World) lastResultLocked(runID worlds.RunID, eventType worlds.EventType,
 }
 
 func (m *World) eventResultLocked(event worlds.Event, events []worlds.Event, created bool) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Events: events, Data: bytes.Clone(event.Data)}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Events: events, Data: bytes.Clone(event.Data)}
 	if created {
 		result.AllocatedEventCount = 1
 	}
@@ -429,24 +450,12 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName}, HookID: id, Token: value.Token, Webhook: cloneWebhook(value.Webhook), TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookReceived:
 		id := worlds.HookID(event.CorrelationID)
 		hook := m.hooks[id]
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		value, ok := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && ok {
-			if value.Request != nil {
-				hook.WebhookEventID = event.EventID
-			}
-			if value.Response != nil && value.ResponseTo == hook.WebhookEventID {
-				m.completeHookLocked(&hook, now)
-			}
-		}
-		if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-			m.completeHookLocked(&hook, now)
-		}
 		m.hooks[id] = hook
 
 	case worlds.EventTypeHookDisposed:
@@ -469,6 +478,13 @@ func (m *World) materializeLocked(event worlds.Event) {
 				delete(m.tokens, hook.Token)
 			}
 		}
+		if worlds.ReadRunRetention(run.Attributes) == worlds.RetainNone {
+			m.purgeLocked(event.RunID, now)
+		}
+	} else if worlds.RunDataExpired(run, now) {
+		// A step still running when its run's data was deleted settles
+		// after it. What it brought is deleted as it lands.
+		m.scrubLastEventLocked(event.RunID)
 	}
 }
 

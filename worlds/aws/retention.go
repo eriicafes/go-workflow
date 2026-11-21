@@ -1,10 +1,12 @@
 package awsworld
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
@@ -22,14 +24,20 @@ func finishes(t worlds.EventType) bool {
 	return t == worlds.EventTypeRunCompleted || t == worlds.EventTypeRunFailed || t == worlds.EventTypeRunCancelled
 }
 
-// scheduleExpiry queues the deletion of a finished run's data for its
-// workflow's retention after the run completed.
+// scheduleExpiry deletes a finished run's data when its ExpiredAt has
+// passed, as for a run with $retention "0", and otherwise queues the deletion
+// for its ExpiredAt, which the commit finishing the run set from its
+// workflow's retention. A deletion that fails is queued to run again.
 func (w *World) scheduleExpiry(ctx context.Context, run worlds.Run) error {
-	retention := worlds.RetentionFor(w.config.Retention, w.config.Retentions, run.WorkflowName)
-	if retention <= 0 || run.CompletedAt == nil {
+	if run.ExpiredAt == nil {
 		return nil
 	}
-	return w.queueExpiry(ctx, run.RunID, run.WorkflowName, run.CompletedAt.Add(retention))
+	if worlds.RunDataExpired(run, time.Now()) {
+		if _, err := w.purgeRun(ctx, run.RunID); err == nil {
+			return nil
+		}
+	}
+	return w.queueExpiry(ctx, run.RunID, run.WorkflowName, *run.ExpiredAt)
 }
 
 // queueExpiry stores the expiry delivery of runID, due at due, and publishes
@@ -71,74 +79,108 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 	return err
 }
 
-// expireRun deletes a finished run's hooks, the tokens they still own, and
-// its run partition, the run's view last, so a deletion cut short is retried
-// while the run still exists. When one of its hooks still retains its token,
-// it queues the expiry again for when that retention ends instead and
-// reports that it rescheduled.
-func (w *World) expireRun(ctx context.Context, input worlds.QueueInput) (rescheduled bool, err error) {
-	runID := string(input.RunID)
-	var hookKeys []map[string]ddb.AttributeValue
-	err = w.query(ctx, &dynamodb.QueryInput{
-		IndexName:                 awsv2.String(listGroupIndex),
-		KeyConditionExpression:    awsv2.String("list_group_pk = :pk"),
-		ExpressionAttributeValues: map[string]ddb.AttributeValue{":pk": avs("HOOKS#" + runID)},
-	}, func(item map[string]ddb.AttributeValue) bool {
-		hookKeys = append(hookKeys, key(read(item, "pk"), read(item, "sk")))
-		return true
-	})
-	if err != nil {
-		return false, err
-	}
-	hooks, err := w.items(ctx, hookKeys...)
-	if err != nil {
-		return false, err
-	}
-	for _, item := range hooks {
-		hook, err := hookFromItem(item)
-		if err != nil {
-			return false, err
-		}
-		if until := hook.TokenRetentionUntil; until != nil && until.After(time.Now()) {
-			return true, w.queueExpiry(ctx, input.RunID, input.WorkflowName, *until)
-		}
-		if hook.Token != "" {
-			if err := w.releaseToken(ctx, hook.Token, hook.HookID); err != nil {
-				return false, err
-			}
-		}
-	}
+// When a run's data is deleted, the run, step, event, hook, and token items
+// stay, the payloads in the run's event items go, and its streams are left
+// empty and closed. The run's expiredAt is set first, so its payloads are
+// unreadable before they are deleted, and dataPurged is set last, so a
+// deletion cut short is finished by its expiry delivery or the next
+// RunsDeleteDataMany.
 
-	var keys []map[string]ddb.AttributeValue
-	err = w.query(ctx, &dynamodb.QueryInput{
-		KeyConditionExpression:    awsv2.String("pk = :pk"),
-		ExpressionAttributeValues: map[string]ddb.AttributeValue{":pk": avs(runPartitionKey(runID))},
-		ProjectionExpression:      awsv2.String("pk, sk"),
-	}, func(item map[string]ddb.AttributeValue) bool {
-		if read(item, "sk") != "META" {
-			keys = append(keys, key(read(item, "pk"), read(item, "sk")))
-		}
-		return true
-	})
-	if err != nil {
-		return false, err
-	}
-	keys = append(append(keys, hookKeys...), runKey(runID))
-	return false, w.deleteItems(ctx, keys)
+// expireRun deletes the data of the run of an expiry delivery.
+func (w *World) expireRun(ctx context.Context, input worlds.QueueInput) error {
+	_, err := w.purgeRun(ctx, input.RunID)
+	return err
 }
 
-// releaseToken deletes the token item of token while hookID still owns it.
-func (w *World) releaseToken(ctx context.Context, token string, hookID worlds.HookID) error {
-	_, err := w.dynamo.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName:                 awsv2.String(w.config.TableName),
-		Key:                       tokenKey(token),
-		ConditionExpression:       awsv2.String("hookId = :hook"),
-		ExpressionAttributeValues: map[string]ddb.AttributeValue{":hook": avs(string(hookID))},
-	})
-	if conditional(err) {
-		return nil
+// purgeRun deletes a finished run's data and reports whether its expiredAt
+// had already passed. A run that does not exist has nothing to delete.
+func (w *World) purgeRun(ctx context.Context, runID worlds.RunID) (alreadyExpired bool, err error) {
+	item, found, err := w.item(ctx, runKey(string(runID)))
+	if err != nil || !found {
+		return false, err
 	}
-	return err
+	run := runFromItem(item)
+	now := time.Now().UTC()
+	alreadyExpired = worlds.RunDataExpired(run.Run, now)
+	if !alreadyExpired {
+		if _, err := w.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                 awsv2.String(w.config.TableName),
+			Key:                       runKey(string(runID)),
+			UpdateExpression:          awsv2.String("SET expiredAt = :now"),
+			ConditionExpression:       awsv2.String("attribute_exists(pk)"),
+			ExpressionAttributeValues: map[string]ddb.AttributeValue{":now": avs(stamp(now))},
+		}); err != nil {
+			return false, err
+		}
+	}
+	if readBool(item, "dataPurged") {
+		return alreadyExpired, nil
+	}
+	var events []map[string]ddb.AttributeValue
+	var streams []map[string]ddb.AttributeValue
+	err = w.query(ctx, &dynamodb.QueryInput{
+		KeyConditionExpression:    awsv2.String("pk = :pk"),
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{":pk": avs(runPartitionKey(string(runID)))},
+		ConsistentRead:            awsv2.Bool(true),
+	}, func(item map[string]ddb.AttributeValue) bool {
+		switch sk := read(item, "sk"); {
+		case strings.HasPrefix(sk, "EVENT#"):
+			events = append(events, item)
+		case strings.HasPrefix(sk, "STREAM#"):
+			streams = append(streams, item)
+		}
+		return true
+	})
+	if err != nil {
+		return alreadyExpired, err
+	}
+	for _, item := range events {
+		event := eventFromItem(item)
+		scrubbed := worlds.ScrubEventData(event.EventType, event.Data)
+		if bytes.Equal(scrubbed, event.Data) {
+			continue
+		}
+		update := &dynamodb.UpdateItemInput{
+			TableName:                awsv2.String(w.config.TableName),
+			Key:                      key(read(item, "pk"), read(item, "sk")),
+			UpdateExpression:         awsv2.String("REMOVE #data"),
+			ExpressionAttributeNames: map[string]string{"#data": "data"},
+		}
+		if len(scrubbed) > 0 {
+			update.UpdateExpression = awsv2.String("SET #data = :data")
+			update.ExpressionAttributeValues = map[string]ddb.AttributeValue{":data": avb(scrubbed)}
+		}
+		if _, err := w.dynamo.UpdateItem(ctx, update); err != nil {
+			return alreadyExpired, err
+		}
+	}
+	for _, item := range streams {
+		name, count := read(item, "name"), int(readInt(item, "count"))
+		// The stream is empty and closed before its chunks go.
+		if _, err := w.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                 awsv2.String(w.config.TableName),
+			Key:                       key(read(item, "pk"), read(item, "sk")),
+			UpdateExpression:          awsv2.String("SET #count = :empty, #closed = :true"),
+			ExpressionAttributeNames:  map[string]string{"#count": "count", "#closed": "closed"},
+			ExpressionAttributeValues: map[string]ddb.AttributeValue{":empty": avn(0), ":true": avbool(true)},
+		}); err != nil {
+			return alreadyExpired, err
+		}
+		chunks := make([]map[string]ddb.AttributeValue, count)
+		for index := range count {
+			chunks[index] = chunkKey(string(runID), name, index)
+		}
+		if err := w.deleteItems(ctx, chunks); err != nil {
+			return alreadyExpired, err
+		}
+	}
+	_, err = w.dynamo.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 awsv2.String(w.config.TableName),
+		Key:                       runKey(string(runID)),
+		UpdateExpression:          awsv2.String("SET dataPurged = :true"),
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{":true": avbool(true)},
+	})
+	return alreadyExpired, err
 }
 
 // deleteItems deletes keys in order, in batches of maxBatchWrite, retrying

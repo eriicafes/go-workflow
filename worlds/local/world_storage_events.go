@@ -185,13 +185,6 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			}
 			return "", worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return "", worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return "", worlds.ErrHookNotActive
-		}
 
 	case worlds.EventTypeHookCreated:
 		var created worlds.DataHookCreated
@@ -284,7 +277,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName}, HookID: id, Token: value.Token, Webhook: value.Webhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, CreatedAt: now, UpdatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			t.setToken(value.Token, &tokenRecord{HookID: id})
@@ -296,19 +289,6 @@ func (t *txn) materialize(event worlds.Event) error {
 		}
 		hook := *current
 		hook.UpdatedAt, hook.ReceivedAt = now, &now
-		complete := false
-		value, ok := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && ok {
-			if value.Request != nil {
-				hook.WebhookEventID = event.EventID
-			}
-			complete = value.Response != nil && value.ResponseTo == hook.WebhookEventID
-		}
-		if complete || hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-			if err := t.completeHook(&hook, now); err != nil {
-				return err
-			}
-		}
 		t.setHook(&hook)
 	case worlds.EventTypeHookDisposed:
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
@@ -407,6 +387,7 @@ func (t *txn) commit() error {
 	if len(t.appended) == 0 {
 		return nil
 	}
+	purge := t.applyRetention(time.Now().UTC())
 	err := t.write()
 	if err != nil {
 		if repairErr := t.w.rebuildRun(t.run.RunID); repairErr != nil {
@@ -414,7 +395,35 @@ func (t *txn) commit() error {
 			return t.w.broken
 		}
 	}
+	if err == nil && purge {
+		t.w.purge(t.run)
+	}
 	return err
+}
+
+// applyRetention deletes the payloads of the appended events of a run whose
+// data is gone, as a step still running when its run's data was deleted
+// settles after it. When the appends finish a run with $retention "0", it
+// sets the run's ExpiredAt, committed with them, and reports that the rest of
+// the run's data is to be purged after the commit.
+func (t *txn) applyRetention(now time.Time) bool {
+	finished := false
+	for _, event := range t.appended {
+		switch event.EventType {
+		case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed, worlds.EventTypeRunCancelled:
+			finished = true
+		}
+	}
+	purge := finished && !t.replay && worlds.ReadRunRetention(t.run.Attributes) == worlds.RetainNone && t.run.ExpiredAt == nil
+	if purge {
+		t.run.ExpiredAt, t.run.DataPurged = &now, false
+	}
+	if purge || worlds.RunDataExpired(t.run.Run, now) {
+		for index, event := range t.appended {
+			t.appended[index].Data = worlds.ScrubEventData(event.EventType, event.Data)
+		}
+	}
+	return purge
 }
 
 func (t *txn) write() error {
@@ -492,7 +501,7 @@ func (t *txn) load(slot int) (worlds.Event, bool, error) {
 // hook_created result carries the view as event left it, with the payload
 // already in hand.
 func (t *txn) result(event worlds.Event, delta []worlds.Event) worlds.EventResult {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: bytes.Clone(event.Data), Events: delta, AllocatedEventCount: 1, InBandCount: t.run.InBandCount}
 	if event.EventType == worlds.EventTypeHookCreated {
 		if hook := t.hooks[worlds.HookID(event.CorrelationID)]; hook != nil {
 			value := hook.Hook
@@ -545,7 +554,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 		return worlds.EventResult{}, err
 	}
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -554,9 +563,29 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if attributes == nil {
 		attributes = map[string]string{}
 	}
-	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
+	run := runRecord{Run: worlds.Run{RunID: input.RunID, WorkflowName: input.WorkflowName, Status: worlds.StatusPending, Attributes: attributes, DeploymentID: input.DeploymentID, EncryptionPublicKey: input.EncryptionPublicKey, ExecutionContext: input.ExecutionContext, CreatedAt: now, UpdatedAt: now}, EventCount: 1}
 	event := worlds.Event{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now}
-	if err := w.createRun(run, event); err != nil {
+	var hook *hookRecord
+	if start := input.StartHook; start != nil {
+		if start.Token == "" {
+			return worlds.EventResult{}, worlds.ErrEventInvalid
+		}
+		// The start hook claims its token with the run, or no run is
+		// created.
+		owner, err := w.readToken(start.Token)
+		if err != nil {
+			return worlds.EventResult{}, err
+		}
+		if owner.held(now) {
+			previous, err := w.readHook(owner.HookID)
+			if err != nil {
+				return worlds.EventResult{}, err
+			}
+			return worlds.EventResult{}, &worlds.HookConflictError{RunID: previous.RunID}
+		}
+		hook = &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey}, CreatedAt: now, UpdatedAt: now}}
+	}
+	if err := w.createRun(run, event, hook); err != nil {
 		return worlds.EventResult{}, err
 	}
 	w.signal()
@@ -565,7 +594,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 
 // createRun clears leftovers of an uncommitted create, then writes slot one and
 // commits the run record.
-func (w *World) createRun(run runRecord, event worlds.Event) error {
+func (w *World) createRun(run runRecord, event worlds.Event, hook *hookRecord) error {
 	for _, dir := range []string{eventsDir(run.RunID), stepsDir(run.RunID)} {
 		if err := w.root.RemoveAll(dir); err != nil {
 			return err
@@ -573,6 +602,16 @@ func (w *World) createRun(run runRecord, event worlds.Event) error {
 	}
 	if err := writeJSON(w.root, eventPath(run.RunID, 1), event); err != nil {
 		return err
+	}
+	// A start hook and its token are written before the run file commits
+	// them. Recovery removes them when the run file was never written.
+	if hook != nil {
+		if err := writeJSON(w.root, hookPath(hook.HookID), hook); err != nil {
+			return err
+		}
+		if err := writeJSON(w.root, tokenPath(hook.Token), tokenRecord{HookID: hook.HookID}); err != nil {
+			return err
+		}
 	}
 	return writeJSON(w.root, runPath(run.RunID), run)
 }

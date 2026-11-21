@@ -90,30 +90,6 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return results, nil
 }
 
-func (w *World) QueueCancel(ctx context.Context, input worlds.QueueCancelInput) error {
-	// Deleting the record is enough, because a scheduled timer for it finds no
-	// record and is skipped.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	unlock, err := w.writeLock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	record, ok, err := w.readQueue(input.MessageID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return worlds.ErrQueueMessageNotFound
-	}
-	if err := w.removeQueueKey(record); err != nil {
-		return err
-	}
-	return remove(w.root, queuePath(record.ID))
-}
-
 func (w *World) readQueue(id string) (queueRecord, bool, error) {
 	if id == "" || strings.ContainsAny(id, `/\.`) {
 		return queueRecord{}, false, nil
@@ -231,7 +207,7 @@ func (w *World) deliver(value delivery) {
 	}
 	if err == nil {
 		input := record.Input
-		input.MessageID = value.id
+		input.MessageID, input.Attempt = value.id, value.attempt+1
 		err = w.runtime.Execute(w.ctx, input)
 	}
 	if err == nil {
@@ -241,7 +217,7 @@ func (w *World) deliver(value delivery) {
 		return
 	}
 	value.attempt++
-	backoff := min(retryBase<<min(value.attempt-1, 20), retryMax)
+	backoff := worlds.DeliveryRetryDelay(err, min(retryBase<<min(value.attempt-1, 20), retryMax))
 	value.at = time.Now().Add(backoff)
 	log.Printf("workflow/local: delivery %s failed (attempt %d), retrying in %s: %v", value.id, value.attempt, backoff, err)
 	w.schedule(value)

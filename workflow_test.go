@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -257,6 +259,377 @@ func TestStartAndGetCoverRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunValueReportsDeletedData(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+		return pointerWorkflowOutput{Value: input.Value}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, &pointerWorkflowInput{Value: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := world.RunsDeleteDataMany(ctx, worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{worlds.RunID(run.ID())}})
+	if err != nil || result.Summary.Deleted != 1 {
+		t.Fatalf("delete = %+v, %v", result, err)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("deleted run error = %v", err)
+	}
+}
+
+func TestDeleteRuns(t *testing.T) {
+	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+		return pointerWorkflowOutput{Value: input.Value}, nil
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, &pointerWorkflowInput{Value: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result, err := workflow.DeleteRuns(ctx, run.ID(), "wrun_missing")
+	if err != nil || result.Summary.Deleted != 1 || result.Summary.NotFound != 1 || result.Results[0].Outcome != worlds.DeleteDataDeleted {
+		t.Fatalf("DeleteRuns = %+v, %v", result, err)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("deleted run error = %v", err)
+	}
+	if _, err := workflow.DeleteRuns(ctx); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("DeleteRuns without runs error = %v", err)
+	}
+	if _, err := workflow.DeleteRuns(ctx, run.ID(), run.ID()); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
+		t.Fatalf("DeleteRuns with a repeated run error = %v", err)
+	}
+	local := workflow.NewContext(context.Background(), workflow.NewClient(noDeleteWorld{world}))
+	if _, err := workflow.DeleteRuns(local, run.ID()); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("DeleteRuns on a World without it error = %v", err)
+	}
+}
+
+type deleteStepInput struct{ Target worlds.RunID }
+
+func (deleteStepInput) Workflow(string) {}
+
+// flakyDeleteWorld fails its first deletion retryably, or every one with a
+// rate limit when throttle is set.
+type flakyDeleteWorld struct {
+	*testworld.World
+	calls    *int
+	throttle bool
+}
+
+func (w flakyDeleteWorld) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteDataManyInput) (worlds.RunsDeleteDataManyResult, error) {
+	*w.calls++
+	if w.throttle {
+		return worlds.RunsDeleteDataManyResult{}, &worlds.ThrottleError{After: 7 * time.Second}
+	}
+	if *w.calls == 1 {
+		results := make([]worlds.DeleteDataResult, len(input.RunIDs))
+		for index, id := range input.RunIDs {
+			results[index] = worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "busy", Retryable: true}
+		}
+		return worlds.NewDeleteDataResult(results), nil
+	}
+	return w.World.RunsDeleteDataMany(ctx, input)
+}
+
+func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
+		return workflow.Step(ctx, func(ctx context.Context, target worlds.RunID) (string, error) {
+			result, err := workflow.DeleteRuns(ctx, string(target))
+			if err != nil {
+				return "", err
+			}
+			return string(result.Results[0].Outcome), nil
+		}, input.Target, workflow.StepOptions{MaxRetries: 1})
+	}))
+	for _, throttle := range []bool{false, true} {
+		inner := testworld.NewManual()
+		calls := 0
+		world := flakyDeleteWorld{World: inner, calls: &calls, throttle: throttle}
+		if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: "wrun_target", WorkflowName: "target"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inner.EventsCreate(ctx, worlds.EventsCreateInput{RunID: "wrun_target", Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}}); err != nil {
+			t.Fatal(err)
+		}
+		clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
+		run, err := workflow.Start(clientCtx, deleteStepInput{Target: "wrun_target"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := worlds.NewRuntime(world, runners)
+		for delivered := 0; delivered < 3 && len(inner.QueuedMessages()) > 0; delivered++ {
+			message := inner.QueuedMessages()[0]
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			_ = inner.Acknowledge(ctx, message.ID)
+		}
+		if !throttle {
+			// The failed run was sent again once, within the step.
+			if value, err := run.Value(clientCtx); err != nil || value != string(worlds.DeleteDataDeleted) || calls != 2 {
+				t.Fatalf("flaky delete = %q, %v after %d calls", value, err, calls)
+			}
+			inner.Close()
+			continue
+		}
+		// A rate limit retries the step after the World's wait.
+		steps, err := inner.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+		if err != nil || len(steps.Data) != 1 || steps.Data[0].RetryAfter == nil {
+			t.Fatalf("throttled step = %+v, %v", steps.Data, err)
+		}
+		if wait := time.Until(*steps.Data[0].RetryAfter); wait < 5*time.Second || wait > 7*time.Second {
+			t.Fatalf("throttled step retries in %v, want the World's 7s", wait)
+		}
+		inner.Close()
+	}
+}
+
+// noDeleteWorld is a World that does not delete run data.
+type noDeleteWorld struct{ *testworld.World }
+
+func (noDeleteWorld) Capabilities() worlds.Capabilities { return worlds.Capabilities{} }
+
+type optionsChildInput struct{ Data string }
+type optionsParentInput struct{}
+
+func (optionsChildInput) Workflow(string)        {}
+func (optionsParentInput) Workflow(worlds.RunID) {}
+
+func TestStartOptions(t *testing.T) {
+	child := func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }
+	parent := func(ctx context.Context, _ optionsParentInput) (worlds.RunID, error) {
+		run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: map[string]string{"tier": "child"}, Retention: workflow.RetainNone})
+		if err != nil {
+			return "", err
+		}
+		return worlds.RunID(run.ID()), nil
+	}
+	world := testworld.New(workflow.Use(child), workflow.Use(parent))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+
+	// A top-level run records its retention and attributes, and its input
+	// as given.
+	large := strings.Repeat("compressible ", 1000)
+	run, err := workflow.Start(ctx, optionsChildInput{Data: large}, workflow.StartOptions{
+		Retention:               workflow.RetainNone,
+		Attributes:              map[string]string{"tier": "gold", worlds.RetentionAttribute: "default"},
+		AllowReservedAttributes: true,
+		NoArgumentCompression:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Attributes["tier"] != "gold" || created.Attributes[worlds.RetentionAttribute] != "0" {
+		t.Fatalf("attributes = %#v", created.Attributes)
+	}
+	if label := worlds.PayloadLabel(created.Input); label != worlds.PayloadDevalue {
+		t.Fatalf("uncompressed input label = %q", label)
+	}
+	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+		t.Fatalf("RetainNone run error = %v", err)
+	}
+
+	// A child run takes its options beside its lineage.
+	parentRun, err := workflow.Start(ctx, optionsParentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := parentRun.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childRun, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childRun.Attributes["tier"] != "child" || childRun.Attributes[worlds.RetentionAttribute] != "0" || childRun.Attributes[worlds.ParentRunIDAttribute] != parentRun.ID() {
+		t.Fatalf("child attributes = %#v", childRun.Attributes)
+	}
+
+	// A replay records the run it replays, which must be a run ID.
+	replay, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{ReplayedFromRunID: run.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(replay.ID())})
+	if err != nil || replayed.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != run.ID() {
+		t.Fatalf("replay = %+v, %v", replayed.ExecutionContext, err)
+	}
+	if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{ReplayedFromRunID: "wrun_missing"}); !errors.Is(err, workflow.ErrInvalidStartOptions) {
+		t.Fatalf("Start replaying a non-run ID error = %v", err)
+	}
+
+	// Attributes outside the SDK's limits start nothing.
+	for _, attributes := range []map[string]string{
+		{"$reserved": "x"},
+		{"": "x"},
+		{"key": strings.Repeat("v", worlds.MaxAttributeValueBytes+1)},
+	} {
+		if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: attributes}); !errors.Is(err, worlds.ErrAttributeInvalid) {
+			t.Fatalf("Start with attributes %v error = %v", attributes, err)
+		}
+	}
+}
+
+// regionalWorld is a World that remembers the region each run ID was given.
+type regionalWorld struct {
+	*testworld.World
+	regions *sync.Map
+}
+
+func (w regionalWorld) RegionRunID(id worlds.RunID, region worlds.Region) worlds.RunID {
+	if region == "" {
+		region = "iad1"
+	}
+	w.regions.Store(id, region)
+	return id
+}
+
+func (w regionalWorld) Capabilities() worlds.Capabilities {
+	capabilities := w.World.Capabilities()
+	capabilities.RegionalRunIDs = true
+	return capabilities
+}
+
+func (w regionalWorld) RegionForRunID(id worlds.RunID) (worlds.Region, bool) {
+	region, ok := w.regions.Load(id)
+	if !ok {
+		return "", false
+	}
+	return region.(worlds.Region), true
+}
+
+type regionParentInput struct{}
+
+func (regionParentInput) Workflow(string) {}
+
+func TestStartRegion(t *testing.T) {
+	runners := worlds.Runners(
+		workflow.Use(func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }),
+		workflow.Use(func(ctx context.Context, _ regionParentInput) (string, error) {
+			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("syd1")})
+			if err != nil {
+				return "", err
+			}
+			return run.ID(), nil
+		}),
+	)
+	// The runtime runs on the regional World, so child starts see it.
+	inner := testworld.NewManual()
+	defer inner.Close()
+	world := regionalWorld{inner, &sync.Map{}}
+	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for name, client := range map[string]workflow.Client{"in process": workflow.NewClient(world), "over HTTP": workflow.NewHTTPClient(server.URL + "/v1/workflow")} {
+		clientCtx := workflow.NewContext(ctx, client)
+		run, err := workflow.Start(clientCtx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("fra1")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if region, _ := world.RegionForRunID(worlds.RunID(run.ID())); region != worlds.Region("fra1") {
+			t.Errorf("%s run %s region = %s, want fra1", name, run.ID(), region)
+		}
+		plain, err := workflow.Start(clientCtx, optionsChildInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if region, _ := world.RegionForRunID(worlds.RunID(plain.ID())); region != worlds.Region("iad1") {
+			t.Errorf("%s run without Region %s region = %s, want the World's iad1", name, plain.ID(), region)
+		}
+	}
+	parent, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), regionParentInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := worlds.NewRuntime(world, runners)
+	for _, message := range inner.QueuedMessages() {
+		if message.Input.RunID != worlds.RunID(parent.ID()) {
+			continue
+		}
+		if err := runtime.Execute(ctx, message.Input); err != nil {
+			t.Fatal(err)
+		}
+		_ = inner.Acknowledge(ctx, message.ID)
+	}
+	childID, err := parent.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if region, _ := world.RegionForRunID(worlds.RunID(childID)); region != worlds.Region("syd1") {
+		t.Errorf("child run %s region = %s, want syd1", childID, region)
+	}
+}
+
+type startHookInput struct{ Token string }
+
+func (startHookInput) Workflow(string) {}
+
+func TestStartHook(t *testing.T) {
+	world := testworld.NewManual()
+	defer world.Close()
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
+		return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
+	}))
+	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for name, client := range map[string]workflow.Client{"in process": workflow.NewClient(world), "over HTTP": workflow.NewHTTPClient(server.URL + "/v1/workflow")} {
+		clientCtx := workflow.NewContext(ctx, client)
+		token := "start-hook-" + strings.ReplaceAll(name, " ", "-")
+		run, err := workflow.Start(clientCtx, startHookInput{Token: token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: token, MinRetention: time.Hour, Metadata: "meta"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The hook takes a payload before the run first executes, and the
+		// workflow's hook of the same token opens it.
+		if err := workflow.ResumeHook(clientCtx, token, "early"); err != nil {
+			t.Fatalf("%s: resume before the run started: %v", name, err)
+		}
+		_, err = workflow.Start(clientCtx, startHookInput{Token: token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: token}})
+		var conflict *worlds.HookConflictError
+		if !errors.As(err, &conflict) || conflict.RunID != worlds.RunID(run.ID()) {
+			t.Fatalf("%s: duplicate start error = %v", name, err)
+		}
+		runtime := worlds.NewRuntime(world, runners)
+		for len(world.QueuedMessages()) != 0 {
+			message := world.QueuedMessages()[0]
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				t.Fatal(err)
+			}
+			_ = world.Acknowledge(ctx, message.ID)
+		}
+		if value, err := run.Value(clientCtx); err != nil || value != "early" {
+			t.Fatalf("%s: run value = %q, %v", name, value, err)
+		}
+	}
+	unsupported := workflow.NewContext(ctx, workflow.NewClient(noDeleteWorld{world}))
+	if _, err := workflow.Start(unsupported, startHookInput{}, workflow.StartOptions{Hook: &workflow.StartHook{Token: "t"}}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Fatalf("start hook on a World without it error = %v", err)
+	}
+}
+
 func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)
@@ -365,15 +738,15 @@ func writeOwnStream(ctx context.Context, runID string) (struct{}, error) {
 	if err != nil {
 		return struct{}{}, err
 	}
-	writer, release, err := run.Writer(ctx, workflow.WriterOption{Name: "side"})
+	writer, err := run.Writer(ctx, workflow.WriterOption{Name: "side"})
 	if err != nil {
 		return struct{}{}, err
 	}
-	defer release()
+	defer writer.Close()
 	if _, err := writer.Write([]byte("from step")); err != nil {
 		return struct{}{}, err
 	}
-	return struct{}{}, writer.Close()
+	return struct{}{}, writer.CloseStream()
 }
 
 func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
@@ -383,7 +756,7 @@ func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
 		if err != nil {
 			return streamAccessOutput{}, err
 		}
-		_, _, workflowErr := run.Writer(ctx)
+		_, workflowErr := run.Writer(ctx)
 		_, err = workflow.Step(ctx, writeOwnStream, runID)
 		return streamAccessOutput{WorkflowErr: fmt.Sprint(workflowErr)}, err
 	}))
@@ -461,7 +834,7 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 			if err := runtime.Execute(ctx, message.Input); err != nil {
 				t.Fatal(err)
 			}
-			_ = world.QueueCancel(ctx, worlds.QueueCancelInput{MessageID: message.ID})
+			_ = world.Acknowledge(ctx, message.ID)
 			executed = true
 			break
 		}
@@ -495,18 +868,18 @@ type progress struct {
 // writeProgress writes message to the run's default stream and returns when
 // it ran, so the test can measure the time that passed between steps.
 func writeProgress(ctx context.Context, p progress) (time.Time, error) {
-	writer, release, err := workflow.Writer(ctx)
+	writer, err := workflow.Writer(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
-	defer release()
+	defer writer.Close()
 
 	if _, err := io.WriteString(writer, p.Message); err != nil {
 		return time.Time{}, err
 	}
 
 	if p.Close {
-		if err := writer.Close(); err != nil {
+		if err := writer.CloseStream(); err != nil {
 			return time.Time{}, err
 		}
 	}

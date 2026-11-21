@@ -2,7 +2,9 @@ package flows
 
 import (
 	"context"
-	"math/rand/v2"
+	"crypto/rand"
+	"io"
+	mathrand "math/rand/v2"
 	"time"
 
 	"github.com/eriicafes/go-workflow"
@@ -38,7 +40,15 @@ func Report(ctx context.Context, in Input) (Output, error) {
 	// A local helper runs in workflow context.
 	now := func() int64 { return time.Now().Unix() } // want `workflow body calls time.Now, use workflow.Now instead`
 	_ = now()
-	_ = rand.IntN(3)             // want `workflow body calls math/rand/v2.IntN, use workflow.Step or workflow.Background instead`
+	_ = mathrand.IntN(3)   // want `workflow body calls math/rand/v2.IntN, use workflow.RandReader instead`
+	_, _ = rand.Read(nil)  // want `workflow body calls crypto/rand.Read, use workflow.RandReader instead`
+	_, _ = io.ReadAll(nil) // want `workflow body calls io.ReadAll, use workflow.Step or workflow.Background instead`
+
+	// Reading from workflow.RandReader is allowed.
+	buffer := make([]byte, 4)
+	_, _ = io.ReadFull(workflow.RandReader(ctx), buffer)
+	random := workflow.RandReader(ctx)
+	_, _ = io.ReadFull(random, buffer)
 	_ = time.Since(time.Time{})  // want `workflow body calls time.Since, use workflow.Now instead`
 	time.Sleep(time.Millisecond) // want `workflow body calls time.Sleep, use workflow.Sleep instead`
 

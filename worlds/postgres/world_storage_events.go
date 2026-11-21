@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/jackc/pgx/v5"
@@ -16,7 +17,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	payload, err := json.Marshal(worlds.DataRunCreated{WorkflowName: input.WorkflowName, Input: input.Input, Attributes: input.Attributes, DeploymentID: input.DeploymentID})
+	payload, err := worlds.RunCreatedData(input)
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -28,11 +29,17 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
+	var executionContext []byte
+	if len(input.ExecutionContext) > 0 {
+		if executionContext, err = json.Marshal(input.ExecutionContext); err != nil {
+			return worlds.EventResult{}, err
+		}
+	}
 	at := now()
 	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, event_count, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 1, $6, $6) ON CONFLICT (run_id) DO NOTHING`,
-			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, at)
+		tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_runs (run_id, workflow_name, status, attributes, deployment_id, encryption_public_key, execution_context, event_count, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8) ON CONFLICT (run_id) DO NOTHING`,
+			input.RunID, input.WorkflowName, worlds.StatusPending, encodedAttributes, input.DeploymentID, input.EncryptionPublicKey, executionContext, at)
 		if err != nil {
 			return err
 		}
@@ -41,7 +48,10 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO go_workflow_events (run_id, slot, type, correlation_id, data, created_at) VALUES ($1, 1, $2, '', $3, $4)`,
 			input.RunID, worlds.EventTypeRunCreated, payload, at)
-		return err
+		if err != nil || input.StartHook == nil {
+			return err
+		}
+		return createStartHook(ctx, tx, input, at)
 	})
 	if err != nil {
 		return worlds.EventResult{}, err
@@ -61,7 +71,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	}
 	var result worlds.EventResult
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
-		a, err := lockRun(ctx, tx, input.RunID)
+		a, err := w.lockRun(ctx, tx, input.RunID)
 		if err != nil {
 			return err
 		}
@@ -110,7 +120,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	var inBandCount int
 	err := w.inTx(ctx, func(tx pgx.Tx) error {
 		results = make([]worlds.EventResult, 0, len(input.Events))
-		a, err := lockRun(ctx, tx, input.RunID)
+		a, err := w.lockRun(ctx, tx, input.RunID)
 		if err != nil {
 			return err
 		}
@@ -154,7 +164,13 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 		var event worlds.Event
 		event, err = scanEvent(w.pool.QueryRow(ctx, `SELECT `+eventColumns+` FROM go_workflow_events WHERE run_id = $1 AND slot = $2`, input.RunID, int64(slot)))
 		if err == nil {
-			event.Data = worlds.ResolveEventData(event.EventType, event.Data, input.ResolveData)
+			resolve := input.ResolveData
+			if expired, err := w.runDataExpired(ctx, input.RunID); err != nil {
+				return worlds.Event{}, err
+			} else if expired {
+				resolve = worlds.EventsResolveDataNone
+			}
+			event.Data = worlds.ResolveEventData(event.EventType, event.Data, resolve)
 			return event, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -218,6 +234,11 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
+	if expired, err := w.runDataExpired(ctx, runID); err != nil {
+		return worlds.Page[worlds.Event]{}, err
+	} else if expired {
+		resolve = worlds.EventsResolveDataNone
+	}
 	events = worlds.ResolveEvents(events, resolve)
 	if len(events) == 0 {
 		if err := w.runExists(ctx, runID); err != nil {
@@ -235,6 +256,7 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 // row lock. Admission reads see the transaction's own earlier appends, so a
 // batch is admitted against its in-progress state.
 type appender struct {
+	w           *World
 	tx          pgx.Tx
 	run         worlds.Run
 	count       uint64
@@ -322,13 +344,6 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			}
 			return nil, worlds.ErrHookNotActive
 		}
-		received, _ := worlds.DecodeWebhookReceived(event.Data)
-		if hook.Webhook != nil && received.Request != nil && hook.WebhookEventID != "" {
-			return nil, worlds.ErrHookNotActive
-		}
-		if hook.Webhook != nil && received.Response != nil && (!hook.Webhook.Manual || hook.WebhookEventID == "" || received.ResponseTo != hook.WebhookEventID) {
-			return nil, worlds.ErrHookNotActive
-		}
 
 	case worlds.EventTypeHookDisposed:
 		hook, found, err := loadHook(ctx, a.tx, worlds.HookID(event.CorrelationID), worlds.ResolveDataNone)
@@ -405,6 +420,11 @@ func (a *appender) delta(ctx context.Context, options worlds.EventsCreateOptions
 func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (worlds.Event, error) {
 	a.count++
 	event := worlds.Event{RunID: a.run.RunID, EventID: worlds.EventIDForSlot(a.count), EventType: value.EventType, CorrelationID: value.CorrelationID, Data: value.Data, CreatedAt: now()}
+	if worlds.RunDataExpired(a.run, event.CreatedAt) {
+		// A step still running when its run's data was deleted settles after
+		// it. What it brought is deleted as it lands.
+		event.Data = worlds.ScrubEventData(event.EventType, event.Data)
+	}
 	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_events (run_id, slot, type, correlation_id, data, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		event.RunID, int64(a.count), event.EventType, event.CorrelationID, event.Data, event.CreatedAt); err != nil {
 		return worlds.Event{}, err
@@ -496,18 +516,9 @@ func (a *appender) updateStep(ctx context.Context, event worlds.Event, status wo
 func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int64) error {
 	var value worlds.DataHookCreated
 	_ = json.Unmarshal(event.Data, &value)
-	var webhook []byte
-	if value.Webhook != nil {
-		encoded, err := json.Marshal(value.Webhook)
-		if err != nil {
-			return err
-		}
-		webhook = encoded
-	}
-
 	claimed, _ := json.Marshal(value.ForceClaimedFrom)
-	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, token, created_slot, webhook, created_at, updated_at, token_retention_until, claimed_from)
- VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)`, event.CorrelationID, event.RunID, a.run.WorkflowName, a.run.DeploymentID, value.Token, slot, webhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
+	if _, err := a.tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, created_slot, is_webhook, created_at, updated_at, token_retention_until, claimed_from)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11)`, event.CorrelationID, event.RunID, a.run.WorkflowName, a.run.DeploymentID, a.run.EncryptionPublicKey, value.Token, slot, value.IsWebhook, event.CreatedAt, value.TokenRetentionUntil, claimed); err != nil {
 		return err
 	}
 
@@ -535,29 +546,8 @@ func (a *appender) receiveHook(ctx context.Context, event worlds.Event) error {
 	}
 	at := event.CreatedAt
 	hook.UpdatedAt, hook.ReceivedAt = at, &at
-	complete := false
-	value, ok := worlds.DecodeWebhookReceived(event.Data)
-	if hook.Webhook != nil && ok {
-		if value.Request != nil {
-			hook.WebhookEventID = event.EventID
-		}
-		if value.Response != nil && value.ResponseTo == hook.WebhookEventID {
-			complete = true
-		}
-	}
-
-	if hook.Webhook != nil && !hook.Webhook.Manual && hook.WebhookEventID != "" {
-		complete = true
-	}
-	if complete {
-		hook.DisposedAt = &at
-		if err := releaseToken(ctx, a.tx, hook); err != nil {
-			return err
-		}
-	}
-
-	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3, webhook_event_id = $4, token_retention_until = $5, disposed_at = $6 WHERE hook_id = $1`,
-		hook.HookID, hook.UpdatedAt, hook.ReceivedAt, hook.WebhookEventID, hook.TokenRetentionUntil, hook.DisposedAt)
+	_, err = a.tx.Exec(ctx, `UPDATE go_workflow_hooks SET updated_at = $2, received_at = $3 WHERE hook_id = $1`,
+		hook.HookID, hook.UpdatedAt, hook.ReceivedAt)
 	return err
 }
 
@@ -578,7 +568,7 @@ func (a *appender) advance(count *int, appended int) {
 }
 
 func (a *appender) result(ctx context.Context, event worlds.Event, created bool) (worlds.EventResult, error) {
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, Data: event.Data, InBandCount: a.run.InBandCount}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, InBandCount: a.run.InBandCount}
 	if created {
 		result.AllocatedEventCount = 1
 	}
@@ -616,11 +606,30 @@ func (a *appender) flush(ctx context.Context) error {
 		return err
 	}
 	if !a.wasTerminal && a.run.Status.Terminal() {
+		if err := a.expire(ctx); err != nil {
+			return err
+		}
 		if _, err := a.tx.Exec(ctx, `SELECT pg_notify($1, $2)`, channelRuns, string(a.run.RunID)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// expire applies the retention of a run that has just finished. A run with
+// $retention "0" loses its data in this transaction, before waiters are
+// notified. Otherwise a Config.Retention for its workflow sets the run's
+// expired_at, and Worker deletes its data once it has passed.
+func (a *appender) expire(ctx context.Context) error {
+	if worlds.ReadRunRetention(a.run.Attributes) == worlds.RetainNone {
+		return purgeRunData(ctx, a.tx, a.run.RunID)
+	}
+	retention := a.w.retentionFor(a.run.WorkflowName)
+	if retention <= 0 || a.run.CompletedAt == nil {
+		return nil
+	}
+	_, err := a.tx.Exec(ctx, `UPDATE go_workflow_runs SET expired_at = $2 WHERE run_id = $1 AND expired_at IS NULL`, a.run.RunID, a.run.CompletedAt.Add(retention))
+	return err
 }
 
 // eventColumns are the columns scanEvent reads. Data is always read, since
@@ -642,13 +651,13 @@ func validEvent(event worlds.EventsCreateEvent) bool {
 	return event.EventType != worlds.EventTypeRunCreated && event.EventType.Valid()
 }
 
-func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, error) {
-	a := &appender{tx: tx}
+func (w *World) lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, error) {
+	a := &appender{w: w, tx: tx}
 	var attributes []byte
 	var count, inBandCount int64
-	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, status, result_slot, attributes, updated_at, started_at, completed_at, event_count, in_band_count
+	err := tx.QueryRow(ctx, `SELECT run_id, workflow_name, deployment_id, encryption_public_key, status, result_slot, attributes, updated_at, started_at, completed_at, expired_at, event_count, in_band_count
 		FROM go_workflow_runs WHERE run_id = $1 FOR UPDATE`, runID).
-		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &count, &inBandCount)
+		Scan(&a.run.RunID, &a.run.WorkflowName, &a.run.DeploymentID, &a.run.EncryptionPublicKey, &a.run.Status, &a.resultSlot, &attributes, &a.run.UpdatedAt, &a.run.StartedAt, &a.run.CompletedAt, &a.run.ExpiredAt, &count, &inBandCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, worlds.ErrRunNotFound
 	}
@@ -663,4 +672,40 @@ func lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*appender, err
 	a.run.InBandCount = int(inBandCount)
 	a.wasTerminal = a.run.Status.Terminal()
 	return a, nil
+}
+
+// createStartHook creates a run's start hook in the transaction creating the
+// run, claiming its token, or returns a *HookConflictError naming the run
+// holding it, which rolls the run back.
+func createStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput, at time.Time) error {
+	start := input.StartHook
+	if start.Token == "" {
+		return worlds.ErrEventInvalid
+	}
+	holder, err := lockToken(ctx, tx, start.Token, at)
+	if err != nil {
+		return err
+	}
+	if holder.hookID != "" {
+		return &worlds.HookConflictError{RunID: holder.runID}
+	}
+	id := worlds.StartHookID(input.RunID)
+	// created_slot 1 joins run_created, which holds the hook's metadata.
+	if _, err := tx.Exec(ctx, `INSERT INTO go_workflow_hooks (hook_id, run_id, workflow_name, deployment_id, encryption_public_key, token, created_slot, is_webhook, created_at, updated_at, token_retention_until)
+		VALUES ($1, $2, $3, $4, $5, $6, 1, false, $7, $7, $8)`, id, input.RunID, input.WorkflowName, input.DeploymentID, input.EncryptionPublicKey, start.Token, at, start.TokenRetentionUntil); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO go_workflow_hook_tokens (token, hook_id) VALUES ($1, $2) ON CONFLICT (token) DO NOTHING`, start.Token, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// A concurrent claimant inserted the token since it was checked.
+		var owner worlds.RunID
+		if err := tx.QueryRow(ctx, `SELECT h.run_id FROM go_workflow_hook_tokens t JOIN go_workflow_hooks h ON h.hook_id = t.hook_id WHERE t.token = $1`, start.Token).Scan(&owner); err != nil {
+			return err
+		}
+		return &worlds.HookConflictError{RunID: owner}
+	}
+	return nil
 }

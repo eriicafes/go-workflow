@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -37,7 +38,7 @@ type (
 	}
 )
 
-// DurableStep declares the step at the next position. On first execution in a
+// DurableStep declares the next step. On first execution in a
 // flow it holds the step back until the runner waits, when Execution.Wait
 // runs it inline or records step_created with input and queues a step
 // delivery, which a step delivery or compensation does at once. On replay it
@@ -46,27 +47,19 @@ type (
 // this step it
 // calls fn with the recorded input, records the result in the Execution, and
 // ends the replay with a panic the Runtime recovers, so it does not return.
-// fn is executed at least once. When the operation recorded at the position is
+// fn is executed at least once. When the operation recorded with its ID is
 // not a step with options.Name, it ends the replay with a panic carrying a
 // replayDivergenceError.
 func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, fn func(context.Context, In) (Out, error), input In) DurableStepResult[Out] {
-	position := options.Execution.NextPosition()
-	creationIndex, exists := options.Execution.index[position]
+	stepID := options.Execution.NextStepID()
+	creationIndex, exists := options.Execution.declared(string(stepID))
 	if !exists {
 		// First execution persists the declaration and dispatches its target work.
-		stepID := NewStepID()
-		encoded, err := json.Marshal(input)
+		encoded, err := options.Execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
 			return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: encode step input: %w", err)}
 		}
-		created := DataStepCreated{
-			Position:     position,
-			StepName:     options.Name,
-			Input:        encoded,
-			MaxRetries:   options.MaxRetries,
-			Rollback:     options.Rollback,
-			Cancellation: CancellationReferences(ctx),
-		}
+		created := DataStepCreated{StepName: options.Name, Input: encoded}
 		if options.Execution.target == nil && !options.Rollback {
 			// A flow holds the step back until the runner waits, and then
 			// runs it inline or queues it.
@@ -75,7 +68,7 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 				created:  &created,
 				limit:    MaxInlineSteps(ctx),
 				duration: MaxInlineStepsDuration(ctx),
-				run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, created.Cancellation, fn, input),
+				run:      pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
 			})
 			return DurableStepResult[Out]{StepID: stepID}
 		}
@@ -88,19 +81,18 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		return DurableStepResult[Out]{StepID: stepID}
 	}
 
-	// Replay the declaration at this logical workflow position.
+	// Replay the recorded declaration.
 	event := options.Execution.events[creationIndex]
 	if event.EventType != EventTypeStepCreated {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded %s, replay reached a step", event.EventType)}))
 	}
 	var createdData DataStepCreated
 	if err := json.Unmarshal(event.Data, &createdData); err != nil {
 		return DurableStepResult[Out]{Err: fmt.Errorf("workflow: decode step: %w", err)}
 	}
 	if createdData.StepName != options.Name {
-		panic(options.Execution.exit(replayDivergenceError{Position: position, Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
+		panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(stepID), Reason: fmt.Sprintf("recorded step %q, replay reached step %q", createdData.StepName, options.Name)}))
 	}
-	stepID := StepID(event.CorrelationID)
 
 	// Root replays only declare steps, and the targeted delivery of a step
 	// that has not settled invokes fn.
@@ -147,15 +139,16 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 		case owner == options.Execution.delivery.MessageID:
 			// The flow that ran the step stopped, and this is its message
 			// redelivered, so it runs the step again.
-			var stepInput In
-			if err := json.Unmarshal(createdData.Input, &stepInput); err != nil {
+			var args stepArgs[In]
+			if err := options.Execution.DecodePayload(createdData.Input, &args); err != nil {
 				return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode step input: %w", err)}
 			}
+			stepInput := args.Args[0]
 			options.Execution.hold(pendingStep{
 				stepID:    stepID,
 				recovered: true,
 				attempt:   attempts + 1,
-				run:       pendingRun(ctx, options.Execution, stepID, options.Name, createdData.MaxRetries, createdData.Cancellation, fn, stepInput),
+				run:       pendingRun(ctx, options.Execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, stepInput),
 			})
 		default:
 			// The owning flow's lease passed, so a step delivery takes the
@@ -169,12 +162,14 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	}
 
 	// Targeted execution always uses the input captured by step_created.
-	if err := json.Unmarshal(createdData.Input, &input); err != nil {
+	var args stepArgs[In]
+	if err := options.Execution.DecodePayload(createdData.Input, &args); err != nil {
 		return DurableStepResult[Out]{StepID: stepID, Err: fmt.Errorf("workflow: decode step input: %w", err)}
 	}
+	input = args.Args[0]
 	attempt := stepAttempt(options.Execution, stepID)
 	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
-	stepCtx, stop := StepCancelContext(ctx, options.Execution, createdData.Cancellation)
+	stepCtx, stop := StepCancelContext(ctx, options.Execution, CancellationReferences(ctx))
 	defer stop()
 	stepCtx, span := startStepSpan(stepCtx, options.Execution, stepID, options.Name, attempt)
 	defer span.End()
@@ -191,14 +186,14 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 	// Report the target result to the engine, which appends the lifecycle
 	// event.
 	if callErr != nil {
-		result := DataStepResult{Error: encodeError(callErr), RetryAfter: stepRetryAfter(callErr, options.MaxRetries, attempt)}
+		result := DataStepResult{Error: options.Execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, options.MaxRetries, attempt)}
 		options.Execution.SetTargetResult(result)
 		panic(options.Execution.exit(errReplayComplete))
 	}
 
-	output, err := json.Marshal(value)
+	output, err := options.Execution.EncodePayload(value)
 	if err != nil {
-		options.Execution.SetTargetResult(DataStepResult{Error: encodeError(err)})
+		options.Execution.SetTargetResult(DataStepResult{Error: options.Execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))})
 	} else {
 		options.Execution.SetTargetResult(DataStepResult{Result: output})
 	}
@@ -210,6 +205,8 @@ func DurableStep[In, Out any](ctx context.Context, options DurableStepOptions, f
 // passes on. A cancelled stepCtx makes the error fatal, unless the delivery
 // itself stopped.
 func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay bool, fn func(context.Context, In) (Out, error), input In) (value Out, err error) {
+	returned := &stepReturn{}
+	stepCtx = context.WithValue(stepCtx, stepReturnKey{}, returned)
 	func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -224,10 +221,57 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 		}()
 		value, err = fn(stepCtx, input)
 	}()
+	// What the step left to finish, such as buffered stream writes, is done
+	// before its result is recorded, so a completed step's writes are stored.
+	if returnErr := returned.run(); returnErr != nil && err == nil {
+		err = returnErr
+	}
 	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
 		err = FatalError{Cause: context.Canceled}
 	}
 	return value, err
+}
+
+type stepReturnKey struct{}
+
+// stepReturn holds the functions to run when a step function returns.
+type stepReturn struct {
+	mu    sync.Mutex
+	funcs []func() error
+	done  bool
+}
+
+func (r *stepReturn) run() error {
+	r.mu.Lock()
+	funcs := r.funcs
+	r.funcs, r.done = nil, true
+	r.mu.Unlock()
+	var errs []error
+	for _, fn := range funcs {
+		if err := fn(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// OnStepReturn registers fn to run when the step function ctx belongs to
+// returns, in registration order and before the step's result is recorded.
+// An error from fn fails a step that would otherwise succeed. It reports
+// false, and does not register fn, when ctx is not a running step
+// function's context.
+func OnStepReturn(ctx context.Context, fn func() error) bool {
+	returned, ok := ctx.Value(stepReturnKey{}).(*stepReturn)
+	if !ok {
+		return false
+	}
+	returned.mu.Lock()
+	defer returned.mu.Unlock()
+	if returned.done {
+		return false
+	}
+	returned.funcs = append(returned.funcs, fn)
+	return true
 }
 
 // StepOutcome decodes the result of the step stepID, which must have settled
@@ -244,9 +288,9 @@ func StepOutcome[Out any](execution *Execution, stepID StepID) (Out, error) {
 		return data, fmt.Errorf("workflow: decode step result: %w", err)
 	}
 	if event.EventType == EventTypeStepFailed {
-		return data, DecodeError(result.Error)
+		return data, execution.decodeError(result.Error)
 	}
-	if err := json.Unmarshal(result.Result, &data); err != nil {
+	if err := execution.DecodePayload(result.Result, &data); err != nil {
 		return data, fmt.Errorf("workflow: decode step output: %w", err)
 	}
 	return data, nil

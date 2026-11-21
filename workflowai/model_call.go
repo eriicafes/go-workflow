@@ -92,8 +92,8 @@ type modelCallResult struct {
 }
 
 // modelCall calls a language model in a step. Its methods are the step
-// functions, so a model call is identified by the method and its position in
-// the run.
+// functions, so a model call is identified by the method and the step ID it
+// draws.
 type modelCall struct {
 	model      provider.LanguageModel
 	telemetry  *telemetry.Options
@@ -151,11 +151,11 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 func (m modelCall) stream(ctx context.Context, input modelCallInput) (result modelCallResult, err error) {
 	var writer io.Writer = io.Discard
 	if input.Writer != nil {
-		w, release, err := workflow.Writer(ctx, *input.Writer)
+		w, err := workflow.Writer(ctx, *input.Writer)
 		if err != nil {
 			return modelCallResult{}, err
 		}
-		defer release()
+		defer w.Close()
 		if err := writePart(w, ModelCallStreamPart{Type: "reset-step"}); err != nil {
 			return modelCallResult{}, err
 		}

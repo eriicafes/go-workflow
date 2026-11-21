@@ -86,9 +86,15 @@ whose result is already recorded refuses a second one.
 
 ## Identifying operations
 
-Operations are identified by **position**: the order in which the runner
-reaches them. Each recorded operation stores its position, and replay checks
-that the runner reaches a matching operation there.
+Operations are identified by **ID**, and every ID comes from a generator
+seeded with the run: `<run ID>:<workflow name>:<deployment ID>` seeds
+seedrandom's ARC4, and steps, timers, and hooks take the run's next
+correlation ULID, `step_`, `wait_`, or `hook_` and a ULID at the run's
+creation time, each one the previous plus one. A hook created without a
+token draws a 21-character Nano ID token from the same generator. Each replay
+draws the same IDs in the same order, and replay checks that the operation
+the runner reaches matches the one recorded with its ID. This is why a runner
+must declare its operations in the same order on every replay.
 
 ## Delivering results in order
 
@@ -117,8 +123,8 @@ resolves when the walk reaches its result.
 A replay **diverges** when the runner doesn't reach the operations its log
 records. The runtime detects:
 
-- an operation of another kind at a recorded position, such as a step where a
-  timer was recorded.
+- an operation of another kind recorded with the drawn ID, such as a step
+  where a timer was recorded.
 - a step that calls a different step function than the one recorded.
 - a hook with a different token than the one recorded.
 - a runner that returns without reaching a recorded operation, for example
@@ -131,8 +137,8 @@ delivery** of the same flow or step right away, which replays the run from a
 fresh read of its log, possibly on another worker. Each recovery delivery
 carries a count in `QueueInput.ReplayDivergenceCount`. After three recovery
 deliveries diverge too, the runtime fails the run with an error matching
-`worlds.ErrCorruptedEventLog`, whose message names the position and the
-mismatch. A step that diverges records a new attempt on each recovery
+`worlds.ErrCorruptedEventLog`, whose message names the operation's ID and
+the mismatch. A step that diverges records a new attempt on each recovery
 delivery. Compensations registered with `Rollback` do **not** run,
 because they would replay against the same log.
 
@@ -156,10 +162,14 @@ context must make the same decisions every time.
 
 - **Do side effects only in steps.** Network calls, database queries, file
   I/O, and anything that sends a message belong in a step function.
-- **Read time only through `workflow.Now`.** It records the time the first time
-  it runs, so replay returns the same value. `time.Now` is fine inside steps.
-- **Don't use randomness directly.** Generate IDs and random choices in a step,
-  or with [`workflow.InlineStep`](/guide/inline-steps).
+- **Read time only through `workflow.Now`.** It returns the replay clock, which
+  every replay moves to the same times at the same points.
+  `time.Now` is fine inside steps.
+- **Read randomness only through `workflow.RandReader`.** Its bytes are drawn
+  from the run's seed, the generator that draws step, timer, and hook IDs, so
+  every replay reads the same bytes in the same order. Wrap it for other
+  shapes, such as `uuid.NewRandomFromReader(workflow.RandReader(ctx))`.
+  `crypto/rand` is fine inside steps.
 - **Don't start goroutines or `select` on channels.** Use
   [`workflow.Background`](/guide/concurrency) and the `Select` functions.
 - **Don't range over maps** in a way that changes the order of operations. Go
@@ -207,7 +217,7 @@ How it works:
   [world-http adapter](/tooling/world-http) get the Go World's deployment ID.
 - **Addressed to the run's deployment.** Every delivery for a run is sent to
   its deployment, including the ones queued from outside the run: hook and
-  webhook resumes, `WakeUp`, and QStash timers. A newer deployment handling a
+  webhook resumes, `WakeUp`, and the hops of long timers. A newer deployment handling a
   webhook for an older run sends the delivery back to the older one.
 - **Re-routed if misdelivered.** A delivery that still reaches another
   deployment is not replayed. It is sent to the run's deployment again, after
@@ -239,25 +249,26 @@ which brings their pinned runs back.
 
 A workflow that never ends, such as a daily job that starts tomorrow's run
 before it finishes, would otherwise stay on the deployment its first run
-started on until that deployment is deleted. Embed `workflow.StartOnLatest` in
-it, and new runs of it start on the World's latest deployment instead of the
-one that starts them:
+started on until that deployment is deleted. Start its next run with
+`workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`
+does, and it starts on the World's latest deployment instead of the one that
+starts it:
 
 ```go
-type DailyDigest struct {
-	workflow.Struct[DigestResult]
-	workflow.StartOnLatest
-	UserID string
-}
+next, err := workflow.Start(ctx, DailyDigest{UserID: input.UserID}, workflow.StartOptions{
+	Deployment: workflow.LatestDeployment,
+})
 ```
 
 A run never moves once started, so its event log is still only replayed by
 the code that wrote it: each run of the chain picks up new code when the
 previous one starts it. This applies whether the run is started from a
 workflow, a step or a handler, and through an HTTP client too, since the
-server picks the deployment. Mark only workflows nothing waits on the output
+server picks the deployment. Use it only for runs nothing waits on the output
 of, since a newer deployment may return a different output.
+`workflow.DeploymentWithID(id)` names a deployment instead.
 
-The marker needs a World that implements `worlds.LatestDeployments`, such as
+The option needs a World with deployment affinity, and `LatestDeployment` one
+that implements `worlds.LatestDeployments`, such as
 the [Vercel World](/worlds/vercel#latest-deployment). On other Worlds it
 changes nothing.

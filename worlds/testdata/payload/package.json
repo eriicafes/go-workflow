@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Generates the Workflow SDK payload vectors the worlds package tests against, and checks Go-written payloads with the SDK.",
+  "scripts": {
+    "generate": "node generate.mjs",
+    "verify": "node verify.mjs"
+  },
+  "dependencies": {
+    "@workflow/core": "5.7.0",
+    "@workflow/errors": "5.1.4",
+    "@workflow/world-vercel": "5.7.0"
+  }
+}

@@ -15,7 +15,7 @@ Your workflow code is the same on every World. Choose one per environment.
 | World | Storage and delivery | Processes | Entry points | Best for |
 | --- | --- | --- | --- | --- |
 | [Local](/worlds/local) | JSON files, in-process delivery | one per directory | `World.Prepare` | development, single-process apps |
-| [Vercel](/worlds/vercel) | Redis, Vercel Queues, optional QStash | any number | `vercelworld.Queue` | Vercel Functions |
+| [Vercel](/worlds/vercel) | Vercel workflow storage, Vercel Queues | any number | `vercelworld.Queue` | Vercel Functions |
 | [AWS](/worlds/aws) | DynamoDB, SQS, optional EventBridge Scheduler | any number | `awsworld.Queue` | AWS Lambda |
 | [Postgres](/worlds/postgres) | PostgreSQL, LISTEN/NOTIFY workers | any number | `postgresworld.Worker` | servers and containers |
 | [Test](/worlds/testworld) | memory | one | `testworld.New` | tests |
@@ -40,7 +40,7 @@ Every World package except the test World exports the same handler constructors:
 | `POST /v1/workflow/rpc` | CBOR RPC used by `workflow.NewHTTPClient` and the [web UI](/tooling/web-ui) |
 | `/v1/workflow/webhooks/{token}` | [webhook](/guide/webhooks) requests |
 
-The Vercel World also serves `/v1/workflow/callbacks/qstash` when QStash is configured.
+The Vercel World also serves `/v1/workflow/deployment`.
 See [HTTP Endpoints](/reference/http) for details.
 
 ### Base URL
@@ -57,10 +57,23 @@ followed by the prefix, such as `http://workflow-worker:8081/v1/workflow`.
 
 ## Retention
 
-Runs are kept forever by default. A World that supports retention deletes a
-run's data `Config.Retention` after the run completes, fails, or is cancelled,
-so storage stays bounded. `Config.Retentions` sets it per workflow, by workflow
-name, and zero keeps that workflow's runs forever:
+A run's data is deleted as the Workflow SDK deletes it: its inputs, outputs
+and errors, the payloads in its events and hooks, and its streams' chunks. The
+run, step, event and hook records stay with their IDs, statuses, timestamps
+and attributes, the run's `ExpiredAt` is set, and the Workflow web UI shows its
+data as expired. Reading its result returns `workflow.ErrRunExpired`.
+
+A run's data is deleted:
+
+- when the run finishes, if it was created with `$retention: "0"`
+  (`worlds.RetainNone`), in every World;
+- on demand, with `workflow.DeleteRuns` or `RunsDeleteDataMany`, in a World
+  with `Capabilities().DeleteData`;
+- after `Config.Retention`, in a World that supports it.
+
+`Config.Retention` keeps a finished run's data for that long, and
+`Config.Retentions` sets it per workflow, by workflow name. Zero keeps the
+data:
 
 ```go
 config.Retention = 24 * time.Hour
@@ -70,27 +83,25 @@ config.Retentions = worlds.Retentions(
 )
 ```
 
-Every World that supports retention follows the same rules:
-
-- Runs that are still pending or running are never deleted, however old.
-- A hook whose token retention has not ended keeps its run until it ends.
-- Runs that finished before retention was set are kept.
-
-Callers read a run's result and streams right after it finishes, so a few
-minutes is the shortest practical retention. Each World's page describes how
-and when it deletes.
+When a run finishes, its `ExpiredAt` is set from its workflow's retention, and
+its data reads as gone once that passes. Runs that are still pending or running
+are never deleted, and changing the retention applies to runs that finish
+afterwards. Callers read a run's result and streams right after it finishes, so
+a few minutes is the shortest practical retention. Each World's page describes
+how and when it deletes.
 
 ## Delivery guarantees
 
 Every World delivers **at least once**. The runtime decides whether a delivery
 may run by appending events, and every World admits or rejects appends
 atomically, so duplicate and stale deliveries are harmless. A failed delivery
-is retried with backoff.
+is retried with backoff, and the runtime gives up on a delivery after 48
+attempts, as the Workflow SDK does, failing its run or step.
 
 | World | Native max delay | Failed delivery backoff |
 | --- | --- | --- |
 | Local | unlimited | 100 ms up to 30 s |
-| Vercel | 6 days (longer in hops, or with QStash) | 5 s up to 5 min |
+| Vercel | 23 hours (longer in hops) | 5 s up to 15 min |
 | AWS | 15 min (longer with Scheduler) | 1 s up to 15 min |
 | Postgres | unlimited | 1 s up to 5 min |
 
@@ -98,28 +109,29 @@ is retried with backoff.
 
 The RPC and webhook handlers don't authenticate requests.
 
-- **RPC** can start runs and read every run's input, output, and events. Keep it
-  on a private network, or [protect it](#protecting-the-rpc-path) with
-  `worlds.WithRPCToken`.
+- **Client endpoints** (RPC and the stream socket) can start runs and read
+  every run's input, output, and events. Keep them on a private network, or
+  [protect them](#protecting-the-client-endpoints) with
+  `worlds.WithClientToken`.
 - **Webhooks** are authorized only by the token in the URL. Treat webhook URLs
   as bearer capabilities and verify provider signatures in the workflow.
 - **Queue consumers** must only be reachable by the queue infrastructure.
 
-### Protecting the RPC path
+### Protecting the client endpoints
 
-Pass `worlds.WithRPCToken` to `HTTP(world)` to require a bearer token on the RPC
-path. Webhook requests still pass, since webhook callers can't send your
+Pass `worlds.WithClientToken` to `HTTP(world)` to require a bearer token on the
+client endpoints, RPC and the stream socket. Webhook requests still pass, since webhook callers can't send your
 credentials:
 
 ```go
-handler := postgresworld.HTTP(world, worlds.WithRPCToken(os.Getenv("WORKFLOW_HTTP_TOKEN")))
+handler := postgresworld.HTTP(world, worlds.WithClientToken(os.Getenv("WORKFLOW_HTTP_TOKEN")))
 log.Fatal(http.ListenAndServe(":8081", handler))
 ```
 
-An empty token refuses every RPC request, so an unset secret never leaves the
-endpoint open. For other checks, such as a session or an IP allowlist,
-`worlds.WithRPCMiddleware(middleware)` wraps only the RPC path in your own
-middleware.
+An empty token refuses every client request, so an unset secret never leaves
+them open. For other checks, such as a session or an IP allowlist,
+`worlds.WithClientMiddleware(middleware)` wraps only the client endpoints in
+your own middleware.
 
 The [world-http adapter](/tooling/world-http), and so the
 [web UI](/tooling/web-ui), sends `WORKFLOW_HTTP_TOKEN` as the bearer token.

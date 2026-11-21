@@ -42,6 +42,41 @@ func Routes(routes ...QueueRoute) map[string]string {
 	return byWorkflow
 }
 
+// Retention is how long a finished run's data is kept, as the run's
+// $retention attribute records it. Its zero value is RetainDefault, and
+// RetainNone is the only other value.
+type Retention struct{ value string }
+
+var (
+	// RetainDefault leaves a run's data to the World's retention.
+	RetainDefault = Retention{}
+	// RetainNone deletes a run's data as soon as the run finishes. The run's
+	// metadata, such as its ID, status, and attributes, is kept.
+	RetainNone = Retention{value: "0"}
+)
+
+// String returns the RetentionAttribute value of r, or "" for
+// RetainDefault, which is recorded by leaving the attribute out.
+func (r Retention) String() string { return r.value }
+
+// ReadRunRetention returns the retention a run's attributes ask for:
+// RetainNone for a RetentionAttribute of "0", and RetainDefault otherwise.
+// Any other value, such as another duration, keeps the run's data rather
+// than deleting it.
+func ReadRunRetention(attributes map[string]string) Retention {
+	if attributes[RetentionAttribute] == RetainNone.value {
+		return RetainNone
+	}
+	return RetainDefault
+}
+
+// RunDataExpired reports whether run's data is gone at now: its ExpiredAt
+// is set and has passed. A World stops returning a run's payloads once it
+// has, even before it deletes them.
+func RunDataExpired(run Run, now time.Time) bool {
+	return run.ExpiredAt != nil && !run.ExpiredAt.After(now)
+}
+
 // WorkflowRetention sets how long one workflow's finished runs are kept.
 type WorkflowRetention struct {
 	Workflow  string

@@ -1,7 +1,6 @@
 package awsworld
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -29,16 +28,5 @@ func TestScheduleExpression(t *testing.T) {
 	}
 	if got := scheduleExpression(exact.In(time.FixedZone("x", 3600))); got != "at(2026-03-04T05:06:07)" {
 		t.Fatalf("zoned = %s", got)
-	}
-}
-
-func TestDeleteScheduleNotFound(t *testing.T) {
-	schedules := newFakeScheduler()
-	world := testWorld(t, newFakeDynamo(), &fakeSQS{}, schedules)
-	if err := world.deleteSchedule(context.Background(), "missing"); err != nil {
-		t.Fatalf("delete missing schedule: %v", err)
-	}
-	if world.scheduleGroup() != "default" {
-		t.Fatalf("group = %q", world.scheduleGroup())
 	}
 }

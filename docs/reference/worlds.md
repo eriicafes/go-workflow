@@ -16,15 +16,17 @@ tool builders, and people [implementing a World](/worlds/custom).
 
 ```go
 func Runners(values ...Runner) RunnerSet
-func NewRunner(name string, run func(context.Context, json.RawMessage) (json.RawMessage, error)) Runner
+func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner
 
 func NewRuntime(world World, runners RunnerSet) *Runtime
 func (*Runtime) Execute(ctx context.Context, input QueueInput) error
 ```
 
 `workflow.Use` builds a `Runner` from a typed runner function. `NewRunner`
-builds one from a JSON function, for runners written without the `workflow`
-package.
+builds one from a function of payloads, for runners written without the
+`workflow` package: it receives the run's input payload and returns its output
+payload, read and written with the `DecodePayload` and `EncodePayload` methods
+of the run's `Execution`, which encrypt as the run does.
 
 `Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
 flow. With `StepID` set it executes that step. A delivery for a terminal run
@@ -88,14 +90,26 @@ type World interface {
 	BaseURL() string
 	Analytics() Analytics
 	Capabilities() Capabilities
-	SpecVersion() int
 	DeploymentID() string
 }
 
 type Capabilities struct {
-	Analytics          bool
-	SetAttributes      bool
+	// Analytics: Analytics returns the World's analytics rather than nil.
+	Analytics bool
+	// SetAttributes: attribute writes are stored rather than no-ops.
+	SetAttributes bool
+	// DeploymentAffinity: runs are pinned to World.DeploymentID, and the
+	// Runtime replays a run only on the deployment it is pinned to.
 	DeploymentAffinity bool
+	// DeleteData: the optional RunsDeleteDataMany. Every World deletes a
+	// run's data as it finishes when its $retention attribute is "0".
+	DeleteData bool
+	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
+	// with the run, or returns a *HookConflictError and creates nothing.
+	StartHook bool
+	// RegionalRunIDs: the World implements RegionalRunIDs, and clients ask
+	// it for new run IDs.
+	RegionalRunIDs bool
 }
 ```
 
@@ -111,10 +125,11 @@ affinity, and only when it has a deployment ID.
 
 A World with affinity can also implement `LatestDeployments`, whose
 `LatestDeploymentID(ctx)` returns its newest deployment, or `""` when it knows
-none. `workflow.Start` pins new runs of workflows marked
-`workflow.StartOnLatest` to it through `StartDeploymentID(ctx, world, latest)`:
-child runs directly, and other runs by setting `ClientRunsCreateInput.Latest`,
-which `CreateRun` resolves on the World's side of a local or HTTP Client.
+none. `workflow.Start` resolves its `StartOptions.Deployment` through
+`StartDeploymentID(ctx, world, deployment)`, which pins a run started with
+`LatestDeployment` to it: child runs directly, and other runs through the
+Client's `RunsStartDeployment`, resolved on the World's side of a local or
+HTTP Client.
 
 A World can choose a delivery's queue from `QueueInput.WorkflowName`, which the
 Runtime and Client set on every delivery. `ResumeHook` takes it from the hook's
@@ -133,10 +148,11 @@ runID)` returns a delivery addressed that way.
 | `RunsList` | Runs filtered by `WorkflowName` and `Status`, paginated. |
 | `RunsWaitForTerminalStatus` | Blocks until the run is terminal, `Timeout` elapses, or `ctx` is done. |
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
+| `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event. `ErrRunAlreadyExists` if it exists. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
-| `EventsCreateBatch` | Appends events atomically. Rejecting one rejects the batch. |
+| `EventsCreateBatch` | Appends events in order. An invalid event appends none of them; a refused event may leave others appended, as in the Workflow SDK. |
 | `EventsGet`, `EventsList`, `EventsListByCorrelationID` | Read the event log. |
 | `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
 
@@ -162,11 +178,12 @@ type Run struct {
 	RunID        RunID
 	WorkflowName string
 	Status       Status
-	Input        []byte // JSON workflow input
-	Output       []byte // JSON workflow output
-	Error        []byte // JSON Error; DecodeError decodes it
+	Input        []byte // payload: the argument list, [input]
+	Output       []byte // payload
+	Error        []byte // payload; DecodeErrorPayload decodes it
 	Attributes   map[string]string
 	DeploymentID string // the deployment the run is pinned to
+	EncryptionPublicKey string // base64, set when the run's payloads are encrypted
 	InBandCount  int    // events appended by the run's orchestrator, which fence its writes
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -195,9 +212,8 @@ type Hook struct {
 	ResumeContext       HookResumeContext // copied from the run when the hook is created
 	HookID              HookID
 	Token               string
-	Metadata            []byte
-	Webhook             *Webhook // set for webhooks
-	WebhookEventID      EventID
+	Metadata            []byte // payload; a webhook's is its WebhookMetadata
+	IsWebhook           bool
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	ReceivedAt          *time.Time
@@ -208,10 +224,14 @@ type Hook struct {
 }
 
 type HookResumeContext struct {
-	DeploymentID string
-	WorkflowName string
+	DeploymentID        string
+	WorkflowName        string
+	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
 }
 ```
+
+A view's payloads are in the Workflow SDK's format and may be encrypted; a
+World stores them as opaque bytes. See [Payloads](#payloads).
 
 Run attributes `$parentRunId` (`ParentRunIDAttribute`) and `$rootRunId`
 (`RootRunIDAttribute`) are set on child runs.
@@ -222,7 +242,6 @@ Run attributes `$parentRunId` (`ParentRunIDAttribute`) and `$rootRunId`
 type Queue interface {
 	Queue(context.Context, QueueInput) (QueueResult, error)
 	QueueBatch(context.Context, QueueBatchInput) ([]QueueResult, error)
-	QueueCancel(context.Context, QueueCancelInput) error
 }
 
 type QueueInput struct {
@@ -237,11 +256,16 @@ type QueueInput struct {
 	DeploymentMismatchRetryCount int    // re-routes so far, set by the Runtime
 	ReplayDivergenceCount        int    // recovery deliveries after divergence, set by the Runtime
 	MessageID                    string // the delivered message's ID, set by the World before Execute; Queue ignores it
+	Attempt                      int    // 1-based delivery attempt, set by the World before Execute; 0 is not counted
 }
 ```
 
-Delivery is at least once. `QueueCancel` returns `ErrQueueMessageNotFound` for
-an unknown message. A World with deployment affinity returns an error wrapping
+Delivery is at least once, and a queued delivery cannot be cancelled: one that
+is no longer needed only replays its run. A World sets `Attempt` from its
+backend's delivery count, and the Runtime gives up on a delivery past
+`MaxDeliveries` (48) attempts, as the Workflow SDK does: a flow delivery fails
+its run, and a step delivery fails its step, both with
+`ErrMaxDeliveriesExceeded`. A World with deployment affinity returns an error wrapping
 `ErrDeploymentUnavailable` when the addressed deployment no longer exists.
 
 ### Routing
@@ -283,14 +307,43 @@ is negative, for validating a configuration.
 
 | Method | Description |
 | --- | --- |
-| `StreamsCreateWriteSession` | Exclusive writer session for a stream. `ErrStreamLocked` if another holds it. |
-| `StreamsWriteSession` | Appends chunks for a session at a sequence number. |
-| `StreamsCloseWriteSession` | Releases a session, optionally closing the stream. |
-| `StreamsWrite`, `StreamsWriteMulti` | Append when no session owns the stream. |
-| `StreamsClose` | Marks a stream done when no session owns it. |
+| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. `ErrStreamClosed` once the stream is closed. |
+| `StreamsClose` | Marks a stream done for every writer. Closing it again does nothing. |
 | `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
 | `StreamsGetInfo` | Tail index and whether the stream is done. |
 | `StreamsList` | Stream names of a run. |
+
+Streams have no exclusive writers, as in the Workflow SDK: any number of
+writers append to a stream at once and their chunks interleave.
+`OpenStreamWriter` returns a `StreamWriter` for one writer, through the
+optional `StreamWriterOpener` interface when the World implements it, and otherwise
+through `StreamsWriteMulti` and `StreamsClose`:
+
+```go
+type StreamWriterOpener interface {
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
+}
+
+type StreamsOpenWriterInput struct {
+	RunID    RunID
+	Name     string
+	WriterID string // from NewWriterID, "wrtr_" and a ULID
+}
+
+type StreamWriter interface {
+	Write(ctx context.Context, chunks [][]byte) error
+	Release(ctx context.Context) error     // ends this writer, leaving the stream open
+	CloseStream(ctx context.Context) error // closes the stream for every writer
+}
+```
+
+A World implements `StreamWriterOpener` to hold a connection for a writer's
+lifetime. `HTTPHandler` serves the Workflow SDK's stream socket protocol at
+`<prefix>/websockets/v1/runs/{runId}/streams/{name}?writerId=`, behind the same
+RPC protection, and `NewHTTPClient` writes over it, falling back to RPC writes
+while it opens and when it is declined or fails. `OpenStreamSocketWriter` and
+`StreamSocketHandler` are the two ends, for a World whose backend speaks the
+protocol, as Vercel's does.
 
 ## Analytics
 
@@ -306,10 +359,10 @@ methods are shared with the World:
 
 | Method | Description |
 | --- | --- |
-| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes` | Read runs and change their attributes. |
+| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes`, `RunsDeleteDataMany` | Read runs, change their attributes, and delete their data. |
 | `StepsGet`, `StepsList` | Read steps. |
 | `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
-| `StreamsCreateWriteSession` | Open an exclusive writer session. |
+| `StreamsOpenWriter` | Open a stream writer. |
 | `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID, or by the token of an active or retained hook. |
 | `Analytics` | As on World. |
 
@@ -320,13 +373,15 @@ The rest are the Client's own:
 | `RunsCreate` | Starts a run and queues its first delivery. Returns the run ID. |
 | `RunsCancel` | Cancels a run. Returns `ErrRunTerminal` if finished. |
 | `RunsWake` | Settles pending waits early. |
-| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams without a session. |
+| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams one call at a time. |
 | `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
 | `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
+| `RunKeys` | The keys of a run's payloads, or nil when they are not encrypted. |
+| `RunsStartDeployment` | The deployment a new run starts on, so its input is encrypted for it. |
 
 ```go
 type ClientSpec struct {
-	SpecVersion  int
+	RPCVersion   int
 	Capabilities Capabilities
 }
 ```
@@ -352,17 +407,54 @@ func NormalizeBaseURL(value string) (string, error)
 
 See [HTTP Endpoints](/reference/http).
 
+## Payloads
+
+```go
+func EncodePayload(value any, options PayloadOptions) ([]byte, error)
+func DecodePayload(data []byte, keys *RunKeys, value any) error
+func EncodeErrorPayload(err error, options PayloadOptions) ([]byte, error)
+func DecodeErrorPayload(data []byte, keys *RunKeys) *Error
+
+type PayloadOptions struct {
+	Keys          *RunKeys // encrypt with the run's key (encr)
+	SealTo        []byte   // seal to a run's public key (encp)
+	NoCompression bool
+}
+
+type EncryptionKeys interface {
+	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
+}
+
+func RunKeysFor(ctx context.Context, world any, runID RunID, deploymentID string) (*RunKeys, error)
+func NewRunKeys(runKey []byte) (*RunKeys, error)
+func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error)
+func ConfiguredRunKey(key []byte, runID RunID) ([]byte, error)
+```
+
+Payloads use the Workflow SDK's format: devalue text labelled `devl`,
+optionally compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
+[Data Format and Encryption](/guide/encryption). `EncryptionKeys` is the
+optional World interface the SDK calls `getEncryptionKeyForRun`. A World that
+takes a `Config.EncryptionKey` returns `ConfiguredRunKey(key, runID)`.
+`RunKeysFor` resolves and caches a run's keys. `EncodeStreamFrame` and
+`SplitStreamFrames` write and read stream frames, and `PayloadMarshaler`,
+`PayloadUnmarshaler`, and `PayloadReduced` let a type choose its encoding,
+such as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata`, the SDK's
+`Request`, `Response`, and `{respondWith}`.
+
 ## Durable primitives
 
 The `workflow` package is built on these functions, which read and append to
 the `Execution` of the current delivery. They are exported for advanced
-integrations. Operations normally take the runner's next position with
-`Execution.NextPosition`. Lazy hooks reserve a position at creation and pass it
-to `DurableHook` when receiving, selecting, or explicitly checking ownership.
+integrations. Operations draw their IDs from the run's seed with
+`Execution.NextStepID`, `NextWaitID`, and `NextHookID`, and a hook created
+without a token draws one with `NextHookToken`. Lazy hooks draw their ID at
+creation and pass it to `DurableHook` when receiving, selecting, or explicitly
+checking ownership.
 
 | Function | Description |
 | --- | --- |
-| `DurableStep` | Declares a step at the next position, or executes it in its step delivery. |
+| `DurableStep` | Declares the next step, or executes it in its step delivery. |
 | `DurableInlineStep` | Runs an inline step's attempt in the flow and records its result, or queues the retry, records it, and suspends. |
 | `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
 | `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
@@ -376,7 +468,6 @@ to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 | `PendingWaits` | The IDs of a run's pending waits, in creation order. |
 | `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
 | `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
-| `NewRunHookToken` | Derives a stable token from a run and hook declaration position. |
 | `ExecutionFromContext` | The replay state of the current delivery. |
 
 ## Errors
@@ -397,8 +488,8 @@ to `DurableHook` when receiving, selecting, or explicitly checking ownership.
 | `ErrHookConflict` | Another active hook owns the token. |
 | `ErrHookForceClaimed` | Another hook took the token with `Force`. |
 | `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
-| `ErrStreamLocked` | Stream write conflicts with its writer session. |
-| `ErrQueueMessageNotFound` | `QueueCancel` with an unknown message. |
+| `ErrStreamClosed` | Writing to a closed stream. |
+| `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
 | `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |
 | `ErrDeploymentUnavailable` | `Queue` addressed a deployment that no longer exists. |

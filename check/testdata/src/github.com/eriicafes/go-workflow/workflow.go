@@ -3,8 +3,11 @@ package workflow
 
 import (
 	"context"
+	"io"
 	"time"
 )
+
+func RandReader(ctx context.Context) io.Reader { return nil }
 
 type Runner struct{}
 

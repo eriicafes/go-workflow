@@ -56,20 +56,24 @@ expiry behavior.
 
 ## Reading the time
 
-Use `workflow.Now` instead of `time.Now` in a runner. It records the time the
-first time it runs, so replay returns the same value.
+Use `workflow.Now` instead of `time.Now` in a runner. In workflow context it
+returns the **replay clock**, which records nothing:
+
+- it starts at the run's creation time, read from the run ID;
+- it moves forward to an event's creation time when the event's outcome is
+  delivered to the runner: a step's result, a timer firing, a hook's
+  registration, a cancellation, and a hook payload when `Next` takes it.
+
+Every replay delivers the same outcomes in the same order, so it reads the
+same time at the same point.
 
 ```go
-now, err := workflow.Now(ctx)
-if err != nil {
-	return Result{}, err
-}
-
-deadline := now.Add(72 * time.Hour)
+deadline := workflow.Now(ctx).Add(72 * time.Hour)
 ```
 
-`Now` returns UTC. It returns `ErrNoWorkflow` outside workflow context,
-including in step context, where `time.Now` is safe to use.
+`Now` returns UTC in whole milliseconds. Outside workflow context, including
+in step context, it returns `time.Now()`. `Sleep`, `Timer`, `WithTimeout`, and
+a hook's `MinRetention` measure from the replay clock too.
 
 ## Waking a run early
 
@@ -101,7 +105,7 @@ natively, and handles longer timers differently:
 | --- | --- | --- |
 | Local | none | in-process timer heap |
 | Postgres | none | rows with `not_before` |
-| Vercel | 6 days | Vercel Queues hops of up to 6 days, or `Config.QStash` |
+| Vercel | 23 hours | Vercel Queues hops of up to 23 hours |
 | AWS | 15 minutes | set `Config.Scheduler` (EventBridge Scheduler) |
 
 Without the optional component, queueing a delivery beyond the limit returns an

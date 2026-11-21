@@ -1,6 +1,7 @@
 import type {
 	CreateEventParams,
 	CreateEventRequest,
+	DeleteRunsDataResult,
 	RunCreatedEventRequest,
 	AnalyticsAttributeKey,
 	AnalyticsEvent,
@@ -24,10 +25,10 @@ import type {
 	World,
 } from "@workflow/world";
 import { SPEC_VERSION_CURRENT } from "@workflow/world/spec-version";
-import { decode } from "cbor-x";
 import { HTTPWorldError, RPCClient, devkitName, type RPC } from "./rpc.js";
+import { HTTPStreamWriteSession } from "./stream-socket.js";
 
-const HTTP_WORLD_SPEC_VERSION = 1;
+const HTTP_WORLD_RPC_VERSION = 1;
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
@@ -40,8 +41,8 @@ export interface HTTPWorldOptions {
 	 */
 	baseURL?: string;
 	/**
-	 * Sent as a bearer token with every RPC request, for a server protected
-	 * with `worlds.WithRPCToken`. Defaults to `WORKFLOW_HTTP_TOKEN`. An
+	 * Sent as a bearer token with every RPC and stream socket request, for a server protected
+	 * with `worlds.WithClientToken`. Defaults to `WORKFLOW_HTTP_TOKEN`. An
 	 * `Authorization` header in `headers` takes precedence.
 	 */
 	token?: string;
@@ -67,7 +68,7 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 	});
 	// The first request already carries the protocol version, so a mismatched
 	// server fails it instead of answering.
-	client.specVersion = HTTP_WORLD_SPEC_VERSION;
+	client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 	const spec = await client.call<RPC.Spec>("client.spec", {});
 	return new HTTPWorld(client, spec);
 }
@@ -102,12 +103,27 @@ export class HTTPWorld implements World {
 	readonly createQueueHandler: World["createQueueHandler"] = () => {
 		throw new HTTPWorldError("unsupported", "workflow: HTTP worlds do not create queue handlers");
 	};
+	/**
+	 * The key of a run's payloads, which the Go World resolves, or undefined
+	 * when they are not encrypted. Go runs' payloads are in the Workflow
+	 * SDK's format, so the SDK's tools decrypt and hydrate them with it.
+	 */
+	readonly getEncryptionKeyForRun: NonNullable<World["getEncryptionKeyForRun"]>;
 
 	constructor(client: RPCClient, spec: RPC.Spec) {
-		client.specVersion = HTTP_WORLD_SPEC_VERSION;
+		client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 		this._spec = spec;
 		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
 		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});
+		this.getEncryptionKeyForRun = (async (run: string | WorkflowRun, context?: Record<string, unknown>) => {
+			const runId = typeof run === "string" ? run : run.runId;
+			const deploymentId = typeof run === "string" ? context?.deploymentId : run.deploymentId;
+			const key = await client.call<Uint8Array | null>("runs.encryptionKey", {
+				runId,
+				deploymentId: typeof deploymentId === "string" ? deploymentId : "",
+			});
+			return key ?? undefined;
+		}) as NonNullable<World["getEncryptionKeyForRun"]>;
 		this.runs = HTTPWorld.createRuns(client, spec.capabilities);
 		this.steps = HTTPWorld.createSteps(client);
 		this.events = HTTPWorld.createEvents(client);
@@ -122,6 +138,7 @@ export class HTTPWorld implements World {
 			hookRetention: { active: true },
 			hookForceClaim: true,
 			...(capabilities.deploymentAffinity ? { deploymentAffinity: true } : {}),
+			...(capabilities.startHook ? { atomicStartHook: { active: true } } : {}),
 		};
 	}
 
@@ -171,6 +188,11 @@ export class HTTPWorld implements World {
 					},
 				}
 				: {}),
+			...(capabilities.deleteData
+				? {
+					deleteDataMany: (request) => client.call<DeleteRunsDataResult>("runs.deleteDataMany", request),
+				}
+				: {}),
 		};
 	}
 
@@ -200,16 +222,30 @@ export class HTTPWorld implements World {
 				options?: CreateEventParams,
 			) => {
 				if (event.eventType === "run_created") {
+					const { startHook } = event.eventData;
 					// An empty run ID asks the server to generate one.
 					return client
 						.call<RPC.EventResult>("events.createRun", {
 							runId: runId ?? "",
 							workflowName: event.eventData.workflowName,
-							input: jsonEncoded(event.eventData.input),
+							input: event.eventData.input,
 							...(event.eventData.attributes ? { attributes: event.eventData.attributes } : {}),
 							...(event.eventData.deploymentId ? { deploymentId: event.eventData.deploymentId } : {}),
+							...(event.eventData.encryptionPublicKey ? { encryptionPublicKey: event.eventData.encryptionPublicKey } : {}),
+							...(event.eventData.executionContext ? { executionContext: event.eventData.executionContext } : {}),
+							...(startHook ? { startHook: { token: startHook.token, tokenRetentionUntil: startHook.tokenRetentionUntil, metadata: startHook.metadata } } : {}),
 						})
-						.then(toEventResult) as Promise<EventResult<"run_created">>;
+						.then((result) => {
+							const created = toEventResult(result);
+							// The run echoes its start hook, as world-vercel's does,
+							// which is how start() knows the World created it.
+							if (startHook && created.run && runId) {
+								created.run = { ...created.run, startHook: { ...startHook, hookId: `hook_${runId.slice("wrun_".length)}` } } as typeof created.run;
+							}
+							return created;
+						}, (error: unknown) => {
+							throw startHook ? startHookConflict(error, startHook.token) : error;
+						}) as Promise<EventResult<"run_created">>;
 				}
 				return client
 					.call<RPC.EventResult>("events.create", {
@@ -343,64 +379,6 @@ export class HTTPWorld implements World {
 	}
 }
 
-class HTTPStreamWriteSession {
-	readonly client: RPCClient;
-	readonly input: RPC.StreamWriteSessionInput;
-	sessionId?: string;
-	closed = false;
-
-	constructor(client: RPCClient, input: RPC.StreamWriteSessionInput) {
-		this.client = client;
-		this.input = input;
-	}
-
-	async write(sequence: number, chunks: RPC.StreamChunk[]): Promise<void> {
-		if (this.closed) {
-			throw new HTTPWorldError("stream_session_closed", "workflow: stream write session is closed");
-		}
-		await this.client.call<RPC.Empty>("streams.writeSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: await this.getSessionId(),
-			sequence: sequence,
-			chunks: chunks.map(bytes),
-		});
-	}
-
-	async close(): Promise<void> {
-		if (this.closed) {
-			return;
-		}
-		await this.client.call<RPC.Empty>("streams.closeWriteSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: await this.getSessionId(),
-			close: true,
-		});
-		this.closed = true;
-	}
-
-	async release(): Promise<void> {
-		if (!this.sessionId || this.closed) {
-			return;
-		}
-		await this.client.call<RPC.Empty>("streams.closeWriteSession", {
-			runId: this.input.runId,
-			name: this.input.name,
-			sessionId: this.sessionId,
-			close: false,
-		});
-		this.sessionId = undefined;
-	}
-
-	private async getSessionId(): Promise<string> {
-		if (!this.sessionId) {
-			this.sessionId = await this.client.call<string>("streams.createWriteSession", this.input);
-		}
-		return this.sessionId;
-	}
-}
-
 async function getStreamChunks(client: RPCClient, input: RPC.GetStreamChunksInput): Promise<RPC.StreamChunksResult> {
 	const { waitMs, ...request } = input;
 	const result = await client.call<RPC.WireStreamChunksResult>("streams.getChunks", {
@@ -485,9 +463,14 @@ function jsonEncoded(value: unknown): Uint8Array {
 	return new TextEncoder().encode(text);
 }
 
+// payloadFields are the eventData fields that hold payloads, in the Workflow
+// SDK's serialized form. The Go World stores event data as JSON, with
+// payload bytes as base64 strings.
+const payloadFields = ["input", "output", "result", "error", "payload", "metadata"];
+
 // withEventData exposes an event's stored data as the eventData object the
-// Workflow SDK reads, with Go workflow and step names in SDK form. The Go
-// runtime stores event data as JSON, and this client writes it as CBOR.
+// Workflow SDK reads: its payloads as bytes, and Go workflow and step names
+// in SDK form.
 function withEventData(event: RPC.Event): Event {
 	const { data, ...rest } = event;
 	const eventData = decodeData(data);
@@ -502,12 +485,17 @@ function withEventData(event: RPC.Event): Event {
 		if (typeof fields.stepName === "string") {
 			fields.stepName = devkitName("step", fields.stepName);
 		}
+		for (const field of payloadFields) {
+			if (typeof fields[field] === "string") {
+				fields[field] = new Uint8Array(Buffer.from(fields[field] as string, "base64"));
+			}
+		}
 	}
 	return { ...rest, eventData } as Event;
 }
 
-// decodeData decodes stored bytes as the JSON the Go runtime writes, or the
-// CBOR this client writes. Empty or undecodable bytes are undefined.
+// decodeData decodes stored event data, the JSON the Go World writes.
+// Empty or undecodable bytes are undefined.
 function decodeData(data: Uint8Array | null | undefined): unknown {
 	if (!data || data.byteLength === 0) {
 		return undefined;
@@ -515,38 +503,35 @@ function decodeData(data: Uint8Array | null | undefined): unknown {
 	try {
 		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
 	} catch {
-		try {
-			return decode(data);
-		} catch {
-			return undefined;
-		}
-	}
-}
-
-// decodeError decodes a stored error, the Go runtime's {message, chain}
-// JSON, as the Workflow SDK's structured error.
-function decodeError(data: Uint8Array | null | undefined): { message: string } | undefined {
-	const value = decodeData(data);
-	if (value === undefined) {
 		return undefined;
 	}
-	if (value && typeof value === "object" && typeof (value as { message?: unknown }).message === "string") {
-		return { message: (value as { message: string }).message };
-	}
-	return { message: typeof value === "string" ? value : JSON.stringify(value) };
 }
 
-// toRun exposes a run's stored input, output, and error as decoded values,
-// the legacy JSON form the Workflow SDK reads for runs without a spec version.
+// payload returns stored payload bytes as the Workflow SDK reads them, or
+// undefined when there are none.
+function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
+	return data && data.byteLength > 0 ? data : undefined;
+}
+
+// toRun exposes a run as the Workflow SDK reads one. Its payloads are in the
+// SDK's format, so it reports the spec version that reads them.
 function toRun(run: RPC.Run): WorkflowRun {
-	const { input, output, error, ...rest } = run;
-	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as WorkflowRun;
+	const { input, output, error, expiredAt, executionContext, ...rest } = run;
+	return {
+		...rest,
+		...(expiredAt ? { expiredAt } : {}),
+		...(executionContext ? { executionContext } : {}),
+		specVersion: SPEC_VERSION_CURRENT,
+		input: payload(input),
+		output: payload(output),
+		error: payload(error),
+	} as WorkflowRun;
 }
 
-// toStep exposes a step's stored input, output, and error as decoded values.
+// toStep exposes a step as the Workflow SDK reads one.
 function toStep(step: RPC.Step): Step {
 	const { input, output, error, ...rest } = step;
-	return { ...rest, input: decodeData(input), output: decodeData(output), error: decodeError(error) } as Step;
+	return { ...rest, input: payload(input), output: payload(output), error: payload(error) } as Step;
 }
 
 // terminalWaitMs is how long one runs.waitForTerminalStatus request waits.
@@ -582,4 +567,19 @@ function durationMilliseconds(nanoseconds: number | undefined): number {
 		return 0;
 	}
 	return Number(nanoseconds) / 1_000_000;
+}
+
+// startHookConflict returns a refused start hook as the Workflow SDK's
+// HookConflictError, which start() recognizes by its name, naming the run that
+// holds the token. Other errors are returned as they are.
+function startHookConflict(error: unknown, token: string): unknown {
+	if (!(error instanceof HTTPWorldError) || error.sentinel !== "hook_conflict" || !error.conflictingRunId) {
+		return error;
+	}
+	return Object.assign(new Error(`No run was created: workflow run "${error.conflictingRunId}" already owns this hook token`), {
+		name: "HookConflictError",
+		token,
+		conflictingRunId: error.conflictingRunId,
+		cause: error,
+	});
 }

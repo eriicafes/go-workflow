@@ -40,7 +40,8 @@ runner's dependencies. Method runners' bodies are checked like functions'.
 | `workflow body must not range over a map` | Iterate a sorted slice of keys. |
 | `workflow body calls time.Now, use workflow.Now instead` | Use [`workflow.Now`](/guide/sleep#reading-the-time). Also reported for `time.Since` and `time.Until`. |
 | `workflow body calls time.Sleep, use workflow.Sleep instead` | Use [`workflow.Sleep`](/guide/sleep). Also reported for `time.After`, `time.AfterFunc`, `time.Tick`, `time.NewTimer`, and `time.NewTicker`. |
-| `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O and randomness into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, `crypto/rand`, `math/rand`, `math/rand/v2`, and packages whose path contains `uuid`. |
+| `workflow body calls <pkg.Func>, use workflow.RandReader instead` | Read randomness from [`workflow.RandReader`](/guide/replay#determinism-rules). Reported for calls into `crypto/rand`, `math/rand`, and `math/rand/v2`. |
+| `workflow body calls <pkg.Func>, use workflow.Step or workflow.Background instead` | Move I/O into a step. Reported for calls into `os`, `io`, `net/http`, `database/sql`, and packages whose path contains `uuid`. A call that reads from `workflow.RandReader`, passed directly or through a variable assigned one, is allowed, such as `io.ReadFull(workflow.RandReader(ctx), buffer)`. |
 | `workflow stream access and webhook responses require a durable step` | Move [stream](/guide/streams) access and `RespondWith` calls into a step. |
 
 The analyzer also rejects the `context` package's cancellation and deadline

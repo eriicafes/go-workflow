@@ -38,12 +38,12 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 // log: the input from step_created and the output or error from the latest
 // result. ResolveDataNone joins only an error result.
 func stepSelect(resolve worlds.ResolveData) string {
-	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = s.run_id AND ie.slot = s.created_slot"
+	input, result, join := "ie.data", "re.data", " LEFT JOIN go_workflow_events ie ON ie.run_id = s.run_id AND ie.slot = s.created_slot"+runLive("s.run_id")
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type <> '"+string(worlds.EventTypeStepCompleted)+"' THEN re.data END", ""
 	}
 	return "SELECT s.run_id, s.step_id, s.step_name, s.status, " + input + ", re.type, " + result + ", s.attempt, s.created_at, s.updated_at, s.started_at, s.completed_at, s.retry_after" +
-		" FROM go_workflow_steps s" + join + " LEFT JOIN go_workflow_events re ON re.run_id = s.run_id AND re.slot = s.result_slot"
+		" FROM go_workflow_steps s" + join + " LEFT JOIN go_workflow_events re ON re.run_id = s.run_id AND re.slot = s.result_slot" + runLive("s.run_id")
 }
 
 func scanStep(row pgx.Row) (worlds.Step, error) {
