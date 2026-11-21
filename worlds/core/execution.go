@@ -136,6 +136,12 @@ type Execution struct {
 	// they and the steps already running can finish before it. It is zero
 	// when ctx has no deadline.
 	inlineUntil time.Time
+	// inlineDuration is the longest MaxInlineStepsDuration of the steps the
+	// runner declared.
+	inlineDuration time.Duration
+	// awaited holds the steps, timers, and hooks the runner has looked for
+	// the settlement of and not found, until it is. See runahead.go.
+	awaited map[string]bool
 }
 
 func newExecution(ctx context.Context, world worlds.World, run worlds.Run, events []worlds.Event, target *worlds.StepID) (*Execution, error) {
@@ -366,7 +372,18 @@ func (e *Execution) InBandCount() *int {
 // answer is the same at the same point of every replay.
 func (e *Execution) Settled(id string) bool {
 	index, ok := e.settles[id]
-	return ok && index < e.horizon
+	settled := ok && index < e.horizon
+	// A runner that waits on a step another delivery runs may decide
+	// differently once its result arrives.
+	if settled {
+		delete(e.awaited, id)
+	} else {
+		if e.awaited == nil {
+			e.awaited = map[string]bool{}
+		}
+		e.awaited[id] = true
+	}
+	return settled
 }
 
 // SettledEvent returns the event that settled id, when Settled reports true.
@@ -576,6 +593,7 @@ func (e *Execution) Wait() {
 // event is delivered.
 func (e *Execution) hold(step pendingStep) {
 	e.pending = append(e.pending, step)
+	e.inlineDuration = max(e.inlineDuration, step.duration)
 }
 
 // holdWait adds a timer to the ones advance creates once every recorded

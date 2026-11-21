@@ -29,15 +29,17 @@ import (
 //   - A flow runs ahead past a boundary only while nothing another writer can
 //     append could change what the runner decides there: no hook the runner
 //     waits on, no cancellation context, which a cancellation reaches through
-//     a hook, no step delivered by another delivery, whose result is unknown,
-//     and no timer due before the flow could finish. Otherwise it drains
-//     first.
+//     a hook, no step delivered by another delivery that the runner waits on,
+//     whose result is unknown, and no timer due within the delivery's inline
+//     window. Otherwise it drains first.
 //   - Each write's answer reports the events between the position the flow
-//     placed it at and its own. One that is inert there, a payload of a hook
-//     nobody waits on, an attribute write, or the run's cancellation, is
-//     folded in after the flow's own writes: a replay that reads it earlier
-//     decides the same. Any other ends the delivery, which starts again from
-//     a fresh read of the log once, and then hands its message on.
+//     placed it at and its own, and the flow reads the rest from the log when
+//     the report is incomplete. One that is inert there, a payload of a hook
+//     nobody waits on, a step result nobody waits on, an attribute write, or
+//     the run's cancellation, is folded in after the flow's own writes: a
+//     replay that reads it earlier decides the same. Any other ends the
+//     delivery, which starts again from a fresh read of the log once, and
+//     then hands its message on.
 //   - A World that stores an in-band write at a time other than the one the
 //     flow sent, which the runner's clock already read, ends the delivery the
 //     same way and is never run ahead of again in the process.
@@ -110,8 +112,10 @@ type aheadWrite struct {
 	createdAt []time.Time
 	err       error
 	// observed holds the hooks the runner waited on when it made the write,
-	// which an event below it could have changed a decision for.
+	// and awaited the steps, which an event below it could have changed a
+	// decision for.
 	observed map[worlds.HookID]bool
+	awaited  map[string]bool
 }
 
 // count returns the number of events the write appends.
@@ -139,18 +143,23 @@ func (e *Execution) canRunAhead() bool {
 
 // boundaryInert reports whether nothing another writer can append now could
 // change a decision of the runner: no hook it waits on, no cancellation
-// context, no step another delivery runs, and no timer that can fall due
-// before the flow could finish.
+// context, no step another delivery runs that the runner waits on, and no
+// timer that can fall due within the delivery's inline window.
 func (e *Execution) boundaryInert() bool {
 	if len(e.observedHooks) > 0 {
 		return false
 	}
-	window := time.Now().Add(openWaitSkew)
-	if e.inlineUntil.IsZero() {
-		window = window.Add(DefaultMaxInlineStepsDuration)
-	} else {
-		window = e.inlineUntil.Add(openWaitSkew)
+	// The flow runs steps inline, and so ahead, for the delivery's inline
+	// window: the longest duration its steps allow, cut at inlineUntil.
+	duration := e.inlineDuration
+	if duration == 0 {
+		duration = DefaultMaxInlineStepsDuration
 	}
+	window := e.startedAt.Add(duration)
+	if !e.inlineUntil.IsZero() && e.inlineUntil.Before(window) {
+		window = e.inlineUntil
+	}
+	window = window.Add(openWaitSkew)
 	for _, wait := range e.openWaitsInLog() {
 		if wait.resumeAt.Before(window) {
 			return false
@@ -168,8 +177,10 @@ func (e *Execution) boundaryInert() bool {
 		case worlds.EventTypeHookDisposed:
 			finished[event.CorrelationID] = true
 		case worlds.EventTypeStepCreated, worlds.EventTypeStepRetrying:
-			// A step delivery runs it.
-			created[event.CorrelationID] = true
+			// A step delivery runs it, and the runner waits on it.
+			if e.awaited[event.CorrelationID] && !e.ranInline[worlds.StepID(event.CorrelationID)] {
+				created[event.CorrelationID] = true
+			}
 		case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed:
 			finished[event.CorrelationID] = true
 		}
@@ -185,15 +196,15 @@ func (e *Execution) boundaryInert() bool {
 // runAheadHazard returns why event, committed below a write the flow ran
 // ahead of, could have changed a decision the runner already made, or "" when
 // it is inert there.
-func (e *Execution) runAheadHazard(event worlds.Event, observed map[worlds.HookID]bool) string {
+func (e *Execution) runAheadHazard(event worlds.Event, write *aheadWrite) string {
 	switch event.EventType {
 	case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed, worlds.EventTypeHookConflict:
-		if observed[worlds.HookID(event.CorrelationID)] || e.systemHook(event.CorrelationID) {
+		if write.observed[worlds.HookID(event.CorrelationID)] || e.systemHook(event.CorrelationID) {
 			return fmt.Sprintf("%s for a hook the runner may be waiting on", event.EventType)
 		}
 	case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		if !e.ranInline[worlds.StepID(event.CorrelationID)] {
-			return fmt.Sprintf("%s of a step this delivery does not run", event.EventType)
+		if write.awaited[event.CorrelationID] && !e.ranInline[worlds.StepID(event.CorrelationID)] {
+			return fmt.Sprintf("%s of a step the runner waits on and this delivery does not run", event.EventType)
 		}
 	case worlds.EventTypeWaitCompleted:
 		return "wait_completed written by another writer"
@@ -238,6 +249,7 @@ func (e *Execution) writeAhead(step pendingStep, result worlds.DataStepResult) {
 		occurred: occurred,
 		done:     make(chan struct{}),
 		observed: maps.Clone(e.observedHooks),
+		awaited:  maps.Clone(e.awaited),
 	}
 	if e.writer == nil {
 		e.startWriter()
@@ -330,6 +342,9 @@ func (e *Execution) confirmAhead(wait bool) {
 // many positions, or ends the delivery when one of them could have changed a
 // decision.
 func (e *Execution) foldBelow(write *aheadWrite) {
+	if write.result.MoreEvents {
+		write.result.Events = e.readBelow(write)
+	}
 	var below []worlds.Event
 	for _, event := range write.result.Events {
 		// An event at a position the flow placed one of its own writes at
@@ -339,10 +354,6 @@ func (e *Execution) foldBelow(write *aheadWrite) {
 		if !held || speculative {
 			below = append(below, event)
 		}
-	}
-	if write.result.MoreEvents {
-		e.abandonAhead()
-		panic(e.exit(errRunAheadStop{reason: "the report of the events below a write ahead was incomplete"}))
 	}
 	committed, err := worlds.EventSlot(write.result.EventID)
 	// Where the write is expected to land, moved up by the events found
@@ -356,7 +367,7 @@ func (e *Execution) foldBelow(write *aheadWrite) {
 		return
 	}
 	for _, event := range below {
-		if reason := e.runAheadHazard(event, write.observed); reason != "" {
+		if reason := e.runAheadHazard(event, write); reason != "" {
 			e.abandonAhead()
 			panic(e.exit(errRunAheadStop{reason: reason}))
 		}
@@ -380,6 +391,36 @@ func (e *Execution) foldBelow(write *aheadWrite) {
 	for _, event := range below {
 		e.trackEvent(len(e.events), event)
 		e.events = append(e.events, event)
+	}
+}
+
+// readBelow reads from the log the events between the position write was
+// placed at and the one it committed at, when its answer's report of them
+// was incomplete.
+func (e *Execution) readBelow(write *aheadWrite) []worlds.Event {
+	committed, err := worlds.EventSlot(write.result.EventID)
+	if err != nil {
+		e.abandonAhead()
+		panic(e.exit(deliveryError{cause: err}))
+	}
+	var events []worlds.Event
+	cursor := string(worlds.EventIDForSlot(uint64(write.index)))
+	for {
+		page, err := e.world.EventsList(e.ctx, worlds.EventsListInput{RunID: e.run.RunID, Pagination: worlds.Pagination{Cursor: cursor}})
+		if err != nil {
+			e.abandonAhead()
+			panic(e.exit(deliveryError{cause: err}))
+		}
+		for _, event := range page.Data {
+			if slot, err := worlds.EventSlot(event.EventID); err != nil || slot >= committed {
+				return events
+			}
+			events = append(events, event)
+		}
+		if !page.HasMore {
+			return events
+		}
+		cursor = page.Cursor
 	}
 }
 
@@ -421,7 +462,7 @@ func (e *Execution) sendBatchAhead(batch []worlds.EventsCreateEvent, held, fence
 // flow's other writes ahead. Every event is taken as committed.
 func (e *Execution) writeBatchAhead(events []worlds.EventsCreateEvent) map[string]bool {
 	occurred := time.Now().UTC().Truncate(time.Millisecond)
-	write := &aheadWrite{batch: events, index: len(e.events), occurred: occurred, done: make(chan struct{}), observed: maps.Clone(e.observedHooks)}
+	write := &aheadWrite{batch: events, index: len(e.events), occurred: occurred, done: make(chan struct{}), observed: maps.Clone(e.observedHooks), awaited: maps.Clone(e.awaited)}
 	committed := make(map[string]bool, len(events))
 	for index := range events {
 		events[index].OccurredAt = occurred

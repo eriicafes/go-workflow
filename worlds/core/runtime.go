@@ -100,21 +100,32 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 		return r.continueWaitHop(ctx, input)
 	}
 	err := r.executeFlow(ctx, input)
+	stopped := false
 	for restarts := 0; ; restarts++ {
 		var stop errRunAheadStop
 		if !errors.As(err, &stop) {
 			break
 		}
+		stopped = true
+		if count, warn := runAheadStops.note(input.RunID); warn {
+			log.Printf("workflow: warning: run %s stopped running ahead %d times in a row: %s", input.RunID, count, stop.reason)
+		}
 		if restarts == maxRunAheadRestarts {
 			// The next delivery decides from the log.
-			log.Printf("workflow: run %s handed off after its run-ahead stopped: %s", input.RunID, stop.reason)
 			return worlds.Redeliver(0)
 		}
 		err = r.executeFlow(ctx, input)
 	}
+	if !stopped {
+		runAheadStops.clear(input.RunID)
+	}
 	if errors.Is(err, errReplaySuperseded) {
+		if count, warn := fenceRefusals.note(input.RunID); warn {
+			log.Printf("workflow: warning: run %s had its writes refused by the in-band fence %d times in a row", input.RunID, count)
+		}
 		return worlds.Redeliver(fenceRefusalRedelivery)
 	}
+	fenceRefusals.clear(input.RunID)
 	return err
 }
 
