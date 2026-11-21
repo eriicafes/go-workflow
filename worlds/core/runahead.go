@@ -138,6 +138,10 @@ type aheadWriter struct {
 	stopped atomic.Bool
 }
 
+// errStartedAlready answers a turbo pass's run_started that found the run
+// started already, which stops the writes queued behind it.
+var errStartedAlready = errors.New("workflow: the run had already started")
+
 // errNotWritten answers a write ahead the writer refused after run-ahead
 // stopped.
 var errNotWritten = errors.New("workflow: write ahead not sent after run-ahead stopped")
@@ -278,6 +282,29 @@ func (e *Execution) writeAhead(step pendingStep, result worlds.DataStepResult) {
 	e.writer.writes <- write
 }
 
+// writeStartAhead adds a turbo pass's run_started, carrying the run's
+// creation in data, to the log at the position after run_created, and sends
+// it as the first write ahead, which every other write of the flow queues
+// behind.
+func (e *Execution) writeStartAhead(data []byte) {
+	occurred := time.Now().UTC().Truncate(time.Millisecond)
+	write := &aheadWrite{
+		event:    worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data, OccurredAt: occurred},
+		index:    len(e.events),
+		occurred: occurred,
+		done:     make(chan struct{}),
+		observed: map[worlds.HookID]bool{},
+	}
+	if e.writer == nil {
+		e.startWriter()
+	}
+	e.ahead = append(e.ahead, write)
+	event := worlds.Event{RunID: e.run.RunID, EventID: worlds.EventIDForSlot(uint64(len(e.events) + 1)), EventType: worlds.EventTypeRunStarted, CreatedAt: occurred, SpecVersion: worlds.SpecVersion}
+	e.trackEvent(len(e.events), event)
+	e.events = append(e.events, event)
+	e.writer.writes <- write
+}
+
 // startWriter starts the goroutine that sends the flow's writes ahead, each
 // fenced with the count the write before it left.
 func (e *Execution) startWriter() {
@@ -307,6 +334,11 @@ func (e *Execution) startWriter() {
 					Options: worlds.EventsCreateOptions{EventCount: &held, InBandCount: &fence},
 				})
 				write.createdAt = []time.Time{write.result.CreatedAt}
+				if write.event.EventType == worlds.EventTypeRunStarted && (write.err == nil && write.result.AllocatedEventCount == 0 || errors.Is(write.err, worlds.ErrInBandSuperseded)) {
+					// The run started before: a repeat, or a fence that
+					// moved past run_started.
+					write.err = errStartedAlready
+				}
 			}
 			if write.err != nil {
 				failed = true
@@ -337,6 +369,17 @@ func (e *Execution) confirmAhead(wait bool) {
 		<-write.done
 		e.ahead = e.ahead[1:]
 		switch {
+		case errors.Is(write.err, errStartedAlready):
+			// A turbo pass's run_started found the run started already, so
+			// nothing it decided behind it was written, and the delivery
+			// replays again from the log.
+			e.stopped = true
+			e.abandonAhead()
+			if !e.finishing {
+				panic(e.exit(errRunAheadRepair{reason: "the run had already started"}))
+			}
+			e.markRepair("the run had already started")
+			continue
 		case errors.Is(write.err, worlds.ErrInBandSuperseded) || errors.Is(write.err, errReplaySuperseded):
 			e.abandonAhead()
 			e.supersede()

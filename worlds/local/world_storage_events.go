@@ -676,6 +676,14 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !validAppend(input.Event.EventType) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	if input.Event.EventType == worlds.EventTypeRunStarted {
+		// A first flow's run_started creates a run whose run_created never
+		// landed, and is stored without the creation it carries.
+		if err := worlds.CreateRunForStart(ctx, w, input.RunID, input.Event.Data); err != nil {
+			return worlds.EventResult{}, err
+		}
+		input.Event.Data = nil
+	}
 	unlock, err := w.writeLock()
 	if err != nil {
 		return worlds.EventResult{}, err

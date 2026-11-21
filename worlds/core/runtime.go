@@ -108,7 +108,7 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	// wait falls due (see linger.go).
 	restarts, lingered := 0, false
 	var pass *Execution
-	err := r.executeFlow(ctx, input, true, false, &pass)
+	err := r.executeFlow(ctx, input, flowPass{runAhead: true, first: true}, &pass)
 	for {
 		var stop errRunAheadStop
 		if errors.As(err, &stop) {
@@ -118,19 +118,22 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 				return worlds.Redeliver(0)
 			}
 			restarts++
-			err = r.executeFlow(ctx, input, false, lingered, &pass)
+			err = r.executeFlow(ctx, input, flowPass{lingered: lingered}, &pass)
 			continue
 		}
 		if errors.As(err, new(errRunAheadRepair)) {
-			err = r.executeFlow(ctx, input, restarts == 0, lingered, &pass)
+			err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered}, &pass)
 			continue
 		}
 		if err == nil && pass != nil && pass.parked && r.linger(ctx, pass) {
 			lingered = true
-			err = r.executeFlow(ctx, input, restarts == 0, lingered, &pass)
+			err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered}, &pass)
 			continue
 		}
 		break
+	}
+	if errors.Is(err, errStartRefused) {
+		return nil
 	}
 	if errors.Is(err, errReplaySuperseded) {
 		if count, warn := fenceRefusals.note(input.RunID); warn {
@@ -142,12 +145,44 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	return err
 }
 
+// flowPass is how one pass of a flow delivery runs: whether it may run ahead,
+// whether the delivery lingered before it, and whether it is the delivery's
+// first.
+type flowPass struct {
+	runAhead, lingered, first bool
+}
+
+// TurboFirstDeliveries turns on the turbo path of a run's first flow: the
+// first delivery of its first message replays without reading the log,
+// writes run_started without waiting for it, and starts its inline steps
+// before their writes commit, as the Workflow SDK's turbo mode does.
+var TurboFirstDeliveries = true
+
+// isTurbo reports whether the pass takes the turbo path: the first pass of the
+// first delivery of a run's first message, which carries the run's creation,
+// and not a start hook's candidate, which its run_started may refuse.
+func isTurbo(input worlds.QueueInput, pass flowPass) bool {
+	return TurboFirstDeliveries && pass.first && input.RunInput != nil && input.RunInput.StartHook == nil &&
+		input.DeliveryCount == 1 && input.Attempt <= 1 && input.WaitContinuation == nil && len(input.CompleteWaits) == 0
+}
+
 // executeFlow loads the run's log, records run_started on the run's first
 // flow, replays the runner, and turns the runner's result into a terminal run
 // event when it did not suspend.
-func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runAhead, lingered bool, pass **Execution) error {
-	*pass = nil
+func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, pass flowPass, current **Execution) error {
+	*current = nil
+	if isTurbo(input, pass) {
+		return r.executeTurbo(ctx, input, pass, current)
+	}
 	run, events, err := r.loadRun(ctx, input.RunID)
+	if errors.Is(err, worlds.ErrRunNotFound) && input.RunInput != nil {
+		// The start's run_created never landed: its first flow creates the
+		// run, or exits when its start hook is refused.
+		if err := r.createRunForStart(ctx, input); err != nil {
+			return err
+		}
+		run, events, err = r.loadRun(ctx, input.RunID)
+	}
 	if err != nil {
 		return err
 	}
@@ -162,9 +197,9 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runA
 		return err
 	}
 	execution.delivery = input
-	execution.lingered = lingered
-	*pass = execution
-	if runAhead {
+	execution.lingered = pass.lingered
+	*current = execution
+	if pass.runAhead {
 		execution.aheadDepth = r.runAheadDepth
 	}
 	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
@@ -185,15 +220,90 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, runA
 	return r.replayFlow(input, runner, run, execution)
 }
 
-// startRun records run_started as an in-band write of the run's first flow.
+// startRun records run_started as an in-band write of the run's first flow,
+// carrying the run's creation when its message does.
 func (r *Runtime) startRun(execution *Execution) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = replayExit(recovered)
 		}
 	}()
-	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted}, nil)
+	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: runStartedData(execution.delivery)}, nil)
 	return nil
+}
+
+// runStartedData returns the Data of a flow's run_started: the run's
+// creation from its first message, which creates the run when its
+// run_created never landed, or nil.
+func runStartedData(input worlds.QueueInput) []byte {
+	if input.RunInput == nil {
+		return nil
+	}
+	data, _ := worlds.RunCreatedData(*input.RunInput)
+	return data
+}
+
+// createRunForStart creates the run of a first flow whose start's run_created
+// never landed. A start hook the World refuses ends the delivery.
+func (r *Runtime) createRunForStart(ctx context.Context, input worlds.QueueInput) error {
+	err := worlds.CreateRunForStart(ctx, r.world, input.RunID, runStartedData(input))
+	var conflict *worlds.HookConflictError
+	if errors.As(err, &conflict) {
+		return errStartRefused
+	}
+	return err
+}
+
+// errStartRefused ends a first flow whose start hook the World refused: it
+// acknowledges its message without creating a run.
+var errStartRefused = errors.New("workflow: the run's start was refused")
+
+// executeTurbo runs the turbo pass of a run's first flow. The log is taken to
+// hold only run_created, as the run's creation in the message records it, and
+// run_started is written ahead of the replay, as a write ahead the flow's
+// other writes queue behind. When the run had already started, as on a
+// platform's replay of a first delivery, the delivery replays again from the
+// log.
+func (r *Runtime) executeTurbo(ctx context.Context, input worlds.QueueInput, pass flowPass, current **Execution) error {
+	create := *input.RunInput
+	create.RunID = input.RunID
+	created, err := worlds.RunCreatedData(create)
+	if err != nil {
+		return err
+	}
+	createdAt, err := runCreatedAt(input.RunID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	attributes := create.Attributes
+	if attributes == nil {
+		attributes = map[string]string{}
+	}
+	run := worlds.Run{RunID: input.RunID, WorkflowName: create.WorkflowName, Status: worlds.StatusRunning, Input: create.Input, Attributes: attributes, DeploymentID: create.DeploymentID,
+		EncryptionPublicKey: create.EncryptionPublicKey, ExecutionContext: create.ExecutionContext, InBandCount: 1, SpecVersion: worlds.SpecVersion, CreatedAt: now, UpdatedAt: now, StartedAt: &now}
+	events := []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: created, CreatedAt: time.UnixMilli(int64(createdAt)).UTC(), SpecVersion: worlds.SpecVersion}}
+	if r.misrouted(run) {
+		return r.reroute(ctx, run, input)
+	}
+	execution, err := newExecution(ctx, r.world, run, events, nil)
+	if err != nil {
+		return err
+	}
+	execution.delivery = input
+	*current = execution
+	if pass.runAhead {
+		execution.aheadDepth = r.runAheadDepth
+	}
+	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
+		return err
+	}
+	execution.writeStartAhead(created)
+	runner, ok := r.runners[run.WorkflowName]
+	if !ok {
+		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName)))
+	}
+	return r.replayFlow(input, runner, run, execution)
 }
 
 // replayExit turns the panic that ended a replay outside runner code into

@@ -22,6 +22,14 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	if input.Event.EventType == worlds.EventTypeRunStarted {
+		// A first flow's run_started creates a run whose run_created never
+		// landed, and is stored without the creation it carries.
+		if err := worlds.CreateRunForStart(ctx, m, input.RunID, input.Event.Data); err != nil {
+			return worlds.EventResult{}, err
+		}
+		input.Event.Data = nil
+	}
 	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()

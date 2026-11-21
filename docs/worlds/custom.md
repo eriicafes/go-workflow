@@ -79,6 +79,11 @@ type World interface {
   `OccurredAt` as `CreatedAt`.
 - **Specification version.** Record `worlds.SpecVersion` on every run you
   create (`Run.SpecVersion`).
+- **Resilient start.** A run's first flow carries its creation
+  (`QueueInput.RunInput`), and so does its `run_started`, since a start queues
+  the flow and writes `run_created` at the same time. Call
+  `worlds.CreateRunForStart` for every `run_started`, which creates a run
+  whose `run_created` never landed, and store the event without its data.
 - **Deliveries.** `Queue` must not deliver before `NotBefore`, and must
   redeliver failed deliveries. Store every `QueueInput` field and hand it back
   unchanged, including `ReplayDivergenceCount` and

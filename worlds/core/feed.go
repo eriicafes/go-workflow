@@ -301,7 +301,7 @@ func (e *Execution) takeFeed() {
 			continue
 		}
 		if len(e.ahead) > 0 {
-			if !e.ownOrKnown(event, slot) {
+			if !e.isOwnOrKnown(event, slot) {
 				if reason := e.feedHazard(event); reason != "" {
 					e.stopRunAhead(reason, event)
 				}
@@ -328,9 +328,9 @@ func (e *Execution) takeFeed() {
 	}
 }
 
-// ownOrKnown reports whether event, at slot, is the flow's own write ahead or
+// isOwnOrKnown reports whether event, at slot, is the flow's own write ahead or
 // one the log it holds has.
-func (e *Execution) ownOrKnown(event worlds.Event, slot uint64) bool {
+func (e *Execution) isOwnOrKnown(event worlds.Event, slot uint64) bool {
 	index := int(slot) - 1
 	if index < 0 || index >= len(e.events) {
 		return false

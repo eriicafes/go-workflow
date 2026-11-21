@@ -358,8 +358,10 @@ func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
 	if _, err := worlds.CreateRun(ctx, queueOutage{world}, input); !errors.Is(err, errQueueUnavailable) {
 		t.Fatalf("first create error = %v, want the queue error", err)
 	}
+	// The run exists already, which a start takes as its own, as the
+	// Workflow SDK's does.
 	runID, err := worlds.CreateRun(ctx, world, input)
-	if !errors.Is(err, worlds.ErrRunAlreadyExists) || runID != input.RunID {
+	if err != nil || runID != input.RunID {
 		t.Fatalf("retried create = %q, %v", runID, err)
 	}
 	if queued := world.Queued(); len(queued) != 1 || queued[0].RunID != input.RunID {

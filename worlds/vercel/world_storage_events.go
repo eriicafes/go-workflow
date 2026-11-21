@@ -2,6 +2,7 @@ package vercelworld
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -39,9 +40,11 @@ var repeatable = map[worlds.EventType]bool{
 	worlds.EventTypeWaitCompleted: true,
 }
 
-func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+// runCreationMeta returns the frame meta of a run's creation, which
+// run_created carries, and a first flow's run_started too.
+func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType worlds.EventType) map[string]any {
 	meta := map[string]any{
-		"eventType":         string(worlds.EventTypeRunCreated),
+		"eventType":         string(eventType),
 		"specVersion":       specVersion,
 		"workflowName":      input.WorkflowName,
 		"deploymentId":      input.DeploymentID,
@@ -80,6 +83,11 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			}
 		}
 	}
+	return meta
+}
+
+func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	meta := w.runCreationMeta(input, worlds.EventTypeRunCreated)
 	response, err := w.postEvent(ctx, input.RunID, worlds.EventTypeRunCreated, meta, input.Input)
 	if err != nil {
 		return worlds.EventResult{}, classify(err, worlds.EventTypeRunCreated)
@@ -99,6 +107,16 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	meta, payload, err := encodeEvent(input.Event)
 	if err != nil {
 		return worlds.EventResult{}, err
+	}
+	if input.Event.EventType == worlds.EventTypeRunStarted {
+		// A first flow's run_started carries the run's creation, which the
+		// backend creates the run from when run_created never landed.
+		var created worlds.DataRunCreated
+		if json.Unmarshal(input.Event.Data, &created) == nil && created.WorkflowName != "" {
+			meta = w.runCreationMeta(worlds.EventsCreateRunInput{RunID: input.RunID, WorkflowName: created.WorkflowName, Input: created.Input, Attributes: created.Attributes, DeploymentID: created.DeploymentID, EncryptionPublicKey: created.EncryptionPublicKey, ExecutionContext: created.ExecutionContext, StartHook: created.StartHook}, worlds.EventTypeRunStarted)
+			meta["specVersion"], meta["executorSpecVersion"] = worlds.EventSpecVersion(input.Event.SpecVersion), specVersion
+			payload = created.Input
+		}
 	}
 	setRequestID(ctx, meta)
 	meta["occurredAt"] = occurredAt(input.Event)

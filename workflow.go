@@ -765,17 +765,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
 		return "", err
 	}
-	_, err = execution.World().EventsCreateRun(ctx, create)
-	if errors.Is(err, worlds.ErrRunAlreadyExists) {
-		run, err := execution.World().RunsGet(ctx, worlds.RunsGetInput{RunID: id, ResolveData: worlds.ResolveDataNone})
-		if err != nil || run.Status != worlds.StatusPending {
-			return id, err
-		}
-		deploymentID = run.DeploymentID
-	} else if err != nil {
-		return "", err
-	}
-	if _, err := execution.World().Queue(ctx, worlds.FirstFlow(id, input.WorkflowName, deploymentID)); err != nil {
+	if err := worlds.StartRun(ctx, execution.World(), create); err != nil {
 		return "", err
 	}
 	return id, nil
