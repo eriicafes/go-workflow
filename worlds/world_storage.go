@@ -232,7 +232,11 @@ type Run struct {
 	Output []byte
 	// Error is the error payload of a failed run. DecodeErrorPayload
 	// decodes it.
-	Error      []byte
+	Error []byte
+	// ErrorCode is the category of a failed run's error, such as USER_ERROR,
+	// from its run_failed (DataRunFailed.ErrorCode). It is metadata, kept
+	// when the run's data is deleted.
+	ErrorCode  string
 	Attributes map[string]string
 	// DeploymentID is the deployment the run is pinned to, recorded when the
 	// run is created. Empty means the run is not pinned.

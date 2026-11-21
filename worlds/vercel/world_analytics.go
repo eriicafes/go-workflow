@@ -48,21 +48,21 @@ func analyticsQuery(pagination worlds.Pagination, limit int) url.Values {
 	return query
 }
 
-// setWindow sets the creation time window. The backend takes both bounds or
-// neither, so a missing bound is the earliest or latest time a run has.
-func setWindow(query url.Values, start, end *time.Time) {
-	if start == nil && end == nil {
-		return
+// setWindow sets the creation time window. Like world-vercel's
+// assertDateWindow, it refuses one bound without the other, which the
+// backend does not take, and a start after the end.
+func setWindow(query url.Values, start, end *time.Time) error {
+	switch {
+	case start == nil && end == nil:
+		return nil
+	case start == nil || end == nil:
+		return fmt.Errorf("%w: the Vercel backend needs both StartTime and EndTime, or neither", worlds.ErrEventInvalid)
+	case start.After(*end):
+		return fmt.Errorf("%w: StartTime is after EndTime", worlds.ErrEventInvalid)
 	}
-	from, to := time.UnixMilli(0), time.Now().Add(24*time.Hour)
-	if start != nil {
-		from = *start
-	}
-	if end != nil {
-		to = *end
-	}
-	query.Set("startTime", from.UTC().Format(time.RFC3339Nano))
-	query.Set("endTime", to.UTC().Format(time.RFC3339Nano))
+	query.Set("startTime", start.UTC().Format(time.RFC3339Nano))
+	query.Set("endTime", end.UTC().Format(time.RFC3339Nano))
+	return nil
 }
 
 // analyticsPage converts a page of the backend's analytics with convert.
@@ -94,7 +94,9 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 	default:
 		return worlds.Page[worlds.AnalyticsRun]{}, fmt.Errorf("%w: the Vercel backend filters analytics runs by one status", worlds.ErrEventInvalid)
 	}
-	setWindow(query, input.StartTime, input.EndTime)
+	if err := setWindow(query, input.StartTime, input.EndTime); err != nil {
+		return worlds.Page[worlds.AnalyticsRun]{}, err
+	}
 	if len(input.Attributes) > 0 {
 		attributes, err := json.Marshal(input.Attributes)
 		if err != nil {
@@ -114,7 +116,9 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	if input.WorkflowName != "" {
 		query.Set("workflowName", input.WorkflowName)
 	}
-	setWindow(query, input.StartTime, input.EndTime)
+	if err := setWindow(query, input.StartTime, input.EndTime); err != nil {
+		return worlds.Page[worlds.AnalyticsAttribute]{}, err
+	}
 	var page listResponse
 	if err := a.get(ctx, "/attributes", query, &page); err != nil {
 		return worlds.Page[worlds.AnalyticsAttribute]{}, err
@@ -221,8 +225,12 @@ func (a analytics) WaitsGet(ctx context.Context, input worlds.AnalyticsWaitsGetI
 }
 
 func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsListInput) (worlds.Page[worlds.AnalyticsWait], error) {
+	query := analyticsQuery(input.Pagination, analyticsRunScopedPageLimit)
+	if input.Status != "" {
+		query.Set("status", string(input.Status))
+	}
 	var page listResponse
-	if err := a.get(ctx, runPath(input.RunID)+"/waits", analyticsQuery(input.Pagination, analyticsRunScopedPageLimit), &page); err != nil {
+	if err := a.get(ctx, runPath(input.RunID)+"/waits", query, &page); err != nil {
 		return worlds.Page[worlds.AnalyticsWait]{}, notFound(err, worlds.ErrRunNotFound)
 	}
 	return analyticsPage(page, toAnalyticsWait), nil
@@ -231,14 +239,17 @@ func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsLis
 func toAnalyticsRun(values map[string]any) worlds.AnalyticsRun {
 	run := worlds.AnalyticsRun{
 		RunID:        worlds.RunID(str(values, "runId")),
-		WorkflowName: str(values, "workflowName"),
 		Status:       worlds.Status(str(values, "status")),
+		DeploymentID: str(values, "deploymentId"),
+		WorkflowName: str(values, "workflowName"),
+		ErrorCode:    str(values, "errorCode"),
 		Attributes:   map[string]string{},
 		CreatedAt:    requiredTime(values, "createdAt"),
 		UpdatedAt:    requiredTime(values, "updatedAt"),
 		StartedAt:    timeField(values, "startedAt"),
 		CompletedAt:  timeField(values, "completedAt"),
 	}
+	run.SpecVersion, _ = asInt(values["specVersion"])
 	if attributes, ok := values["attributes"].(map[string]any); ok {
 		for key, value := range attributes {
 			if text, ok := value.(string); ok {
@@ -305,8 +316,10 @@ func toAnalyticsWait(values map[string]any) worlds.AnalyticsWait {
 	return worlds.AnalyticsWait{
 		RunID:       worlds.RunID(str(values, "runId")),
 		WaitID:      worlds.WaitID(str(values, "waitId")),
-		DueAt:       requiredTime(values, "resumeAt"),
+		Status:      worlds.WaitStatus(str(values, "status")),
+		ResumeAt:    timeField(values, "resumeAt"),
 		CreatedAt:   requiredTime(values, "createdAt"),
+		UpdatedAt:   requiredTime(values, "updatedAt"),
 		CompletedAt: timeField(values, "completedAt"),
 	}
 }

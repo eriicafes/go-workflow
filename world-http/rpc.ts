@@ -43,6 +43,7 @@ export namespace RPC {
 		input: Uint8Array;
 		output: Uint8Array;
 		error: Uint8Array;
+		errorCode: string;
 		attributes: Record<string, string>;
 		deploymentId: string;
 		encryptionPublicKey?: string;
@@ -150,21 +151,6 @@ export namespace RPC {
 	};
 	export type QueueResult = { messageId: string };
 	export type StreamInfo = { tailIndex: number; done: boolean };
-	export type AnalyticsRun = Omit<Run, "input" | "output" | "error" | "deploymentId" | "inBandCount">;
-	export type AnalyticsAttribute = {
-		key: string;
-		runCount: number;
-		firstSeenAt: Date;
-		lastSeenAt: Date;
-	};
-	export type AnalyticsWait = {
-		runId: string;
-		waitId: string;
-		dueAt: Date;
-		queueMessageId: string;
-		createdAt: Date;
-		completedAt: Date | null;
-	};
 	export type Empty = Record<string, never>;
 	export type Error = {
 		code: string;

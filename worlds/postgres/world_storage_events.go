@@ -624,9 +624,8 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusCompleted, &at, &slot
 	case worlds.EventTypeRunFailed:
 		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusFailed, &at, &slot
-		var failed worlds.DataRunFailed
-		if json.Unmarshal(event.Data, &failed) == nil && failed.ErrorCode != "" {
-			a.errorCode = &failed.ErrorCode
+		if code := worlds.RunFailedErrorCode(event.Data); code != "" {
+			a.run.ErrorCode, a.errorCode = code, &code
 		}
 	case worlds.EventTypeRunCancelled:
 		a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at

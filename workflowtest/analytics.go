@@ -43,7 +43,9 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 		t.Fatalf("analytics runs by status = %#v err=%v", running, err)
 	}
 	future := time.Now().Add(time.Hour)
-	none, err := analytics.RunsList(ctx, worlds.AnalyticsRunsListInput{WorkflowName: name, StartTime: &future})
+	// The Workflow SDK's analytics take both bounds of a window or neither.
+	later := future.Add(time.Hour)
+	none, err := analytics.RunsList(ctx, worlds.AnalyticsRunsListInput{WorkflowName: name, StartTime: &future, EndTime: &later})
 	if err != nil || len(none.Data) != 0 {
 		t.Fatalf("analytics runs after StartTime = %#v err=%v", none, err)
 	}
@@ -62,12 +64,15 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 	conformAppend(t, world, second, worlds.EventTypeWaitCreated, "wait_b", worlds.DataWaitCreated{ResumeAt: due})
 	conformAppend(t, world, second, worlds.EventTypeWaitCompleted, "wait_a", nil)
 	waits, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: second})
-	if err != nil || len(waits.Data) != 2 || waits.Data[0].WaitID != "wait_a" || waits.Data[0].CompletedAt == nil || !waits.Data[0].DueAt.Equal(due) || waits.Data[1].CompletedAt != nil || !waits.Data[1].DueAt.Equal(due) {
+	if err != nil || len(waits.Data) != 2 || waits.Data[0].WaitID != "wait_a" || waits.Data[0].Status != worlds.WaitStatusCompleted || waits.Data[0].CompletedAt == nil || !waits.Data[0].ResumeAt.Equal(due) || waits.Data[1].Status != worlds.WaitStatusWaiting || waits.Data[1].CompletedAt != nil || !waits.Data[1].ResumeAt.Equal(due) {
 		t.Fatalf("analytics waits = %#v err=%v", waits, err)
 	}
 	wait, err := analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: second, WaitID: "wait_b"})
-	if err != nil || wait.WaitID != "wait_b" || !wait.DueAt.Equal(due) {
+	if err != nil || wait.WaitID != "wait_b" || wait.ResumeAt == nil || !wait.ResumeAt.Equal(due) {
 		t.Fatalf("analytics wait = %#v err=%v", wait, err)
+	}
+	if waiting, err := analytics.WaitsList(ctx, worlds.AnalyticsWaitsListInput{RunID: second, Status: worlds.WaitStatusWaiting}); err != nil || len(waiting.Data) != 1 || waiting.Data[0].WaitID != "wait_b" {
+		t.Fatalf("analytics waiting waits = %#v err=%v", waiting, err)
 	}
 	_, err = analytics.WaitsGet(ctx, worlds.AnalyticsWaitsGetInput{RunID: second, WaitID: "wait_missing"})
 	conformExpect(t, err, worlds.ErrEventNotFound, "missing wait")

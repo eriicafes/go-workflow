@@ -2,6 +2,7 @@ package worlds
 
 import (
 	"context"
+	"maps"
 	"time"
 )
 
@@ -75,9 +76,11 @@ type (
 		RunID  RunID
 		WaitID WaitID
 	}
-	// AnalyticsWaitsListInput holds the arguments to WaitsList.
+	// AnalyticsWaitsListInput holds the arguments to WaitsList. An empty
+	// Status matches every wait.
 	AnalyticsWaitsListInput struct {
 		RunID      RunID
+		Status     WaitStatus
 		Pagination Pagination
 	}
 )
@@ -85,13 +88,22 @@ type (
 // AnalyticsRun is the summary of one run, without its payloads.
 type AnalyticsRun struct {
 	RunID        RunID
-	WorkflowName string
 	Status       Status
+	DeploymentID string
+	WorkflowName string
+	SpecVersion  int
 	Attributes   map[string]string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time
+	// ErrorCode is the category of a failed run's error.
+	ErrorCode string
+}
+
+// NewAnalyticsRun returns the summary of run.
+func NewAnalyticsRun(run Run) AnalyticsRun {
+	return AnalyticsRun{RunID: run.RunID, Status: run.Status, DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, SpecVersion: run.SpecVersion, Attributes: maps.Clone(run.Attributes), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, ErrorCode: run.ErrorCode}
 }
 
 // AnalyticsAttribute aggregates one attribute key across runs.
@@ -105,12 +117,17 @@ type AnalyticsAttribute struct {
 	LastSeenAt time.Time
 }
 
-// AnalyticsWait describes one timer recorded by a wait_created event.
+// AnalyticsWait describes one timer recorded by a wait_created event, read
+// from its events, so a finished run's waits are still reported.
 type AnalyticsWait struct {
 	RunID  RunID
 	WaitID WaitID
-	// DueAt is when the timer fires.
-	DueAt       time.Time
+	Status WaitStatus
+	// ResumeAt is when the timer fires.
+	ResumeAt *time.Time
+	// CreatedAt is the time of its wait_created, and UpdatedAt the time of
+	// its latest event.
 	CreatedAt   time.Time
+	UpdatedAt   time.Time
 	CompletedAt *time.Time
 }

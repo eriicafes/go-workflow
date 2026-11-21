@@ -85,7 +85,7 @@ func runSelect(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		input, result, join = "NULL::bytea", "CASE WHEN re.type = '"+string(worlds.EventTypeRunFailed)+"' THEN re.payload_cbor END", ""
 	}
-	return "SELECT r.id, r.name, r.status::text, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, coalesce(r.encryption_public_key, ''), s.seq_in_band, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
+	return "SELECT r.id, r.name, r.status::text, " + input + ", re.type, " + result + ", r.attributes, r.deployment_id, coalesce(r.encryption_public_key, ''), coalesce(r.error_code, ''), s.seq_in_band, r.spec_version, r.created_at, r.updated_at, r.started_at, r.completed_at, r.expired_at, r.execution_context, r.start_hook" +
 		" FROM workflow.workflow_runs r JOIN workflow.workflow_event_slots s ON s.run_id = r.id" + join + " LEFT JOIN workflow.workflow_events re ON re.run_id = r.id AND re.id = " + slotID("r.result_slot") + live
 }
 
@@ -99,7 +99,7 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 	var attributes, input, result, executionContext, startHook []byte
 	var resultType *worlds.EventType
 	var inBandCount int64
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &inBandCount, &run.SpecVersion, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt, &executionContext, &startHook); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &input, &resultType, &result, &attributes, &run.DeploymentID, &run.EncryptionPublicKey, &run.ErrorCode, &inBandCount, &run.SpecVersion, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt, &run.ExpiredAt, &executionContext, &startHook); err != nil {
 		return worlds.Run{}, err
 	}
 	if len(startHook) > 0 {

@@ -19,7 +19,7 @@ type analytics struct {
 	world *World
 }
 
-const analyticsRunColumns = "id, name, status::text, attributes, created_at, updated_at, started_at, completed_at"
+const analyticsRunColumns = "id, name, status::text, deployment_id, spec_version, coalesce(error_code, ''), attributes, created_at, updated_at, started_at, completed_at"
 
 func (a analytics) RunsGet(ctx context.Context, input worlds.AnalyticsRunsGetInput) (worlds.AnalyticsRun, error) {
 	run, err := scanAnalyticsRun(a.world.pool.QueryRow(ctx, a.world.q(`SELECT `+analyticsRunColumns+` FROM workflow.workflow_runs WHERE id = $1`), input.RunID))
@@ -80,84 +80,10 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	return worlds.Page[worlds.AnalyticsAttribute]{Data: values, HasMore: true, Cursor: values[len(values)-1].Key}, nil
 }
 
-// waits derives waits from wait_created events, completed by the first
-// wait_completed with the same correlation ID. Unparseable wait_created data
-// is skipped.
-func (a analytics) waits(ctx context.Context, runID worlds.RunID, waitID *worlds.WaitID) ([]worlds.AnalyticsWait, error) {
-	if err := a.world.runExists(ctx, runID); err != nil {
-		return nil, err
-	}
-	var q query
-	q.where("c.run_id = " + q.arg(runID))
-	q.where("c.type = " + q.arg(worlds.EventTypeWaitCreated))
-	if waitID != nil {
-		q.where("c.correlation_id = " + q.arg(*waitID))
-	}
-	completed := q.arg(worlds.EventTypeWaitCompleted)
-	rows, err := a.world.pool.Query(ctx, a.world.q(`SELECT c.correlation_id, c.payload_cbor, c.created_at,
-			(SELECT min(d.created_at) FROM workflow.workflow_events d WHERE d.run_id = c.run_id AND d.correlation_id = c.correlation_id AND d.type = `+completed+`)
-		FROM workflow.workflow_events c`+q.clause()+` ORDER BY c.created_at, c.id`), q.args...)
-	if err != nil {
-		return nil, err
-	}
-	type row struct {
-		wait worlds.AnalyticsWait
-		data []byte
-	}
-	values, err := collect(rows, func(scan pgx.Row) (row, error) {
-		var value row
-		value.wait.RunID = runID
-		err := scan.Scan(&value.wait.WaitID, &value.data, &value.wait.CreatedAt, &value.wait.CompletedAt)
-		return value, err
-	})
-	if err != nil {
-		return nil, err
-	}
-	// A later wait_created for the same ID replaces the earlier one.
-	index := map[worlds.WaitID]int{}
-	waits := []worlds.AnalyticsWait{}
-	for _, value := range values {
-		var data worlds.DataWaitCreated
-		decoded, err := eventData(worlds.EventTypeWaitCreated, value.data)
-		if err != nil || json.Unmarshal(decoded, &data) != nil {
-			continue
-		}
-		wait := value.wait
-		wait.DueAt = data.ResumeAt.UTC()
-		wait.CreatedAt, wait.CompletedAt = wait.CreatedAt.UTC(), utc(wait.CompletedAt)
-		if i, ok := index[wait.WaitID]; ok {
-			waits[i] = wait
-			continue
-		}
-		index[wait.WaitID] = len(waits)
-		waits = append(waits, wait)
-	}
-	return waits, nil
-}
-
-func (a analytics) WaitsGet(ctx context.Context, input worlds.AnalyticsWaitsGetInput) (worlds.AnalyticsWait, error) {
-	waits, err := a.waits(ctx, input.RunID, &input.WaitID)
-	if err != nil {
-		return worlds.AnalyticsWait{}, err
-	}
-	if len(waits) == 0 {
-		return worlds.AnalyticsWait{}, worlds.ErrEventNotFound
-	}
-	return waits[0], nil
-}
-
-func (a analytics) WaitsList(ctx context.Context, input worlds.AnalyticsWaitsListInput) (worlds.Page[worlds.AnalyticsWait], error) {
-	waits, err := a.waits(ctx, input.RunID, nil)
-	if err != nil {
-		return worlds.Page[worlds.AnalyticsWait]{}, err
-	}
-	return offsetPage(waits, input.Pagination)
-}
-
 func scanAnalyticsRun(row pgx.Row) (worlds.AnalyticsRun, error) {
 	var run worlds.AnalyticsRun
 	var attributes []byte
-	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &attributes, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
+	if err := row.Scan(&run.RunID, &run.WorkflowName, &run.Status, &run.DeploymentID, &run.SpecVersion, &run.ErrorCode, &attributes, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.CompletedAt); err != nil {
 		return worlds.AnalyticsRun{}, err
 	}
 	run.Attributes = map[string]string{}
