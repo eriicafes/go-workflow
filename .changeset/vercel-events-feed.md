@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Push a run's events from the Vercel World over the backend's events socket, as world-vercel's live feed does.
+Push a run's events from the Vercel World over the backend's events socket.
