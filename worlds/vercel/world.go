@@ -31,11 +31,12 @@ type Config struct {
 	// It is required.
 	BaseURL string
 	// QueueURL is a Vercel Queues API root including /api/v3 that every
-	// queue request goes to, naming the message's region in the
-	// x-vercel-queue-region header, as a proxy forwards it. Empty sends each
-	// message to https://<region>.vercel-queue.com/api/v3 for the region its
-	// run ID carries, as world-vercel does, else that of VERCEL_REGION, else
-	// iad1, and releases each delivery in the region that delivered it.
+	// queue request goes to. Empty sends each message to
+	// https://<region>.vercel-queue.com/api/v3 for the region its run ID
+	// carries, as world-vercel does, else that of VERCEL_REGION, else iad1,
+	// and releases each delivery in the region that delivered it. Through
+	// Vercel's API proxy, with Token, requests name the region in the
+	// x-vercel-queue-region header.
 	QueueURL string
 	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
 	// are published to. It is required.
@@ -211,7 +212,7 @@ func (*World) SpecVersion() int            { return worlds.SpecVersion }
 func (w *World) DeploymentID() string      { return w.config.DeploymentID }
 func (*World) Analytics() worlds.Analytics { return nil }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true}
+	return worlds.Capabilities{SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the

@@ -75,12 +75,19 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if meta.Closed {
 			return worlds.ErrStreamClosed
 		}
-		// A deleted run's streams take no more data.
-		var run runRecord
-		if ok, err := w.readOptional(runPath(input.RunID), &run); err != nil {
-			return err
-		} else if ok && worlds.RunDataExpired(run.Run, time.Now()) {
+		// A deleted run's streams take no more data. Its purge closed the
+		// streams it had, unless it failed partway, so only a new stream
+		// reads the run.
+		if w.unpurged[input.RunID] {
 			return worlds.ErrStreamClosed
+		}
+		if meta.Count == 0 {
+			var run runRecord
+			if ok, err := w.readOptional(runPath(input.RunID), &run); err != nil {
+				return err
+			} else if ok && worlds.RunDataExpired(run.Run, time.Now()) {
+				return worlds.ErrStreamClosed
+			}
 		}
 		return w.appendChunks(input.RunID, meta, input.Chunks)
 	})

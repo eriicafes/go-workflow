@@ -394,6 +394,8 @@ func TestQueueConsumerPublishesNextHop(t *testing.T) {
 func TestVQSRoutesByRegion(t *testing.T) {
 	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
 	world := newQueueWorld(t, server)
+	// Through the API proxy, the header names each request's region.
+	world.api.proxy = true
 	t.Setenv("VERCEL_REGION", "cdg1")
 	ctx := context.Background()
 
@@ -419,7 +421,12 @@ func TestVQSRoutesByRegion(t *testing.T) {
 		t.Fatalf("ack = %+v", ack)
 	}
 
-	// Without Config.QueueURL, each region has its own host.
+	// Without the proxy, an explicit QueueURL is one endpoint, and each
+	// region otherwise has its own host.
+	world.api.proxy = false
+	if queue, header := world.queueURL(worlds.RegionSYD1); queue != world.config.QueueURL || header != nil {
+		t.Fatalf("explicit queue = %q, %v", queue, header)
+	}
 	world.config.QueueURL = ""
 	if queue, header := world.queueURL(worlds.RegionSYD1); queue != "https://syd1.vercel-queue.com/api/v3" || header != nil {
 		t.Fatalf("syd1 queue = %q, %v", queue, header)

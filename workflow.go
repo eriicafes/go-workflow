@@ -582,6 +582,8 @@ type StartOptions struct {
 	ReplayedFromRunID string
 }
 
+var errNoStartHooks = fmt.Errorf("workflow: StartOptions.Hook: the World does not create start hooks: %w", errors.ErrUnsupported)
+
 // StartHook is a hook Start creates with its run. See StartOptions.Hook.
 type StartHook struct {
 	// Token is the hook's token. It must not be empty.
@@ -738,33 +740,33 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	if err != nil {
 		return nil, err
 	}
-	if settings.HookToken != "" {
-		var supported bool
-		if execution, ok := workflowExecutionFromContext(ctx); ok {
-			supported = execution.World().Capabilities().StartHook
-		} else {
-			spec, err := client.Spec(ctx)
-			if err != nil {
-				return nil, err
-			}
-			supported = spec.Capabilities.StartHook
-		}
-		if !supported {
-			return nil, fmt.Errorf("workflow: StartOptions.Hook: the World does not create start hooks: %w", errors.ErrUnsupported)
-		}
-	}
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
+		if settings.HookToken != "" && !execution.World().Capabilities().StartHook {
+			return nil, errNoStartHooks
+		}
 		id, err := InlineStep(execution.Context(), startChild[In], childStartInput[In]{WorkflowName: name, Input: input, Settings: settings})
 		if err != nil {
 			return nil, err
 		}
 		return &Run[Out]{id: id, client: client}, nil
 	}
-	// The input is encrypted with the run's key, so the run's ID and
-	// deployment are settled first.
-	runID, err := client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: settings.Region})
+	// The client caches the World's capabilities, so this costs a request
+	// once per client.
+	spec, err := client.Spec(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if settings.HookToken != "" && !spec.Capabilities.StartHook {
+		return nil, errNoStartHooks
+	}
+	// The input is encrypted with the run's key, so the run's ID and
+	// deployment are settled first. A World with regional run IDs mints the
+	// ID, tagged with the run's region.
+	runID := worlds.NewRunID()
+	if spec.Capabilities.RegionalRunIDs {
+		if runID, err = client.RunsNewID(ctx, worlds.ClientRunsNewIDInput{Region: settings.Region}); err != nil {
+			return nil, err
+		}
 	}
 	deploymentID, err := client.RunsStartDeployment(ctx, worlds.NewClientRunsStartDeploymentInput(settings.deployment()))
 	if err != nil {

@@ -104,6 +104,9 @@ type Capabilities struct {
 	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
 	// with the run, or returns a *HookConflictError and creates nothing.
 	StartHook bool
+	// RegionalRunIDs: the World implements RegionalRunIDs, and clients ask
+	// it for new run IDs.
+	RegionalRunIDs bool
 }
 ```
 

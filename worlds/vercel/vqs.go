@@ -42,13 +42,18 @@ const (
 )
 
 // queueURL returns the Vercel Queues API root of region: Config.QueueURL when
-// it was set, which forwards to region by the x-vercel-queue-region header,
-// and region's own host otherwise, as world-vercel routes each message.
+// it was set, and region's own host otherwise, as world-vercel routes each
+// message. Through Vercel's API proxy, the x-vercel-queue-region header names
+// the region the proxy forwards to, as world-vercel sends it there.
 func (w *World) queueURL(region worlds.Region) (string, http.Header) {
-	if w.config.QueueURL != "" {
-		return w.config.QueueURL, http.Header{"X-Vercel-Queue-Region": {region.String()}}
+	var header http.Header
+	if w.api.proxy {
+		header = http.Header{"X-Vercel-Queue-Region": {region.String()}}
 	}
-	return "https://" + region.String() + ".vercel-queue.com/api/v3", nil
+	if w.config.QueueURL != "" {
+		return w.config.QueueURL, header
+	}
+	return "https://" + region.String() + ".vercel-queue.com/api/v3", header
 }
 
 // messageRegion returns the region a message of runID is sent to: the region

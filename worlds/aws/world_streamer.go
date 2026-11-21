@@ -15,9 +15,9 @@ import (
 
 const (
 	defaultChunkLimit = 100
-	// maxChunksPerWrite keeps a write and its stream update in one
-	// TransactWriteItems call, so chunks become visible atomically.
-	maxChunksPerWrite = maxTransactItems - 1
+	// maxChunksPerWrite keeps a write, its stream update, and its run check
+	// in one TransactWriteItems call, so chunks become visible atomically.
+	maxChunksPerWrite = maxTransactItems - 2
 	streamPollMin     = 50 * time.Millisecond
 	streamPollMax     = 500 * time.Millisecond
 )
@@ -93,6 +93,14 @@ func (w *World) appendChunks(ctx context.Context, runID worlds.RunID, name strin
 	for index, chunk := range chunks {
 		items = append(items, ddb.TransactWriteItem{Put: &ddb.Put{TableName: table, Item: merge(chunkKey(string(runID), name, count+index), map[string]ddb.AttributeValue{"data": avb(chunk)})}})
 	}
+	// The run's data is not deleted. The fixed-width stamps compare as
+	// strings.
+	items = append(items, ddb.TransactWriteItem{ConditionCheck: &ddb.ConditionCheck{
+		TableName:                 table,
+		Key:                       runKey(string(runID)),
+		ConditionExpression:       awsv2.String("attribute_not_exists(pk) OR attribute_not_exists(expiredAt) OR expiredAt > :now"),
+		ExpressionAttributeValues: map[string]ddb.AttributeValue{":now": avs(stamp(time.Now()))},
+	}})
 	return w.transact(ctx, items)
 }
 
@@ -101,13 +109,9 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 }
 
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
-	// A deleted run's streams take no more data.
-	if item, found, err := w.item(ctx, runKey(string(input.RunID))); err != nil {
-		return err
-	} else if found && worlds.RunDataExpired(runFromItem(item).Run, time.Now()) {
-		return worlds.ErrStreamClosed
-	}
-	// Concurrent writers race on count and retry.
+	// Concurrent writers race on count and retry. The write's transaction
+	// also requires the run's data not to be deleted, so a deleted run's
+	// streams, including new ones, take no more data.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -126,6 +130,11 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		err = w.appendChunks(ctx, input.RunID, input.Name, meta.count, input.Chunks, condition)
 		if !contended(err) {
 			return err
+		}
+		if item, found, err := w.item(ctx, runKey(string(input.RunID))); err != nil {
+			return err
+		} else if found && worlds.RunDataExpired(runFromItem(item).Run, time.Now()) {
+			return worlds.ErrStreamClosed
 		}
 		if attempt+1 >= maxAppendAttempts {
 			return fmt.Errorf("workflow/aws: stream write still contended after %d attempts: %w", maxAppendAttempts, err)

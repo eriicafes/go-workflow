@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Tag Vercel run IDs with their region and route each queue message to it, as world-vercel does. `Config.QueueURL` now proxies every region.
+Tag Vercel run IDs with their region and route each queue message to it, as world-vercel does.

@@ -235,9 +235,12 @@ func TestRunsCreatedInARegionAreRoutedThere(t *testing.T) {
 	if _, err := client.RunsCreate(ctx, worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf"}}); err != nil {
 		t.Fatal(err)
 	}
+	if region := messageRegion(runID); region != worlds.RegionSYD1 {
+		t.Fatalf("first delivery routed to %s", region)
+	}
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
-	if len(queue.requests) != 1 || queue.requests[0].Header.Get("X-Vercel-Queue-Region") != "syd1" {
-		t.Fatalf("first delivery published to %v", queue.requests)
+	if len(queue.requests) != 1 {
+		t.Fatalf("first delivery published %d times", len(queue.requests))
 	}
 }
