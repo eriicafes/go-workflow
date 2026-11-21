@@ -50,6 +50,17 @@ const (
 	// vqsMaxCoalescedReruns is how often a delivery runs again because
 	// messages were coalesced into it before it hands its message off.
 	vqsMaxCoalescedReruns = 32
+	// vqsRotationExpiryMargin is how long before its message expires a
+	// flow continues on a new message instead of handing it off, and
+	// vqsRotationHandoffMargin how many handoffs short of
+	// vqsMaxHandoffs, the most Vercel Queues makes of one message, past
+	// which a handoff counts as an attempt.
+	vqsRotationExpiryMargin  = 4 * time.Hour
+	vqsMaxHandoffs           = 10_000
+	vqsRotationHandoffMargin = 100
+	// vqsRotationDelay delays the new message past the acknowledgment of
+	// the one it replaces, so it is not coalesced into it.
+	vqsRotationDelay = time.Second
 	// vqsLease is the visibility timeout requested and renewed while a
 	// delivery executes.
 	vqsLease          = 5 * time.Minute
@@ -195,7 +206,10 @@ type vqsDelivery struct {
 	HandoffCount  int
 	// VisibilityDeadline is when the current lease expires, when known.
 	VisibilityDeadline time.Time
-	Body               []byte
+	// CreatedAt is when the message was first sent, and ExpiresAt when
+	// Vercel Queues drops it, when known.
+	CreatedAt, ExpiresAt time.Time
+	Body                 []byte
 	// Region is the region of the queue that delivered the message, which
 	// its lease is renewed and released in.
 	Region worlds.Region
@@ -225,6 +239,8 @@ func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 		delivery.DeliveryCount, _ = strconv.Atoi(request.Header.Get("Ce-Vqsdeliverycount"))
 		delivery.HandoffCount, _ = strconv.Atoi(request.Header.Get("Ce-Vqsexperimentalhandoffcount"))
 		delivery.VisibilityDeadline, _ = time.Parse(time.RFC3339Nano, request.Header.Get("Ce-Vqsvisibilitydeadline"))
+		delivery.CreatedAt, _ = time.Parse(time.RFC3339Nano, request.Header.Get("Ce-Vqscreatedat"))
+		delivery.ExpiresAt, _ = time.Parse(time.RFC3339Nano, request.Header.Get("Ce-Vqsexpiresat"))
 		if delivery.ReceiptHandle != "" {
 			delivery.Body = body
 		}
@@ -282,9 +298,11 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 		return vqsDelivery{}, err
 	}
 	var message struct {
-		ReceiptHandle string `json:"receiptHandle"`
-		DeliveryCount int    `json:"deliveryCount"`
-		Body          string `json:"body"`
+		ReceiptHandle string    `json:"receiptHandle"`
+		DeliveryCount int       `json:"deliveryCount"`
+		Body          string    `json:"body"`
+		CreatedAt     time.Time `json:"createdAt"`
+		ExpiresAt     time.Time `json:"expiresAt"`
 	}
 	if err := json.Unmarshal(line, &message); err != nil || message.ReceiptHandle == "" {
 		return vqsDelivery{}, errors.New("workflow/vercel: invalid queue message")
@@ -293,6 +311,13 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 		return vqsDelivery{}, fmt.Errorf("workflow/vercel: decode queue message: %w", err)
 	}
 	delivery.ReceiptHandle, delivery.DeliveryCount = message.ReceiptHandle, message.DeliveryCount
+	delivery.CreatedAt, delivery.ExpiresAt = message.CreatedAt, message.ExpiresAt
+	if delivery.CreatedAt.IsZero() {
+		delivery.CreatedAt, _ = time.Parse(time.RFC3339Nano, response.Header.Get("Vqs-Timestamp"))
+	}
+	if delivery.ExpiresAt.IsZero() {
+		delivery.ExpiresAt, _ = time.Parse(time.RFC3339Nano, response.Header.Get("Vqs-Expires-At"))
+	}
 	// The counts may come as headers, as on a multipart receive.
 	if count, err := strconv.Atoi(response.Header.Get("Vqs-Delivery-Count")); err == nil && delivery.DeliveryCount == 0 {
 		delivery.DeliveryCount = count

@@ -618,3 +618,60 @@ func TestQueueConsumerWaitsForAThrottle(t *testing.T) {
 		t.Fatalf("throttled delivery: status %d request %+v", response.Code, retry)
 	}
 }
+
+func TestRotationContinuesAMessageNearItsExpiryOrHandoffBound(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name     string
+		delivery vqsDelivery
+		message  queueMessage
+		want     string
+	}{
+		{"fresh", vqsDelivery{CreatedAt: now.Add(-time.Hour)}, queueMessage{}, ""},
+		{"near its default retention", vqsDelivery{CreatedAt: now.Add(-21 * time.Hour)}, queueMessage{}, "expiry"},
+		{"far from a longer retention", vqsDelivery{CreatedAt: now.Add(-21 * time.Hour)}, queueMessage{RetentionMs: (48 * time.Hour).Milliseconds()}, ""},
+		{"near its reported expiry", vqsDelivery{CreatedAt: now, ExpiresAt: now.Add(time.Hour)}, queueMessage{}, "expiry"},
+		{"near the handoff bound", vqsDelivery{HandoffCount: vqsMaxHandoffs - vqsRotationHandoffMargin}, queueMessage{}, "handoff bound"},
+		{"nothing known", vqsDelivery{}, queueMessage{}, ""},
+	} {
+		if got := rotation(test.delivery, test.message, now); got != test.want {
+			t.Errorf("%s: rotation = %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
+func TestHandoffNearExpiryContinuesTheFlowOnANewMessage(t *testing.T) {
+	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
+	world := newQueueWorld(t, server)
+	handler := &consumer{world: world, execute: func(context.Context, worlds.QueueInput) error { return worlds.Redeliver(0) }}
+	deliver := func(message queueMessage) (int, []recorded) {
+		t.Helper()
+		body, _ := json.Marshal(message)
+		before := len(server.all())
+		request := deliveryRequest("msg_1", string(body))
+		request.Header.Set("Ce-Vqsdeliverycount", "3")
+		request.Header.Set("Ce-Vqscreatedat", time.Now().Add(-21*time.Hour).Format(time.RFC3339Nano))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code, server.all()[before:]
+	}
+	flow := queueMessage{ID: "01MSG", RunID: "wrun_1", WorkflowName: "wf", RunSpecVersion: worlds.SpecVersion, ReplayDivergenceCount: 2,
+		RunInput: &queueRunInput{WorkflowName: "wf", SpecVersion: worlds.SpecVersion}, CompleteWaits: []string{"wait_1"}}
+	status, requests := deliver(flow)
+	if status != http.StatusOK || len(requests) != 2 || requests[0].Method != http.MethodPost || requests[1].Method != http.MethodDelete {
+		t.Fatalf("status %d requests %+v, want a new message then an acknowledgment", status, requests)
+	}
+	// The new message is a continuation of the run, not a copy.
+	var sent queueMessage
+	if err := json.Unmarshal([]byte(requests[0].Body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.ID == flow.ID || sent.RunID != "wrun_1" || sent.RunInput != nil || sent.ReplayDivergenceCount != 0 || sent.RunSpecVersion != worlds.SpecVersion || len(sent.CompleteWaits) != 1 || sent.NotBefore == nil {
+		t.Fatalf("continuation = %+v", sent)
+	}
+	// A step message is handed off: its key would drop a copy.
+	stepID := worlds.StepID("step_1")
+	if status, requests := deliver(queueMessage{ID: "01STEP", RunID: "wrun_1", StepID: &stepID}); status != http.StatusAccepted || len(requests) != 1 || requests[0].Header.Get("Vqs-Experimental-Handoff") != "1" {
+		t.Fatalf("step message: status %d requests %+v", status, requests)
+	}
+}
