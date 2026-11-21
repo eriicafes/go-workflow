@@ -689,9 +689,9 @@ func (settings startSettings) region() Region {
 	return region
 }
 
-// executionContext returns the run's ExecutionContext, or nil when it has
+// runExecutionContext returns the run's ExecutionContext, or nil when it has
 // none.
-func (settings startSettings) executionContext() map[string]any {
+func (settings startSettings) runExecutionContext() map[string]any {
 	if settings.ReplayedFrom == "" {
 		return nil
 	}
@@ -786,7 +786,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 		return nil, err
 	}
 	create.Attributes = settings.attributes(nil)
-	create.ExecutionContext = settings.executionContext()
+	create.ExecutionContext = settings.runExecutionContext()
 	if create.StartHook, err = settings.startHook(keys); err != nil {
 		return nil, err
 	}
@@ -853,7 +853,7 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 		worlds.ParentRunIDAttribute: string(parent.RunID),
 		worlds.RootRunIDAttribute:   root,
 	})
-	create.ExecutionContext = input.Settings.executionContext()
+	create.ExecutionContext = input.Settings.runExecutionContext()
 	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
 		return "", err
 	}
