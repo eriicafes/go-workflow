@@ -46,5 +46,8 @@ JavaScript or for data written by older releases:
   since no JavaScript reads them.
 - **There is one schema version and no legacy data**, so the World writes no
   `version.txt` and prints no legacy notice.
+- **It appends batches** (`EventsCreateBatch`), which world-local does not:
+  the SDK's `createBatch` is optional, but Go's runtime records a flow's
+  steps and timers in one fenced write.
 - **It serves analytics,** which world-local does not: runs and attributes
   from its tables, and steps, events, hooks, and waits from the event log.

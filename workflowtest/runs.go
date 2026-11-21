@@ -80,6 +80,13 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 	if err != nil || run.Status != worlds.StatusRunning || run.StartedAt == nil {
 		t.Fatalf("running run = %#v err=%v", run, err)
 	}
+	// A run is updated by its own events only, as in the Workflow SDK's
+	// Worlds: a wait of the run leaves it as it was.
+	time.Sleep(2 * time.Millisecond)
+	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_lifecycle", worlds.DataWaitCreated{ResumeAt: time.Now().Add(time.Hour)})
+	if waited, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || !waited.UpdatedAt.Equal(run.UpdatedAt) {
+		t.Fatalf("run after a wait = %#v err=%v, want UpdatedAt %v", waited, err, run.UpdatedAt)
+	}
 	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", worlds.DataRunCompleted{Output: json.RawMessage(`"output"`)})
 	run, err = world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	if err != nil || run.Status != worlds.StatusCompleted || string(run.Output) != `"output"` || run.CompletedAt == nil {
@@ -170,6 +177,10 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	running, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Status: []worlds.Status{worlds.StatusRunning}})
 	if err != nil || len(running.Data) != 1 || running.Data[0].RunID != ids[1] {
 		t.Fatalf("running runs = %#v err=%v", running, err)
+	}
+	// An empty status filter matches no runs, as the SDK's status: [] does.
+	if none, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Status: []worlds.Status{}}); err != nil || len(none.Data) != 0 || none.HasMore {
+		t.Fatalf("runs of no status = %#v err=%v", none, err)
 	}
 	var seen []worlds.RunID
 	cursor := ""

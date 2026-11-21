@@ -200,6 +200,11 @@ func (w *World) getRun(ctx context.Context, runID worlds.RunID, resolve worlds.R
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
+	// An empty status filter matches no runs, as in the Workflow SDK's
+	// Worlds (status: []). A nil one matches every status.
+	if input.Status != nil && len(input.Status) == 0 {
+		return worlds.Page[worlds.Run]{Data: []worlds.Run{}}, nil
+	}
 	if len(input.Status) > 1 {
 		// The backend filters by one status, so world-vercel refuses more.
 		return worlds.Page[worlds.Run]{}, fmt.Errorf("%w: the Vercel backend filters runs by one status", worlds.ErrEventInvalid)

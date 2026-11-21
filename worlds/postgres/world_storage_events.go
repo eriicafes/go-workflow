@@ -645,22 +645,28 @@ func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (
 // the event log, and the views record the slots holding them.
 func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int64) error {
 	at := event.CreatedAt
-	a.run.UpdatedAt = at
+	// The run itself changes, and is updated, only on its own events, as
+	// the Workflow SDK's Worlds update it.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
+		a.run.UpdatedAt = at
 		a.run.Status, a.run.StartedAt = worlds.StatusRunning, &at
 	case worlds.EventTypeRunCompleted:
+		a.run.UpdatedAt = at
 		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusCompleted, &at, &slot
 	case worlds.EventTypeRunFailed:
+		a.run.UpdatedAt = at
 		a.run.Status, a.run.CompletedAt, a.resultSlot = worlds.StatusFailed, &at, &slot
 		if code := worlds.RunFailedErrorCode(event.Data); code != "" {
 			a.run.ErrorCode, a.errorCode = code, &code
 		}
 	case worlds.EventTypeRunCancelled:
 		if a.run.Status != worlds.StatusCancelled {
+			a.run.UpdatedAt = at
 			a.run.Status, a.run.CompletedAt = worlds.StatusCancelled, &at
 		}
 	case worlds.EventTypeAttrSet:
+		a.run.UpdatedAt = at
 		var value worlds.DataAttrSet
 		if json.Unmarshal(event.Data, &value) == nil {
 			for _, change := range value.Changes {
