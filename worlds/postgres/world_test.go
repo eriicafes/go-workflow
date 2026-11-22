@@ -36,11 +36,18 @@ func TestConformanceShared(t *testing.T) {
 	})
 }
 
-func TestConfigValidation(t *testing.T) {
-	t.Parallel()
+// TestOpenRequiresAURL clears the environment Open falls back to, so it
+// cannot run in parallel.
+func TestOpenRequiresAURL(t *testing.T) {
+	t.Setenv("WORKFLOW_POSTGRES_URL", "")
+	t.Setenv("DATABASE_URL", "")
 	if _, err := Open(context.Background(), Config{BaseURL: testBaseURL}); err == nil {
 		t.Fatal("Open without URL succeeded")
 	}
+}
+
+func TestConfigValidation(t *testing.T) {
+	t.Parallel()
 	if _, err := New(context.Background(), nil, Config{BaseURL: testBaseURL}); err == nil {
 		t.Fatal("New without pool succeeded")
 	}
