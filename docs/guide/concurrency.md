@@ -34,6 +34,11 @@ A result's `Unwrap` method also waits, but panics on failure. Use `Value`
 when you need to handle the error. `workflow.Step` combines `Background` and
 `Value` in one call.
 
+A step or timer starts when the runner waits, so one the runner declares and
+then returns without waiting for anything never runs. The run records it as
+it ends, with a `step_created` or `wait_created` before its final event, so
+the log shows the work that was declared and left behind.
+
 ## Waiting for a group
 
 ### Wait for every outcome

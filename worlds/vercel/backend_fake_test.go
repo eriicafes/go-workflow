@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -81,6 +82,13 @@ var storedKeys = map[string]string{
 	"writer":                  "writer",
 	"errorCode":               "errorCode",
 	"cancelReason":            "cancelReason",
+	"optimizations":           "optimizations",
+	"finalSchedulingReplay":   "finalSchedulingReplay",
+	"eventCount":              "eventCount",
+	"stepCount":               "stepCount",
+	"rsfs":                    "rsfs",
+	"stso":                    "stso",
+	"ttfs":                    "ttfs",
 	"executionContext":        "executionContext",
 	"startHook":               "startHook",
 }
@@ -132,6 +140,11 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", frameContentType)
 		_, _ = writer.Write(f.eventFrame(event))
 	case len(parts) == 2 && parts[0] == "v4" && parts[1] == "events":
+		// The correlation route pages by cursor, limit and order alone.
+		if query.Has("returnAll") {
+			writeError(writer, http.StatusBadRequest, "validation-error", "the correlation listing takes no returnAll")
+			return
+		}
 		page, err := f.store.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: worlds.RunID(query.Get("runId")), CorrelationID: query.Get("correlationId")})
 		if err != nil {
 			writeGoError(writer, err)
@@ -292,8 +305,8 @@ type outcome struct {
 	// retryAfter is the Retry-After of a 425, a step started before its
 	// retry is due.
 	retryAfter time.Duration
-	// details is the structured body of a refusal, such as the owner of a
-	// start hook's token.
+	// details holds the fields a refusal carries at the top level of its
+	// body, such as the owner of a start hook's token.
 	details map[string]any
 }
 
@@ -318,7 +331,9 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 	case result.details != nil:
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(result.status)
-		_ = json.NewEncoder(writer).Encode(map[string]any{"error": result.code, "message": result.message, "details": result.details})
+		body := map[string]any{"error": result.code, "message": result.message}
+		maps.Copy(body, result.details)
+		_ = json.NewEncoder(writer).Encode(body)
 	case result.status != http.StatusOK:
 		if result.retryAfter > 0 {
 			writer.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(result.retryAfter.Seconds()))))
@@ -457,10 +472,14 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	refuse := func(err error) outcome {
 		var conflict *worlds.HookConflictError
 		if errors.As(err, &conflict) {
-			return outcome{status: http.StatusConflict, code: "start-hook-conflict", message: err.Error(), details: map[string]any{"conflictingRunId": string(conflict.RunID)}}
+			return outcome{status: http.StatusConflict, code: "start-hook-conflict", message: err.Error(), details: map[string]any{"token": conflict.Token, "conflictingRunId": string(conflict.RunID)}}
 		}
 		status, code := goErrorStatus(err)
 		refused := outcome{status: status, code: code, message: err.Error()}
+		// A forced claim's refusal names the hook that took the token.
+		if claimed, ok := errors.AsType[*worlds.HookForceClaimedError](err); ok && claimed.RunID != "" {
+			refused.details = map[string]any{"claimedBy": map[string]any{"runId": string(claimed.RunID), "hookId": string(claimed.HookID)}}
+		}
 		var early *worlds.TooEarlyError
 		if errors.As(err, &early) {
 			refused.retryAfter = early.RetryAfter
@@ -575,6 +594,10 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 }
 
 func (f *fakeBackend) listEvents(ctx context.Context, writer http.ResponseWriter, runID worlds.RunID, query map[string][]string, version string) {
+	if cursor := pagination(query).Cursor; cursor != "" && !strings.HasPrefix(cursor, "eid:") {
+		writeError(writer, http.StatusBadRequest, "validation-error", "cursor is not eid:<event ID>")
+		return
+	}
 	// The counters are read before the listing, so the listing covers every
 	// position they count.
 	seq, seqInBand := f.counters(ctx, runID)
@@ -698,8 +721,13 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		stored["token"], stored["conflictingRunId"] = created.Token, string(created.ConflictingRunID)
 	case worlds.EventTypeHookDisposed:
 		var disposed worlds.HookDisposedEventData
-		if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil && disposed.ForceClaimedBy != nil {
-			stored["forceClaimedBy"] = map[string]any{"runId": string(disposed.ForceClaimedBy.RunID), "hookId": string(disposed.ForceClaimedBy.HookID)}
+		if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil {
+			if disposed.Token != "" {
+				stored["token"] = disposed.Token
+			}
+			if disposed.ForceClaimedBy != nil {
+				stored["forceClaimedBy"] = map[string]any{"runId": string(disposed.ForceClaimedBy.RunID), "hookId": string(disposed.ForceClaimedBy.HookID)}
+			}
 		}
 	default:
 		meta, payload, err := encodeEvent(worlds.EventsCreateEvent{EventType: event.EventType, CorrelationID: event.CorrelationID, Data: event.Data})
@@ -709,11 +737,6 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		for key, value := range meta {
 			if name, ok := storedKeys[key]; ok {
 				stored[name] = value
-			}
-		}
-		if data, ok := meta["eventData"].(map[string]any); ok {
-			for key, value := range data {
-				stored[key] = value
 			}
 		}
 		if field, ok := payloadFields[event.EventType]; ok && len(payload) > 0 {

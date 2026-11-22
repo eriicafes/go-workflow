@@ -218,7 +218,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 		if disposal != nil && disposal.RunID == t.run.RunID {
 			if disposal.ForceClaimedBy != nil {
-				return "", &worlds.HookForceClaimedError{RunID: disposal.ForceClaimedBy.RunID, HookID: disposal.ForceClaimedBy.HookID}
+				return "", t.forceClaimed(worlds.HookID(event.CorrelationID), disposal.ForceClaimedBy)
 			}
 			return "", &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
@@ -249,8 +249,57 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		if err != nil {
 			return "", err
 		}
-		if owner.held(now) {
+		if held, err := t.s.tokenHeld(owner, now); err != nil {
+			return "", err
+		} else if held {
 			return "", &worlds.HookConflictError{Token: created.Token, RunID: owner.RunID}
+		}
+	}
+	return "", nil
+}
+
+// forceClaimed returns the redirect a delivery to the run's force-claimed
+// hook id is refused with. It names the token and the hook that holds it
+// now, which is not the claimant once the token was taken again, and the
+// claimant when the token has no owner.
+func (t *txn) forceClaimed(id worlds.HookID, claimant *worlds.HookForceClaim) error {
+	redirect := &worlds.HookForceClaimedError{RunID: claimant.RunID, HookID: claimant.HookID}
+	token, err := t.hookToken(id)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return redirect
+	}
+	redirect.Token = token
+	owner, err := t.token(token)
+	if err != nil {
+		return err
+	}
+	if owner != nil {
+		redirect.RunID, redirect.HookID = owner.RunID, owner.HookID
+	}
+	return redirect
+}
+
+// hookToken returns the token the run's hook id was created with, from the
+// run's log, or "" when the log does not record it.
+func (t *txn) hookToken(id worlds.HookID) (string, error) {
+	if id == worlds.StartHookID(t.run.RunID) {
+		if t.run.StartHook != nil {
+			return t.run.StartHook.Token, nil
+		}
+		return "", nil
+	}
+	events, err := t.correlated(string(id))
+	if err != nil {
+		return "", err
+	}
+	for _, event := range events {
+		if event.EventType == worlds.EventTypeHookCreated {
+			var created worlds.DataHookCreated
+			_ = json.Unmarshal(event.Data, &created)
+			return created.Token, nil
 		}
 	}
 	return "", nil
@@ -259,7 +308,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 // correlated returns the run's eventType events for correlationID,
 // committed then staged.
 func (t *txn) correlated(correlationID string) ([]worlds.Event, error) {
-	committed, err := t.s.correlated(t.run.RunID, correlationID, 0, false, 0)
+	committed, err := t.s.correlated(t.run.RunID, correlationID)
 	if err != nil {
 		return nil, err
 	}
@@ -286,11 +335,11 @@ func (t *txn) findEvent(eventType worlds.EventType, correlationID string) (world
 	return "", nil
 }
 
-// eventTime returns the creation time of event: its OccurredAt for an
-// in-band write that sets one, and now otherwise.
+// eventTime returns the creation time of event: its OccurredAt, to the
+// millisecond, for an in-band write that sets one, and now otherwise.
 func eventTime(event worlds.EventsCreateEvent, inBand *int, now time.Time) time.Time {
 	if inBand != nil && !event.OccurredAt.IsZero() {
-		return event.OccurredAt.UTC()
+		return event.OccurredAt.UTC().Truncate(time.Millisecond)
 	}
 	return now
 }
@@ -383,7 +432,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			// A previous owner whose claim lapsed is deleted with its token.
@@ -394,7 +443,7 @@ func (t *txn) materialize(event worlds.Event) error {
 			if previous != nil && previous.HookID != id {
 				t.deleteHook(previous.HookID)
 			}
-			t.setToken(value.Token, &tokenRecord{HookID: id, RunID: run.RunID})
+			t.setToken(value.Token, &tokenRecord{HookID: id, RunID: run.RunID, TokenRetentionUntil: value.TokenRetentionUntil})
 		}
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)
@@ -424,18 +473,14 @@ func (t *txn) materialize(event worlds.Event) error {
 				}
 				hook = *staged
 			}
+			if hook.TokenRetentionUntil != nil && hook.TokenRetentionUntil.After(now) {
+				continue
+			}
 			owner, err := t.token(hook.Token)
 			if err != nil {
 				return err
 			}
-			owns := owner != nil && owner.HookID == hook.HookID
-			if hook.TokenRetentionUntil != nil && hook.TokenRetentionUntil.After(now) {
-				if owns {
-					t.setToken(hook.Token, &tokenRecord{HookID: hook.HookID, RunID: hook.RunID, TokenRetentionUntil: hook.TokenRetentionUntil})
-				}
-				continue
-			}
-			if owns {
+			if owner != nil && owner.HookID == hook.HookID {
 				t.setToken(hook.Token, nil)
 			}
 			t.deleteHook(hook.HookID)
@@ -488,7 +533,7 @@ func (t *txn) commit() error {
 	if len(t.appended) == 0 {
 		return nil
 	}
-	purge := t.applyRetention(time.Now().UTC())
+	purge := t.applyRetention(clock())
 	for _, event := range t.appended {
 		if err := t.s.insertEvent(event); err != nil {
 			return err
@@ -514,7 +559,7 @@ func (t *txn) commit() error {
 			err = t.s.putToken(string(key), t.tokens[string(key)])
 		case waitKey:
 			if !t.run.Status.Terminal() {
-				err = t.s.putWait(*t.waits[string(key)])
+				err = t.s.putWait(string(key), *t.waits[string(key)])
 			}
 		}
 		if err != nil {
@@ -572,7 +617,7 @@ func (t *txn) applyRetention(now time.Time) bool {
 // run's current InBandCount.
 func (t *txn) fence(count *int) error {
 	if count != nil && *count != t.run.InBandCount {
-		return &worlds.InBandSupersededError{}
+		return &worlds.InBandSupersededError{EventCount: t.run.EventCount, InBandCount: t.run.InBandCount}
 	}
 	return nil
 }
@@ -635,10 +680,8 @@ func (s *store) delta(run runRecord, options worlds.EventsCreateOptions) ([]worl
 	start := run.EventCount
 	if options.EventCount != nil {
 		start = min(max(*options.EventCount, 0), run.EventCount)
-	} else if options.SinceCursor != "" {
-		if slot, err := eventCursor(options.SinceCursor); err == nil {
-			start = min(slot, run.EventCount)
-		}
+	} else if slot := eventCursor(options.SinceCursor); slot > 0 {
+		start = min(slot, run.EventCount)
 	}
 	if start >= run.EventCount {
 		return nil, nil
@@ -676,10 +719,13 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
+	if err := checkID("run ID", string(input.RunID)); err != nil {
+		return worlds.EventResult{}, err
+	}
 	var result worlds.EventResult
 	err := w.commitRefusal(ctx, func(s *store) error {
 		var err error
-		result, err = w.createRun(s, input, time.Now().UTC())
+		result, err = w.createRun(s, input, clock())
 		return err
 	})
 	return result, err
@@ -740,7 +786,9 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 		if err != nil {
 			return worlds.EventResult{}, err
 		}
-		if owner.held(now) {
+		if held, err := s.tokenHeld(owner, now); err != nil {
+			return worlds.EventResult{}, err
+		} else if held {
 			decision := worlds.StartHookDecision{Token: start.Token, ConflictingRunID: owner.RunID}
 			if err := s.putRejection(input.RunID, decision); err != nil {
 				return worlds.EventResult{}, err
@@ -757,7 +805,7 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 		if err := s.putHook(hook); err != nil {
 			return worlds.EventResult{}, err
 		}
-		if err := s.putToken(start.Token, &tokenRecord{HookID: hook.HookID, RunID: input.RunID}); err != nil {
+		if err := s.putToken(start.Token, &tokenRecord{HookID: hook.HookID, RunID: input.RunID, TokenRetentionUntil: start.TokenRetentionUntil}); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
@@ -772,6 +820,9 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	if err := checkAppendIDs(input.RunID, input.Event); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if input.Event.EventType == worlds.EventTypeHookCreated {
 		return w.createHook(ctx, input)
 	}
@@ -797,7 +848,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 
 // appendEvent appends one event in the write transaction s.
 func (w *World) appendEvent(s *store, input worlds.EventsCreateInput) (worlds.EventResult, bool, error) {
-	now := time.Now().UTC()
+	now := clock()
 	if input.Event.EventType == worlds.EventTypeRunStarted {
 		// A first delivery's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
@@ -879,6 +930,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if !validAppend(value.EventType) || value.EventType == worlds.EventTypeHookCreated {
 			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
 		}
+		if err := checkAppendIDs(input.RunID, value); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
 	}
 	var result worlds.EventBatchResult
 	purged := false
@@ -914,7 +968,7 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 			result.Results[index].Err = fmt.Errorf("%w: an earlier event of %s was refused", worlds.ErrStepNotStartable, value.CorrelationID)
 			continue
 		}
-		now := time.Now().UTC()
+		now := clock()
 		replay, err := t.admit(value, now)
 		if err == nil && replay != "" {
 			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, value.EventType, value.CorrelationID)
@@ -948,6 +1002,9 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
+	if err := errors.Join(checkID("run ID", string(input.RunID)), checkID("event ID", string(input.EventID))); err != nil {
+		return worlds.Event{}, err
+	}
 	var event worlds.Event
 	err := w.read(ctx, func(s *store) error {
 		// A run's events are read whatever its tag: only runs are scoped by
@@ -974,9 +1031,12 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 }
 
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	if err := checkID("run ID", string(input.RunID)); err != nil {
+		return worlds.EventsPage{}, err
+	}
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
-	// Pages are by slot. The cursor is the last returned event ID, in either
-	// order.
+	// Pages are by slot. The cursor names the last returned event, in either
+	// order, and a page ends early once it holds maxEventPageBytes.
 	var page worlds.EventsPage
 	err := w.read(ctx, func(s *store) error {
 		// A run's events are read whatever its tag, and a missing run has
@@ -989,80 +1049,58 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 		if err != nil {
 			return err
 		}
+		events, hasMore, err := s.listEvents(eventQuery{runID: input.RunID, after: eventCursor(input.Pagination.Cursor), descending: input.Pagination.SortOrder == worlds.SortOrderDescending, limit: input.Pagination.Limit, capped: true})
+		if err != nil {
+			return err
+		}
 		// The run's row holds both counters, read in the page's snapshot.
-		snapshot := worlds.EventsSnapshot{EventCount: run.EventCount, InBandCount: run.InBandCount}
-		cursor, err := eventCursor(input.Pagination.Cursor)
-		if err != nil {
-			return err
-		}
-		limit := input.Pagination.Limit
-		if input.Pagination.SortOrder == worlds.SortOrderDescending {
-			high := run.EventCount
-			if cursor > 0 {
-				high = min(cursor-1, run.EventCount)
-			}
-			low := 1
-			if limit > 0 {
-				low = max(high-limit+1, 1)
-			}
-			events, err := s.readEventsDescending(input.RunID, low, high)
-			if err != nil {
-				return err
-			}
-			page = worlds.EventsPage{Page: eventsPage(worlds.ResolveEvents(events, input.ResolveData), low > 1), Snapshot: snapshot}
-			return nil
-		}
-		low := cursor + 1
-		high := run.EventCount
-		if limit > 0 {
-			high = min(cursor+limit, run.EventCount)
-		}
-		events, err := s.readEvents(input.RunID, low, high)
-		if err != nil {
-			return err
-		}
-		page = worlds.EventsPage{Page: eventsPage(worlds.ResolveEvents(events, input.ResolveData), high < run.EventCount), Snapshot: snapshot}
+		page = worlds.EventsPage{Page: eventsPage(worlds.ResolveEvents(events, input.ResolveData), hasMore), Snapshot: worlds.EventsSnapshot{EventCount: run.EventCount, InBandCount: run.InBandCount}}
 		return nil
 	})
 	return page, err
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	if err := errors.Join(checkID("run ID", string(input.RunID)), checkID("correlation ID", input.CorrelationID)); err != nil {
+		return worlds.Page[worlds.Event]{}, err
+	}
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Event]
 	err := w.read(ctx, func(s *store) error {
 		// A missing run has no events.
-		cursor, err := eventCursor(input.Pagination.Cursor)
+		events, hasMore, err := s.listEvents(eventQuery{runID: input.RunID, correlationID: input.CorrelationID, after: eventCursor(input.Pagination.Cursor), descending: input.Pagination.SortOrder == worlds.SortOrderDescending, limit: input.Pagination.Limit, capped: true})
 		if err != nil {
 			return err
 		}
-		limit := input.Pagination.Limit
-		if limit > 0 {
-			limit++
-		}
-		matched, err := s.correlated(input.RunID, input.CorrelationID, cursor, input.Pagination.SortOrder == worlds.SortOrderDescending, limit)
-		if err != nil {
-			return err
-		}
-		hasMore := false
-		if input.Pagination.Limit > 0 && len(matched) > input.Pagination.Limit {
-			matched, hasMore = matched[:input.Pagination.Limit], true
-		}
-		page = eventsPage(worlds.ResolveEvents(matched, input.ResolveData), hasMore)
+		page = eventsPage(worlds.ResolveEvents(events, input.ResolveData), hasMore)
 		return nil
 	})
 	return page, err
 }
 
+// checkAppendIDs refuses an append whose run ID or correlation ID, when it
+// has one, is unsafe.
+func checkAppendIDs(runID worlds.RunID, event worlds.EventsCreateEvent) error {
+	if runID != "" {
+		if err := checkID("run ID", string(runID)); err != nil {
+			return err
+		}
+	}
+	if event.CorrelationID != "" {
+		return checkID("correlation ID", event.CorrelationID)
+	}
+	return nil
+}
+
 func validAppend(eventType worlds.EventType) bool {
-	return eventType != worlds.EventTypeRunCreated && eventType.Valid()
+	return eventType.Creatable()
 }
 
 func eventsPage(events []worlds.Event, hasMore bool) worlds.Page[worlds.Event] {
 	page := worlds.Page[worlds.Event]{Data: events, HasMore: hasMore && len(events) > 0}
 	// The last page's cursor resumes after it.
 	if len(events) > 0 {
-		page.Cursor = string(events[len(events)-1].EventID)
+		page.Cursor = eventCursorPrefix + string(events[len(events)-1].EventID)
 	}
 	return page
 }

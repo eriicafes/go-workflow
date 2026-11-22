@@ -246,7 +246,9 @@ func (e *Execution) systemHook(hookID string) bool {
 
 // writeAhead adds result, the outcome of an inline step's attempt, to the log
 // where its write is expected to land, so the runner reads it at once, and
-// sends the write to land there behind the flow's other writes ahead.
+// sends the write to land there behind the flow's other writes ahead. A
+// single step_failed written ahead is always such an outcome, of a function
+// that ran, and its write says so.
 func (e *Execution) writeAhead(step pendingStep, result worlds.DataStepResult) {
 	eventType := worlds.EventTypeStepCompleted
 	if len(result.Error) != 0 {
@@ -331,7 +333,7 @@ func (e *Execution) startWriter() {
 				write.result, write.err = e.world.EventsCreate(e.ctx, worlds.EventsCreateInput{
 					RunID:   e.run.RunID,
 					Event:   write.event,
-					Options: worlds.EventsCreateOptions{EventCount: &held, InBandCount: &fence},
+					Options: worlds.EventsCreateOptions{EventCount: &held, InBandCount: &fence, AfterStepBody: write.event.EventType == worlds.EventTypeStepFailed},
 				})
 				write.createdAt = []time.Time{write.result.CreatedAt}
 				if write.event.EventType == worlds.EventTypeRunStarted && (write.err == nil && write.result.AllocatedEventCount == 0 || is[*worlds.InBandSupersededError](write.err) || errors.Is(write.err, worlds.ErrEntityConflict)) {

@@ -40,24 +40,21 @@ func SetAttributes(ctx context.Context, attributes map[string]*string, options .
 		return ErrNoWorkflow
 	}
 	keys := make([]string, 0, len(attributes))
-	values := make(map[string]string, len(attributes))
-	for key, value := range attributes {
+	for key := range attributes {
 		keys = append(keys, key)
-		values[key] = ""
-		if value != nil {
-			values[key] = *value
-		}
 	}
 	if len(keys) == 0 {
 		return nil
-	}
-	if err := worlds.CheckAttributes(values, option.AllowReservedAttributes); err != nil {
-		return FatalError(err)
 	}
 	slices.Sort(keys)
 	changes := make([]worlds.RunsAttributeChange, len(keys))
 	for index, key := range keys {
 		changes[index] = worlds.RunsAttributeChange{Key: key, Value: attributes[key]}
+	}
+	// The run's attributes are not known here, so only the attributes set
+	// count towards the limit: a removal adds none.
+	if err := worlds.CheckAttributeChanges(nil, changes, option.AllowReservedAttributes); err != nil {
+		return FatalError(err)
 	}
 	if inStep {
 		step, _ := core.StepMetadataFromContext(ctx)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -35,6 +36,7 @@ func TestEncryptionKeysMatchWorldVercel(t *testing.T) {
 
 	// A run of another deployment asks Vercel's API, authorized by the OIDC
 	// token, retrying while it is unavailable.
+	shorten(t, &readRetryBase, time.Millisecond)
 	other := bytes.Repeat([]byte{9}, 32)
 	calls := 0
 	api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -57,6 +59,17 @@ func TestEncryptionKeysMatchWorldVercel(t *testing.T) {
 	world.runKeyURL = api.URL + "/"
 	if key, err := world.EncryptionKeyForRun(ctx, "wrun_1", "dpl_other"); err != nil || !bytes.Equal(key, other) || calls != 2 {
 		t.Fatalf("fetched key = %x err=%v calls=%d", key, err, calls)
+	}
+
+	// A rate limit is Vercel's answer, and is not asked about again.
+	limited := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls++
+		writer.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer limited.Close()
+	calls, world.runKeyURL = 0, limited.URL+"/"
+	if _, err := world.EncryptionKeyForRun(ctx, "wrun_1", "dpl_other"); err == nil || calls != 1 {
+		t.Fatalf("rate limited key = %v after %d calls, want its failure after one", err, calls)
 	}
 
 	// Without a project, payloads are not encrypted.

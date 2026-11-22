@@ -138,18 +138,22 @@ export namespace RPC {
 	};
 	export type Hook = {
 		runId: string;
-		resumeContext: { deploymentId: string; workflowName: string; runSpecVersion: number };
+		resumeContext: { deploymentId: string; workflowName: string; encryptionPublicKey?: string; runSpecVersion: number };
 		specVersion: number;
 		hookId: string;
 		token: string;
-		metadata: Uint8Array;
-		webhook: Webhook | null;
-		webhookEventId: string;
+		metadata: Uint8Array | null;
+		isWebhook: boolean;
+		isSystem?: boolean;
 		createdAt: Date;
 		tokenRetentionUntil: Date | null;
-		claimedFrom: { runId: string; hookId: string } | null;
+		claimedFrom: { runId: string; hookId: string; workflowName?: string; deploymentId?: string; runSpecVersion?: number } | null;
+		/** Whether the World deduplicates resumes of the hook, on a read by token. */
+		resumeDedup?: boolean;
 	};
 	export type QueueResult = { messageId: string };
+	/** One item's outcome in a queue.queueBatch answer. */
+	export type QueueBatchResult = { messageId: string; error?: string; retryable?: boolean };
 	export type StreamInfo = { tailIndex: number; done: boolean };
 	export type Empty = Record<string, never>;
 	export type Error = {
@@ -159,6 +163,8 @@ export namespace RPC {
 		conflictingRunId?: string;
 		/** Nanoseconds a throttled failure asks the caller to wait. */
 		retryAfter?: number;
+		/** The fields of the Go error type the sentinel names. */
+		details?: unknown;
 	};
 
 	// Input and output are embedded CBOR items, matching the Go RawMessage fields.
@@ -235,29 +241,89 @@ const sdkErrorNames: Record<string, string> = {
 	stream_expired: "StreamExpiredError",
 	run_not_found: "WorkflowRunNotFoundError",
 	hook_not_found: "HookNotFoundError",
+	hook_conflict: "HookConflictError",
+	hook_force_claimed: "HookForceClaimedError",
+	in_band_superseded: "InBandSupersededError",
 };
 
 export class HTTPWorldError extends Error {
 	readonly code: string;
-	readonly status?: number;
+	status?: number;
 	/** The Go sentinel error the server reported, such as run_not_found. */
 	readonly sentinel?: string;
 	/** The run holding a hook token, for a hook_conflict failure. */
 	readonly conflictingRunId?: string;
 	/** Seconds a throttled failure asks the caller to wait, when it says. */
 	readonly retryAfter?: number;
+	/** The hook token of a hook_conflict, hook_force_claimed or hook_not_found failure. */
+	readonly token?: string;
+	/** The run and hook that took the token, for a hook_force_claimed failure. */
+	readonly claimedByRunId?: string;
+	readonly claimedByHookId?: string;
+	/** The run's position counters, for an in_band_superseded failure. */
+	readonly seq?: number;
+	readonly seqInBand?: number;
+	/** The run, its status and when its data expired, for a run_expired failure. */
+	readonly runId?: string;
+	readonly runStatus?: string;
+	readonly expiredAt?: Date;
+	/** The stream of a stream_expired failure, which also has runId and expiredAt. */
+	readonly streamId?: string;
+	/** The run's and the World's spec versions, for a run_not_supported failure. */
+	readonly runSpecVersion?: number;
+	readonly worldSpecVersion?: number;
 
-	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string, retryAfter?: number) {
+	constructor(code: string, message: string, status?: number, sentinel?: string, conflictingRunId?: string, retryAfter?: number, details?: Record<string, unknown>) {
 		super(message);
 		// A failure the Workflow SDK's runtime acts on is named as its error
 		// class, which callers recognize by name (EntityConflictError.is,
-		// ThrottleError.is reading retryAfter, and so on).
-		this.name = (sentinel && sdkErrorNames[sentinel]) || "HTTPWorldError";
+		// ThrottleError.is reading retryAfter, and so on). Any other failure
+		// of the World is its WorkflowWorldError, which callers read the
+		// status of.
+		this.name = (sentinel && sdkErrorNames[sentinel]) || (sentinel || status !== undefined ? "WorkflowWorldError" : "HTTPWorldError");
 		this.code = code;
 		this.status = status;
 		this.sentinel = sentinel;
 		this.conflictingRunId = conflictingRunId;
 		this.retryAfter = retryAfter;
+		// The fields the SDK reads off the error classes above.
+		const text = (key: string) => (typeof details?.[key] === "string" && details[key] ? (details[key] as string) : undefined);
+		const count = (key: string) => (typeof details?.[key] === "number" ? (details[key] as number) : undefined);
+		// Go sends a time it does not have as its zero time, year 1.
+		const time = (key: string) => (details?.[key] instanceof Date && (details[key] as Date).getUTCFullYear() > 1 ? (details[key] as Date) : undefined);
+		switch (sentinel) {
+			case "hook_not_found":
+				this.token = text("token");
+				break;
+			case "run_expired":
+				this.runId = text("runId");
+				this.runStatus = text("runStatus");
+				this.expiredAt = time("expiredAt");
+				break;
+			case "stream_expired":
+				this.runId = text("runId");
+				this.streamId = text("streamId");
+				this.expiredAt = time("expiredAt");
+				break;
+			case "run_not_supported":
+				this.runSpecVersion = count("runSpecVersion");
+				this.worldSpecVersion = count("worldSpecVersion");
+				break;
+			case "hook_conflict":
+				this.token = text("token");
+				this.conflictingRunId ??= text("runId");
+				break;
+			case "hook_force_claimed":
+				this.token = text("token");
+				this.claimedByRunId = text("runId");
+				this.claimedByHookId = text("hookId");
+				break;
+			case "in_band_superseded":
+				this.status = 412;
+				this.seq = count("eventCount");
+				this.seqInBand = count("inBandCount");
+				break;
+		}
 	}
 }
 
@@ -330,9 +396,10 @@ export class RPCClient {
 			);
 		}
 		if (envelope.error) {
-			const { code, message, sentinel, conflictingRunId, retryAfter } = envelope.error;
-			const seconds = retryAfter ? Math.ceil(retryAfter / 1e9) : undefined;
-			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId, seconds);
+			const { code, message, sentinel, conflictingRunId, retryAfter, details } = envelope.error;
+			const seconds = retryAfter ? Math.ceil(Number(retryAfter) / 1e9) : undefined;
+			const fields = details && typeof details === "object" && !(details instanceof Uint8Array) ? (fromWire(details) as Record<string, unknown>) : undefined;
+			throw new HTTPWorldError(code, message, rpcErrorStatus[code] ?? 500, sentinel, conflictingRunId, seconds, fields);
 		}
 		if (envelope.output === undefined) {
 			return undefined as T;
@@ -364,7 +431,7 @@ export function devkitName(kind: "workflow" | "step", name: string): string {
 
 // goName reverses devkitName. Names whose module is a relative path or carries
 // a version came from JavaScript and are kept as they are.
-function goName(kind: "workflow" | "step", name: string): string {
+export function goName(kind: "workflow" | "step", name: string): string {
 	const [prefix, module, ...identifier] = name.split("//");
 	if (prefix !== kind || !module || identifier.length === 0 || module.startsWith(".") || module.includes("@")) {
 		return name;
@@ -373,6 +440,12 @@ function goName(kind: "workflow" | "step", name: string): string {
 }
 
 function toWire(value: unknown, preserveKeys = false): unknown {
+	// cbor-x writes an integer of 2^32 or more as a float, which Go does not
+	// decode into an integer such as a duration's nanoseconds, so it is sent
+	// as a 64-bit integer.
+	if (typeof value === "number" && Number.isInteger(value) && Math.abs(value) >= 2 ** 32) {
+		return BigInt(value);
+	}
 	if (value == null || value instanceof Date || value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return value;
 	}
@@ -392,6 +465,11 @@ function toWire(value: unknown, preserveKeys = false): unknown {
 }
 
 function fromWire(value: unknown, preserveKeys = false): unknown {
+	// cbor-x reads a 64-bit integer as a bigint. One a number holds exactly,
+	// such as a duration's nanoseconds, is returned as a number.
+	if (typeof value === "bigint") {
+		return Number.isSafeInteger(Number(value)) ? Number(value) : value;
+	}
 	if (value == null || value instanceof Date || value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return value;
 	}

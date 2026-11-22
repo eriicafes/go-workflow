@@ -64,8 +64,9 @@ for JavaScript, for its queue, or for data written by older releases:
   `owner_id`, `project_id`, and `environment` columns, which world-postgres
   keeps for Vercel's accounts, are gone.
 - **Steps are keyed by run** as well as by step, since a step ID is unique
-  only within its run. Streams are keyed by name alone, and the run is stored
-  with each chunk for `StreamsList`.
+  only within its run. That key leads with the run, so there is no
+  `workflow_steps_run_id_index`. Streams are keyed by name alone, and the run
+  is stored with each chunk for `StreamsList`.
 - **A purge removes the payloads from each event's CBOR** and keeps the rest
   of its data, where world-postgres clears the whole column. It cuts each
   stream to an `eof` row, where world-postgres keeps the chunk rows with their
@@ -75,7 +76,32 @@ for JavaScript, for its queue, or for data written by older releases:
   stream name has no length limit.
 - **A queue row counts its job's attempts** in its payload and its
   `deliveries` and `handoffs` columns, for `Attempt`, `DeliveryCount`, and the
-  73 attempts of a job.
+  73 attempts of a job. A failed delivery is retried after world-postgres's
+  backoff, e<sup>n</sup> seconds over the job's first ten failures, and, as
+  there, a message never expires.
+- **`workflow_runs.updated_at` moves only with the run:** on its own events
+  and on attribute writes. world-postgres also moves it whenever it sets or
+  clears `wake_pending`, which is part of its queue.
+- **A late `step_failed` is refused on a finished run** unless its step is
+  running, with `*RunExpiredError`, as every Go World and world-local do.
+  world-postgres checks only the step and records it.
+- **A run ID that names a run created without a start hook is refused** when
+  it is created again with one (`ErrStartHookRejected`), as world-local does.
+  world-postgres answers with the existing run, for runs created by workers
+  that predate start hooks, which Go has none of.
+- **A resume of a hook another run took over is redirected**
+  (`*HookForceClaimedError`, naming the token's holder) whether or not it
+  carries a resume ID. world-postgres redirects only a `hook_received`
+  without one. Go's resumes always carry one, so they would lose the redirect.
+- **A stream cursor is the index of the next chunk,** in decimal, as in every
+  Go World, and the last page has one, so a reader can wait for more.
+  world-postgres's is base64 JSON of the last chunk's ID and the next index,
+  and is absent on the last page.
+- **A closed stream stores nothing more.** A write or a second close on it is
+  dropped, where world-postgres appends rows its readers ignore. The first
+  write to a new stream of a run whose data was deleted stores an `eof` row,
+  so the stream reads as closed, where world-postgres stores nothing and the
+  stream reads as open and empty.
 - **Startup recovery reads parked runs from the queue.** A due or leased flow
   of the run stands in for world-postgres's `wake_pending` and locked
   orchestrator jobs, and every run is recovered, as there is no `job_prefix`.

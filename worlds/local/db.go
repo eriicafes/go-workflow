@@ -113,9 +113,9 @@ CREATE TABLE start_hook_rejections (
 );
 
 CREATE TABLE stream_chunks (
-  run_id TEXT NOT NULL,
   name TEXT NOT NULL,
   idx INTEGER NOT NULL,
+  run_id TEXT,
   tag TEXT,
   data BLOB,
   eof INTEGER NOT NULL DEFAULT 0,

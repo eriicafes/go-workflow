@@ -1,0 +1,61 @@
+// Command server serves an in-memory World over HTTP for world-http's tests,
+// which drive it through the adapter as the Workflow SDK would. It prints one
+// line of JSON with its base URL and the names of its workflows, then serves
+// until it is killed.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/eriicafes/go-workflow"
+	"github.com/eriicafes/go-workflow/worlds"
+	"github.com/eriicafes/go-workflow/worlds/testworld"
+)
+
+// Review waits for one payload on the hook Token and returns it.
+type Review struct {
+	workflow.Struct[Decision]
+	Token string `json:"token"`
+}
+
+// Decision is the payload a Review's hook receives.
+type Decision struct {
+	Approved bool `json:"approved"`
+}
+
+// Nap sleeps for an hour, so a test can wake it.
+type Nap struct {
+	workflow.Struct[string]
+}
+
+func main() {
+	world := testworld.New(
+		workflow.Use(func(ctx context.Context, input Review) (Decision, error) {
+			return workflow.CreateHook[Decision](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
+		}),
+		workflow.Use(func(ctx context.Context, _ Nap) (string, error) {
+			if err := workflow.Sleep(ctx, time.Hour); err != nil {
+				return "", err
+			}
+			return "rested", nil
+		}),
+	)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{
+		"baseURL": "http://" + listener.Addr().String() + worlds.HTTPPrefixPath(""),
+		"review":  worlds.WorkflowName[Review](),
+		"nap":     worlds.WorkflowName[Nap](),
+	}); err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(http.Serve(listener, worlds.HTTPHandler(world, "")))
+}

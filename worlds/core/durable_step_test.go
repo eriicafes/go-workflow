@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -38,7 +41,7 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input durableStepInput) (durableStepOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
 			if attempts.Add(1) == 1 {
-				return 0, errors.New("retry")
+				return 0, workflow.RetryableError(errors.New("retry"), time.Millisecond)
 			}
 			return value + 1, nil
 		}, input.Value, workflow.StepOptions{MaxRetries: 1})
@@ -205,7 +208,50 @@ type tracedStepOutput struct{}
 
 func (tracedStepInput) Workflow(tracedStepOutput) {}
 
-func tracedStep(context.Context, int) (int, error) { return 0, errors.New("try again") }
+func tracedStep(context.Context, int) (int, error) {
+	return 0, workflow.RetryableError(errors.New("try again"), time.Millisecond)
+}
+
+type startTracedInput struct{}
+
+func (startTracedInput) Workflow(tracedStepOutput) {}
+
+func startTracedStep(context.Context, int) (int, error) { return 0, nil }
+
+func TestDurableStepContinuesTheTraceTheRunWasStartedIn(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	previousProvider, previousPropagator := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer otel.SetTracerProvider(previousProvider)
+	defer otel.SetTextMapPropagator(previousPropagator)
+
+	starter := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{7},
+		SpanID:     trace.SpanID{8},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ startTracedInput) (tracedStepOutput, error) {
+		_, err := workflow.Step(ctx, startTracedStep, 1)
+		return tracedStepOutput{}, err
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	// The run records the trace context it is started in.
+	run, err := workflow.Start(trace.ContextWithRemoteSpanContext(ctx, starter), startTracedInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatal(err)
+	}
+	spans := exporter.GetSpans()
+	if len(spans) != 1 || spans[0].SpanContext.TraceID() != starter.TraceID() || spans[0].Parent.SpanID() != starter.SpanID() {
+		t.Fatalf("spans = %+v", spans)
+	}
+}
 
 func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
@@ -292,5 +338,354 @@ func TestStepWhoseInputDoesNotEncodeIsCreatedWithThePlaceholderAndFailed(t *test
 	}
 	if err := worlds.DecodePayload(steps.Data[0].Input, nil, &input); err != nil || !input.Flag || len(input.Args) != 1 || !strings.Contains(input.Args[0], "input unavailable") {
 		t.Fatalf("input = %+v err = %v", input, err)
+	}
+}
+
+type retryDelayInput struct{ After time.Duration }
+type retryDelayOutput struct{}
+
+func (retryDelayInput) Workflow(retryDelayOutput) {}
+
+func retryDelayStep(_ context.Context, after time.Duration) (struct{}, error) {
+	if after > 0 {
+		return struct{}{}, workflow.RetryableError(errors.New("later"), after)
+	}
+	return struct{}{}, errors.New("again")
+}
+
+func retryDelayRunner() core.Runner {
+	return workflow.Use(func(ctx context.Context, input retryDelayInput) (retryDelayOutput, error) {
+		_, err := workflow.Background(ctx, retryDelayStep, input.After, workflow.StepOptions{MaxRetries: 1}).Value(ctx)
+		return retryDelayOutput{}, err
+	})
+}
+
+func TestFailedStepRetriesAfterASecondByDefault(t *testing.T) {
+	runner := retryDelayRunner()
+	world := testworld.NewManual(runner)
+	defer world.Close()
+	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, retryDelayInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := core.NewRuntime(world, core.Runners(runner))
+	for range 2 {
+		// The flow creates the step, and the step's delivery runs its
+		// first attempt, which asks for the message again when the retry
+		// is due.
+		message := world.QueuedMessages()[0]
+		err := runtime.Execute(ctx, message.Input)
+		if redelivery, ok := worlds.RedeliveryOf(err); ok {
+			if redelivery.After < 900*time.Millisecond || redelivery.After > time.Second {
+				t.Fatalf("redelivery after %s, want a second", redelivery.After)
+			}
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := world.Acknowledge(ctx, message.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events.Data {
+		if event.EventType != worlds.EventTypeStepRetrying {
+			continue
+		}
+		var data worlds.DataStepResult
+		if err := json.Unmarshal(event.Data, &data); err != nil || data.RetryAfter == nil {
+			t.Fatalf("step_retrying data = %s, %v", event.Data, err)
+		}
+		if wait := data.RetryAfter.Sub(event.CreatedAt); wait < 900*time.Millisecond || wait > 1100*time.Millisecond {
+			t.Fatalf("retry due %s after the failure, want a second", wait)
+		}
+		return
+	}
+	t.Fatal("no step_retrying recorded")
+}
+
+func TestStepWhoseRetryOutlivesItsMessageFails(t *testing.T) {
+	world := testworld.New(retryDelayRunner())
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	// The step's message lives a week, so a retry due later would find it
+	// gone.
+	run, err := workflow.Start(ctx, retryDelayInput{After: worlds.StepRetention + time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err == nil || !strings.Contains(err.Error(), "could not be retried") {
+		t.Fatalf("run = %v, want the step failed for a retry past its message", err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeStepRetrying {
+			t.Fatal("the step was left retrying")
+		}
+	}
+}
+
+type exhaustedInput struct{ Inline bool }
+type exhaustedOutput struct{}
+
+func (exhaustedInput) Workflow(exhaustedOutput) {}
+
+type exhaustedCause struct{ Code int }
+
+func (e exhaustedCause) Error() string { return fmt.Sprintf("refused with %d", e.Code) }
+
+func alwaysRefused(context.Context, struct{}) (struct{}, error) {
+	return struct{}{}, exhaustedCause{Code: 7}
+}
+
+func TestStepThatRunsOutOfRetriesFailsWithAFatalErrorThatKeepsItsLastError(t *testing.T) {
+	for _, inline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inline=%t", inline), func(t *testing.T) {
+			var stepErr error
+			world := testworld.New(workflow.Use(func(ctx context.Context, input exhaustedInput) (exhaustedOutput, error) {
+				if input.Inline {
+					_, stepErr = workflow.InlineStep(ctx, alwaysRefused, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+				} else {
+					_, stepErr = workflow.Step(core.WithMaxInlineSteps(ctx, 0), alwaysRefused, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+				}
+				return exhaustedOutput{}, stepErr
+			}))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, exhaustedInput{Inline: inline})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = run.Value(ctx)
+			var recorded *workflow.Error
+			var fatal worlds.FatalError
+			var cause exhaustedCause
+			if !errors.As(err, &recorded) || recorded.Type != "FatalError" || !strings.HasPrefix(recorded.Message, `Step "`) ||
+				!strings.HasSuffix(recorded.Message, `.alwaysRefused" failed after 0 retries: refused with 7`) {
+				t.Fatalf("run = %#v, want the step's retries used up", err)
+			}
+			// The step's own error is the cause, which errors.As reaches.
+			if !errors.As(err, &fatal) || fatal.Cause == nil || fatal.Cause.Error() != "refused with 7" || !errors.As(err, &cause) || cause.Code != 7 {
+				t.Fatalf("run = %#v, want the step's last error as its cause", err)
+			}
+		})
+	}
+}
+
+// stepSignalWorld records what the runtime tells its World about the steps a
+// delivery executes: the events it writes, with their options, and the steps
+// whose functions it is about to run, in order.
+type stepSignalWorld struct {
+	*testworld.World
+	mu      sync.Mutex
+	creates []worlds.EventsCreateInput
+	trace   []string
+	batches [][]worlds.QueueInput
+}
+
+func (w *stepSignalWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
+	result, err := w.World.EventsCreate(ctx, input)
+	if err == nil {
+		w.mu.Lock()
+		w.creates, w.trace = append(w.creates, input), append(w.trace, string(input.Event.EventType))
+		w.mu.Unlock()
+	}
+	return result, err
+}
+
+func (w *stepSignalWorld) RecordStepExecution(_ context.Context, stepID worlds.StepID) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.trace = append(w.trace, "run "+string(stepID))
+}
+
+func (w *stepSignalWorld) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	w.mu.Lock()
+	w.batches = append(w.batches, input.Items)
+	w.mu.Unlock()
+	return w.World.QueueBatch(ctx, input)
+}
+
+// written returns the options of the writes of eventType.
+func (w *stepSignalWorld) written(eventType worlds.EventType) []worlds.EventsCreateOptions {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var options []worlds.EventsCreateOptions
+	for _, input := range w.creates {
+		if input.Event.EventType == eventType {
+			options = append(options, input.Options)
+		}
+	}
+	return options
+}
+
+type signalInput struct{ Fail bool }
+type signalOutput struct{}
+
+func (signalInput) Workflow(signalOutput) {}
+
+func signalStep(_ context.Context, fail bool) (struct{}, error) {
+	if fail {
+		return struct{}{}, workflow.FatalError(errors.New("refused"))
+	}
+	return struct{}{}, nil
+}
+
+func signalRunner(ctx context.Context, input signalInput) (signalOutput, error) {
+	_, err := workflow.Step(ctx, signalStep, input.Fail, workflow.StepOptions{MaxRetries: 1})
+	return signalOutput{}, err
+}
+
+func TestStepDeliveryTellsTheWorldWhenItsStepWasCreatedAndThatItRan(t *testing.T) {
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	world := &stepSignalWorld{World: manual}
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The flow creates the step and sends its message in a batch, with the
+	// time the World stored its step_created.
+	deliverNext(t, ctx, manual, runtime)
+	events, err := manual.EventsList(ctx, worlds.EventsListInput{RunID: manual.Queued()[0].RunID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createdAt time.Time
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeStepCreated {
+			createdAt = event.CreatedAt
+		}
+	}
+	if len(world.batches) != 1 || len(world.batches[0]) != 1 || world.batches[0][0].StepID == nil || createdAt.IsZero() || !world.batches[0][0].StepCreatedAt.Equal(createdAt) {
+		t.Fatalf("step messages = %+v, want one batch of the step's message with its creation time %s", world.batches, createdAt)
+	}
+	// Its delivery starts the first attempt with that time, tells the World
+	// right before the function runs, and marks the failure it records as
+	// one of a function that ran.
+	deliverNext(t, ctx, manual, runtime)
+	if started := world.written(worlds.EventTypeStepStarted); len(started) != 1 || !started[0].StepCreatedAt.Equal(createdAt) || started[0].AfterStepBody {
+		t.Fatalf("step_started options = %+v, want the step's creation time", started)
+	}
+	if failed := world.written(worlds.EventTypeStepFailed); len(failed) != 1 || !failed[0].AfterStepBody || !failed[0].StepCreatedAt.IsZero() {
+		t.Fatalf("step_failed options = %+v, want it marked as after the step's function", failed)
+	}
+	stepID := string(*world.batches[0][0].StepID)
+	if want := []string{"step_started", "run " + stepID, "step_failed"}; !slices.Equal(world.trace[len(world.trace)-3:], want) {
+		t.Fatalf("delivery trace = %v, want %v", world.trace, want)
+	}
+}
+
+func TestStepDeliveryReadsItsStepsCreationFromTheLogWhenItsMessageHasNone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	world := &stepSignalWorld{World: manual}
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{}); err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, manual, runtime)
+	message := manual.QueuedMessages()[0]
+	sent := message.Input.StepCreatedAt
+	message.Input.StepCreatedAt = time.Time{}
+	if err := runtime.Execute(ctx, message.Input); err != nil {
+		t.Fatal(err)
+	}
+	if started := world.written(worlds.EventTypeStepStarted); len(started) != 1 || sent.IsZero() || !started[0].StepCreatedAt.Equal(sent) {
+		t.Fatalf("step_started options = %+v, want the creation time %s read from the log", started, sent)
+	}
+	// A step that completes needs no mark: only a step_failed is ambiguous.
+	if completed := world.written(worlds.EventTypeStepCompleted); len(completed) != 1 || completed[0].AfterStepBody {
+		t.Fatalf("step_completed options = %+v", completed)
+	}
+}
+
+func TestStepFailedWithoutRunningIsNotMarkedAsAfterItsFunction(t *testing.T) {
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	world := &stepSignalWorld{World: manual}
+	var calls atomic.Int32
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ signalInput) (signalOutput, error) {
+		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+			calls.Add(1)
+			return struct{}{}, nil
+		}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
+		return signalOutput{}, err
+	})))
+	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{}); err != nil {
+		t.Fatal(err)
+	}
+	deliverNext(t, ctx, manual, runtime)
+	// The step's only attempt started in a delivery that stopped, so its
+	// next delivery fails it without running it, and with no creation time:
+	// that is the first attempt's alone.
+	message := manual.QueuedMessages()[0]
+	started, _ := json.Marshal(worlds.DataStepStarted{Attempt: 1})
+	if _, err := manual.EventsCreate(ctx, worlds.EventsCreateInput{RunID: message.Input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(*message.Input.StepID), Data: started}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, message.Input); err != nil {
+		t.Fatal(err)
+	}
+	if failed := world.written(worlds.EventTypeStepFailed); len(failed) != 1 || failed[0].AfterStepBody || calls.Load() != 0 {
+		t.Fatalf("step_failed options = %+v after %d calls, want an unmarked failure of a step that never ran", failed, calls.Load())
+	}
+	if slices.ContainsFunc(world.trace, func(entry string) bool { return strings.HasPrefix(entry, "run ") }) {
+		t.Fatalf("trace = %v, want no step execution recorded", world.trace)
+	}
+}
+
+func TestInlineStepTellsTheWorldItRanAndMarksItsFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	world := &stepSignalWorld{World: manual}
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(t, ctx, manual, runtime)
+	steps, err := manual.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil || len(steps.Data) != 1 {
+		t.Fatalf("steps = %+v, %v", steps, err)
+	}
+	// The flow ran the step itself: the World is told before the function
+	// runs, the failure is marked, and a step created inline has no creation
+	// time to report.
+	world.mu.Lock()
+	ran := slices.Index(world.trace, "run "+string(steps.Data[0].StepID))
+	failed := slices.Index(world.trace, "step_failed")
+	world.mu.Unlock()
+	if ran < 0 || failed < ran {
+		t.Fatalf("trace = %v, want the step's execution recorded before its failure", world.trace)
+	}
+	if options := world.written(worlds.EventTypeStepFailed); len(options) != 1 || !options[0].AfterStepBody || options[0].InBandCount == nil {
+		t.Fatalf("step_failed options = %+v, want an in-band write marked as after the step's function", options)
+	}
+	for _, options := range world.written(worlds.EventTypeStepStarted) {
+		if !options.StepCreatedAt.IsZero() {
+			t.Fatalf("an inline step's start carries a creation time: %+v", options)
+		}
+	}
+	if len(world.batches) != 0 {
+		t.Fatalf("an inline step was sent a message: %+v", world.batches)
 	}
 }

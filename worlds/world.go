@@ -116,6 +116,17 @@ type EncryptionKeys interface {
 	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
 }
 
+// StepExecutions is an optional World interface the runtime tells that a
+// step's function is about to run, so the World can link the step to the
+// platform invocation running it.
+type StepExecutions interface {
+	// RecordStepExecution is called right before the function of step
+	// stepID is called, for every attempt, with a ctx derived from the one
+	// Runtime.Execute was given for the delivery. It does not block or
+	// fail.
+	RecordStepExecution(ctx context.Context, stepID StepID)
+}
+
 // RegionRunID returns id tagged with region when world implements
 // RegionalRunIDs, and id unchanged otherwise.
 func RegionRunID(world World, id RunID, region Region) RunID {
@@ -324,7 +335,19 @@ func StartQueueInput(input EventsCreateRunInput) QueueInput {
 // retryably does not: the queued flow's run_started creates the run. Nor does
 // a run that exists already, which the queued flow's run_started may have
 // created first.
+//
+// A run with a StartHook is a candidate the World admits or refuses, and
+// its start returns that decision. Its first delivery is queued first, and
+// its creation then decides it: a refusal is returned as the World gave it. A
+// creation that fails retryably, or with ErrStartHookDisabled, is sent again
+// after each of startHookConfirmDelays, since the World answers every copy of
+// a candidate with the one decision, and so is the queueing of an admitted
+// candidate that failed retryably. A start that still has no answer returns a
+// *StartError.
 func StartRun(ctx context.Context, world World, input EventsCreateRunInput) error {
+	if input.StartHook != nil {
+		return startCandidate(ctx, world, input)
+	}
 	created := make(chan error, 1)
 	go func() {
 		_, err := world.EventsCreateRun(ctx, input)
@@ -445,7 +468,7 @@ func ResumeDigest(payload []byte) string {
 // When queueing fails after the payload is recorded, it returns an error
 // wrapping ErrResumeNotQueued.
 func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte, resumeID string) (EventResult, error) {
-	data, err := EncodeHookReceived(payload, hook.ResumeContext.WorkflowName)
+	data, err := json.Marshal(DataHookReceived{Payload: payload, WorkflowName: hook.ResumeContext.WorkflowName, Token: hook.Token})
 	if err != nil {
 		return EventResult{}, err
 	}

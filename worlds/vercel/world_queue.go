@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -25,6 +28,52 @@ func setRequestID(ctx context.Context, meta map[string]any) {
 	if id, ok := ctx.Value(requestIDKey{}).(string); ok {
 		meta["vercelId"] = id
 	}
+}
+
+// stepIDsHeader is the response header that names, as a JSON array, the steps
+// a flow's invocation ran inline, by which Vercel links the invocation's logs
+// to them. It names at most maxStepIDs.
+const (
+	stepIDsHeader = "X-Vercel-Internal-Workflow-Step-Ids"
+	maxStepIDs    = 10
+)
+
+// stepRecorderKey holds, in a flow delivery's context, its *stepRecorder.
+type stepRecorderKey struct{}
+
+// stepRecorder collects the IDs of the steps whose functions a flow delivery
+// runs.
+type stepRecorder struct {
+	mu  sync.Mutex
+	off bool
+	ids []string
+}
+
+// RecordStepExecution notes that the delivery of ctx is about to run the
+// function of step stepID, when it is a flow's delivery, for the
+// stepIDsHeader of the delivery's response.
+func (w *World) RecordStepExecution(ctx context.Context, stepID worlds.StepID) {
+	recorder, ok := ctx.Value(stepRecorderKey{}).(*stepRecorder)
+	id := string(stepID)
+	if !ok || id == "" {
+		return
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if !recorder.off && len(recorder.ids) < maxStepIDs && !slices.Contains(recorder.ids, id) {
+		recorder.ids = append(recorder.ids, id)
+	}
+}
+
+// header returns the stepIDsHeader value, or "" when no step was recorded.
+func (r *stepRecorder) header() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.ids) == 0 {
+		return ""
+	}
+	encoded, _ := json.Marshal(r.ids)
+	return string(encoded)
 }
 
 // queueMessage is the Vercel Queues payload: the whole delivery, so the
@@ -52,6 +101,9 @@ type queueMessage struct {
 	WaitContinuation             *queueWaitContinuation `json:"waitContinuation,omitempty"`
 	// RetentionMs is the delivery's Retention in milliseconds.
 	RetentionMs int64 `json:"retentionMs,omitempty"`
+	// StepCreatedAt is the delivery's StepCreatedAt in milliseconds since
+	// the epoch.
+	StepCreatedAt int64 `json:"stepCreatedAt,omitempty"`
 }
 
 // queueRunInput is a first delivery's RunInput in a queueMessage: the run's
@@ -102,6 +154,9 @@ func newQueueMessage(id string, input worlds.QueueInput) queueMessage {
 	if wait := input.WaitContinuation; wait != nil {
 		message.WaitContinuation = &queueWaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
 	}
+	if !input.StepCreatedAt.IsZero() {
+		message.StepCreatedAt = input.StepCreatedAt.UnixMilli()
+	}
 	return message
 }
 
@@ -128,6 +183,9 @@ func (message queueMessage) input() worlds.QueueInput {
 	if wait := message.WaitContinuation; wait != nil {
 		input.WaitContinuation = &worlds.WaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
 	}
+	if message.StepCreatedAt > 0 {
+		input.StepCreatedAt = time.UnixMilli(message.StepCreatedAt).UTC()
+	}
 	return input
 }
 
@@ -148,10 +206,19 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
+	message, send := w.prepareSend(input)
+	id, err := w.publishVQS(ctx, message, send)
+	if err != nil {
+		return worlds.QueueResult{}, err
+	}
+	return worlds.QueueResult{MessageID: id}, nil
+}
+
+// prepareSend returns the message of a delivery and how it is published.
+func (w *World) prepareSend(input worlds.QueueInput) (queueMessage, vqsSend) {
 	if input.DeploymentID == "" {
 		input.DeploymentID = w.config.DeploymentID
 	}
-	message := newQueueMessage(ulid.Make().String(), input)
 	send := vqsSend{
 		Topic:          w.config.Topics[w.config.Routes[input.WorkflowName]],
 		DeploymentID:   input.DeploymentID,
@@ -164,23 +231,75 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if input.NotBefore != nil {
 		send.Delay = time.Until(*input.NotBefore)
 	}
-	id, err := w.publishVQS(ctx, message, send)
-	if err != nil {
-		return worlds.QueueResult{}, err
-	}
-	return worlds.QueueResult{MessageID: id}, nil
+	return newQueueMessage(ulid.Make().String(), input), send
 }
 
+// QueueBatch publishes the deliveries with Vercel Queues' batch send: one
+// request for up to 100 messages that share a topic, a region and a
+// deployment, each message published as Queue would publish it. Requests for
+// different destinations are sent at the same time, and a request that fails
+// transiently is sent again as a single send is. The results are in the order
+// of the items, with an empty message ID for a message Vercel Queues accepted
+// without naming it. A message Vercel Queues refused has its result's Err
+// set, and Retryable as Vercel Queues says whether sending it again may
+// succeed. When a request fails, the outcome of its messages is not known and
+// QueueBatch returns the failure as its error.
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
-	results := make([]worlds.QueueResult, 0, len(input.Items))
-	for _, item := range input.Items {
-		result, err := w.Queue(ctx, item)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, result)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return results, nil
+	type destination struct {
+		region              worlds.Region
+		topic, deploymentID string
+	}
+	var order []destination
+	groups := map[destination][]vqsBatchItem{}
+	for index, item := range input.Items {
+		message, send := w.prepareSend(item)
+		body, err := json.Marshal(message)
+		if err != nil {
+			return nil, err
+		}
+		header := messageHeaders(message, send)
+		header.Set("Content-Type", "application/json")
+		to := destination{messageRegion(message.RunID), w.topicOf(send), send.DeploymentID}
+		if _, ok := groups[to]; !ok {
+			order = append(order, to)
+		}
+		groups[to] = append(groups[to], vqsBatchItem{index: index, body: body, header: header})
+	}
+	results := make([]worlds.QueueResult, len(input.Items))
+	failures := make([]error, len(order))
+	var sending sync.WaitGroup
+	for group, to := range order {
+		sending.Go(func() {
+			items := groups[to]
+			for start := 0; start < len(items) && failures[group] == nil; start += vqsBatchMax {
+				chunk := items[start:min(start+vqsBatchMax, len(items))]
+				var outcomes []vqsBatchOutcome
+				err := retrySend(ctx, to.topic, func() error {
+					var err error
+					outcomes, err = w.sendBatchVQS(ctx, to.region, to.topic, to.deploymentID, chunk)
+					return err
+				})
+				if err != nil {
+					failures[group] = err
+					return
+				}
+				for position, outcome := range outcomes {
+					result := &results[chunk[position].index]
+					switch {
+					case outcome.Status == "failed":
+						result.Err, result.Retryable = fmt.Errorf("workflow/vercel: publish queue message: %d: %s", outcome.StatusCode, outcome.Error), outcome.Retryable
+					case outcome.MessageID != nil:
+						result.MessageID = *outcome.MessageID
+					}
+				}
+			}
+		})
+	}
+	sending.Wait()
+	return results, errors.Join(failures...)
 }
 
 type consumer struct {
@@ -209,7 +328,11 @@ func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	status, err := c.handle(ctx, delivery)
+	steps := &stepRecorder{}
+	status, err := c.handle(context.WithValue(ctx, stepRecorderKey{}, steps), delivery)
+	if ids := steps.header(); ids != "" {
+		writer.Header().Set(stepIDsHeader, ids)
+	}
 	if err != nil {
 		log.Printf("workflow/vercel: queue message %s: %v", delivery.MessageID, err)
 		http.Error(writer, "workflow queue delivery failed", status)
@@ -239,10 +362,18 @@ func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error
 			return http.StatusAccepted, nil
 		}
 	}
+	if recorder, ok := ctx.Value(stepRecorderKey{}).(*stepRecorder); ok && message.StepID != nil {
+		// A step's own delivery is linked to its step by the message.
+		recorder.mu.Lock()
+		recorder.off = true
+		recorder.mu.Unlock()
+	}
 	input := message.input()
 	// The delivery carries Vercel Queues' message ID, which stays the same
 	// across its redeliveries.
 	input.MessageID = delivery.MessageID
+	// When the message was queued, as Vercel Queues reports it.
+	input.CreatedAt = delivery.CreatedAt
 	input.DeliveryCount = delivery.DeliveryCount
 	if delivery.DeliveryCount > 0 {
 		// A handoff is not an attempt.
@@ -332,7 +463,15 @@ func (c *consumer) redeliver(ctx context.Context, delivery vqsDelivery, err erro
 		}
 		return http.StatusAccepted, nil
 	}
-	if visibilityErr := c.world.setVisibility(ctx, delivery, worlds.DeliveryRetryDelay(err, retryDelay(delivery.DeliveryCount))); visibilityErr != nil {
+	// The backoff is never shorter than the wait the failure itself asks for.
+	delay := worlds.DeliveryRetryDelay(err, retryDelay(delivery.DeliveryCount))
+	if api, ok := errors.AsType[*apiError](err); ok {
+		delay = max(delay, api.RetryAfter)
+	}
+	if early, ok := errors.AsType[*worlds.TooEarlyError](err); ok {
+		delay = max(delay, early.RetryAfter)
+	}
+	if visibilityErr := c.world.setVisibility(ctx, delivery, delay); visibilityErr != nil {
 		err = errors.Join(err, visibilityErr)
 	}
 	return http.StatusInternalServerError, err

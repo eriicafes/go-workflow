@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,5 +95,37 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 	}
 	if err := workflow.SetAttributes(ctx, map[string]*string{"a": ptrTo("b")}); !errors.Is(err, workflow.ErrNoWorkflow) {
 		t.Fatalf("SetAttributes outside a run = %v, want ErrNoWorkflow", err)
+	}
+}
+
+func TestSetAttributesPastTheRunLimitFailsTheRun(t *testing.T) {
+	batch := func(prefix string) map[string]*string {
+		attributes := map[string]*string{}
+		for index := range 40 {
+			attributes[prefix+strconv.Itoa(index)] = ptrTo("x")
+		}
+		return attributes
+	}
+	world := testworld.New(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+		if err := workflow.SetAttributes(ctx, batch("a")); err != nil {
+			return attributesOutput{}, err
+		}
+		// Each write is within the limit, and only the World can tell that
+		// together they pass it.
+		return attributesOutput{}, workflow.SetAttributes(ctx, batch("b"))
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, attributesInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err == nil || !strings.Contains(err.Error(), "failed World validation") {
+		t.Fatalf("run = %v, want it failed by the World's refusal", err)
+	}
+	stored, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
+	if err != nil || stored.Status != worlds.StatusFailed || stored.ErrorCode != "USER_ERROR" {
+		t.Fatalf("run = %+v, %v, want a failed run with USER_ERROR", stored, err)
 	}
 }

@@ -24,8 +24,17 @@ type Queue interface {
 	// QueueInput.SerializedFlow): the fence keeps overlapping flows safe, and
 	// this makes them rare.
 	Queue(context.Context, QueueInput) (QueueResult, error)
-	// QueueBatch stores the supplied deliveries and returns their message IDs. It
-	// may return results for items stored before an error.
+	// QueueBatch stores the supplied deliveries, each as Queue would store
+	// it, and returns one result per item, in the order of the items. An
+	// item the queue did not store has its Err set, and its Retryable when
+	// sending the batch again may store it. A stored item has no Err, and
+	// may have no MessageID when the queue did not name its message.
+	//
+	// QueueBatch returns an error only for a failure that leaves no item's
+	// outcome known, never for an item it refused. After either, a caller
+	// sends the batch again, so it gives every item an IdempotencyKey, which
+	// keeps the items already stored from being stored twice. QueueAll sends
+	// a batch that must be stored whole.
 	QueueBatch(context.Context, QueueBatchInput) ([]QueueResult, error)
 }
 
@@ -88,6 +97,12 @@ type (
 		// not tell whether the step's first message was sent. Its delivery
 		// reads the log before it runs the step.
 		StepResent bool
+		// StepCreatedAt is when the step a step delivery executes was
+		// created, on the message of the step's first attempt, which passes
+		// it on with that attempt's step_started (see
+		// EventsCreateOptions.StepCreatedAt). Zero on a retry's message and
+		// when the time is not known.
+		StepCreatedAt time.Time
 		// RunSpecVersion is the spec version of the run the delivery
 		// belongs to, SpecVersion.
 		RunSpecVersion int
@@ -109,6 +124,10 @@ type (
 		// included. A World caps it at what its queue supports, and zero
 		// uses its default.
 		Retention time.Duration
+		// CreatedAt is when the message was queued, which the World sets
+		// before Runtime.Execute when its queue reports it, and Queue
+		// ignores. Zero means the queue does not report it.
+		CreatedAt time.Time
 	}
 	// WaitContinuation marks a timer of the wait CorrelationID. A wait
 	// further away than the World's MaxQueueDelay is reached in hops,
@@ -128,11 +147,85 @@ type (
 	QueueBatchInput struct {
 		Items []QueueInput
 	}
-	// QueueResult is the result of Queue for one delivery.
+	// QueueResult is the result of Queue for one delivery, and of QueueBatch
+	// for one of its items.
 	QueueResult struct {
 		MessageID string
+		// Err is why QueueBatch did not store the item, and nil for an item
+		// it stored. Queue reports a failure as its own error instead.
+		Err error `json:"-" cbor:"-"`
+		// Retryable reports, for an item with an Err, that sending the
+		// batch again may store it.
+		Retryable bool `json:",omitempty" cbor:",omitempty"`
 	}
 )
+
+// QueueBatchError is the error of a batch of deliveries that was not stored
+// whole: QueueBatch refused Failed of its Total items, or answered with a
+// number of results other than Total, which says nothing about the items it
+// left out. Some of the items may be stored.
+type QueueBatchError struct {
+	Failed, Total int
+	// Retryable reports that sending the batch again may store it whole.
+	Retryable bool
+	// Err is the first refused item's error, or what was wrong with the
+	// answer.
+	Err error
+}
+
+func (e *QueueBatchError) Error() string {
+	return fmt.Sprintf("workflow: %d of %d queue messages were not stored: %v", e.Failed, e.Total, e.Err)
+}
+
+func (e *QueueBatchError) Unwrap() error { return e.Err }
+
+// QueueAll stores items with one QueueBatch and returns its results, with an
+// error unless every item was stored: QueueBatch's own, or a
+// *QueueBatchError. The items already stored stay stored, so a caller that
+// sends the items again after an error gives each an IdempotencyKey.
+func QueueAll(ctx context.Context, queue Queue, items []QueueInput) ([]QueueResult, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	results, err := queue.QueueBatch(ctx, QueueBatchInput{Items: items})
+	if err != nil {
+		return results, err
+	}
+	if len(results) != len(items) {
+		return results, &QueueBatchError{Failed: len(items), Total: len(items), Retryable: true, Err: fmt.Errorf("the queue returned %d results", len(results))}
+	}
+	var failed *QueueBatchError
+	for _, result := range results {
+		if result.Err == nil {
+			continue
+		}
+		if failed == nil {
+			failed = &QueueBatchError{Total: len(items), Err: result.Err}
+		}
+		failed.Failed++
+		failed.Retryable = failed.Retryable || result.Retryable
+	}
+	if failed != nil {
+		return results, failed
+	}
+	return results, nil
+}
+
+// QueueEach is a QueueBatch for a queue without a batch send: it stores
+// items one after another with queue, a World's Queue, and reports each
+// item's failure in its result, Retryable when IsRetryableWorldError says the
+// failure is transient.
+func QueueEach(ctx context.Context, queue func(context.Context, QueueInput) (QueueResult, error), items []QueueInput) []QueueResult {
+	results := make([]QueueResult, len(items))
+	for index, item := range items {
+		result, err := queue(ctx, item)
+		if err != nil {
+			result = QueueResult{Err: err, Retryable: IsRetryableWorldError(err)}
+		}
+		results[index] = result
+	}
+	return results
+}
 
 // Intermediate reports whether input is an intermediate hop of a wait's
 // timer, which a World delivers without waiting for another flow of the run.

@@ -1,7 +1,10 @@
 package localworld
 
 import (
+	"cmp"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -53,16 +56,12 @@ type disposalRecord struct {
 	ForceClaimedBy *worlds.HookForceClaim
 }
 
-// tokenRecord is a token's owner. A token is held while its row exists and
-// TokenRetentionUntil has not passed.
+// tokenRecord is a token's owner, with the retention its hook asked for. See
+// tokenHeld for when the owner still holds the token.
 type tokenRecord struct {
 	HookID              worlds.HookID
 	RunID               worlds.RunID
 	TokenRetentionUntil *time.Time
-}
-
-func (t *tokenRecord) held(now time.Time) bool {
-	return t != nil && (t.TokenRetentionUntil == nil || t.TokenRetentionUntil.After(now))
 }
 
 // eventLoader returns the event in a run's slot, or false for slot 0.
@@ -149,33 +148,62 @@ func hookView(record hookRecord, load eventLoader, resolve worlds.ResolveData) (
 	return value, err
 }
 
-// sortKey orders records by creation time, then ID. The fixed-width UTC time
-// sorts lexically.
-func sortKey(at time.Time, id string) string {
-	return at.UTC().Format("2006-01-02T15:04:05.000000000Z") + "\x00" + id
+// cursorTime is the time of an entity cursor: UTC with milliseconds.
+const cursorTime = "2006-01-02T15:04:05.000Z"
+
+// entityCursor is the cursor of a run, step, or hook page: the creation time
+// and ID of its last record, as "<time>|<id>".
+func entityCursor(at time.Time, id string) string {
+	return at.UTC().Format(cursorTime) + "|" + id
 }
 
-// keyPage sorts values by key in the requested order and returns the page
-// after the opaque cursor, which encodes the last returned key.
-func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string) (worlds.Page[T], error) {
+// parseEntityCursor returns the creation time, in milliseconds, and the ID an
+// entity cursor names. A cursor without an ID names every record of its
+// time, and one whose time does not parse is no cursor.
+func parseEntityCursor(cursor string) (int64, string, bool) {
+	if cursor == "" {
+		return 0, "", false
+	}
+	parts := strings.Split(cursor, "|")
+	at, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return 0, "", false
+	}
+	id := ""
+	if len(parts) > 1 {
+		id = parts[1]
+	}
+	return at.UnixMilli(), id, true
+}
+
+// entityPage sorts values by creation time in milliseconds, then ID, in the
+// requested order, and returns the page after the cursor. A cursor that does
+// not parse starts from the first page.
+func entityPage[T any](values []T, pagination worlds.Pagination, key func(T) (time.Time, string)) worlds.Page[T] {
 	descending := pagination.SortOrder == worlds.SortOrderDescending
-	slices.SortFunc(values, func(a, b T) int {
-		if descending {
-			return strings.Compare(key(b), key(a))
+	compare := func(at int64, id string, value T) int {
+		valueAt, valueID := key(value)
+		order := cmp.Compare(valueAt.UnixMilli(), at)
+		if order == 0 && id != "" {
+			order = strings.Compare(valueID, id)
 		}
-		return strings.Compare(key(a), key(b))
+		if descending {
+			return -order
+		}
+		return order
+	}
+	slices.SortFunc(values, func(a, b T) int {
+		at, id := key(a)
+		// compare orders its value against a's key, so b after a is positive.
+		return -compare(at.UnixMilli(), id, b)
 	})
 	start := 0
-	if pagination.Cursor != "" {
-		// A cursor that does not decode starts from the first page.
-		if raw, err := base64.RawURLEncoding.DecodeString(pagination.Cursor); err == nil {
-			after := string(raw)
-			start = len(values)
-			for index, value := range values {
-				if compare := strings.Compare(key(value), after); descending && compare < 0 || !descending && compare > 0 {
-					start = index
-					break
-				}
+	if at, id, ok := parseEntityCursor(pagination.Cursor); ok {
+		start = len(values)
+		for index, value := range values {
+			if compare(at, id, value) > 0 {
+				start = index
+				break
 			}
 		}
 	}
@@ -189,26 +217,66 @@ func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string
 	}
 	// The last page's cursor resumes after it.
 	if end > start {
-		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
+		page.Cursor = entityCursor(key(values[end-1]))
 	}
-	return page, nil
+	return page
 }
 
-// eventCursor returns the slot named by an event cursor, or 0 when empty.
-func eventCursor(cursor string) (int, error) {
-	if cursor == "" {
-		return 0, nil
+// eventCursorPrefix starts the cursor of an events page, which names the last
+// event of the page.
+const eventCursorPrefix = "key:"
+
+// eventCursor returns the slot named by an event cursor: "key:<event ID>", a
+// bare event ID, or "<time>|<event ID>". An empty cursor, and one that names
+// no slot, is 0, the start of the log.
+func eventCursor(cursor string) int {
+	id := cursor
+	if rest, ok := strings.CutPrefix(id, eventCursorPrefix); ok {
+		id = rest
+	} else if _, rest, ok := strings.Cut(id, "|"); ok {
+		id = rest
 	}
-	slot, err := worlds.EventSlot(worlds.EventID(cursor))
+	slot, err := worlds.EventSlot(worlds.EventID(id))
 	if err != nil {
-		return 0, err
+		return 0
 	}
-	return int(slot), nil
+	return int(slot)
 }
 
-func chunkCursor(cursor string) int {
-	if value, err := strconv.Atoi(cursor); err == nil && value > 0 {
-		return value
+// chunkCursor is the cursor of a chunks page: how many chunks precede the
+// next one, as base64 of the JSON {"i": count}.
+func chunkCursor(count int) string {
+	return base64.StdEncoding.EncodeToString([]byte(`{"i":` + strconv.Itoa(count) + `}`))
+}
+
+// parseChunkCursor returns the count a chunk cursor holds. A plain decimal
+// count is read too, and anything else is 0, the start of the stream.
+func parseChunkCursor(cursor string) int {
+	if value, err := strconv.Atoi(cursor); err == nil {
+		return max(value, 0)
 	}
-	return 0
+	raw, err := base64.StdEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0
+	}
+	var position struct {
+		I int `json:"i"`
+	}
+	if json.Unmarshal(raw, &position) != nil {
+		return 0
+	}
+	return max(position.I, 0)
+}
+
+// checkID refuses an ID a caller supplied that is empty or holds ".", "/",
+// "\", or a NUL byte, with ErrEventInvalid. No record is stored under one.
+func checkID(kind, id string) error {
+	if id != "" && !strings.ContainsAny(id, "./\\\x00") {
+		return nil
+	}
+	shown := id
+	if runes := []rune(shown); len(runes) > 48 {
+		shown = string(runes[:48]) + "…"
+	}
+	return fmt.Errorf("%w: unsafe %s %q: it must not be empty or contain a dot, a slash, a backslash, or a NUL byte", worlds.ErrEventInvalid, kind, shown)
 }

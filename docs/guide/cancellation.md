@@ -206,6 +206,15 @@ if err := run.Cancel(ctx); err != nil {
 
 The run records `run_cancelled`, and `Run.Value` returns
 `workflow.ErrRunCancelled`. Cancelling an already-finished run is a no-op.
+
+Pass a reason to record why the run was cancelled. It is stored on the
+`run_cancelled` event in plain text, at most 512 characters, so tools can
+show it without decrypting anything:
+
+```go
+err := run.Cancel(ctx, workflow.CancelOptions{Reason: "duplicate order"})
+```
+
 Already-running steps can finish and record their outcomes. Their contexts
 remain active unless you also cancel a managed context passed to them.
 

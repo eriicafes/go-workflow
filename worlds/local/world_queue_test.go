@@ -60,6 +60,27 @@ func TestRetryDelay(t *testing.T) {
 	}
 }
 
+func TestMessagePastItsRetentionIsStillDelivered(t *testing.T) {
+	t.Parallel()
+	deliveries := make(chan worlds.QueueInput, 10)
+	// The redelivery is due after the message's retention has passed.
+	world := queueWorld(t, Config{}, func(_ context.Context, input worlds.QueueInput) error {
+		deliveries <- input
+		if input.DeliveryCount == 1 {
+			return worlds.Redeliver(30 * time.Millisecond)
+		}
+		return nil
+	})
+	stepID := worlds.StepID("step_a")
+	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: runA, StepID: &stepID, Retention: time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	receive(t, deliveries)
+	if second := receive(t, deliveries); second.DeliveryCount != 2 {
+		t.Fatalf("redelivery = %+v", second)
+	}
+}
+
 func TestRedeliveryKeepsTheMessageAndCountsAttempts(t *testing.T) {
 	t.Parallel()
 	deliveries := make(chan worlds.QueueInput, 10)
@@ -351,7 +372,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	input := worlds.QueueInput{
 		RunID: runA, QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &notBefore,
 		IdempotencyKey: "key", DeploymentID: "dpl", DeploymentMismatchRetryCount: 2, ReplayDivergenceCount: 3,
-		StepName: "step", StepAttempt: 4, StepResent: true, RunSpecVersion: 9,
+		StepName: "step", StepAttempt: 4, StepResent: true, StepCreatedAt: hopAt, RunSpecVersion: 9,
 		CompleteWaits:    []string{"w1", "w2"},
 		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "w", Attempt: 5, ResumeAt: &resumeAt, HopAt: &hopAt},
@@ -364,6 +385,11 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	got := receive(t, deliveries)
 	want := input
 	want.MessageID, want.DeliveryCount, want.Attempt = result.MessageID, 1, 1
+	// The World stamps when the message was queued.
+	if got.CreatedAt.IsZero() || time.Since(got.CreatedAt) > time.Minute {
+		t.Fatalf("CreatedAt = %s", got.CreatedAt)
+	}
+	want.CreatedAt = got.CreatedAt
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("delivered %+v\nwant %+v", got, want)
 	}

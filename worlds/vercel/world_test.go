@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,26 +62,53 @@ func (f *fakeVQS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	path := request.URL.Path
-	switch {
-	case request.Method == http.MethodPost && strings.HasPrefix(path, "/api/v3/topic/") && !strings.Contains(path, "/consumer/"):
-		key := request.Header.Get("Vqs-Idempotency-Key")
+	// publish stores a message, one per idempotency key, and returns its ID.
+	publish := func(topic string, header http.Header, body []byte) string {
+		key := header.Get("Vqs-Idempotency-Key")
 		if key != "" {
 			for _, message := range f.messages {
 				if message.idempotencyKey == key {
-					writer.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprintf(writer, `{"messageId":%q}`, message.id)
-					return
+					return message.id
 				}
 			}
 		}
 		f.sequence++
-		message := &fakeMessage{id: fmt.Sprintf("msg_%d", f.sequence), topic: strings.TrimPrefix(path, "/api/v3/topic/"), idempotencyKey: key, concurrencyKey: request.Header.Get("Vqs-Experimental-Concurrency-Key"), body: body, visibleAt: time.Now()}
-		if seconds, err := strconv.Atoi(request.Header.Get("Vqs-Delay-Seconds")); err == nil {
+		message := &fakeMessage{id: fmt.Sprintf("msg_%d", f.sequence), topic: topic, idempotencyKey: key, concurrencyKey: header.Get("Vqs-Experimental-Concurrency-Key"), body: body, visibleAt: time.Now()}
+		if seconds, err := strconv.Atoi(header.Get("Vqs-Delay-Seconds")); err == nil {
 			message.visibleAt = message.visibleAt.Add(time.Duration(seconds) * time.Second)
 		}
 		f.messages = append(f.messages, message)
+		return message.id
+	}
+	switch {
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/api/v3/topic/") && strings.HasSuffix(path, "/batch"):
+		// A batch send: a multipart/mixed body with a part per message, whose
+		// headers are the message's, answered with a result per part.
+		_, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		if err != nil || params["boundary"] == "" {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		topic := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v3/topic/"), "/batch")
+		results := []map[string]any{}
+		reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+		for {
+			part, err := reader.NextRawPart()
+			if err != nil {
+				break
+			}
+			data, _ := io.ReadAll(part)
+			results = append(results, map[string]any{"status": "sent", "messageId": publish(topic, http.Header(part.Header), data)})
+		}
+		if len(results) < 1 || len(results) > 100 {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		writer.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(writer, `{"messageId":%q}`, message.id)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"results": results})
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/api/v3/topic/") && !strings.Contains(path, "/consumer/"):
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(writer, `{"messageId":%q}`, publish(strings.TrimPrefix(path, "/api/v3/topic/"), request.Header, body))
 	case strings.Contains(path, "/lease/"):
 		message := f.leased(path[strings.LastIndex(path, "/")+1:])
 		if message == nil {
@@ -261,18 +291,76 @@ func TestNewDefaults(t *testing.T) {
 	if proxied.api.baseURL != DefaultProxyURL || !proxied.api.proxy || proxied.api.env != "production" {
 		t.Fatalf("proxy defaults = backend %q proxy %v env %q", proxied.api.baseURL, proxied.api.proxy, proxied.api.env)
 	}
+	if queue, header := proxied.queueURL(RegionSFO1); queue != DefaultProxyURL+"/queues-proxy/api/v3" || header.Get("X-Vercel-Queue-Region") != "sfo1" || header.Get("X-Vercel-Project-Id") != "prj_1" {
+		t.Fatalf("proxy queue = %q, %v", queue, header)
+	}
+}
+
+func TestNewReadsTheBackendFromTheEnvironment(t *testing.T) {
+	t.Setenv("VERCEL_WORKFLOW_SERVER_URL", "https://backend.example.com/")
+	t.Setenv("WORKFLOW_VERCEL_BACKEND_URL", "https://proxy.example.com/v1/workflow")
+	config := Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow"}
+	direct, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Without a token the backend's host is used directly.
+	if direct.api.baseURL != "https://backend.example.com/api" || direct.api.forwardTo != "" {
+		t.Fatalf("direct backend = %q, forwarded to %q", direct.api.baseURL, direct.api.forwardTo)
+	}
+	// With one, requests go to the proxy named, which is told the backend.
+	config.Token, config.ProjectID = "token", "prj_1"
+	proxied, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := http.Header{}
+	if err := proxied.api.authorize(context.Background(), header); err != nil {
+		t.Fatal(err)
+	}
+	if proxied.api.baseURL != "https://proxy.example.com/v1/workflow" || header.Get("X-Vercel-Workflow-Api-Url") != "https://backend.example.com/" {
+		t.Fatalf("proxied backend = %q, headers %v", proxied.api.baseURL, header)
+	}
+	// BackendURL is the caller's choice over either.
+	config.BackendURL = "https://chosen.example.com"
+	chosen, err := New(config)
+	if err != nil || chosen.api.baseURL != "https://chosen.example.com" {
+		t.Fatalf("chosen backend = %q, %v", chosen.api.baseURL, err)
+	}
+}
+
+func TestNewReadsTheStreamsTransport(t *testing.T) {
+	for value, overHTTP := range map[string]bool{"": false, "http": true, " HTTP ": true, "ws": false, "https": false} {
+		t.Setenv("WORKFLOW_STREAMS_TRANSPORT", value)
+		world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow"})
+		if err != nil || world.streamsOverHTTP != overHTTP {
+			t.Errorf("WORKFLOW_STREAMS_TRANSPORT=%q: over HTTP %v, %v, want %v", value, world.streamsOverHTTP, err, overHTTP)
+		}
+	}
+}
+
+func TestUserAgentNamesTheClientAndDeployment(t *testing.T) {
+	world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", DeploymentID: "dpl_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "go-workflow/vercelworld " + runtime.Version() + " " + runtime.GOOS + " (" + runtime.GOARCH + ") dpl_1"
+	if world.api.userAgent != want {
+		t.Fatalf("user agent = %q, want %q", world.api.userAgent, want)
+	}
 }
 
 // TestProxyCredentials checks the headers a World sends through Vercel's API
 // proxy with an access token.
 func TestProxyCredentials(t *testing.T) {
 	var header http.Header
+	var path string
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		header = request.Header.Clone()
+		header, path = request.Header.Clone(), request.URL.Path
 		writer.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(server.Close)
-	world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", Token: "vercel-token", ProjectID: "prj_1", TeamID: "team_1", Environment: "preview", BackendURL: server.URL, OIDCToken: func(context.Context) (string, error) {
+	world, err := New(Config{BaseURL: "https://example.com/v1/workflow", Topic: "workflow", Token: "vercel-token", ProjectID: "prj_1", TeamID: "team_1", Environment: "preview", BackendURL: server.URL + "/v1/workflow", OIDCToken: func(context.Context) (string, error) {
 		t.Fatal("OIDC token requested through the proxy")
 		return "", nil
 	}})
@@ -282,6 +370,12 @@ func TestProxyCredentials(t *testing.T) {
 	_, _ = world.StepsGet(context.Background(), worlds.StepsGetInput{RunID: "wrun_1", StepID: "step_1"})
 	if header.Get("Authorization") != "Bearer vercel-token" || header.Get("X-Vercel-Project-Id") != "prj_1" || header.Get("X-Vercel-Team-Id") != "team_1" || header.Get("X-Vercel-Environment") != "preview" || header.Get("X-Vercel-Trusted-Oidc-Idp-Token") != "" {
 		t.Fatalf("proxy headers = %v", header)
+	}
+	// A queue send goes through the proxy too, with the same credentials and
+	// the region to forward it to.
+	_, _ = world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_1", WorkflowName: "w"})
+	if path != "/v1/workflow/queues-proxy/api/v3/topic/workflow" || header.Get("Authorization") != "Bearer vercel-token" || header.Get("X-Vercel-Project-Id") != "prj_1" || header.Get("X-Vercel-Team-Id") != "team_1" || header.Get("X-Vercel-Environment") != "preview" || header.Get("X-Vercel-Queue-Region") == "" {
+		t.Fatalf("proxied queue send = %s with %v", path, header)
 	}
 }
 

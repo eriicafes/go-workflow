@@ -1,6 +1,7 @@
 package postgresworld
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,17 @@ import (
 )
 
 // startHookDecisionAge is how long a start hook candidate's decision is kept:
-// past it, every attempt for the candidate is refused anyway.
-const startHookDecisionAge = worlds.StartHookCandidateMaxAge
+// an hour past the age at which every attempt for the candidate is refused
+// anyway.
+const startHookDecisionAge = worlds.StartHookCandidateMaxAge + time.Hour
+
+// startHookDecisionBatch is the most lapsed decisions one admission deletes,
+// so no admission pays for a backlog.
+const startHookDecisionBatch = 100
+
+// errAdmissionRetry restarts a run's creation that another write for the
+// same run or token overtook.
+var errAdmissionRetry = errors.New("workflow/postgres: run was decided by another write while being created")
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -49,92 +59,222 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			return worlds.EventResult{}, err
 		}
 	}
-	at := now()
 	var startHook []byte
 	if echo := worlds.RunEchoStartHook(payload); echo != nil {
 		if startHook, err = cbor.Marshal(echo); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
-	if start := input.StartHook; start != nil {
-		// A candidate's decision is permanent.
-		var decision, conflicting, token string
-		err := w.pool.QueryRow(ctx, w.q(`SELECT decision, coalesce(conflicting_run_id, ''), token FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`), input.RunID).Scan(&decision, &conflicting, &token)
-		if err == nil && token != start.Token {
-			// A candidate is decided for its token, and another is refused.
-			return worlds.EventResult{}, fmt.Errorf("%w: run %s was already admitted with a different start hook token", worlds.ErrStartHookRejected, input.RunID)
+	for attempt := 1; ; attempt++ {
+		at := now()
+		// A candidate's decision, the start hook, and the run commit
+		// together. A refusal commits too, and is returned once it has.
+		var repeat *worlds.EventResult
+		var refusal error
+		err = w.inTx(ctx, func(tx pgx.Tx) error {
+			repeat, refusal = nil, nil
+			if input.StartHook != nil {
+				admitted, err := w.admitStartHook(ctx, tx, input, at)
+				if err != nil {
+					return err
+				}
+				if !admitted.created {
+					repeat, refusal = admitted.repeat, admitted.refusal
+					return nil
+				}
+			}
+			tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_runs (id, name, status, attributes, deployment_id, encryption_public_key, execution_context_cbor, spec_version, created_at, updated_at, start_hook_cbor)
+				VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $8, $9) ON CONFLICT (id) DO NOTHING`),
+				input.RunID, input.WorkflowName, encodedAttributes, input.DeploymentID, nullable(input.EncryptionPublicKey), executionContext, worlds.SpecVersion, at, startHook)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				if input.StartHook != nil {
+					// The run was created since its candidate was admitted.
+					return errAdmissionRetry
+				}
+				repeat, err = w.existingRun(ctx, tx, input)
+				return err
+			}
+			// run_created takes the first position, which counts as in-band.
+			if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_events (run_id, id, type, payload_cbor, created_at, spec_version) VALUES ($1, $2, $3, $4, $5, $6)`),
+				input.RunID, worlds.EventIDForSlot(1), worlds.EventTypeRunCreated, data, at, worlds.SpecVersion); err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_event_slots (run_id, seq_in_band) VALUES ($1, 1)`), input.RunID)
+			return err
+		})
+		if errors.Is(err, errAdmissionRetry) && attempt < claimAttempts {
+			continue
 		}
-		if err == nil && decision == "rejected" {
-			return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, worlds.StartHookDecision{Token: token, ConflictingRunID: worlds.RunID(conflicting)})
-		}
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		switch {
+		case err != nil:
 			return worlds.EventResult{}, err
+		case refusal != nil:
+			return worlds.EventResult{}, refusal
+		case repeat != nil:
+			return *repeat, nil
 		}
-		if errors.Is(err, pgx.ErrNoRows) && worlds.StartHookCandidateExpired(input.RunID, at) {
-			return worlds.EventResult{}, worlds.ErrStartHookRejected
+		return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: at, AllocatedEventCount: 1, InBandCount: 1}, nil
+	}
+}
+
+// existingRun answers a creation of a run that exists: the run_created of
+// the accepted start it repeats, or the error it is refused with.
+func (w *World) existingRun(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput) (*worlds.EventResult, error) {
+	created, err := scanEvent(tx.QueryRow(ctx, w.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 AND id = $2`), input.RunID, worlds.EventIDForSlot(1)))
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
+		return nil, err
+	}
+	return &worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}, nil
+}
+
+// startHookAdmission is what admitStartHook decided: created, for a candidate
+// accepted now, whose start hook is written and whose run the caller creates;
+// repeat, the run_created of a candidate accepted before; or refusal, the
+// error of a rejected one, which the caller returns once the transaction that
+// recorded it has committed.
+type startHookAdmission struct {
+	created bool
+	repeat  *worlds.EventResult
+	refusal error
+}
+
+// admitStartHook decides a start hook candidate in the transaction that
+// creates its run, so its decision, its hook, and its run commit together. A
+// recorded decision is permanent and answers every later attempt. A new
+// candidate is accepted when no other run holds its token, which writes its
+// start hook and its decision. Otherwise it is rejected, which writes the
+// decision naming the holder.
+func (w *World) admitStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput, at time.Time) (startHookAdmission, error) {
+	start := input.StartHook
+	if start.Token == "" {
+		return startHookAdmission{}, worlds.ErrEventInvalid
+	}
+	if decided, admission, err := w.decidedStartHook(ctx, tx, input); err != nil || decided {
+		return admission, err
+	}
+	if worlds.StartHookCandidateExpired(input.RunID, at) {
+		return startHookAdmission{}, worlds.ErrStartHookRejected
+	}
+	if start.TokenRetentionUntil != nil && start.TokenRetentionUntil.After(at.Add(w.hookRetentionLimit)) {
+		return startHookAdmission{}, fmt.Errorf("%w: hook retention cannot exceed %s in the Postgres World", worlds.ErrStartHookRejected, w.hookRetentionLimit)
+	}
+	// A run that exists was created without this candidate's decision.
+	if err := w.runExistsIn(ctx, tx, input.RunID); err == nil {
+		repeat, err := w.existingRun(ctx, tx, input)
+		return startHookAdmission{repeat: repeat}, err
+	} else if !errors.Is(err, worlds.ErrRunNotFound) {
+		return startHookAdmission{}, err
+	}
+	// Decisions past every candidate's window decide nothing. Rows another
+	// admission is deleting are left to it.
+	if _, err := tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_start_hook_admissions WHERE run_id IN (
+			SELECT run_id FROM workflow.workflow_start_hook_admissions WHERE created_at < $1 LIMIT $2 FOR UPDATE SKIP LOCKED)`),
+		at.Add(-startHookDecisionAge), startHookDecisionBatch); err != nil {
+		return startHookAdmission{}, err
+	}
+	holder, err := w.lockToken(ctx, tx, start.Token, at)
+	if err != nil {
+		return startHookAdmission{}, err
+	}
+	owner := holder.runID
+	if holder.hookID == "" {
+		// metadata_slot 1 joins run_created, which holds the hook's metadata.
+		// The other copy of this candidate inserts the same hook as well as
+		// the same claim, so any conflict is left to the checks below.
+		resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion})
+		tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, created_at, token_retention_until, spec_version)
+			VALUES ($1, $2, $3, $4, true, 1, false, $5, $6, $7)
+			ON CONFLICT DO NOTHING`), worlds.StartHookID(input.RunID), input.RunID, resume, start.Token, at, start.TokenRetentionUntil, worlds.SpecVersion)
+		if err != nil {
+			return startHookAdmission{}, err
 		}
-		if start.TokenRetentionUntil != nil && start.TokenRetentionUntil.After(at.Add(w.hookRetentionLimit)) {
-			return worlds.EventResult{}, fmt.Errorf("%w: hook retention cannot exceed %s in the Postgres World", worlds.ErrStartHookRejected, w.hookRetentionLimit)
+		if tag.RowsAffected() == 1 {
+			if recorded, err := w.recordStartHookDecision(ctx, tx, input, "accepted", "", at); err != nil {
+				return startHookAdmission{}, err
+			} else if !recorded {
+				// A refusal recorded first wins, and this hook is rolled back.
+				return startHookAdmission{}, errAdmissionRetry
+			}
+			return startHookAdmission{created: true}, nil
+		}
+		// Another claim committed first: the other copy of this candidate,
+		// whose decision is now recorded, or another run.
+		if decided, admission, err := w.decidedStartHook(ctx, tx, input); err != nil || decided {
+			return admission, err
+		}
+		err = tx.QueryRow(ctx, w.q(`SELECT run_id FROM workflow.workflow_hooks WHERE token = $1 AND claims_token AND run_id <> $2`), start.Token, input.RunID).Scan(&owner)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The token changed owner meanwhile.
+			return startHookAdmission{}, errAdmissionRetry
+		}
+		if err != nil {
+			return startHookAdmission{}, err
 		}
 	}
-	var repeat *worlds.EventResult
-	err = w.inTx(ctx, func(tx pgx.Tx) error {
-		repeat = nil
-		tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_runs (id, name, status, attributes, deployment_id, encryption_public_key, execution_context_cbor, spec_version, created_at, updated_at, start_hook_cbor)
-			VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $8, $9) ON CONFLICT (id) DO NOTHING`),
-			input.RunID, input.WorkflowName, encodedAttributes, input.DeploymentID, nullable(input.EncryptionPublicKey), executionContext, worlds.SpecVersion, at, startHook)
-		if err != nil {
-			return err
+	if recorded, err := w.recordStartHookDecision(ctx, tx, input, "rejected", owner, at); err != nil {
+		return startHookAdmission{}, err
+	} else if !recorded {
+		// The other copy of this candidate decided first, and its decision
+		// answers this attempt.
+		decided, admission, err := w.decidedStartHook(ctx, tx, input)
+		if err == nil && !decided {
+			err = errAdmissionRetry
 		}
-		if tag.RowsAffected() == 0 {
-			// A repeat of an accepted start returns its run_created.
-			created, err := scanEvent(tx.QueryRow(ctx, w.q(`SELECT `+eventColumns+` FROM workflow.workflow_events WHERE run_id = $1 AND id = $2`), input.RunID, worlds.EventIDForSlot(1)))
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-			if err := worlds.ExistingRunRefusal(created.Data, input); err != nil {
-				return err
-			}
-			repeat = &worlds.EventResult{EventID: created.EventID, EventType: created.EventType, CreatedAt: created.CreatedAt, InBandCount: 1}
-			return nil
-		}
-		// run_created takes the first position, which counts as in-band.
-		if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_events (run_id, id, type, payload_cbor, created_at, spec_version) VALUES ($1, $2, $3, $4, $5, $6)`),
-			input.RunID, worlds.EventIDForSlot(1), worlds.EventTypeRunCreated, data, at, worlds.SpecVersion); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_event_slots (run_id, seq_in_band) VALUES ($1, 1)`), input.RunID); err != nil {
-			return err
-		}
-		if input.StartHook == nil {
-			return nil
-		}
-		if err := w.createStartHook(ctx, tx, input, at); err != nil {
-			return err
-		}
-		// Decisions past a candidate's window decide nothing.
-		if _, err := tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_start_hook_admissions WHERE created_at < $1`), at.Add(-startHookDecisionAge)); err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_start_hook_admissions (run_id, token, decision, created_at) VALUES ($1, $2, 'accepted', $3) ON CONFLICT (run_id) DO NOTHING`), input.RunID, input.StartHook.Token, at)
-		return err
-	})
-	var conflict *worlds.HookConflictError
-	if errors.As(err, &conflict) && input.StartHook != nil {
-		// The refusal is permanent, recorded apart from the rolled-back
-		// creation.
-		if _, recordErr := w.pool.Exec(ctx, w.q(`INSERT INTO workflow.workflow_start_hook_admissions (run_id, token, decision, conflicting_run_id, created_at) VALUES ($1, $2, 'rejected', $3, $4) ON CONFLICT (run_id) DO NOTHING`),
-			input.RunID, input.StartHook.Token, conflict.RunID, at); recordErr != nil {
-			return worlds.EventResult{}, errors.Join(err, recordErr)
-		}
+		return admission, err
+	}
+	return startHookAdmission{refusal: worlds.StartHookDecision{Token: start.Token, ConflictingRunID: owner}.Err()}, nil
+}
+
+// decidedStartHook answers a candidate from its recorded decision, and
+// reports whether there is one: an accepted candidate with its run_created,
+// and a rejected one with its refusal. A candidate decided for another token
+// is refused with ErrStartHookRejected.
+func (w *World) decidedStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput) (bool, startHookAdmission, error) {
+	var decision, conflicting, token string
+	err := tx.QueryRow(ctx, w.q(`SELECT decision, coalesce(conflicting_run_id, ''), token FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`), input.RunID).Scan(&decision, &conflicting, &token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, startHookAdmission{}, nil
 	}
 	if err != nil {
-		return worlds.EventResult{}, err
+		return false, startHookAdmission{}, err
 	}
-	if repeat != nil {
-		return *repeat, nil
+	if token != input.StartHook.Token {
+		return true, startHookAdmission{}, fmt.Errorf("%w: run %s was already admitted with a different start hook token", worlds.ErrStartHookRejected, input.RunID)
 	}
-	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: at, AllocatedEventCount: 1, InBandCount: 1}, nil
+	if decision == "rejected" {
+		return true, startHookAdmission{refusal: worlds.StartHookRejectionRefusal(input, worlds.StartHookDecision{Token: token, ConflictingRunID: worlds.RunID(conflicting)})}, nil
+	}
+	if err := w.runExistsIn(ctx, tx, input.RunID); err != nil {
+		return true, startHookAdmission{}, err
+	}
+	repeat, err := w.existingRun(ctx, tx, input)
+	return true, startHookAdmission{repeat: repeat}, err
+}
+
+// recordStartHookDecision records a candidate's decision, and reports
+// whether it did: a decision recorded before stays.
+func (w *World) recordStartHookDecision(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput, decision string, conflicting worlds.RunID, at time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_start_hook_admissions (run_id, token, decision, conflicting_run_id, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (run_id) DO NOTHING`),
+		input.RunID, input.StartHook.Token, decision, nullable(string(conflicting)), at)
+	return tag.RowsAffected() == 1, err
+}
+
+// runExistsIn returns ErrRunNotFound unless tx sees the run.
+func (w *World) runExistsIn(ctx context.Context, tx pgx.Tx, runID worlds.RunID) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, w.q(`SELECT EXISTS (SELECT 1 FROM workflow.workflow_runs WHERE id = $1)`), runID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return worlds.ErrRunNotFound
+	}
+	return nil
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -168,13 +308,24 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		if err := a.fence(input.Options.InBandCount); err != nil {
 			return err
 		}
-		resumeID := ""
-		if input.Event.EventType == worlds.EventTypeHookReceived {
+		// A resume is stored with its payload's digest, which a caller may
+		// leave out.
+		resumeID, digest := "", ""
+		if input.Event.EventType == worlds.EventTypeHookReceived && input.Options.ResumeID != "" {
 			resumeID = input.Options.ResumeID
+			digest = cmp.Or(input.Options.ResumePayloadDigest, worlds.ResumeDigest(worlds.DecodeHookReceived(input.Event.Data)))
 		}
-		replay, err := a.resumed(ctx, input.Event, resumeID, input.Options.ResumePayloadDigest)
+		replay, err := a.resumed(ctx, input.Event, resumeID, digest)
 		if err != nil {
 			return err
+		}
+		if replay == nil && resumeID != "" {
+			// A resume that committed stays accepted after its run ends. A
+			// new one finds the run finished before it looks for its hook,
+			// which went with the run.
+			if err := worlds.FinishedRunHookRefusal(a.run.Status, input.Event); err != nil {
+				return err
+			}
 		}
 		if replay == nil {
 			if replay, err = a.admit(ctx, input.Event); err != nil {
@@ -197,7 +348,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		}
 		if resumeID != "" {
 			if _, err := tx.Exec(ctx, w.q(`UPDATE workflow.workflow_events SET resume_id = $3, resume_payload_digest = $4 WHERE run_id = $1 AND id = $2`),
-				event.RunID, event.EventID, resumeID, input.Options.ResumePayloadDigest); err != nil {
+				event.RunID, event.EventID, resumeID, digest); err != nil {
 				return err
 			}
 			event.ResumeID = resumeID
@@ -494,12 +645,12 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if !found {
 			// A disposed hook is gone. One another run took over redirects
 			// the delivery.
-			forced, err := a.forceClaimed(ctx, event.CorrelationID)
+			claimed, err := a.forceClaimed(ctx, event.CorrelationID)
 			if err != nil {
 				return nil, err
 			}
-			if forced {
-				return nil, &worlds.HookForceClaimedError{}
+			if claimed != nil {
+				return nil, claimed
 			}
 			return nil, &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
@@ -543,28 +694,41 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 	return nil, nil
 }
 
-// replay finds the latest (or, when latest is false, the earliest) event of
-// eventType for correlationID. A missing event yields an empty result.
-// forceClaimed reports that the run's hook was disposed by another run's
-// forced claim of its token: its hook_disposed names the claimant.
-func (a *appender) forceClaimed(ctx context.Context, hookID string) (bool, error) {
+// forceClaimed returns the refusal of a delivery to a hook of the run that a
+// forced claim of its token disposed, or nil for a hook that was not taken
+// over. It names the token and the hook holding it now, the end of a chain
+// of takeovers, or else the claimant the hook's hook_disposed names.
+func (a *appender) forceClaimed(ctx context.Context, hookID string) (*worlds.HookForceClaimedError, error) {
 	var data []byte
 	err := a.tx.QueryRow(ctx, a.w.q(`SELECT payload_cbor FROM workflow.workflow_events WHERE run_id = $1 AND correlation_id = $2 AND type = $3 LIMIT 1`),
 		a.run.RunID, hookID, worlds.EventTypeHookDisposed).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	decoded, err := eventData(worlds.EventTypeHookDisposed, data)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	var disposed worlds.HookDisposedEventData
-	return len(decoded) > 0 && json.Unmarshal(decoded, &disposed) == nil && disposed.ForceClaimedBy != nil, nil
+	if len(decoded) == 0 || json.Unmarshal(decoded, &disposed) != nil || disposed.ForceClaimedBy == nil {
+		return nil, nil
+	}
+	claimed := &worlds.HookForceClaimedError{Token: disposed.Token, RunID: disposed.ForceClaimedBy.RunID, HookID: disposed.ForceClaimedBy.HookID}
+	if disposed.Token == "" {
+		return claimed, nil
+	}
+	err = a.tx.QueryRow(ctx, a.w.q(`SELECT run_id, hook_id FROM workflow.workflow_hooks WHERE token = $1 AND claims_token`), disposed.Token).Scan(&claimed.RunID, &claimed.HookID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return claimed, nil
 }
 
+// replay finds the latest (or, when latest is false, the earliest) event of
+// eventType for correlationID. A missing event yields an empty result.
 func (a *appender) replay(ctx context.Context, eventType worlds.EventType, correlationID string, latest bool) (*worlds.EventResult, error) {
 	direction := "ASC"
 	if latest {
@@ -763,7 +927,11 @@ func (a *appender) wait(ctx context.Context, event worlds.Event) (*worlds.Wait, 
 func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int64) error {
 	var value worlds.DataHookCreated
 	_ = json.Unmarshal(event.Data, &value)
-	claimed, _ := json.Marshal(value.ForceClaimedFrom)
+	// claimed_from is CBOR, and NULL for a hook that claimed nothing.
+	var claimed []byte
+	if value.ForceClaimedFrom != nil {
+		claimed, _ = cbor.Marshal(value.ForceClaimedFrom)
+	}
 	// The token had no holder when admission checked it, so a concurrent
 	// claimant may have claimed it since. Losing that race is a conflict.
 	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: a.run.DeploymentID, WorkflowName: a.run.WorkflowName, EncryptionPublicKey: a.run.EncryptionPublicKey, RunSpecVersion: a.run.SpecVersion})
@@ -784,7 +952,7 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int6
 // locked run's in-band count.
 func (a *appender) fence(count *int) error {
 	if count != nil && *count != a.inBandCount {
-		return &worlds.InBandSupersededError{}
+		return &worlds.InBandSupersededError{EventCount: int(a.count), InBandCount: a.inBandCount}
 	}
 	a.inBand = count != nil
 	return nil
@@ -916,7 +1084,7 @@ func slotOf(id *string) uint64 {
 }
 
 func validEvent(event worlds.EventsCreateEvent) bool {
-	return event.EventType != worlds.EventTypeRunCreated && event.EventType.Valid()
+	return event.EventType.Creatable()
 }
 
 func nullable(value string) *string {
@@ -955,40 +1123,6 @@ func (w *World) lockRun(ctx context.Context, tx pgx.Tx, runID worlds.RunID) (*ap
 	a.run.InBandCount = a.inBandCount
 	a.wasTerminal = a.run.Status.Terminal()
 	return a, nil
-}
-
-// createStartHook creates a run's start hook in the transaction creating the
-// run, claiming its token, or returns a *HookConflictError naming the run
-// holding it, which rolls the run back.
-func (w *World) createStartHook(ctx context.Context, tx pgx.Tx, input worlds.EventsCreateRunInput, at time.Time) error {
-	start := input.StartHook
-	if start.Token == "" {
-		return worlds.ErrEventInvalid
-	}
-	holder, err := w.lockToken(ctx, tx, start.Token, at)
-	if err != nil {
-		return err
-	}
-	if holder.hookID != "" {
-		return &worlds.HookConflictError{Token: start.Token, RunID: holder.runID, Start: true}
-	}
-	// metadata_slot 1 joins run_created, which holds the hook's metadata.
-	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion})
-	tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, created_at, token_retention_until, spec_version)
-		VALUES ($1, $2, $3, $4, true, 1, false, $5, $6, $7)
-		ON CONFLICT (token) WHERE claims_token DO NOTHING`), worlds.StartHookID(input.RunID), input.RunID, resume, start.Token, at, start.TokenRetentionUntil, worlds.SpecVersion)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		// A concurrent claimant claimed the token since it was checked.
-		var owner worlds.RunID
-		if err := tx.QueryRow(ctx, w.q(`SELECT run_id FROM workflow.workflow_hooks WHERE token = $1 AND claims_token`), start.Token).Scan(&owner); err != nil {
-			return err
-		}
-		return &worlds.HookConflictError{Token: start.Token, RunID: owner, Start: true}
-	}
-	return nil
 }
 
 // EventsSubscribe pushes the run's events after afterSlot as they commit,

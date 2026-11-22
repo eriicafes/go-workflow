@@ -3,7 +3,10 @@ package vercelworld
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -122,11 +125,40 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			return nil, nil, err
 		}
 		if data.ResumeAt != nil {
-			meta["eventData"] = map[string]any{"resumeAt": data.ResumeAt.UTC()}
+			meta["resumeAt"] = data.ResumeAt.UTC()
 		}
 		return meta, nil, nil
-	case worlds.EventTypeRunCancelled, worlds.EventTypeHookDisposed:
+	case worlds.EventTypeRunCancelled:
+		var data worlds.DataRunCancelled
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		setString(meta, "cancelReason", data.CancelReason)
 		return meta, nil, nil
+	case worlds.EventTypeHookDisposed:
+		var data worlds.HookDisposedEventData
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		// The token the hook releases, when the writer names it.
+		setString(meta, "hookToken", data.Token)
+		return meta, nil, nil
+	case worlds.EventTypeStepStarted:
+		var data worlds.DataStepStarted
+		if err := decode(&data); err != nil {
+			return nil, nil, err
+		}
+		// The process that runs the attempt.
+		meta["computeInstanceId"] = computeInstanceID()
+		setString(meta, "stepName", data.StepName)
+		setString(meta, "workflowName", data.WorkflowName)
+		if data.Attempt > 0 {
+			meta["attempt"] = data.Attempt
+		}
+		if data.Inline {
+			meta["inline"] = true
+		}
+		return meta, data.Input, nil
 	case worlds.EventTypeAttrSet:
 		var data worlds.DataAttrSet
 		if err := decode(&data); err != nil {
@@ -158,20 +190,6 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		setString(meta, "workflowName", data.WorkflowName)
 		setString(meta, "creatorMessageId", data.CreatorMessageID)
 		return meta, data.Input, nil
-	case worlds.EventTypeStepStarted:
-		var data worlds.DataStepStarted
-		if err := decode(&data); err != nil {
-			return nil, nil, err
-		}
-		setString(meta, "stepName", data.StepName)
-		setString(meta, "workflowName", data.WorkflowName)
-		if data.Attempt > 0 {
-			meta["attempt"] = data.Attempt
-		}
-		if data.Inline {
-			meta["inline"] = true
-		}
-		return meta, data.Input, nil
 	case worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 		var data worlds.DataStepResult
 		if err := decode(&data); err != nil {
@@ -185,6 +203,22 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 		}
 		if data.RetryAfter != nil {
 			meta["retryAfter"] = data.RetryAfter.UTC()
+		}
+		// Latency telemetry the backend takes for its metrics and does not
+		// return.
+		for key, value := range map[string]*float64{"ttfs": data.TTFS, "stso": data.STSO, "rsfs": data.RSFS, "finalSchedulingReplay": data.FinalSchedulingReplay} {
+			if value != nil {
+				meta[key] = *value
+			}
+		}
+		if data.StepCount > 0 {
+			meta["stepCount"] = data.StepCount
+		}
+		if data.EventCount > 0 {
+			meta["eventCount"] = data.EventCount
+		}
+		if len(data.Optimizations) > 0 {
+			meta["optimizations"] = data.Optimizations
 		}
 		if event.EventType == worlds.EventTypeStepCompleted {
 			return meta, data.Result, nil
@@ -214,6 +248,8 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			return nil, nil, err
 		}
 		setString(meta, "workflowName", data.WorkflowName)
+		// The token the payload was sent to, when the writer names it.
+		setString(meta, "hookToken", data.Token)
 		return meta, data.Payload, nil
 	case worlds.EventTypeWaitCreated:
 		var data worlds.DataWaitCreated
@@ -228,6 +264,11 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 	}
 	return nil, nil, fmt.Errorf("%w: %s cannot be written", worlds.ErrEventInvalid, event.EventType)
 }
+
+// computeInstanceID identifies this process to the backend, which records
+// on a step_started the instance that ran the attempt: cinst_ and a ULID made
+// on first use, the same for every invocation the process handles.
+var computeInstanceID = sync.OnceValue(func() string { return "cinst_" + ulid.Make().String() })
 
 // setString sets meta[key] to value when value is not empty.
 func setString(meta map[string]any, key, value string) {
@@ -298,6 +339,21 @@ func eventData(wire wireEvent) ([]byte, error) {
 		if value, ok := asTime(d["retryAfter"]); ok && wire.EventType == string(worlds.EventTypeStepRetrying) {
 			result.RetryAfter = &value
 		}
+		// Latency telemetry, when the backend returns what it was sent.
+		for key, field := range map[string]**float64{"ttfs": &result.TTFS, "stso": &result.STSO, "rsfs": &result.RSFS, "finalSchedulingReplay": &result.FinalSchedulingReplay} {
+			if value, ok := asFloat(d[key]); ok {
+				*field = &value
+			}
+		}
+		result.StepCount, _ = asInt(d["stepCount"])
+		result.EventCount, _ = asInt(d["eventCount"])
+		if items, ok := d["optimizations"].([]any); ok {
+			for _, item := range items {
+				if name, ok := item.(string); ok {
+					result.Optimizations = append(result.Optimizations, name)
+				}
+			}
+		}
 		return json.Marshal(result)
 	case worlds.EventTypeHookCreated, worlds.EventTypeHookConflict:
 		data := worlds.DataHookCreated{Token: str(d, "token"), Metadata: payload("metadata")}
@@ -322,13 +378,13 @@ func eventData(wire wireEvent) ([]byte, error) {
 		}
 		return json.Marshal(data)
 	case worlds.EventTypeHookReceived:
-		return json.Marshal(worlds.DataHookReceived{Payload: payload("payload"), WorkflowName: str(d, "workflowName")})
+		return json.Marshal(worlds.DataHookReceived{Payload: payload("payload"), WorkflowName: str(d, "workflowName"), Token: str(d, "token")})
 	case worlds.EventTypeHookDisposed:
-		claim := hookClaim(d["forceClaimedBy"])
-		if claim == nil {
+		claim, token := hookClaim(d["forceClaimedBy"]), str(d, "token")
+		if claim == nil && token == "" {
 			return nil, nil
 		}
-		return json.Marshal(worlds.HookDisposedEventData{ForceClaimedBy: claim})
+		return json.Marshal(worlds.HookDisposedEventData{Token: token, ForceClaimedBy: claim})
 	case worlds.EventTypeWaitCreated:
 		resumeAt, ok := asTime(d["resumeAt"])
 		if !ok {
@@ -342,10 +398,29 @@ func eventData(wire wireEvent) ([]byte, error) {
 			return nil, nil
 		}
 		return json.Marshal(worlds.DataWaitCompleted{ResumeAt: &resumeAt})
+	case worlds.EventTypeRunCancelled:
+		if reason := str(d, "cancelReason"); reason != "" {
+			return json.Marshal(worlds.DataRunCancelled{CancelReason: reason})
+		}
 	}
-	// run_started, run_cancelled, and the backend's noop slot fillers carry
-	// no Data.
+	// run_started, a run_cancelled without a reason, and the backend's noop
+	// slot fillers carry no Data.
 	return nil, nil
+}
+
+// asFloat reads a decoded CBOR or JSON number as a float.
+func asFloat(value any) (float64, bool) {
+	switch value := value.(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	}
+	return 0, false
 }
 
 func str(values map[string]any, key string) string {

@@ -22,9 +22,10 @@ type querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// store reads and writes the World's rows in one transaction. A tagged World
-// sees the rows of its tag and the untagged ones; an untagged World sees only
-// untagged rows. A run's steps, waits, and events belong to its tag.
+// store reads and writes the World's rows in one transaction. A read of one
+// run is scoped by tag: a tagged World finds the runs of its tag and the
+// untagged ones, and an untagged World only untagged runs. Lists and the
+// rows a run owns are not scoped.
 type store struct {
 	ctx context.Context
 	q   querier
@@ -55,6 +56,10 @@ func (s *store) exec(query string, args ...any) error {
 
 // millis returns at as epoch milliseconds, as the columns hold times.
 func millis(at time.Time) int64 { return at.UnixMilli() }
+
+// clock returns the current time as the World records it: UTC, to the
+// millisecond.
+func clock() time.Time { return time.Now().UTC().Truncate(time.Millisecond) }
 
 func nullable(value string) any {
 	if value == "" {
@@ -112,16 +117,20 @@ type runFilter struct {
 	statuses     []worlds.Status
 	// active selects runs that have not finished.
 	active bool
-	// ownTag selects only the store's tag's runs, without the untagged ones
-	// a tagged store also sees.
+	// ownTag selects only the runs of the store's tag: the untagged ones for
+	// an untagged store.
 	ownTag bool
 }
 
-// listRuns returns the runs the store's tag sees, oldest first.
+// listRuns returns the runs of every tag, oldest first: a list is not scoped
+// by tag unless the filter asks for the store's own.
 func (s *store) listRuns(filter runFilter) ([]runRecord, error) {
-	condition, args := s.tagged("tag")
-	if filter.ownTag && s.tag != "" {
-		condition, args = "tag = ?", []any{s.tag}
+	condition, args := "1 = 1", []any(nil)
+	if filter.ownTag {
+		condition = "tag IS NULL"
+		if s.tag != "" {
+			condition, args = "tag = ?", []any{s.tag}
+		}
 	}
 	query := "SELECT seq, seq_in_band, doc FROM runs WHERE " + condition
 	if filter.workflowName != "" {
@@ -219,16 +228,6 @@ func (s *store) readEvents(runID worlds.RunID, from, to int) ([]worlds.Event, er
 	return s.queryEvents("SELECT seq, event_type, coalesce(correlation_id, ''), doc FROM events WHERE run_id = ? AND seq BETWEEN ? AND ? ORDER BY seq", runID, string(runID), from, to)
 }
 
-// readEventsDescending returns the run's events in slots from..to inclusive,
-// latest first.
-func (s *store) readEventsDescending(runID worlds.RunID, from, to int) ([]worlds.Event, error) {
-	from = max(from, 1)
-	if to < from {
-		return []worlds.Event{}, nil
-	}
-	return s.queryEvents("SELECT seq, event_type, coalesce(correlation_id, ''), doc FROM events WHERE run_id = ? AND seq BETWEEN ? AND ? ORDER BY seq DESC", runID, string(runID), from, to)
-}
-
 // readEvent returns the event in slot, or false for slot 0 or a missing one.
 func (s *store) readEvent(runID worlds.RunID, slot int) (worlds.Event, bool, error) {
 	if slot < 1 {
@@ -241,30 +240,89 @@ func (s *store) readEvent(runID worlds.RunID, slot int) (worlds.Event, bool, err
 	return events[0], true, nil
 }
 
-// correlated returns the run's events of correlationID after slot after, or
-// before it when descending (0 is no bound), at most limit of them (0 is no
-// limit).
-func (s *store) correlated(runID worlds.RunID, correlationID string, after int, descending bool, limit int) ([]worlds.Event, error) {
-	query := "SELECT seq, event_type, coalesce(correlation_id, ''), doc FROM events INDEXED BY events_by_correlation WHERE run_id = ? AND correlation_id = ?"
-	args := []any{string(runID), correlationID}
-	order := " ORDER BY seq"
-	switch {
-	case descending && after > 0:
-		query += " AND seq < ?"
-		args = append(args, after)
-	case !descending && after > 0:
-		query += " AND seq > ?"
-		args = append(args, after)
+// maxEventPageBytes is the most bytes, as stored, one page of a run's events
+// holds before it ends early with more to read. A page always holds one
+// event.
+var maxEventPageBytes = 8 << 20
+
+// eventQuery selects events of a run.
+type eventQuery struct {
+	runID worlds.RunID
+	// correlationID selects the events of one correlation ID when set.
+	correlationID string
+	// after is the slot the events follow, or precede when descending. 0 is
+	// no bound.
+	after      int
+	descending bool
+	// limit is the most events returned. 0 is no limit.
+	limit int
+	// capped ends the page at maxEventPageBytes.
+	capped bool
+}
+
+// listEvents returns the events query selects, and whether more follow them.
+func (s *store) listEvents(query eventQuery) ([]worlds.Event, bool, error) {
+	source := "events"
+	if query.correlationID != "" {
+		// Without the hint SQLite scans the run by its primary key.
+		source = "events INDEXED BY events_by_correlation"
 	}
-	if descending {
-		order += " DESC"
+	statement := "SELECT seq, event_type, coalesce(correlation_id, ''), doc FROM " + source + " WHERE run_id = ?"
+	args := []any{string(query.runID)}
+	if query.correlationID != "" {
+		statement += " AND correlation_id = ?"
+		args = append(args, query.correlationID)
 	}
-	query += order
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
+	if query.after > 0 {
+		if query.descending {
+			statement += " AND seq < ?"
+		} else {
+			statement += " AND seq > ?"
+		}
+		args = append(args, query.after)
 	}
-	return s.queryEvents(query, runID, args...)
+	statement += " ORDER BY seq"
+	if query.descending {
+		statement += " DESC"
+	}
+	if query.limit > 0 {
+		statement += " LIMIT ?"
+		args = append(args, query.limit+1)
+	}
+	rows, err := s.q.QueryContext(s.ctx, statement, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	events := []worlds.Event{}
+	size := 0
+	for rows.Next() {
+		var slot int
+		var eventType, correlationID string
+		var doc []byte
+		if err := rows.Scan(&slot, &eventType, &correlationID, &doc); err != nil {
+			return nil, false, err
+		}
+		if query.limit > 0 && len(events) == query.limit || query.capped && len(events) > 0 && size+len(doc) > maxEventPageBytes {
+			return events, true, nil
+		}
+		size += len(doc)
+		event, err := decodeEvent(query.runID, slot, eventType, correlationID, doc)
+		if err != nil {
+			return nil, false, err
+		}
+		events = append(events, event)
+	}
+	return events, false, rows.Err()
+}
+
+// correlated returns the run's events of correlationID, in order.
+func (s *store) correlated(runID worlds.RunID, correlationID string) ([]worlds.Event, error) {
+	if correlationID == "" {
+		return []worlds.Event{}, nil
+	}
+	events, _, err := s.listEvents(eventQuery{runID: runID, correlationID: correlationID})
+	return events, err
 }
 
 func (s *store) queryEvents(query string, runID worlds.RunID, args ...any) ([]worlds.Event, error) {
@@ -340,12 +398,14 @@ func (s *store) listSteps(runID worlds.RunID) ([]stepRecord, error) {
 
 // Waits.
 
-func (s *store) putWait(wait worlds.Wait) error {
+// putWait inserts or updates the wait of correlationID, which keys its row:
+// the wait's own WaitID, which also names its run, is in its doc.
+func (s *store) putWait(correlationID string, wait worlds.Wait) error {
 	doc, err := json.Marshal(wait)
 	if err != nil {
 		return err
 	}
-	return s.exec("INSERT INTO waits (run_id, wait_id, doc) VALUES (?, ?, ?) ON CONFLICT (run_id, wait_id) DO UPDATE SET doc = excluded.doc", string(wait.RunID), string(wait.WaitID), string(doc))
+	return s.exec("INSERT INTO waits (run_id, wait_id, doc) VALUES (?, ?, ?) ON CONFLICT (run_id, wait_id) DO UPDATE SET doc = excluded.doc", string(wait.RunID), correlationID, string(doc))
 }
 
 // deleteWaits deletes a run's waits, as it ends.
@@ -567,7 +627,8 @@ func (s *store) runHooks(runID worlds.RunID) ([]hookRecord, error) {
 
 // purgeRun deletes the data of a run whose ExpiredAt is set: the payloads in
 // its events, which are also its run, step, and hook payloads, and its
-// streams' chunks, leaving each stream empty and closed.
+// streams' chunks, leaving each stream only an end marker in row 0, so it
+// reads as empty and closed.
 func (s *store) purgeRun(run runRecord) error {
 	events, err := s.readEvents(run.RunID, 1, run.EventCount)
 	if err != nil {
@@ -612,7 +673,7 @@ func (s *store) purgeRun(run runRecord) error {
 		if value.tag.Valid {
 			tag = value.tag.String
 		}
-		if err := s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, 1, ?, NULL, 1)", string(run.RunID), value.name, tag); err != nil {
+		if err := s.exec("INSERT INTO stream_chunks (name, idx, run_id, tag, data, eof) VALUES (?, 0, ?, ?, NULL, 1)", value.name, string(run.RunID), tag); err != nil {
 			return err
 		}
 	}

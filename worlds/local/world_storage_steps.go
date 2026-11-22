@@ -2,6 +2,8 @@ package localworld
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -9,6 +11,9 @@ import (
 // StepsGet and StepsList read a run's steps whatever its tag: only runs are
 // scoped by tag.
 func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (worlds.Step, error) {
+	if err := errors.Join(checkID("run ID", string(input.RunID)), checkID("step ID", string(input.StepID))); err != nil {
+		return worlds.Step{}, err
+	}
 	var step worlds.Step
 	err := w.read(ctx, func(s *store) error {
 		record, err := s.getStep(input.RunID, input.StepID)
@@ -25,6 +30,9 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
+	if err := checkID("run ID", string(input.RunID)); err != nil {
+		return worlds.Page[worlds.Step]{}, err
+	}
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	var page worlds.Page[worlds.Step]
 	err := w.read(ctx, func(s *store) error {
@@ -40,8 +48,8 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 			}
 			steps = append(steps, step)
 		}
-		page, err = keyPage(steps, input.Pagination, func(step worlds.Step) string { return sortKey(step.CreatedAt, string(step.StepID)) })
-		return err
+		page = entityPage(steps, input.Pagination, func(step worlds.Step) (time.Time, string) { return step.CreatedAt, string(step.StepID) })
+		return nil
 	})
 	return page, err
 }

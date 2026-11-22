@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -16,11 +17,16 @@ import (
 )
 
 func TestBackoff(t *testing.T) {
-	cases := map[int]time.Duration{0: time.Second, 1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second, 9: 256 * time.Second, 10: 5 * time.Minute, 64: 5 * time.Minute, 1000: 5 * time.Minute}
-	for attempts, want := range cases {
+	// The delay is e^attempts seconds over the first ten attempts.
+	cases := map[int]float64{0: math.E, 1: math.E, 2: math.Exp(2), 3: math.Exp(3), 9: math.Exp(9), 10: math.Exp(10), 11: math.Exp(10), 1000: math.Exp(10)}
+	for attempts, seconds := range cases {
+		want := time.Duration(seconds * float64(time.Second))
 		if got := backoff(attempts); got != want {
 			t.Errorf("backoff(%d) = %v, want %v", attempts, got, want)
 		}
+	}
+	if longest := backoff(73); longest < 6*time.Hour || longest > 7*time.Hour {
+		t.Errorf("longest backoff = %v, want about 6 hours", longest)
 	}
 }
 
@@ -34,7 +40,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	want := worlds.QueueInput{
 		RunID: runA, QueueName: "q", WorkflowName: "wf", StepID: &stepID, NotBefore: &due,
 		IdempotencyKey: "key", DeploymentID: "dpl_1", DeploymentMismatchRetryCount: 3, ReplayDivergenceCount: 2,
-		StepName: "step", StepAttempt: 4, StepResent: true, RunSpecVersion: worlds.SpecVersion,
+		StepName: "step", StepAttempt: 4, StepResent: true, StepCreatedAt: resumeAt, RunSpecVersion: worlds.SpecVersion,
 		CompleteWaits:    []string{"wait_a", "wait_b"},
 		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_a", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
@@ -52,6 +58,11 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 		t.Fatalf("message ID %q, want msg_<ULID>", queued.MessageID)
 	}
 	want.MessageID, want.Attempt, want.DeliveryCount = queued.MessageID, 1, 1
+	// The World stamps when the message was queued.
+	if created := claimed[0].input.CreatedAt; created.IsZero() || time.Since(created) > time.Minute {
+		t.Fatalf("CreatedAt = %s", created)
+	}
+	want.CreatedAt = claimed[0].input.CreatedAt
 	if got := claimed[0].input; !reflect.DeepEqual(got, want) {
 		t.Fatalf("claimed input = %#v\nwant %#v", got, want)
 	}
@@ -100,20 +111,24 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
+// TestQueueKeepsAMessagePastItsRetention checks a message does not expire:
+// past its Retention it is still claimed, with its Retention, and still
+// holds its idempotency key.
+func TestQueueKeepsAMessagePastItsRetention(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
 	ctx := context.Background()
-	expired, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key", Retention: time.Millisecond})
+	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key", Retention: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if claimed, err := world.claim(ctx, 10, nil); err != nil || len(claimed) != 0 {
-		t.Fatalf("claimed expired = %#v err=%v", claimed, err)
+	if repeat, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"}); err != nil || repeat.MessageID != queued.MessageID {
+		t.Fatalf("key past the retention = %#v err=%v, want message %s", repeat, err, queued.MessageID)
 	}
-	if fresh, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"}); err != nil || fresh.MessageID == expired.MessageID {
-		t.Fatalf("key after expiry = %#v err=%v", fresh, err)
+	claimed, err := world.claim(ctx, 10, nil)
+	if err != nil || len(claimed) != 1 || claimed[0].id != queued.MessageID || claimed[0].input.Retention != time.Millisecond {
+		t.Fatalf("claimed past the retention = %#v err=%v", claimed, err)
 	}
 }
 

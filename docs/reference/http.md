@@ -29,8 +29,11 @@ body.
 | close | `{ type: "close", reqId }` | empty; closes the stream for every writer |
 
 The server answers each with `{ type: "write_ack" | "close_ack", reqId }` or
-`{ type: "error", reqId, status, message }`, where `409` means the stream is
-closed. `workflow.NewHTTPClient` and the `world-http` adapter open the socket
+`{ type: "error", reqId, status, message, retryAfter }`, where `409` means the
+stream is closed. A `429` is the World's rate limit (`*worlds.ThrottleError`):
+the request did not apply, and `retryAfter` names the seconds to wait. A
+writer sends it again under a new `reqId` after that wait, at least a second,
+and leaves the socket for RPC once one request's waits pass 30 seconds. `workflow.NewHTTPClient` and the `world-http` adapter open the socket
 for each writer and write through RPC while it opens and when it is declined or
 fails, so a server that does not serve it still works.
 

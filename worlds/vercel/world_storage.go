@@ -1,14 +1,20 @@
 package vercelworld
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
@@ -61,6 +67,42 @@ func payloadBytes(value any) []byte {
 	return data
 }
 
+// entityPayload is the payload of a run, step, or hook view, without the
+// compression it was stored under: a payload prefixed gzip or zstd is
+// returned as the payload inside it. An encrypted payload, whose compression
+// is inside the encryption, and one that does not decompress, are returned
+// as stored.
+func entityPayload(value any) []byte {
+	data := payloadBytes(value)
+	prefix, body, err := envelope.Decode(data)
+	if err != nil {
+		return data
+	}
+	var inner []byte
+	switch prefix {
+	case envelope.PrefixGzip:
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return data
+		}
+		if inner, err = io.ReadAll(io.LimitReader(reader, maxResponseBytes)); err != nil {
+			return data
+		}
+	case envelope.PrefixZstd:
+		decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxResponseBytes))
+		if err != nil {
+			return data
+		}
+		defer decoder.Close()
+		if inner, err = decoder.DecodeAll(body, nil); err != nil {
+			return data
+		}
+	default:
+		return data
+	}
+	return inner
+}
+
 func timeField(values map[string]any, key string) *time.Time {
 	value, ok := asTime(values[key])
 	if !ok || value.IsZero() {
@@ -80,7 +122,7 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		RunID:               worlds.RunID(str(values, "runId")),
 		WorkflowName:        str(values, "workflowName"),
 		Status:              worlds.Status(str(values, "status")),
-		Error:               payloadBytes(values["error"]),
+		Error:               entityPayload(values["error"]),
 		ErrorCode:           str(values, "errorCode"),
 		Attributes:          stringMap(values["attributes"]),
 		DeploymentID:        str(values, "deploymentId"),
@@ -97,7 +139,7 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		run.StartHook = &worlds.StartHook{Token: str(hook, "token"), HookID: worlds.HookID(str(hook, "hookId")), TokenRetentionUntil: timeField(hook, "tokenRetentionUntil")}
 	}
 	if resolve != worlds.ResolveDataNone {
-		run.Input, run.Output = payloadBytes(values["input"]), payloadBytes(values["output"])
+		run.Input, run.Output = entityPayload(values["input"]), entityPayload(values["output"])
 	}
 	return run
 }
@@ -111,7 +153,7 @@ func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, err
 		StepID:      worlds.StepID(str(values, "stepId")),
 		StepName:    str(values, "stepName"),
 		Status:      worlds.Status(str(values, "status")),
-		Error:       payloadBytes(values["error"]),
+		Error:       entityPayload(values["error"]),
 		Attempt:     attempt,
 		CreatedAt:   requiredTime(values, "createdAt"),
 		UpdatedAt:   requiredTime(values, "updatedAt"),
@@ -121,8 +163,8 @@ func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, err
 	}
 	step.SpecVersion, _ = asInt(values["specVersion"])
 	if resolve != worlds.ResolveDataNone {
-		step.Input = payloadBytes(values["input"])
-		step.Output = payloadBytes(values["output"])
+		step.Input = entityPayload(values["input"])
+		step.Output = entityPayload(values["output"])
 	}
 	return step, nil
 }
@@ -165,7 +207,9 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 		version, _ := asInt(capabilities["hookResumeDedupVersion"])
 		hook.ResumeDedup = version >= hookResumeDedupVersion
 	}
-	hook.Metadata = payloadBytes(values["metadata"])
+	hook.Metadata = entityPayload(values["metadata"])
+	hook.IsWebhook, _ = values["isWebhook"].(bool)
+	hook.IsSystem, _ = values["isSystem"].(bool)
 	return hook, nil
 }
 
@@ -247,22 +291,46 @@ func compareStrings(a, b string) int {
 	return 0
 }
 
-// runWaitSlice is the longest the backend holds one status request.
-const runWaitSlice = 25 * time.Second
+// runWaitHeadroom is kept between the wait the backend is asked to hold a
+// status request for and the request's own deadline, so the hold ends as an
+// answer rather than as a timeout.
+var runWaitHeadroom = 10 * time.Second
+
+// longPollUnusable reports whether err says the status route cannot be held
+// open, rather than that the backend is unwell: the route is missing, an
+// intermediary gave up on the hold, or the request timed out or lost its
+// connection.
+func longPollUnusable(err error) bool {
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return true
+	}
+	switch statusOf(err) {
+	case http.StatusMethodNotAllowed, http.StatusNotImplemented, http.StatusGatewayTimeout:
+		return true
+	case 0:
+		_, failed := errors.AsType[*transientError](err)
+		return failed
+	}
+	return false
+}
 
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
 	deadline := time.Now().Add(input.Timeout)
 	delay := 50 * time.Millisecond
-	longPoll := true
+	// The backend holds a status request until the run finishes or the wait
+	// it was asked for passes. With a request deadline too short to hold one,
+	// plain reads are polled instead.
+	slice := requestTimeout() - runWaitHeadroom
+	longPoll := slice > 0
 	for {
 		remaining := time.Until(deadline)
 		var run worlds.Run
 		var err error
 		if longPoll && remaining > 0 {
-			run, err = w.getRun(ctx, input.RunID, input.ResolveData, "/status", min(remaining, runWaitSlice))
-			if errors.Is(err, worlds.ErrRunNotFound) || statusOf(err) == http.StatusMethodNotAllowed || statusOf(err) == http.StatusNotImplemented || statusOf(err) == http.StatusGatewayTimeout {
-				// The route is missing or did not hold the request: poll
-				// plain reads instead, which also tell a missing run apart.
+			run, err = w.getRun(ctx, input.RunID, input.ResolveData, "/status", min(remaining, slice))
+			if err != nil && ctx.Err() == nil && longPollUnusable(err) {
+				// Poll plain reads instead, which also tell a missing run
+				// apart.
 				longPoll = false
 				run, err = w.getRun(ctx, input.RunID, input.ResolveData, "", 0)
 			}
@@ -380,6 +448,7 @@ func (w *World) hookView(ctx context.Context, values map[string]any, resolve wor
 			var created worlds.DataHookCreated
 			if json.Unmarshal(event.Data, &created) == nil {
 				hook.IsWebhook = hook.IsWebhook || created.IsWebhook
+				hook.IsSystem = hook.IsSystem || created.IsSystem
 				if hook.Metadata == nil {
 					hook.Metadata = created.Metadata
 				}

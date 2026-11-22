@@ -156,6 +156,10 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	before = eventCount()
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &two, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_d"}}})
 	conformExpectType[*worlds.InBandSupersededError](t, err, "stale in-band batch")
+	// The refusal carries the run's counters as the World read them.
+	if superseded, _ := errors.AsType[*worlds.InBandSupersededError](err); superseded.EventCount != before || superseded.InBandCount != 4 {
+		t.Fatalf("stale in-band batch refusal = %#v, want %d positions, 4 in-band", superseded, before)
+	}
 	if eventCount() != before {
 		t.Fatalf("stale in-band batch wrote events %d -> %d", before, eventCount())
 	}

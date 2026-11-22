@@ -2,9 +2,7 @@ package postgresworld
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -71,22 +69,17 @@ func (q *query) limit(limit int) string {
 	return " LIMIT " + q.arg(limit+1)
 }
 
-// keyset adds the condition continuing after cursor for rows ordered by
-// (created_at, id), ascending or descending.
-func (q *query) keyset(cursor string, createdAt, id string, descending bool) error {
+// keyset adds the condition continuing after cursor, the last returned ID,
+// for rows ordered by id, ascending or descending.
+func (q *query) keyset(cursor string, id string, descending bool) {
 	if cursor == "" {
-		return nil
-	}
-	at, key, err := decodeCursor(cursor)
-	if err != nil {
-		return err
+		return
 	}
 	operator := ">"
 	if descending {
 		operator = "<"
 	}
-	q.where(fmt.Sprintf("(%s, %s) %s (%s, %s)", createdAt, id, operator, q.arg(at), q.arg(key)))
-	return nil
+	q.where(id + " " + operator + " " + q.arg(cursor))
 }
 
 func retryable(err error) bool {
@@ -105,40 +98,24 @@ func utc(value *time.Time) *time.Time {
 	return &result
 }
 
-func order(createdAt, id string, descending bool) string {
+// order returns the ORDER BY of rows listed by id. Run, step, and hook IDs
+// end in a ULID, so it is the order they were minted in.
+func order(id string, descending bool) string {
 	if descending {
-		return " ORDER BY " + createdAt + " DESC, " + id + " DESC"
+		return " ORDER BY " + id + " DESC"
 	}
-	return " ORDER BY " + createdAt + ", " + id
-}
-
-func encodeCursor(at time.Time, id string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(at.UnixMicro(), 10) + ":" + id))
-}
-
-func decodeCursor(cursor string) (time.Time, string, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return time.Time{}, "", errInvalidCursor
-	}
-	micros, id, ok := strings.Cut(string(raw), ":")
-	value, err := strconv.ParseInt(micros, 10, 64)
-	if !ok || err != nil {
-		return time.Time{}, "", errInvalidCursor
-	}
-	return time.UnixMicro(value).UTC(), id, nil
+	return " ORDER BY " + id
 }
 
 // keysetPage trims the extra row fetched by query.limit and sets the cursor
-// from the last returned row, on the last page too.
-func keysetPage[T any](values []T, limit int, key func(T) (time.Time, string)) worlds.Page[T] {
+// to the last returned row's ID, on the last page too.
+func keysetPage[T any](values []T, limit int, id func(T) string) worlds.Page[T] {
 	page := worlds.Page[T]{Data: values}
 	if limit > 0 && len(values) > limit {
 		page.Data, page.HasMore = values[:limit], true
 	}
 	if len(page.Data) > 0 {
-		at, id := key(page.Data[len(page.Data)-1])
-		page.Cursor = encodeCursor(at, id)
+		page.Cursor = id(page.Data[len(page.Data)-1])
 	}
 	return page
 }

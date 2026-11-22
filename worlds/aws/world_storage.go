@@ -304,6 +304,9 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 	if hook.IsWebhook {
 		item["isWebhook"] = &ddb.AttributeValueMemberBOOL{Value: true}
 	}
+	if hook.IsSystem {
+		item["isSystem"] = &ddb.AttributeValueMemberBOOL{Value: true}
+	}
 	setTime(item, "tokenRetentionUntil", hook.TokenRetentionUntil)
 	if hook.ClaimedFrom != nil {
 		data, _ := json.Marshal(hook.ClaimedFrom)
@@ -320,8 +323,9 @@ func disposalItem(id worlds.HookID, disposal hookDisposal) map[string]ddb.Attrib
 		"runId":           avs(string(disposal.runID)),
 		"disposedEventId": avs(string(disposal.eventID)),
 	})
-	if disposal.forced {
+	if by := disposal.forcedBy; by != nil {
 		item["forceClaimed"] = &ddb.AttributeValueMemberBOOL{Value: true}
+		item["forceClaimedByRunId"], item["forceClaimedByHookId"] = avs(string(by.RunID)), avs(string(by.HookID))
 	}
 	return item
 }
@@ -333,8 +337,8 @@ func isDisposal(item map[string]ddb.AttributeValue) bool {
 
 func disposalFromItem(item map[string]ddb.AttributeValue) *hookDisposal {
 	disposal := &hookDisposal{runID: worlds.RunID(read(item, "runId")), eventID: worlds.EventID(read(item, "disposedEventId"))}
-	if value, ok := item["forceClaimed"].(*ddb.AttributeValueMemberBOOL); ok {
-		disposal.forced = value.Value
+	if value, ok := item["forceClaimed"].(*ddb.AttributeValueMemberBOOL); ok && value.Value {
+		disposal.forcedBy = &worlds.HookForceClaim{RunID: worlds.RunID(read(item, "forceClaimedByRunId")), HookID: worlds.HookID(read(item, "forceClaimedByHookId"))}
 	}
 	return disposal
 }
@@ -356,6 +360,9 @@ func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	}
 	if value, ok := item["isWebhook"].(*ddb.AttributeValueMemberBOOL); ok {
 		hook.IsWebhook = value.Value
+	}
+	if value, ok := item["isSystem"].(*ddb.AttributeValueMemberBOOL); ok {
+		hook.IsSystem = value.Value
 	}
 	return hook, nil
 }

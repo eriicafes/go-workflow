@@ -119,7 +119,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
-	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
+	if !input.Event.EventType.Creatable() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	// A resume's digest must be its payload's.
@@ -220,7 +220,7 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, err
 	}
 	for _, value := range input.Events {
-		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeHookCreated || !value.EventType.Valid() {
+		if value.EventType == worlds.EventTypeHookCreated || !value.EventType.Creatable() {
 			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
 		}
 	}
@@ -316,7 +316,7 @@ func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
 // read together.
 func fence(run *runEntry, count *int) error {
 	if count != nil && *count != run.view.InBandCount {
-		return &worlds.InBandSupersededError{}
+		return &worlds.InBandSupersededError{EventCount: run.view.eventCount, InBandCount: run.view.InBandCount}
 	}
 	return nil
 }
@@ -636,11 +636,12 @@ type hookEntry struct {
 }
 
 // hookDisposal is a disposed hook's run, its hook_disposed event, which a
-// repeated disposal returns, and whether a forced claim disposed it.
+// repeated disposal returns, and the run and hook whose forced claim disposed
+// it, if one did.
 type hookDisposal struct {
-	runID   worlds.RunID
-	eventID worlds.EventID
-	forced  bool
+	runID    worlds.RunID
+	eventID  worlds.EventID
+	forcedBy *worlds.HookForceClaim
 }
 
 type tokenEntry struct {
@@ -952,8 +953,8 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		}
 		if disposal := entry.disposal; disposal != nil && disposal.runID == run.view.RunID {
 			// A hook another run took over redirects the delivery.
-			if disposal.forced {
-				return nil, &worlds.HookForceClaimedError{}
+			if by := disposal.forcedBy; by != nil {
+				return nil, &worlds.HookForceClaimedError{RunID: by.RunID, HookID: by.HookID}
 			}
 			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
@@ -1155,7 +1156,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey, RunSpecVersion: run.view.SpecVersion}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey, RunSpecVersion: run.view.SpecVersion}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, IsSystem: data.IsSystem, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -1179,7 +1180,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		}
 		// The hook is deleted, leaving the record of its disposal.
 		entry.dirty, entry.hook = true, nil
-		entry.disposal = &hookDisposal{runID: event.RunID, eventID: event.EventID, forced: disposed.ForceClaimedBy != nil}
+		entry.disposal = &hookDisposal{runID: event.RunID, eventID: event.EventID, forcedBy: disposed.ForceClaimedBy}
 	}
 	return nil
 }

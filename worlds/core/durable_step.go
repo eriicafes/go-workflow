@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -133,7 +134,13 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	attempt := starts + 1
 	execution.targetAttempt = attempt
 	if attempt > options.MaxRetries+1 {
-		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(worlds.FatalError{Cause: errStepAttemptsExhausted})})
+		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(attemptsUsedError(options.Name, options.MaxRetries, starts, lastStepStart(execution.events, stepID)))})
+		panic(execution.exit(errReplayComplete))
+	}
+	if execution.stalled {
+		// No delivery of the step's message got as far as starting it, and
+		// this one is past the most a message is delivered.
+		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(deliveriesExceededStepError(options.Name, execution.delivery.Attempt))})
 		panic(execution.exit(errReplayComplete))
 	}
 	var args stepArgs[In]
@@ -145,7 +152,17 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	if err != nil {
 		panic(execution.exit(deliveryError{cause: err}))
 	}
-	result := execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(stepID), Data: started}, func(err error) error {
+	// The first attempt of a step created with a step_created tells the
+	// World when the step was created: the time its message carries, or the
+	// one the log holds.
+	var startOptions worlds.EventsCreateOptions
+	if attempt == 1 && !creation.inline {
+		startOptions.StepCreatedAt = execution.delivery.StepCreatedAt
+		if startOptions.StepCreatedAt.IsZero() {
+			startOptions.StepCreatedAt = stepCreatedAt(execution.events, stepID)
+		}
+	}
+	result := execution.createEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeStepStarted, CorrelationID: string(stepID), Data: started}, startOptions, func(err error) error {
 		if errors.Is(err, worlds.ErrEntityConflict) || errors.Is(err, worlds.ErrStepNotStartable) {
 			// The step already has its result.
 			return nil
@@ -160,6 +177,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	defer stop()
 	stepCtx, span := startStepSpan(stepCtx, execution, stepID, options.Name, attempt)
 	defer span.End()
+	execution.targetRan = true
 	value, callErr := invoke(stepCtx, execution, true, fn, input)
 	var delivery deliveryError
 	if errors.As(callErr, &delivery) {
@@ -173,8 +191,8 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	// Report the target result to the engine, which appends the lifecycle
 	// event.
 	if callErr != nil {
-		result := worlds.DataStepResult{Error: execution.encodeError(callErr), RetryAfter: stepRetryAfter(callErr, options.MaxRetries, attempt)}
-		execution.SetTargetResult(result)
+		failure, retryAfter := stepRetry(callErr, options.Name, options.MaxRetries, attempt, stepMessageSent(execution.events, stepID))
+		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(failure), RetryAfter: retryAfter})
 		panic(execution.exit(errReplayComplete))
 	}
 
@@ -206,10 +224,23 @@ func stepAttempts(events []worlds.Event, stepID worlds.StepID) (int, bool) {
 	return starts, retried
 }
 
+// lastStepStart returns when the last attempt of step stepID among events
+// started, or the zero time when none did.
+func lastStepStart(events []worlds.Event, stepID worlds.StepID) time.Time {
+	var started time.Time
+	for _, event := range events {
+		if event.CorrelationID == string(stepID) && event.EventType == worlds.EventTypeStepStarted {
+			started = event.CreatedAt
+		}
+	}
+	return started
+}
+
 // invoke calls fn with input in stepCtx. A panic in fn becomes its error,
 // except, when inReplay is set, the panic that ends a suspended replay, which
 // passes on. A cancelled stepCtx makes the error fatal, unless the delivery
-// itself stopped.
+// itself stopped. A World that records step executions is told right before
+// fn is called.
 func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay bool, fn func(context.Context, In) (Out, error), input In) (value Out, err error) {
 	returned := &stepReturn{}
 	stepCtx = context.WithValue(stepCtx, stepReturnKey{}, returned)
@@ -225,6 +256,10 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 				}
 			}
 		}()
+		if recorder, ok := execution.world.(worlds.StepExecutions); ok {
+			metadata, _ := StepMetadataFromContext(stepCtx)
+			recorder.RecordStepExecution(stepCtx, metadata.ID)
+		}
 		value, err = fn(stepCtx, input)
 	}()
 	// What the step left to finish, such as buffered stream writes, is done
@@ -302,26 +337,78 @@ func StepOutcome[Out any](execution *Execution, stepID worlds.StepID) (Out, erro
 	return data, nil
 }
 
-func stepRetryAfter(cause error, maxRetries int, attempt int) *time.Time {
+// stepRetryDelay is how long a failed attempt waits for its retry when its
+// error names no delay.
+var stepRetryDelay = time.Second
+
+// stepRetryExpirySlack is how long before its message expires a step's retry
+// must be due, so the message is still there to deliver it.
+const stepRetryExpirySlack = time.Minute
+
+// stepRetry decides what follows attempt of the step named name failing with
+// cause: the time its retry is due, or nil when it fails for good. It returns
+// the error the attempt records. A fatal cause is recorded as it is. A cause
+// that fails the step's last allowed attempt is recorded inside a FatalError
+// that says the retries are used up, and so is one whose retry would be due
+// after the step's message, sent at sent, expires: such a retry would strand
+// the step without an outcome, so the step fails instead. Either keeps cause
+// as its cause. A zero sent is a message whose age is not known.
+func stepRetry(cause error, name string, maxRetries, attempt int, sent time.Time) (error, *time.Time) {
 	var fatal worlds.FatalError
-	if errors.As(cause, &fatal) || attempt > maxRetries {
-		return nil
+	if errors.As(cause, &fatal) {
+		return cause, nil
 	}
+	if attempt > maxRetries {
+		return retriesExhaustedError(name, maxRetries, cause), nil
+	}
+	delay := stepRetryDelay
 	var retryable worlds.RetryableError
-	due := time.Now()
 	if errors.As(cause, &retryable) && retryable.After > 0 {
-		due = due.Add(retryable.After)
+		delay = retryable.After
 	}
-	return &due
+	due := time.Now().Add(delay)
+	if !sent.IsZero() && due.After(sent.Add(worlds.StepRetention-stepRetryExpirySlack)) {
+		return fatalError(fmt.Sprintf("Step \"%s\" could not be retried: its next attempt at %s is past the retention of its queue message: %s", name, isoTime(due), cause.Error()), cause), nil
+	}
+	return cause, &due
+}
+
+// stepMessageSent returns when the message that delivers step stepID was
+// sent: when the step was created as a step delivery, or when an inline
+// step's first retry was handed to one. It is zero for a step without one.
+func stepMessageSent(events []worlds.Event, stepID worlds.StepID) time.Time {
+	for _, event := range events {
+		if event.CorrelationID != string(stepID) {
+			continue
+		}
+		switch event.EventType {
+		case worlds.EventTypeStepCreated, worlds.EventTypeStepRetrying:
+			return event.CreatedAt
+		}
+	}
+	return time.Time{}
 }
 
 // startStepSpan starts the span of a step attempt with the global
 // OpenTelemetry tracer, as a child of the span in ctx. A runner that puts a
 // span context in the ctx it passes to a step parents the step's span under
-// it, since the step runs in the replay that delivers it.
+// it, since the step runs in the replay that delivers it. With no span in
+// ctx, the step's span continues the trace the run was started in, which the
+// run's execution context carries.
 func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.StepID, name string, attempt int) (context.Context, trace.Span) {
 	short := strings.TrimSuffix(name[strings.LastIndex(name, "/")+1:], "-fm")
 	run := execution.Run()
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		if recorded, ok := run.ExecutionContext[worlds.ExecutionContextTraceCarrier].(map[string]any); ok {
+			carrier := propagation.MapCarrier{}
+			for key, value := range recorded {
+				if text, ok := value.(string); ok {
+					carrier[key] = text
+				}
+			}
+			ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+		}
+	}
 	return otel.Tracer("github.com/eriicafes/go-workflow").Start(ctx, "step "+short, trace.WithAttributes(
 		attribute.String("workflow.name", run.WorkflowName),
 		attribute.String("workflow.run.id", string(run.RunID)),

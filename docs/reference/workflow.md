@@ -433,6 +433,7 @@ Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`.
 | `ErrHookNotRegistered` | Receiving from a hook not created in this run. |
 | `*HookConflictError` | Another active hook owns the token. |
 | `*HookForceClaimedError` | Another run took the token with `Force`. |
+| `*StartError` | `Start` with a `Hook` could not confirm the run's admission or its first delivery. |
 | `*RunExpiredError` | `Run.Value` on a run whose data was deleted, such as one started with `RetainNone`. |
 | `*StreamExpiredError` | Reading a stream whose data the World deleted. |
 

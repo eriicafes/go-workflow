@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -306,5 +307,257 @@ func TestHTTPClientWritesStreamsOverTheSocket(t *testing.T) {
 	}
 	if err != nil || !chunks.Done || len(last) != 1 || string(last[0]) != "three" {
 		t.Fatalf("remote stream = %#v err=%v", chunks, err)
+	}
+}
+
+// scriptedSocket serves a stream socket that answers each request with the
+// meta answer returns for it, and records the requests' types and IDs.
+type scriptedSocket struct {
+	mu       sync.Mutex
+	requests []string
+	answer   func(kind string, reqID int, seen int) map[string]any
+}
+
+func (s *scriptedSocket) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.requests...)
+}
+
+// script replaces the socket's answers.
+func (s *scriptedSocket) script(answer func(kind string, reqID int, seen int) map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.answer = answer
+}
+
+// open serves the socket and returns a writer on it, once its writes go
+// through the socket, with the fallback it writes through otherwise.
+func (s *scriptedSocket) open(t *testing.T, world worlds.World, runID worlds.RunID) (worlds.StreamWriter, *countingWriter) {
+	t.Helper()
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var request struct {
+				Type  string `cbor:"type"`
+				ReqID int    `cbor:"reqId"`
+			}
+			if err := cbor.Unmarshal(data[4:4+binary.BigEndian.Uint32(data)], &request); err != nil {
+				return
+			}
+			s.mu.Lock()
+			s.requests = append(s.requests, request.Type+" "+strconv.Itoa(request.ReqID))
+			reply := s.answer(request.Type, request.ReqID, len(s.requests))
+			s.mu.Unlock()
+			reply["reqId"] = request.ReqID
+			meta, _ := cbor.Marshal(reply)
+			frame := append(binary.BigEndian.AppendUint32(nil, uint32(len(meta))), meta...)
+			if err := conn.Write(r.Context(), websocket.MessageBinary, binary.BigEndian.AppendUint32(frame, 0)); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	input := worlds.StreamsOpenWriterInput{RunID: runID, Name: "out", WriterID: worlds.NewWriterID()}
+	direct, err := worlds.OpenStreamWriter(ctx, world, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := &countingWriter{StreamWriter: direct}
+	target, _ := worlds.StreamSocketURL(server.URL, input.RunID, input.Name, input.WriterID)
+	writer := worlds.OpenStreamSocketWriter(ctx, worlds.StreamSocketOptions{URL: target, Fallback: fallback})
+	for deadline := time.Now().Add(5 * time.Second); len(s.seen()) == 0; time.Sleep(5 * time.Millisecond) {
+		if err := writer.Write(ctx, [][]byte{[]byte("opening")}); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket never opened")
+		}
+	}
+	return writer, fallback
+}
+
+func TestStreamSocketWriterWaitsOutARateLimit(t *testing.T) {
+	defer worlds.SetStreamSocketThrottle(time.Millisecond, 20*time.Millisecond)()
+	ctx := context.Background()
+	world := testworld.NewManual()
+	defer world.Close()
+	ack := func(kind string) map[string]any { return map[string]any{"type": kind + "_ack"} }
+	throttled := func(retryAfter string) map[string]any {
+		reply := map[string]any{"type": "error", "status": http.StatusTooManyRequests, "message": "busy"}
+		if retryAfter != "" {
+			reply["retryAfter"] = retryAfter
+		}
+		return reply
+	}
+
+	t.Run("Resent", func(t *testing.T) {
+		// The second and third requests are refused for the rate limit: the
+		// write is sent again under a new request ID each time, and never
+		// through the fallback.
+		socket := &scriptedSocket{answer: func(kind string, _ int, seen int) map[string]any {
+			if seen == 2 || seen == 3 {
+				return throttled("0")
+			}
+			return ack(kind)
+		}}
+		writer, fallback := socket.open(t, world, "wrun_throttled")
+		before, sent := fallback.writes.Load(), len(socket.seen())
+		if err := writer.Write(ctx, [][]byte{[]byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+		if got := socket.seen()[sent:]; len(got) != 3 || got[0] == got[1] || got[1] == got[2] || fallback.writes.Load() != before {
+			t.Fatalf("requests = %v with %d fallback writes, want three sends with their own IDs and none through the fallback", got, fallback.writes.Load()-before)
+		}
+		// A close is waited out the same way.
+		var closes atomic.Int32
+		socket.script(func(kind string, _ int, _ int) map[string]any {
+			if closes.Add(1) == 1 && kind == "close" {
+				return throttled("")
+			}
+			return ack(kind)
+		})
+		if err := writer.CloseStream(ctx); err != nil || fallback.closes.Load() != 0 || closes.Load() != 2 {
+			t.Fatalf("close = %v after %d requests and %d fallback closes, want it sent again on the socket", err, closes.Load(), fallback.closes.Load())
+		}
+	})
+
+	t.Run("PastTheBudget", func(t *testing.T) {
+		// A server that keeps refusing is given up once the waits pass the
+		// budget: the write, which never applied, goes through the fallback,
+		// and so does everything after it.
+		var opened atomic.Bool
+		socket := &scriptedSocket{answer: func(kind string, _ int, _ int) map[string]any {
+			if !opened.Load() {
+				return ack(kind)
+			}
+			return throttled("")
+		}}
+		writer, fallback := socket.open(t, world, "wrun_budget")
+		opened.Store(true)
+		before, sent := fallback.writes.Load(), len(socket.seen())
+		if err := writer.Write(ctx, [][]byte{[]byte("kept")}); err != nil {
+			t.Fatal(err)
+		}
+		refused := len(socket.seen()) - sent
+		if refused < 2 || refused > 21 || fallback.writes.Load() != before+1 {
+			t.Fatalf("%d sends and %d fallback writes, want the write resent within the budget and then stored through the fallback", refused, fallback.writes.Load()-before)
+		}
+		if err := writer.Write(ctx, [][]byte{[]byte("after")}); err != nil || len(socket.seen()) != sent+refused || fallback.writes.Load() != before+2 {
+			t.Fatalf("write after the socket was given up = %v, with %d more sends", err, len(socket.seen())-sent-refused)
+		}
+		if err := writer.CloseStream(ctx); err != nil || fallback.closes.Load() != 1 {
+			t.Fatalf("close = %v with %d fallback closes, want it through the fallback", err, fallback.closes.Load())
+		}
+		chunks, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_budget", Name: "out"})
+		if err != nil || !chunks.Done || len(chunks.Data) < 2 || string(chunks.Data[len(chunks.Data)-2].Data) != "kept" || string(chunks.Data[len(chunks.Data)-1].Data) != "after" {
+			t.Fatalf("stream = %#v err=%v, want both writes stored once, in order", chunks, err)
+		}
+	})
+
+	t.Run("BeforeTheDeadline", func(t *testing.T) {
+		// A wait that would run into the reserve before the context's
+		// deadline is not made.
+		var opened atomic.Bool
+		socket := &scriptedSocket{answer: func(kind string, _ int, _ int) map[string]any {
+			if !opened.Load() {
+				return ack(kind)
+			}
+			return throttled("")
+		}}
+		writer, fallback := socket.open(t, world, "wrun_deadline")
+		opened.Store(true)
+		near, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		before, sent := fallback.writes.Load(), len(socket.seen())
+		if err := writer.Write(near, [][]byte{[]byte("x")}); err != nil || len(socket.seen()) != sent+1 || fallback.writes.Load() != before+1 {
+			t.Fatalf("write = %v after %d sends and %d fallback writes, want one send and the fallback", err, len(socket.seen())-sent, fallback.writes.Load()-before)
+		}
+	})
+
+	t.Run("FailedClose", func(t *testing.T) {
+		// A close the server fails is closed again through the fallback,
+		// which is harmless if it landed.
+		socket := &scriptedSocket{answer: func(kind string, _ int, _ int) map[string]any {
+			if kind == "close" {
+				return map[string]any{"type": "error", "status": http.StatusServiceUnavailable, "message": "reconciling"}
+			}
+			return ack(kind)
+		}}
+		writer, fallback := socket.open(t, world, "wrun_close")
+		if err := writer.CloseStream(ctx); err != nil || fallback.closes.Load() != 1 {
+			t.Fatalf("close = %v with %d fallback closes, want it closed through the fallback", err, fallback.closes.Load())
+		}
+	})
+}
+
+// throttledStreamWorld refuses its first stream write for its rate limit.
+type throttledStreamWorld struct {
+	*testworld.World
+	refused atomic.Int32
+}
+
+func (w *throttledStreamWorld) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
+	if string(input.Chunks[0]) == "limited" && w.refused.Add(1) == 1 {
+		return &worlds.ThrottleError{After: 1500 * time.Millisecond}
+	}
+	return w.World.StreamsWriteMulti(ctx, input)
+}
+
+func TestStreamSocketServerRefusesAThrottledWriteAsRetryable(t *testing.T) {
+	defer worlds.SetStreamSocketThrottle(time.Millisecond, time.Hour)()
+	ctx := context.Background()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	world := &throttledStreamWorld{World: manual}
+	server, _ := socketServer(t, world)
+
+	// The server answers the World's rate limit with a 429 naming the wait
+	// in whole seconds, which a writer waits out and sends again.
+	target, _ := worlds.StreamSocketURL(server.URL+"/v1/workflow", "wrun_limited", "out", worlds.NewWriterID())
+	conn, _, err := websocket.Dial(ctx, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	meta, _ := cbor.Marshal(map[string]any{"type": "write", "reqId": 1, "chunkSeq": 0, "numChunks": 1})
+	frame := append(binary.BigEndian.AppendUint32(nil, uint32(len(meta))), meta...)
+	frame = binary.BigEndian.AppendUint32(frame, uint32(4+len("limited")))
+	frame = append(binary.BigEndian.AppendUint32(frame, uint32(len("limited"))), "limited"...)
+	if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		Type       string `cbor:"type"`
+		ReqID      int    `cbor:"reqId"`
+		Status     int    `cbor:"status"`
+		RetryAfter string `cbor:"retryAfter"`
+	}
+	if err := cbor.Unmarshal(data[4:4+binary.BigEndian.Uint32(data)], &reply); err != nil || reply.Type != "error" || reply.ReqID != 1 || reply.Status != http.StatusTooManyRequests || reply.RetryAfter != "2" {
+		t.Fatalf("reply = %+v, %v, want a 429 that asks for 2 seconds", reply, err)
+	}
+	// The refused write stored nothing, and the socket still takes writes.
+	if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		t.Fatal(err)
+	}
+	if _, data, err = conn.Read(ctx); err != nil || cbor.Unmarshal(data[4:4+binary.BigEndian.Uint32(data)], &reply) != nil || reply.Type != "write_ack" {
+		t.Fatalf("second write = %+v, %v, want it acknowledged", reply, err)
+	}
+	chunks, err := manual.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_limited", Name: "out"})
+	if err != nil || len(chunks.Data) != 1 || string(chunks.Data[0].Data) != "limited" {
+		t.Fatalf("stream = %#v err=%v, want the write stored once", chunks, err)
 	}
 }

@@ -54,6 +54,29 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	if err != nil || conflict.EventType != worlds.EventTypeHookConflict || json.Unmarshal(conflict.Data, &data) != nil || data.ConflictingRunID != runID {
 		t.Fatalf("conflict = %#v, %v", conflict, err)
 	}
+	// A conflict records the token and the run holding it, and nothing else
+	// of the hook that was refused.
+	var recorded map[string]any
+	if err := json.Unmarshal(conflict.Data, &recorded); err != nil || len(recorded) != 2 || recorded["token"] != token || recorded["conflictingRunId"] != string(runID) {
+		t.Fatalf("conflict data = %s, %v", conflict.Data, err)
+	}
+
+	// Only a World records a conflict: a caller's is refused.
+	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: other, Event: conformEvent(t, worlds.EventTypeHookConflict, "hook_caller", map[string]string{"token": token, "conflictingRunId": string(runID)})})
+	conformExpect(t, err, worlds.ErrEventInvalid, "caller-written hook_conflict")
+
+	// A hook the framework creates for itself reads as a system hook.
+	system := conformHookData(token+"-system", false, 0)
+	system.IsSystem = true
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_system", system)}); err != nil {
+		t.Fatal(err)
+	}
+	if hook, err := world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_system"}); err != nil || !hook.IsSystem || byToken.IsSystem {
+		t.Fatalf("system hook = %#v err=%v", hook, err)
+	}
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_system", nil)}); err != nil {
+		t.Fatal(err)
+	}
 
 	second := token + "-second"
 	if _, err := conformClaim(world, runID, "hook_c", second, false); err != nil {
@@ -293,6 +316,10 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_f", conformReceived(t, []byte("late")))})
 	conformExpectType[*worlds.HookForceClaimedError](t, err, "resume a force-claimed hook")
+	// The refusal names the run and hook that took the token.
+	if claimed, _ := errors.AsType[*worlds.HookForceClaimedError](err); claimed.RunID != other || claimed.HookID != "hook_g" {
+		t.Fatalf("force-claimed refusal = %#v, want run %s and hook_g", claimed, other)
+	}
 }
 
 func conformStartHook(t *testing.T, world worlds.World) {

@@ -31,7 +31,8 @@ type (
 // the recorded declaration, and a flow that reaches the declaration once the
 // timer is due completes it. The timer settles when the walk reaches its
 // wait_completed, which Execution.Settled reports. When the operation recorded
-// with its ID is not a timer, it ends the replay with a panic carrying a
+// with its ID is not a timer, or its wait_completed names another time than
+// its wait_created, it ends the replay with a panic carrying a
 // replayDivergenceError.
 func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitResult {
 	waitID := options.Execution.NextWaitID()
@@ -60,7 +61,15 @@ func DurableWait(ctx context.Context, options DurableWaitOptions) DurableWaitRes
 	// A flow completes a due timer where it reaches its declaration, which
 	// every replay does, so the timer's own delivery or any later flow
 	// completes it.
-	_, completed := options.Execution.settles[string(waitID)]
+	completion, completed := options.Execution.settles[string(waitID)]
+	if completed {
+		// A completion that names another time than the timer was created
+		// with is not this timer's.
+		var done worlds.DataWaitCompleted
+		if json.Unmarshal(options.Execution.events[completion].Data, &done) == nil && done.ResumeAt != nil && done.ResumeAt.UnixMilli() != data.ResumeAt.UnixMilli() {
+			panic(options.Execution.exit(replayDivergenceError{CorrelationID: string(waitID), Reason: fmt.Sprintf("recorded wait_completed has resumeAt %s, the wait it completes %s", isoTime(*done.ResumeAt), isoTime(data.ResumeAt))}))
+		}
+	}
 	if completed || ctx.Err() != nil || options.Execution.target != nil {
 		return DurableWaitResult{WaitID: waitID}
 	}

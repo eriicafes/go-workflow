@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -492,3 +493,50 @@ var runTime = worlds.NewRunID()
 // runWait is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runWait = worlds.NewRunID()
+
+func TestRPCQueueBatchCarriesEachItemsOutcome(t *testing.T) {
+	manual := testworld.NewManual()
+	defer manual.Close()
+	handler := worlds.HTTPHandler(refusingQueue{World: manual, refuse: "wrun_b", cause: &worlds.ThrottleError{}}, httpPrefix)
+	encoded, err := cbor.Marshal(worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: "wrun_a"}, {RunID: "wrun_b"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := cbor.Marshal(rpcRequest{Method: "queue.queueBatch", Input: encoded})
+	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
+	request.Header.Set("Content-Type", worlds.RPCContentType)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var envelope rpcResponse
+	if err := cbor.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Error != nil {
+		t.Fatalf("queue.queueBatch = %v, %+v", err, envelope.Error)
+	}
+	// A refused item is part of the answer, not a failure of the request.
+	var results []map[string]any
+	if err := cbor.Unmarshal(envelope.Output, &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0]["MessageID"] == "" || results[0]["Error"] != nil || results[1]["MessageID"] != "" || results[1]["Error"] != "workflow: rate limited" || results[1]["Retryable"] != true {
+		t.Fatalf("results = %+v, want the first stored and the second refused retryably", results)
+	}
+}
+
+// undecidedStartWorld is a World whose start hook admission is switched off.
+type undecidedStartWorld struct{ *testworld.World }
+
+func (undecidedStartWorld) EventsCreateRun(context.Context, worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	return worlds.EventResult{}, fmt.Errorf("%w: off", worlds.ErrStartHookDisabled)
+}
+
+func TestRPCCarriesAnUnconfirmedStart(t *testing.T) {
+	defer worlds.SetStartHookConfirmDelays()()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(undecidedStartWorld{manual}, "")))
+	runID := worlds.NewRunID()
+	_, err := client.RunsCreate(context.Background(), worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "flow", StartHook: &worlds.StartHook{Token: "token"}}})
+	var unconfirmed *worlds.StartError
+	if !errors.As(err, &unconfirmed) || unconfirmed.RunID != runID || unconfirmed.Stage != worlds.StartStageAdmission {
+		t.Fatalf("start error = %v, want a *StartError for the run's admission", err)
+	}
+}

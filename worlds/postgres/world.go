@@ -37,10 +37,11 @@ type Config struct {
 	// WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS, or 30 days.
 	HookRetentionLimit time.Duration
 	// PollInterval bounds how long Worker loops and waiting reads sleep when
-	// no notification arrives. Zero uses 250ms.
+	// no notification arrives. Zero uses WORKFLOW_POSTGRES_POLL_INTERVAL_MS,
+	// or 500ms.
 	PollInterval time.Duration
 	// Concurrency is the most deliveries one Worker call executes at once. Zero
-	// uses 10.
+	// uses WORKFLOW_POSTGRES_WORKER_CONCURRENCY, or 50.
 	Concurrency int
 	// LeaseDuration is how long a claimed delivery stays hidden from other
 	// workers. Workers renew it while executing, so it only bounds how soon a
@@ -74,6 +75,26 @@ type Config struct {
 	// SkipRecovery leaves the active runs alone when Worker starts, rather
 	// than queueing a flow for each of them again.
 	SkipRecovery bool
+}
+
+const (
+	// defaultPollIntervalMS is Config.PollInterval's default, in
+	// milliseconds.
+	defaultPollIntervalMS = 500
+	// defaultConcurrency is Config.Concurrency's default. A step that waits
+	// for a child run holds its delivery meanwhile, so a low limit starves
+	// workflows that fan out.
+	defaultConcurrency = 50
+)
+
+// positiveIntEnv returns the positive integer the environment variable name
+// holds, or zero.
+func positiveIntEnv(name string) int {
+	value, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 // DefaultQueue is the queue of workflows Config.Routes doesn't route.
@@ -149,10 +170,10 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		return nil, fmt.Errorf("workflow/postgres: invalid base URL: %w", err)
 	}
 	if config.PollInterval <= 0 {
-		config.PollInterval = 250 * time.Millisecond
+		config.PollInterval = time.Duration(cmp.Or(positiveIntEnv("WORKFLOW_POSTGRES_POLL_INTERVAL_MS"), defaultPollIntervalMS)) * time.Millisecond
 	}
 	if config.Concurrency <= 0 {
-		config.Concurrency = 10
+		config.Concurrency = cmp.Or(positiveIntEnv("WORKFLOW_POSTGRES_WORKER_CONCURRENCY"), defaultConcurrency)
 	}
 	if config.LeaseDuration <= 0 {
 		config.LeaseDuration = time.Minute

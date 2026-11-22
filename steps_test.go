@@ -61,7 +61,7 @@ func collectionStep(_ context.Context, input collectionStepInput) (int, error) {
 		time.Sleep(input.Delay)
 	}
 	if input.Fail {
-		return 0, errors.New("collection step failed")
+		return 0, workflow.RetryableError(errors.New("collection step failed"), time.Millisecond)
 	}
 	return input.Value, nil
 }
@@ -76,7 +76,7 @@ func TestStepRetriesThroughEngine(t *testing.T) {
 	world := testworld.New(workflow.Use(func(ctx context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
 			if attempts.Add(1) == 1 {
-				return 0, errors.New("retry once")
+				return 0, workflow.RetryableError(errors.New("retry once"), time.Millisecond)
 			}
 			return value + 1, nil
 		}, input.Value, workflow.StepOptions{MaxRetries: 1})
@@ -334,7 +334,11 @@ func TestHandledStepPanicsDoNotRunRollbacks(t *testing.T) {
 						panic("step panic")
 					}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
 				}
-				if err == nil || err.Error() != "workflow: panic: step panic" {
+				// The step's only attempt failed, so its error says its retries
+				// are used up, and keeps the panic as its cause.
+				var fatal worlds.FatalError
+				if err == nil || !strings.HasSuffix(err.Error(), "failed after 0 retries: workflow: panic: step panic") ||
+					!errors.As(err, &fatal) || fatal.Cause == nil || fatal.Cause.Error() != "workflow: panic: step panic" {
 					return rollbackOutput{}, fmt.Errorf("step panic error=%v", err)
 				}
 				return rollbackOutput{}, nil
@@ -439,7 +443,7 @@ func TestRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
 					rollbackLogged = true
 				}
 				var result worlds.DataStepResult
-				if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && worlds.DecodeErrorPayload(result.Error, nil).Error() == wantFailure {
+				if event.EventType == worlds.EventTypeStepFailed && json.Unmarshal(event.Data, &result) == nil && errors.Unwrap(worlds.DecodeErrorPayload(result.Error, nil)) != nil && errors.Unwrap(worlds.DecodeErrorPayload(result.Error, nil)).Error() == wantFailure {
 					stepFailed = true
 				}
 			}
@@ -1064,7 +1068,7 @@ func inlineBackgroundRunner(calls *atomic.Int32) core.Runner {
 	return workflow.Use(func(ctx context.Context, input inlineBackgroundInput) (inlineBackgroundOutput, error) {
 		double := func(_ context.Context, value int) (int, error) {
 			if calls.Add(1) == 1 && input.Fail {
-				return 0, errors.New("try again")
+				return 0, workflow.RetryableError(errors.New("try again"), time.Millisecond)
 			}
 			return value * 2, nil
 		}
@@ -1122,11 +1126,16 @@ func TestInlineBackgroundRunsInlineAndHandsRetriesToStepDeliveries(t *testing.T)
 		stepDeliveries := 0
 		for len(world.QueuedMessages()) != 0 {
 			message := world.QueuedMessages()[0]
+			if err := runtime.Execute(ctx, message.Input); err != nil {
+				// The retry's message is delivered again once it is due.
+				if redelivery, ok := worlds.RedeliveryOf(err); ok {
+					time.Sleep(redelivery.After)
+					continue
+				}
+				t.Fatal(err)
+			}
 			if message.Input.StepID != nil {
 				stepDeliveries++
-			}
-			if err := runtime.Execute(ctx, message.Input); err != nil {
-				t.Fatal(err)
 			}
 			if err := world.Acknowledge(ctx, message.ID); err != nil {
 				t.Fatal(err)

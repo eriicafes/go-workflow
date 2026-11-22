@@ -45,6 +45,8 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		return worlds.QueueResult{}, err
 	}
 	input.MessageID, input.Attempt, input.DeliveryCount = "", 0, 0
+	// The message is created now, whatever the caller set.
+	input.CreatedAt = time.Now().UTC().Truncate(time.Millisecond)
 	queue := w.target(w.config.Routes[input.WorkflowName])
 	var delay time.Duration
 	if input.NotBefore != nil {
@@ -111,16 +113,10 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	return worlds.QueueResult{MessageID: id}, nil
 }
 
+// QueueBatch queues the items one after another, and reports an item that
+// failed in its result.
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
-	results := make([]worlds.QueueResult, 0, len(input.Items))
-	for _, item := range input.Items {
-		result, err := w.Queue(ctx, item)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, result)
-	}
-	return results, nil
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 // maxKeyAttempts bounds how often claimKey retries a claim that races with

@@ -68,16 +68,41 @@ Omitting options allows three retries. Passing `StepOptions{}` allows none.
 If multiple options are passed, the last one applies.
 
 While a retry is scheduled, the step's status is `pending` and `RetryAfter`
-holds the earliest time of the next attempt. When retries run out, the step
-fails with its last error. [Inline steps](/guide/inline-steps#retrying-failures)
-use the same policy.
+holds the earliest time of the next attempt, one second after the failure
+unless the error names a delay. A step's queue message lives for seven days,
+so a retry that would be due after it expires fails the step instead.
+[Inline steps](/guide/inline-steps#retrying-failures) use the same policy.
+
+When retries run out, the step fails with a fatal error that says so and
+keeps the last attempt's error as its cause:
+
+```text
+Step "example.com/shop.chargeCard" failed after 3 retries: card declined
+```
+
+`errors.Is` and `errors.As` still reach the last error through it, so a
+runner matches its own errors the same way whether a step failed at once or
+after its retries:
+
+```go
+_, err := workflow.Step(ctx, chargeCard, order)
+if errors.Is(err, ErrCardDeclined) {
+	// ...
+}
+```
+
+An error wrapped in `FatalError` is recorded as it is, with no such message.
+A step whose attempts all started and whose last one never recorded a result,
+because its delivery crashed or was stopped, fails with
+`Step "..." exceeded max retries (3 retries): attempt 4 started at ... and
+never recorded a result`, which has no cause.
 
 | Return from a step | Effect |
 | --- | --- |
 | `nil` error | Step completes. |
-| Any other error | Retried while retries remain, then fails. |
+| Any other error | Retried after a second while retries remain, then fails. |
 | `workflow.FatalError(err)` | Fails immediately, never retried. |
-| `workflow.RetryableError(err, after)` | Retried no sooner than `after`, while retries remain. |
+| `workflow.RetryableError(err, after)` | Retried no sooner than `after`, or a second when `after` is zero, while retries remain. |
 
 ::: tip Steps only
 `FatalError` and `RetryableError` only change how a step is retried, so return
@@ -120,6 +145,54 @@ if errors.Is(err, ErrCardDeclined) {
 A runner may also handle a step's error and keep going, for example by
 retrying with different input or taking another branch.
 
+### Failures the runtime records
+
+The runtime fails a run itself in a few cases. Each `run_failed` event
+carries an error code in plain text, which `worlds.RunFailedErrorCode` reads
+and tools use to sort failures:
+
+| Error code | The run failed because | Matches |
+| --- | --- | --- |
+| `USER_ERROR` | The runner returned an error or panicked. | The runner's error |
+| `WORKFLOW_NOT_REGISTERED` | The worker has no runner for the run's workflow. | `worlds.ErrWorkflowNotRegistered` |
+| `CORRUPTED_EVENT_LOG` | Its replay kept [diverging](/guide/replay#replay-divergence) from its event log. | `worlds.ErrCorruptedEventLog` |
+| `DEPLOYMENT_MISMATCH` | Its deliveries kept reaching a deployment other than the one it is [pinned to](/guide/replay#pinning-runs-to-a-deployment). | `worlds.ErrDeploymentMismatch` |
+| `MAX_DELIVERIES_EXCEEDED` | One message of its flow was delivered more than 48 times without the delivery succeeding. | `worlds.ErrMaxDeliveriesExceeded` |
+| `MAX_EVENTS_EXCEEDED` | Its event log reached the most events a run may hold. | `worlds.ErrMaxEventsExceeded` |
+| `REPLAY_TIMEOUT` | Replaying it kept taking longer than a delivery may replay for. | `worlds.ErrReplayTimeout` |
+| `RUNTIME_ERROR` | The runtime could not set up its replay at all, such as for a run ID it cannot read. | |
+
+None of these run the run's [rollbacks](/guide/rollbacks), except a runner's
+own failure.
+
+A run may hold 25,000 events. A flow checks the count before it replays and
+each time a step it ran inline records its result, and fails a run at the
+limit, so split long-running work into [child runs](/guide/composition) well
+before it. `WORKFLOW_MAX_EVENTS` sets another limit where the World sets none
+for the run, and `WORKFLOW_MAX_EVENTS_OVERRIDE` lowers whichever applies. The
+runtime logs a warning when a run reaches half, 80% and 95% of its limit.
+
+A flow delivery may spend 240 seconds replaying: reading the log, running the
+runner between steps, and writing events. The time its inline steps'
+functions run and the time it waits for other work do not count. A delivery
+that passes the limit fails, so the queue delivers its message again, and the
+fourth delivery of a message to pass it fails the run.
+`WORKFLOW_REPLAY_TIMEOUT_MS` sets the limit, between 30,000 and 780,000, and
+`WORKFLOW_REPLAY_TIMEOUT_MAX_RETRIES` how many deliveries are retried. A
+World that does not count a message's deliveries retries without failing the
+run.
+
+A step's message is delivered again on purpose while the step retries, so
+the limit of 48 deliveries does not fail a step by itself. Past it, a step
+that no delivery has started, retried, or scheduled for an hour fails with
+`Step "..." failed with MAX_DELIVERIES_EXCEEDED`, an error matching
+`worlds.ErrMaxDeliveriesExceeded` that the runner can handle like any step
+failure.
+
+A step function's failure to decode its input or encode its output, and a
+payload that fails to decrypt, reach the runner as ordinary errors it can
+handle, so a run that returns one fails with `USER_ERROR`.
+
 ## Returned errors
 
 Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`,
@@ -138,7 +211,9 @@ which also reads its fields.
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
 | `*workflow.HookConflictError` | Receiving or selecting a hook whose token another active hook already has. The token is claimed on first use, not at creation. |
 | `*workflow.HookForceClaimedError` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
+| `*workflow.StartError` | `Start` with `StartOptions.Hook` could not confirm that the World admitted the run (`Stage` is `admission`) or queued its first delivery (`queue`), after sending again three times. The run may exist and run. Starting again with the same token is safe: it starts no second run while the first holds the token. It wraps `worlds.ErrStartHookDisabled` when the World's start hook admission is switched off. |
 | `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log. See [Replay divergence](/guide/replay#replay-divergence). |
+| `worlds.ErrMaxEventsExceeded`, `worlds.ErrReplayTimeout`, `worlds.ErrMaxDeliveriesExceeded` | `Run.Value` on a run the runtime failed for a limit. See [Failures the runtime records](#failures-the-runtime-records). |
 
 The [`worlds` reference](/reference/worlds#errors) lists the errors Worlds
 return, such as `ErrRunNotFound` and `ErrHookNotActive`.

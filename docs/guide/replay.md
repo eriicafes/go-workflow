@@ -104,7 +104,9 @@ run's creation, which the message carries. So it replays without reading the
 log, writes `run_started` without waiting for it, and starts its inline steps
 before their writes commit (`core.TurboFirstDeliveries`). When the run had
 already started, as on a platform's replay of a first delivery, it starts again
-from a read of the log.
+from a read of the log. A first delivery of a message queued more than 15
+seconds ago is taken as such a replay and reads the log from the start, on a
+World whose queue reports when a message was queued.
 
 ### Running ahead
 
@@ -184,6 +186,10 @@ records. The runtime detects:
 - a hook with a different token than the one recorded.
 - a runner that returns without reaching a recorded operation, for example
   after a step was removed.
+- a runner that waits with every recorded event delivered and a recorded
+  operation it never declared, for example after one of two concurrent steps
+  was removed.
+- a timer whose recorded completion names another due time than its creation.
 
 On divergence, the runtime ends the delivery instead of returning an error to
 the runner, so a runner that handles step errors can't carry on with misaligned

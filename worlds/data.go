@@ -1,6 +1,7 @@
 package worlds
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,9 +134,11 @@ func ResolveEvents(events []Event, resolve EventsResolveData) []Event {
 type DataRunCreated struct {
 	WorkflowName string `json:"workflowName" cbor:"workflowName"`
 	// Input is the run's argument list, [input], as a payload.
-	Input        []byte            `json:"input" cbor:"input"`
-	Attributes   map[string]string `json:"attributes" cbor:"attributes"`
-	DeploymentID string            `json:"deploymentId,omitempty" cbor:"deploymentId,omitempty"`
+	Input []byte `json:"input" cbor:"input"`
+	// Attributes is left out when the run has none, and DeploymentID is
+	// always recorded.
+	Attributes   map[string]string `json:"attributes,omitempty" cbor:"attributes,omitempty"`
+	DeploymentID string            `json:"deploymentId" cbor:"deploymentId"`
 	// EncryptionPublicKey is the run's X25519 public key in base64, which
 	// writers outside the run seal payloads to. It is set when the run's
 	// payloads are encrypted.
@@ -262,6 +265,18 @@ func RunStartHook(data []byte) *StartHook {
 // run a run was replayed from, so tools link the replay to its source.
 const ExecutionContextReplayedFromRunID = "replayedFromRunId"
 
+// ExecutionContextWorkflowCoreVersion and ExecutionContextFeatures are the
+// executionContext keys every started run records: the version of the
+// go-workflow release that started it, and its features,
+// {"encryption": bool}, which say whether its payloads are encrypted.
+const (
+	// ExecutionContextTraceCarrier is the executionContext key holding the
+	// trace context a run was started in, as a propagation carrier.
+	ExecutionContextTraceCarrier        = "traceCarrier"
+	ExecutionContextWorkflowCoreVersion = "workflowCoreVersion"
+	ExecutionContextFeatures            = "features"
+)
+
 // RunCreatedData returns the Data of the run_created event of input.
 func RunCreatedData(input EventsCreateRunInput) ([]byte, error) {
 	return json.Marshal(DataRunCreated{
@@ -358,6 +373,10 @@ func runErrorCode(err error) string {
 		return "CORRUPTED_EVENT_LOG"
 	case errors.Is(err, ErrMaxDeliveriesExceeded):
 		return "MAX_DELIVERIES_EXCEEDED"
+	case errors.Is(err, ErrMaxEventsExceeded):
+		return "MAX_EVENTS_EXCEEDED"
+	case errors.Is(err, ErrReplayTimeout):
+		return "REPLAY_TIMEOUT"
 	case errors.Is(err, ErrDeploymentMismatch):
 		return "DEPLOYMENT_MISMATCH"
 	case errors.Is(err, ErrWorkflowNotRegistered):
@@ -378,9 +397,11 @@ type DataStepCreated struct {
 	// Inline reports that the flow runs the step itself. A step_created
 	// records a step queued as a step delivery, or one that failed before
 	// it started, and an inline step is created by its first step_started.
-	Inline bool `json:"inline,omitempty" cbor:"inline,omitempty"`
+	// It is always written, false included.
+	Inline bool `json:"inline" cbor:"inline"`
 	// CreatorMessageID is the queued message of the flow that created the
-	// step.
+	// step. A step the runner declared and never waited for, recorded as
+	// its run ends, has none: no message runs it.
 	CreatorMessageID string `json:"creatorMessageId,omitempty" cbor:"creatorMessageId,omitempty"`
 }
 
@@ -420,6 +441,65 @@ type DataStepResult struct {
 	// next attempt runs as a step delivery: the queued message of the flow
 	// that hands it over.
 	CreatorMessageID string `json:"creatorMessageId,omitempty" cbor:"creatorMessageId,omitempty"`
+	// The fields below are latency telemetry, in milliseconds, which the
+	// flow records on the step_completed or step_failed of the first
+	// attempt of the first step of a batch it runs inline.
+	//
+	// TTFS is the time from the run's creation to the start of the first
+	// step's function, when nothing but the runtime stood between them.
+	TTFS *float64 `json:"ttfs,omitempty" cbor:"ttfs,omitempty"`
+	// STSO is the time from the previous step's result to the start of
+	// this step's function, when the two ran back to back. StepCount is
+	// the number of finished steps and EventCount the number of events in
+	// the log when the step was scheduled, and are set with STSO.
+	STSO       *float64 `json:"stso,omitempty" cbor:"stso,omitempty"`
+	StepCount  int      `json:"stepCount,omitempty" cbor:"stepCount,omitempty"`
+	EventCount int      `json:"eventCount,omitempty" cbor:"eventCount,omitempty"`
+	// RSFS is the time from the delivery's run_started to the write of
+	// the first step's start, set with TTFS.
+	RSFS *float64 `json:"rsfs,omitempty" cbor:"rsfs,omitempty"`
+	// FinalSchedulingReplay is how long the runner ran before it
+	// scheduled the step.
+	FinalSchedulingReplay *float64 `json:"finalSchedulingReplay,omitempty" cbor:"finalSchedulingReplay,omitempty"`
+	// Optimizations names the ways the runtime shortened the step's
+	// start, such as "turbo".
+	Optimizations []string `json:"optimizations,omitempty" cbor:"optimizations,omitempty"`
+}
+
+// DataRunCancelled is the Data of a run_cancelled event. A cancellation
+// without a reason has no Data.
+type DataRunCancelled struct {
+	// CancelReason is why the run was cancelled, in plain text of at most
+	// MaxCancelReasonLength characters, so tools can show it without
+	// opening a payload.
+	CancelReason string `json:"cancelReason,omitempty" cbor:"cancelReason,omitempty"`
+}
+
+// MaxCancelReasonLength is the most characters a run_cancelled's
+// CancelReason may hold.
+const MaxCancelReasonLength = 512
+
+// EncodeRunCancelled returns the Data of a run_cancelled event with reason:
+// nil without one. It returns ErrEventInvalid for a reason longer than
+// MaxCancelReasonLength.
+func EncodeRunCancelled(reason string) ([]byte, error) {
+	if reason == "" {
+		return nil, nil
+	}
+	if units := len(utf16.Encode([]rune(reason))); units > MaxCancelReasonLength {
+		return nil, fmt.Errorf("%w: cancel reason is %d characters, over the limit of %d", ErrEventInvalid, units, MaxCancelReasonLength)
+	}
+	return json.Marshal(DataRunCancelled{CancelReason: reason})
+}
+
+// RunCancelReason returns the CancelReason of a run_cancelled event's Data,
+// "" when it has none.
+func RunCancelReason(data []byte) string {
+	var cancelled DataRunCancelled
+	if len(data) == 0 || json.Unmarshal(data, &cancelled) != nil {
+		return ""
+	}
+	return cancelled.CancelReason
 }
 
 // DataWaitCreated is the Data of a wait_created event. The wait's
@@ -438,7 +518,9 @@ type DataWaitCompleted struct {
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.
-// IsWebhook is always recorded, and Data without it reads as a webhook.
+// IsWebhook is always recorded on a hook_created, and Data without it reads
+// as a webhook. A hook_conflict, which has a ConflictingRunID, records only
+// that and the token.
 type DataHookCreated struct {
 	Token     string `json:"token" cbor:"token"`
 	Metadata  []byte `json:"metadata,omitempty" cbor:"metadata,omitempty"`
@@ -450,6 +532,18 @@ type DataHookCreated struct {
 	Force               bool            `json:"force,omitempty" cbor:"force,omitempty"`
 	ForceClaimedFrom    *HookForceClaim `json:"forceClaimedFrom,omitempty" cbor:"forceClaimedFrom,omitempty"`
 	ConflictingRunID    RunID           `json:"conflictingRunId,omitempty" cbor:"conflictingRunId,omitempty"`
+}
+
+// MarshalJSON records a conflict as its token and the run holding it.
+func (d DataHookCreated) MarshalJSON() ([]byte, error) {
+	if d.ConflictingRunID != "" {
+		return json.Marshal(struct {
+			Token            string `json:"token"`
+			ConflictingRunID RunID  `json:"conflictingRunId"`
+		}{d.Token, d.ConflictingRunID})
+	}
+	type plain DataHookCreated
+	return json.Marshal(plain(d))
 }
 
 // UnmarshalJSON reads Data without isWebhook as a webhook's.
@@ -470,6 +564,8 @@ type DataHookReceived struct {
 	Payload []byte `json:"payload,omitempty" cbor:"payload,omitempty"`
 	// WorkflowName is the workflow of the hook's run.
 	WorkflowName string `json:"workflowName,omitempty" cbor:"workflowName,omitempty"`
+	// Token is the token the payload was sent to, which a resume records.
+	Token string `json:"token,omitempty" cbor:"token,omitempty"`
 }
 
 // EncodeHookReceived returns the Data of a hook_received event carrying
@@ -488,9 +584,9 @@ func DecodeHookReceived(data []byte) []byte {
 	return received.Payload
 }
 
-// HookDisposedEventData is the Data of a hook_disposed event. It is empty
-// when the hook disposed of itself. ForceClaimedBy is set when another
-// hook took the token with a forced claim.
+// HookDisposedEventData is the Data of a hook_disposed event. Token is the
+// token the hook released. ForceClaimedBy is set when another hook took the
+// token with a forced claim.
 type HookDisposedEventData struct {
 	Token          string          `json:"token,omitempty" cbor:"token,omitempty"`
 	ForceClaimedBy *HookForceClaim `json:"forceClaimedBy,omitempty" cbor:"forceClaimedBy,omitempty"`
@@ -704,9 +800,32 @@ func CheckAttributeChanges(attributes map[string]string, changes []RunsAttribute
 // MaxAttrSetDataBytes is the most JSON bytes an attr_set's Data may take.
 const MaxAttrSetDataBytes = 8192
 
-// CheckAttrSet returns ErrAttributeInvalid unless the attr_set Data may apply
-// to a run's attributes (CheckAttributeChanges).
+// AttrSetDataSize returns the size MaxAttrSetDataBytes limits: the bytes of
+// an attr_set's Data as JSON that writes <, > and & as themselves, however
+// data escapes them.
+func AttrSetDataSize(data []byte) int {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
+		return len(data)
+	}
+	var plain bytes.Buffer
+	encoder := json.NewEncoder(&plain)
+	encoder.SetEscapeHTML(false)
+	if encoder.Encode(value) != nil {
+		return len(data)
+	}
+	return plain.Len() - 1 // Encode ends with a newline.
+}
+
+// CheckAttrSet returns ErrAttributeInvalid unless the attr_set Data is within
+// MaxAttrSetDataBytes and may apply to a run's attributes
+// (CheckAttributeChanges).
 func CheckAttrSet(attributes map[string]string, data []byte) error {
+	if size := AttrSetDataSize(data); size > MaxAttrSetDataBytes {
+		return fmt.Errorf("%w: attr_set data is %d bytes, over the limit of %d", ErrAttributeInvalid, size, MaxAttrSetDataBytes)
+	}
 	var set DataAttrSet
 	if err := json.Unmarshal(data, &set); err != nil {
 		return fmt.Errorf("%w: attr_set data: %v", ErrEventInvalid, err)

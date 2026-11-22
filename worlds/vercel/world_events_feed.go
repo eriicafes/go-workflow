@@ -249,7 +249,13 @@ func (f *eventsFeed) fillGap(ctx context.Context, through uint64) {
 		if last >= through {
 			return
 		}
-		page, err := f.world.EventsList(ctx, worlds.EventsListInput{RunID: f.runID, Pagination: worlds.Pagination{Cursor: string(worlds.EventIDForSlot(last)), Limit: gapFillPageSize}})
+		// The backend's cursor for "after this event" is eid:<event ID>, and
+		// no cursor reads from the start.
+		pagination := worlds.Pagination{Limit: gapFillPageSize, SortOrder: worlds.SortOrderAscending}
+		if last > 0 {
+			pagination.Cursor = "eid:" + string(worlds.EventIDForSlot(last))
+		}
+		page, err := f.world.EventsList(ctx, worlds.EventsListInput{RunID: f.runID, Pagination: pagination})
 		if err != nil {
 			f.fail(fmt.Errorf("workflow/vercel: read the events the feed of %s missed: %w", f.runID, err))
 			return

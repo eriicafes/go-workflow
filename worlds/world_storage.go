@@ -385,6 +385,9 @@ type Hook struct {
 	// IsWebhook reports that the hook is a webhook, which HTTP requests to
 	// its URL resume.
 	IsWebhook bool
+	// IsSystem reports that the framework created the hook for its own use,
+	// not the workflow's code.
+	IsSystem bool
 	// TokenRetentionUntil is the earliest time terminal-run cleanup may release
 	// the token, or nil when there is no retention reservation. Active runs
 	// keep their tokens beyond it; explicit disposal always releases them
@@ -492,6 +495,13 @@ func (t EventType) Valid() bool {
 	}
 }
 
+// Creatable reports whether a caller may append an event of type t with
+// EventsCreate or EventsCreateBatch: any defined type but run_created, which
+// EventsCreateRun writes, and hook_conflict, which only a World records.
+func (t EventType) Creatable() bool {
+	return t.Valid() && t != EventTypeRunCreated && t != EventTypeHookConflict
+}
+
 type (
 	// EventsCreateRunInput holds the arguments to EventsCreateRun.
 	EventsCreateRunInput struct {
@@ -568,6 +578,22 @@ type (
 		// another digest returns ErrEventInvalid.
 		ResumeID            string
 		ResumePayloadDigest string
+		// AfterStepBody marks a step_failed that records the failure of a
+		// step function that ran. Losing such a write to a redelivery runs
+		// the function again, so a World may keep one it cannot place yet
+		// waiting longer than another write. A step_completed and a
+		// step_retrying are only written after the function ran and need
+		// no mark. A step_failed is also written for a step that never
+		// ran, such as one whose attempts are used up. Advisory: a World
+		// may ignore it.
+		AfterStepBody bool
+		// StepCreatedAt is when the step a step_started starts was created,
+		// set only on the first attempt's step_started of a step created
+		// by a step_created and started by its own delivery, so a World
+		// can report the step's creation-to-start latency without reading
+		// the log. It is telemetry: a World may ignore it, and does not
+		// store it in the event.
+		StepCreatedAt time.Time
 	}
 	// EventsCreateBatchInput holds the arguments to EventsCreateBatch.
 	EventsCreateBatchInput struct {
@@ -672,6 +698,9 @@ type (
 		Page[Event]
 		// Snapshot is the run's position counters, read before the page.
 		Snapshot EventsSnapshot
+		// MaxEvents is the most events the run may hold, when the World
+		// sets one for the run. Zero leaves the limit to the Runtime.
+		MaxEvents int
 	}
 	// EventsSnapshot is a run's position counters: EventCount, the number of
 	// positions in its log, and InBandCount, the positions in-band writes

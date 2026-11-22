@@ -58,10 +58,8 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 		q.where("h.run_id = " + q.arg(input.RunID))
 	}
 	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	if err := q.keyset(input.Pagination.Cursor, "h.created_at", "h.hook_id", descending); err != nil {
-		return worlds.Page[worlds.Hook]{}, err
-	}
-	rows, err := w.pool.Query(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+q.clause()+order("h.created_at", "h.hook_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
+	q.keyset(input.Pagination.Cursor, "h.hook_id", descending)
+	rows, err := w.pool.Query(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+q.clause()+order("h.hook_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
@@ -69,7 +67,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	if err != nil {
 		return worlds.Page[worlds.Hook]{}, err
 	}
-	return keysetPage(hooks, input.Pagination.Limit, func(hook worlds.Hook) (time.Time, string) { return hook.CreatedAt, string(hook.HookID) }), nil
+	return keysetPage(hooks, input.Pagination.Limit, func(hook worlds.Hook) string { return string(hook.HookID) }), nil
 }
 
 func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -222,7 +220,7 @@ func hookColumns(resolve worlds.ResolveData) string {
 	if resolve == worlds.ResolveDataNone {
 		metadata = "NULL::varchar, NULL::bytea"
 	}
-	return "h.hook_id, h.run_id, h.resume_context, h.token, " + metadata + ", coalesce(h.is_webhook, false), h.created_at, h.token_retention_until, h.claimed_from, coalesce(h.spec_version, 0)"
+	return "h.hook_id, h.run_id, h.resume_context, h.token, " + metadata + ", coalesce(h.is_webhook, false), coalesce(h.is_system, false), h.created_at, h.token_retention_until, h.claimed_from, coalesce(h.spec_version, 0)"
 }
 
 // hookJoin joins the event holding the hook's metadata, its hook_created or
@@ -239,7 +237,7 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 	var hook worlds.Hook
 	var metadataType *worlds.EventType
 	var resume, metadata, claimed []byte
-	if err := row.Scan(&hook.HookID, &hook.RunID, &resume, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.CreatedAt, &hook.TokenRetentionUntil, &claimed, &hook.SpecVersion); err != nil {
+	if err := row.Scan(&hook.HookID, &hook.RunID, &resume, &hook.Token, &metadataType, &metadata, &hook.IsWebhook, &hook.IsSystem, &hook.CreatedAt, &hook.TokenRetentionUntil, &claimed, &hook.SpecVersion); err != nil {
 		return worlds.Hook{}, err
 	}
 	var decoded resumeContext
@@ -262,7 +260,7 @@ func scanHook(row pgx.Row) (worlds.Hook, error) {
 		}
 	}
 	if len(claimed) > 0 {
-		if err := json.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
+		if err := cborDecoding.Unmarshal(claimed, &hook.ClaimedFrom); err != nil {
 			return worlds.Hook{}, err
 		}
 	}

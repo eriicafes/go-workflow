@@ -1,20 +1,22 @@
 package vercelworld
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math/rand/v2"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -87,36 +89,51 @@ const (
 // repeated.
 var vqsSendRetryDelays = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond}
 
-// queueURL returns the Vercel Queues API root of region: Config.QueueURL when
-// it was set, and region's own host otherwise. Through Vercel's API proxy,
-// the x-vercel-queue-region header names the region the proxy forwards to.
+// queueURL returns the Vercel Queues API root of region, and the headers
+// that route a request there: Config.QueueURL when it was set, and region's
+// own host otherwise. With Config.Token, requests go through Vercel's API
+// proxy instead, under its queues-proxy path, with the project's headers and
+// the region in x-vercel-queue-region for the proxy to forward to.
 func (w *World) queueURL(region worlds.Region) (string, http.Header) {
-	var header http.Header
 	if w.api.proxy {
-		header = http.Header{"X-Vercel-Queue-Region": {string(region)}}
+		header := http.Header{"X-Vercel-Queue-Region": {string(region)}}
+		w.api.setProject(header)
+		if w.config.QueueURL != "" {
+			return w.config.QueueURL, header
+		}
+		return w.api.baseURL + "/queues-proxy/api/v3", header
 	}
 	if w.config.QueueURL != "" {
-		return w.config.QueueURL, header
+		return w.config.QueueURL, nil
 	}
-	return "https://" + string(region) + ".vercel-queue.com/api/v3", header
+	return "https://" + string(region) + ".vercel-queue.com/api/v3", nil
 }
 
 // messageRegion returns the region a message of runID is sent to: the region
-// its run ID carries, else that of VERCEL_REGION, else iad1.
+// its run ID carries, else that of VERCEL_REGION, else iad1. An ID tagged
+// with a region this package does not know carries none.
 func messageRegion(runID worlds.RunID) worlds.Region {
 	rest, _ := strings.CutPrefix(string(runID), runIDPrefix)
 	if value, err := ulid.ParseStrict(rest); err == nil && value[0]&runIDTagBit != 0 {
-		if region, ok := runRegion(runID); ok {
-			return region
+		regionID := (value[runIDRegionByte] & runIDRegionMask) >> 2
+		for region, known := range regionIDs {
+			if known == regionID && regionID != runIDRegionUnknown {
+				return region
+			}
 		}
 	}
 	return envRegion()
 }
 
 func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, path string, body []byte, header http.Header) (*http.Response, error) {
-	token, err := w.config.OIDCToken(ctx)
-	if err != nil {
-		return nil, err
+	// The API proxy takes the access token, and Vercel Queues itself the
+	// deployment's OIDC token.
+	token := w.config.Token
+	if !w.api.proxy {
+		var err error
+		if token, err = w.config.OIDCToken(ctx); err != nil {
+			return nil, err
+		}
 	}
 	var reader io.Reader
 	if body != nil {
@@ -138,7 +155,10 @@ func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, pa
 		}
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
+	request.Header.Set("User-Agent", w.api.userAgent)
+	// When the request was sent, by this client's clock.
+	request.Header.Set("Vqs-Client-Ts", time.Now().UTC().Format("2006-01-02T15:04:05.000Z"))
+	if body != nil && request.Header.Get("Content-Type") == "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if request.Header.Get("Vqs-Deployment-Id") == "" && w.config.DeploymentID != "" {
@@ -189,7 +209,7 @@ type vqsSend struct {
 // Queues accepts, and a delay to the message's retention less an hour: 23
 // hours with the default retention.
 func messageLifetime(delay, retention time.Duration) (delaySecs, retentionSecs int64) {
-	maxDelay := vqsDefaultRetention - vqsRetentionBuffer
+	maxDelay := maxQueueDelay()
 	if retention > 0 {
 		retentionSecs = delaySeconds(min(max(retention, vqsMinRetention), vqsMaxRetention))
 		maxDelay = max(time.Duration(retentionSecs)*time.Second-vqsRetentionBuffer, 0)
@@ -197,22 +217,10 @@ func messageLifetime(delay, retention time.Duration) (delaySecs, retentionSecs i
 	return min(delaySeconds(delay), int64(maxDelay/time.Second)), retentionSecs
 }
 
-// publishVQS sends message to send.Topic, or to Config.Topic when it is
-// empty, addressed to send.DeploymentID when it is set, and returns the
-// message ID Vercel Queues gave it: empty when it answers 202, as it does when
-// it fails over to another region and cannot name the message. A send that
-// fails transiently is sent again (see sendRetryDelay). A send Vercel Queues
-// refuses because it cannot find the deployment's consumer returns an error
-// wrapping worlds.ErrDeploymentUnavailable once its retries run out.
-func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) (string, error) {
-	topic := send.Topic
-	if topic == "" {
-		topic = w.config.Topic
-	}
-	body, err := json.Marshal(message)
-	if err != nil {
-		return "", err
-	}
+// messageHeaders returns the headers that describe one message: its keys,
+// its lifetime, and the run and step it belongs to, by which Vercel links its
+// invocation to them.
+func messageHeaders(message queueMessage, send vqsSend) http.Header {
 	header := http.Header{}
 	if send.IdempotencyKey != "" {
 		header.Set("Vqs-Idempotency-Key", send.IdempotencyKey)
@@ -227,15 +235,57 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSe
 	if retention > 0 {
 		header.Set("Vqs-Retention-Seconds", strconv.FormatInt(retention, 10))
 	}
+	header.Set("X-Vercel-Workflow-Run-Id", string(message.RunID))
+	if message.StepID != nil {
+		header.Set("X-Vercel-Workflow-Step-Id", string(*message.StepID))
+	}
+	return header
+}
+
+// topicOf returns the topic send publishes to: its own, or Config.Topic.
+func (w *World) topicOf(send vqsSend) string {
+	if send.Topic != "" {
+		return send.Topic
+	}
+	return w.config.Topic
+}
+
+// publishVQS sends message to send.Topic, or to Config.Topic when it is
+// empty, addressed to send.DeploymentID when it is set, and returns the
+// message ID Vercel Queues gave it: empty when it answers 202, as it does when
+// it fails over to another region and cannot name the message. A send that
+// fails transiently is sent again (see sendRetryDelay). A send Vercel Queues
+// refuses because it cannot find the deployment's consumer returns an error
+// wrapping worlds.ErrDeploymentUnavailable once its retries run out.
+func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) (string, error) {
+	topic := w.topicOf(send)
+	body, err := json.Marshal(message)
+	if err != nil {
+		return "", err
+	}
+	header := messageHeaders(message, send)
 	if send.DeploymentID != "" {
 		header.Set("Vqs-Deployment-Id", send.DeploymentID)
 	}
 	region, path := messageRegion(message.RunID), "/topic/"+url.PathEscape(topic)
+	var id string
+	err = retrySend(ctx, topic, func() error {
+		var err error
+		id, err = w.sendVQS(ctx, region, path, body, header, send.DeploymentID)
+		return err
+	})
+	return id, err
+}
+
+// retrySend runs one send to topic, and runs it again after a transient
+// failure (see sendRetryDelay), up to vqsSendMaxAttempts attempts and while a
+// retry can still start within vqsSendRetryBudget of the first.
+func retrySend(ctx context.Context, topic string, send func() error) error {
 	started := time.Now()
 	for attempt := 1; ; attempt++ {
-		id, err := w.sendVQS(ctx, region, path, body, header, send.DeploymentID)
+		err := send()
 		if err == nil {
-			return id, nil
+			return nil
 		}
 		wait, retry := time.Duration(0), false
 		if attempt < vqsSendMaxAttempts {
@@ -245,17 +295,89 @@ func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSe
 			if attempt > 1 {
 				log.Printf("workflow/vercel: queue send to %s failed after %d attempts: %v", topic, attempt, err)
 			}
-			return "", err
+			return err
 		}
 		log.Printf("workflow/vercel: queue send to %s failed (attempt %d), retrying in %s: %v", topic, attempt, wait, err)
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return "", errors.Join(err, ctx.Err())
+			return errors.Join(err, ctx.Err())
 		case <-timer.C:
 		}
 	}
+}
+
+// vqsBatchMax is the most messages Vercel Queues takes in one batch send.
+const vqsBatchMax = 100
+
+// vqsBatchItem is one message of a batch send: its place in the batch, its
+// payload, and the headers that describe it.
+type vqsBatchItem struct {
+	index  int
+	body   []byte
+	header http.Header
+}
+
+// vqsBatchOutcome is Vercel Queues' answer for one message of a batch send:
+// sent, with its message ID; deferred, accepted without one; or failed.
+type vqsBatchOutcome struct {
+	Status     string  `json:"status"`
+	MessageID  *string `json:"messageId"`
+	StatusCode int     `json:"statusCode"`
+	Error      string  `json:"error"`
+	Retryable  bool    `json:"retryable"`
+}
+
+// sendBatchVQS makes one attempt at publishing items, at most vqsBatchMax of
+// them, to one topic, region and deployment in one request: a
+// multipart/mixed body with a part per message, carrying the message's
+// headers and its payload. It returns Vercel Queues' outcome for each.
+func (w *World) sendBatchVQS(ctx context.Context, region worlds.Region, topic, deploymentID string, items []vqsBatchItem) ([]vqsBatchOutcome, error) {
+	var body bytes.Buffer
+	boundary := "vqs-" + ulid.Make().String()
+	for _, item := range items {
+		fmt.Fprintf(&body, "--%s\r\n", boundary)
+		for _, key := range slices.Sorted(maps.Keys(item.header)) {
+			fmt.Fprintf(&body, "%s: %s\r\n", key, item.header.Get(key))
+		}
+		body.WriteString("\r\n")
+		body.Write(item.body)
+		body.WriteString("\r\n")
+	}
+	fmt.Fprintf(&body, "--%s--\r\n", boundary)
+	header := http.Header{}
+	header.Set("Content-Type", "multipart/mixed; boundary="+boundary)
+	if deploymentID != "" {
+		header.Set("Vqs-Deployment-Id", deploymentID)
+	}
+	response, err := w.vqsRequest(ctx, region, http.MethodPost, "/topic/"+url.PathEscape(topic)+"/batch", body.Bytes(), header)
+	if err != nil {
+		return nil, fmt.Errorf("workflow/vercel: publish queue messages: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, &vqsSendError{
+			Status:       response.StatusCode,
+			Code:         response.Header.Get("Vqs-Error-Code"),
+			RetryAfter:   vqsRetryAfter(response.Header.Get("Retry-After")),
+			DeploymentID: deploymentID,
+			Message:      strings.TrimSpace(string(data)),
+		}
+	}
+	var answer struct {
+		Results []vqsBatchOutcome `json:"results"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&answer); err != nil {
+		return nil, fmt.Errorf("workflow/vercel: publish queue messages: invalid answer: %v", err)
+	}
+	if len(answer.Results) != len(items) {
+		// An answer that does not cover the batch is the queue's failure, and
+		// the batch is safe to send again under its idempotency keys.
+		return nil, &vqsSendError{Status: http.StatusInternalServerError, DeploymentID: deploymentID, Message: fmt.Sprintf("batch answer has %d results for %d messages", len(answer.Results), len(items))}
+	}
+	return answer.Results, nil
 }
 
 // sendVQS makes one attempt at a send, and returns the message ID Vercel
@@ -429,7 +551,7 @@ type vqsDelivery struct {
 // parseDelivery reads a push delivery. Binary-mode deliveries (ce-type
 // com.vercel.queue.v2beta) carry the payload and lease in the request.
 // Deliveries without a receipt handle and structured v1beta CloudEvents are
-// claimed with ReceiveMessageById.
+// claimed by ID.
 func (w *World) parseDelivery(request *http.Request) (vqsDelivery, error) {
 	body, err := io.ReadAll(io.LimitReader(request.Body, vqsPayloadMaxSize+1))
 	if err != nil {
@@ -488,9 +610,12 @@ func (w *World) consumerPath(delivery vqsDelivery) string {
 	return "/topic/" + url.PathEscape(delivery.Topic) + "/consumer/" + url.PathEscape(delivery.ConsumerGroup)
 }
 
+// receiveByID claims the delivery's message by its ID. Vercel Queues answers
+// with a multipart/mixed body whose one part is the message: its lease and
+// counts in the part's Vqs- headers, and its payload as the part's body.
 func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDelivery, error) {
 	header := http.Header{}
-	header.Set("Accept", "application/x-ndjson")
+	header.Set("Accept", "multipart/mixed")
 	header.Set("Vqs-Visibility-Timeout-Seconds", strconv.Itoa(int(vqsLease/time.Second)))
 	response, err := w.vqsRequest(ctx, delivery.Region, http.MethodPost, w.consumerPath(delivery)+"/id/"+url.PathEscape(delivery.MessageID), nil, header)
 	if err != nil {
@@ -504,36 +629,30 @@ func (w *World) receiveByID(ctx context.Context, delivery vqsDelivery) (vqsDeliv
 	default:
 		return vqsDelivery{}, responseError("receive queue message", response)
 	}
-	line, err := bufio.NewReaderSize(io.LimitReader(response.Body, 2*vqsPayloadMaxSize), 64<<10).ReadBytes('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return vqsDelivery{}, err
+	_, params, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || params["boundary"] == "" {
+		return vqsDelivery{}, fmt.Errorf("workflow/vercel: receive queue message: answer is %q, not multipart", response.Header.Get("Content-Type"))
 	}
-	var message struct {
-		ReceiptHandle string    `json:"receiptHandle"`
-		DeliveryCount int       `json:"deliveryCount"`
-		Body          string    `json:"body"`
-		CreatedAt     time.Time `json:"createdAt"`
-		ExpiresAt     time.Time `json:"expiresAt"`
+	part, err := multipart.NewReader(io.LimitReader(response.Body, 2*vqsPayloadMaxSize), params["boundary"]).NextRawPart()
+	if errors.Is(err, io.EOF) {
+		// An answer without a message: it is no longer there to claim.
+		return vqsDelivery{}, errDeliveryGone
 	}
-	if err := json.Unmarshal(line, &message); err != nil || message.ReceiptHandle == "" {
+	if err != nil {
+		return vqsDelivery{}, fmt.Errorf("workflow/vercel: receive queue message: %w", err)
+	}
+	message := http.Header(part.Header)
+	delivery.ReceiptHandle = message.Get("Vqs-Receipt-Handle")
+	delivery.CreatedAt, err = time.Parse(time.RFC3339Nano, message.Get("Vqs-Timestamp"))
+	if err != nil || delivery.ReceiptHandle == "" || message.Get("Vqs-Message-Id") == "" {
 		return vqsDelivery{}, errors.New("workflow/vercel: invalid queue message")
 	}
-	if delivery.Body, err = base64.StdEncoding.DecodeString(message.Body); err != nil {
-		return vqsDelivery{}, fmt.Errorf("workflow/vercel: decode queue message: %w", err)
+	if delivery.Body, err = io.ReadAll(part); err != nil {
+		return vqsDelivery{}, fmt.Errorf("workflow/vercel: read queue message: %w", err)
 	}
-	delivery.ReceiptHandle, delivery.DeliveryCount = message.ReceiptHandle, message.DeliveryCount
-	delivery.CreatedAt, delivery.ExpiresAt = message.CreatedAt, message.ExpiresAt
-	if delivery.CreatedAt.IsZero() {
-		delivery.CreatedAt, _ = time.Parse(time.RFC3339Nano, response.Header.Get("Vqs-Timestamp"))
-	}
-	if delivery.ExpiresAt.IsZero() {
-		delivery.ExpiresAt, _ = time.Parse(time.RFC3339Nano, response.Header.Get("Vqs-Expires-At"))
-	}
-	// The counts may come as headers, as on a multipart receive.
-	if count, err := strconv.Atoi(response.Header.Get("Vqs-Delivery-Count")); err == nil && delivery.DeliveryCount == 0 {
-		delivery.DeliveryCount = count
-	}
-	delivery.HandoffCount, _ = strconv.Atoi(response.Header.Get("Vqs-Experimental-Handoff-Count"))
+	delivery.DeliveryCount, _ = strconv.Atoi(message.Get("Vqs-Delivery-Count"))
+	delivery.HandoffCount, _ = strconv.Atoi(message.Get("Vqs-Experimental-Handoff-Count"))
+	delivery.ExpiresAt, _ = time.Parse(time.RFC3339Nano, message.Get("Vqs-Expires-At"))
 	delivery.VisibilityDeadline = time.Now().Add(vqsLease)
 	return delivery, nil
 }
@@ -635,7 +754,8 @@ func delaySeconds(delay time.Duration) int64 {
 }
 
 // retryDelay backs off failed deliveries: a second doubling with each
-// delivery up to 15 minutes, with up to 25% jitter either way, and never less
+// delivery up to 15 minutes, less up to a quarter of it at random so
+// deliveries that failed together do not return together, and never less
 // than the 5 seconds Vercel Queues accepts.
 func retryDelay(deliveryCount int) time.Duration {
 	delay := time.Second
@@ -643,6 +763,16 @@ func retryDelay(deliveryCount int) time.Duration {
 		delay *= 2
 	}
 	delay = min(delay, vqsMaxRetry)
-	jitter := time.Duration((rand.Float64()*2 - 1) * 0.25 * float64(delay))
-	return max(delay+jitter, vqsMinRetry)
+	jitter := time.Duration(rand.Float64() * 0.25 * float64(delay))
+	return max(delay-jitter, vqsMinRetry)
+}
+
+// maxQueueDelay is the longest delay of a message published without a
+// retention: VERCEL_QUEUE_MAX_DELAY_SECONDS when it is a positive number of
+// seconds, and vqsMaxQueueDelay otherwise.
+func maxQueueDelay() time.Duration {
+	if seconds, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("VERCEL_QUEUE_MAX_DELAY_SECONDS")), 64); err == nil && seconds > 0 {
+		return time.Duration(seconds * float64(time.Second))
+	}
+	return vqsMaxQueueDelay
 }

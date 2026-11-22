@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -20,10 +19,6 @@ import (
 
 // runKeyURL is the Vercel API route that answers with a run's key.
 const runKeyURL = "https://api.vercel.com/v1/workflow/run-key/"
-
-// runKeyAttempts is how often a run-key request is sent while Vercel answers
-// 429 or 5xx.
-const runKeyAttempts = 4
 
 var _ worlds.EncryptionKeys = (*World)(nil)
 
@@ -77,29 +72,33 @@ func (w *World) fetchRunKey(ctx context.Context, deploymentID, projectID string,
 		base = runKeyURL
 	}
 	target := base + url.PathEscape(deploymentID) + "?" + query.Encode()
-	delay := 200 * time.Millisecond
-	for attempt := 1; ; attempt++ {
+	// The request is sent again as a read of the workflow API is: after a
+	// failed connection or a 500, 502, 503 or 504, up to maxReadRetries times.
+	// A redirect is not followed, so the token stays with Vercel's API.
+	for retry := 0; ; retry++ {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 		if err != nil {
 			return nil, err
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
-		response, err := w.http.Do(request)
-		if err != nil {
-			return nil, fmt.Errorf("workflow/vercel: fetch run key of %s: %w", runID, err)
-		}
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
-		_ = response.Body.Close()
-		retry := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
-		if retry && attempt < runKeyAttempts {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, ctx.Err()
-			case <-timer.C:
+		response, err := w.api.http.Do(request)
+		var body []byte
+		wait := min(readRetryBase<<min(retry, 16), readRetryMax)
+		if err == nil {
+			body, _ = io.ReadAll(io.LimitReader(response.Body, 1<<16))
+			_ = response.Body.Close()
+			switch response.StatusCode {
+			case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				err = fmt.Errorf("%s: %s", response.Status, body)
+				if after := retryAfter(response.Header.Get("Retry-After")); after > 0 {
+					wait = min(after, readRetryMax)
+				}
 			}
-			delay *= 2
+		}
+		if err != nil {
+			if retry >= maxReadRetries || ctx.Err() != nil || sleep(ctx, wait) != nil {
+				return nil, fmt.Errorf("workflow/vercel: fetch run key of %s from deployment %s: %w", runID, deploymentID, err)
+			}
 			continue
 		}
 		if response.StatusCode != http.StatusOK {

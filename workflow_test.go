@@ -494,6 +494,12 @@ func TestStartOptions(t *testing.T) {
 	if err != nil || replayed.ExecutionContext[worlds.ExecutionContextReplayedFromRunID] != run.ID() {
 		t.Fatalf("replay = %+v, %v", replayed.ExecutionContext, err)
 	}
+	// Every run records the core version whose formats it reads and whether
+	// its payloads are encrypted.
+	features, _ := replayed.ExecutionContext[worlds.ExecutionContextFeatures].(map[string]any)
+	if replayed.ExecutionContext[worlds.ExecutionContextWorkflowCoreVersion] != workflow.Version || features["encryption"] != false {
+		t.Fatalf("execution context = %+v", replayed.ExecutionContext)
+	}
 	if _, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{ReplayedFromRunID: "wrun_missing"}); !errors.Is(err, workflow.ErrInvalidStartOptions) {
 		t.Fatalf("Start replaying a non-run ID error = %v", err)
 	}
@@ -647,6 +653,44 @@ func TestStartHook(t *testing.T) {
 	unsupported := workflow.NewContext(ctx, workflow.NewClient(noDeleteWorld{world}))
 	if _, err := workflow.Start(unsupported, startHookInput{}, workflow.StartOptions{Hook: &workflow.StartHook{Token: "t"}}); !errors.Is(err, errors.ErrUnsupported) {
 		t.Fatalf("start hook on a World without it error = %v", err)
+	}
+}
+
+type startHookParentInput struct{ Token string }
+
+func (startHookParentInput) Workflow(string) {}
+
+func TestStartInAWorkflowReadsAStartHookConflictOnItsFirstAttempt(t *testing.T) {
+	world := testworld.New(
+		workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
+			return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
+		}),
+		// The parent starts a child whose start hook token is already held.
+		workflow.Use(func(ctx context.Context, input startHookParentInput) (string, error) {
+			_, err := workflow.Start(ctx, startHookInput{Token: input.Token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: input.Token}})
+			var conflict *worlds.HookConflictError
+			if !errors.As(err, &conflict) {
+				return "", err
+			}
+			return string(conflict.RunID), nil
+		}),
+	)
+	defer world.Close()
+	// A refused start is decided, so the step does not wait out a retry: the
+	// run finishes well inside the default one-second retry delay.
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 900*time.Millisecond)
+	defer cancel()
+	token := "start-hook-held"
+	holder, err := workflow.Start(ctx, startHookInput{Token: token}, workflow.StartOptions{Hook: &workflow.StartHook{Token: token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := workflow.Start(ctx, startHookParentInput{Token: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner, err := parent.Value(ctx); err != nil || owner != holder.ID() {
+		t.Fatalf("parent read owner %q, %v; want %s", owner, err, holder.ID())
 	}
 }
 
@@ -1364,5 +1408,46 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 	// the start, the step, its settled flow and the hook resume
 	if len(world.QueuedMessages()) < 4 || steps == 0 {
 		t.Fatalf("queued %d deliveries with %d steps, want flow and step deliveries", len(world.QueuedMessages()), steps)
+	}
+}
+
+func TestRunCancelRecordsItsReason(t *testing.T) {
+	world := testworld.NewManual()
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, timerInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A reason over the limit is refused, and cancels nothing.
+	if err := run.Cancel(ctx, workflow.CancelOptions{Reason: strings.Repeat("r", worlds.MaxCancelReasonLength+1)}); !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("cancel with a long reason = %v, want ErrEventInvalid", err)
+	}
+	if err := run.Cancel(ctx, workflow.CancelOptions{Reason: "duplicate order"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events.Data[len(events.Data)-1]
+	if last.EventType != worlds.EventTypeRunCancelled || string(last.Data) != `{"cancelReason":"duplicate order"}` || worlds.RunCancelReason(last.Data) != "duplicate order" {
+		t.Fatalf("last event = %s %s, want the cancellation with its reason", last.EventType, last.Data)
+	}
+	// A cancellation without a reason records no data.
+	other, err := workflow.Start(ctx, timerInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Cancel(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events, err = world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(other.ID())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := events.Data[len(events.Data)-1]; last.EventType != worlds.EventTypeRunCancelled || len(last.Data) != 0 {
+		t.Fatalf("last event = %s %s, want a cancellation without data", last.EventType, last.Data)
 	}
 }
