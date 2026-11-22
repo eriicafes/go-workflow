@@ -148,18 +148,26 @@ func streamCloseRetryDelay(ctx context.Context, err error, retry int) (time.Dura
 }
 
 // streamReadError maps a stream read's 410 as the Workflow SDK's World does:
-// the backend's stream-expired to worlds.ErrStreamExpired, its
-// StreamExpiredError, and any other to worlds.ErrRunExpired, its
-// RunExpiredError.
+// the backend's stream-expired to a *worlds.StreamExpiredError, with the
+// stream its details name, and any other to a *worlds.RunExpiredError.
 func streamReadError(err error) error {
 	var api *apiError
 	if !errors.As(err, &api) || api.Status != http.StatusGone {
 		return err
 	}
 	if api.Code == "stream-expired" {
-		return fmt.Errorf("%w: %v", worlds.ErrStreamExpired, err)
+		expired := &worlds.StreamExpiredError{}
+		if details, ok := api.Fields["details"].(map[string]any); ok {
+			runID, _ := details["runId"].(string)
+			expired.RunID = worlds.RunID(runID)
+			expired.StreamID, _ = details["streamId"].(string)
+			if at, ok := details["expiredAt"].(string); ok {
+				expired.ExpiredAt, _ = time.Parse(time.RFC3339Nano, at)
+			}
+		}
+		return fmt.Errorf("%w: %v", expired, err)
 	}
-	return fmt.Errorf("%w: %v", worlds.ErrRunExpired, err)
+	return fmt.Errorf("%w: %v", &worlds.RunExpiredError{}, err)
 }
 
 // streamSocketRetryAfter is how long a World writes through HTTP after the

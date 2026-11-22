@@ -12,7 +12,7 @@ import (
 type (
 	// DurableHookOptions holds the arguments to DurableHook. An empty Token is
 	// drawn from the run's seed after the hook's ID. Force takes the token from a
-	// hook that owns it instead of failing with ErrHookConflict.
+	// hook that owns it instead of failing with a *HookConflictError.
 	DurableHookOptions struct {
 		Execution *Execution
 		// ID is a hook ID drawn earlier by Execution.NextHookID. When empty,
@@ -33,7 +33,7 @@ type (
 	}
 
 	// DurableHookResult is the state of a hook. DurableHook reports the hook's
-	// declaration, or Err ErrHookConflict when creating it failed, with
+	// declaration, or Err a *HookConflictError when creating it failed, with
 	// ConflictRunID naming the run that owns the token. HookOutcome
 	// reports its settlement: EventID identifies the payload or disposal event,
 	// Data holds a decoded payload, and Err reports disposal, takeover, or
@@ -96,7 +96,8 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 	}
 	result := DurableHookResult[T]{HookID: worlds.HookID(event.CorrelationID), Token: created.Token, ClaimedFrom: created.ForceClaimedFrom}
 	if event.EventType == worlds.EventTypeHookConflict {
-		result.Err, result.ConflictRunID = worlds.ErrHookConflict, created.ConflictingRunID
+		result.Err = &worlds.HookConflictError{Token: created.Token, RunID: created.ConflictingRunID}
+		result.ConflictRunID = created.ConflictingRunID
 	}
 	// The run the token was taken from is woken to read its disposal while it
 	// runs, which the World says by naming its workflow, as the Workflow
@@ -159,7 +160,7 @@ func HookOutcome[T any](execution *Execution, hookID worlds.HookID, after worlds
 	if event.EventType == worlds.EventTypeHookDisposed {
 		var disposed worlds.HookDisposedEventData
 		if len(event.Data) > 0 && json.Unmarshal(event.Data, &disposed) == nil && disposed.ForceClaimedBy != nil {
-			result.Err = worlds.ErrHookForceClaimed
+			result.Err = &worlds.HookForceClaimedError{Token: disposed.Token, RunID: disposed.ForceClaimedBy.RunID, HookID: disposed.ForceClaimedBy.HookID}
 		} else {
 			result.Err = worlds.ErrHookNotActive
 		}
@@ -189,7 +190,7 @@ func DurableDisposeHook(execution *Execution, hookID worlds.HookID) {
 	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID)}, func(err error) error {
 		// A run that ended, a hook that is gone, and a concurrent disposal
 		// leave nothing to dispose, as the Workflow SDK's runtime skips them.
-		if errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrHookNotFound) || errors.Is(err, worlds.ErrHookNotActive) {
+		if is[*worlds.RunExpiredError](err) || is[*worlds.HookNotFoundError](err) || errors.Is(err, worlds.ErrHookNotActive) {
 			return nil
 		}
 		return err

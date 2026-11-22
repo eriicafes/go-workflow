@@ -159,8 +159,7 @@ log.Fatal(http.ListenAndServe(":8081", postgresworld.HTTP(world)))
 
 Deploy `Queue` as a function with a Vercel Queues trigger for `Config.Topic`,
 and `HTTP` as a separate function for clients. Runs are stored in Vercel's
-managed workflow storage, the one the Workflow SDK uses, so there is no
-database to provision. `OIDCToken` defaults to reading `VERCEL_OIDC_TOKEN` on
+managed workflow storage. `OIDCToken` defaults to reading `VERCEL_OIDC_TOKEN` on
 every request.
 
 ```go
@@ -316,8 +315,7 @@ defer workflow.Rollback(ctx, voidInvoice, invoice.ID)
 
 Steps write run-owned byte streams that readers consume while the run is still
 going. Writers and readers use the run's default stream unless their option
-names another. As in the Workflow SDK, writers do not wait for each other:
-their chunks interleave, each writer's in order.
+names another. Writers do not wait for each other so their can chunks interleave.
 
 ```go
 func writeProgress(ctx context.Context, count int) (struct{}, error) {
@@ -359,12 +357,7 @@ Creation is local and returns only a handle. Receiving from or selecting that ho
 err := workflow.ResumeHook(ctx, "approve:"+orderID, Approval{Approved: true})
 ```
 
-A webhook is a hook resumed by each HTTP request to its URL, as the Workflow
-SDK's `createWebhook` is. Each request's body is a stream of the run, so a step
-reads it with `JSON` or `Body`. `WebhookOption` can set a static response, or
-hold each request until a step calls `WebhookRequest.RespondWith`. The token in
-the URL is its only authorization, so verify provider signatures before
-trusting the payload.
+A webhook is a hook resumed by each HTTP request to its URL. Each request's body is a stream of the run, so a step reads it with `JSON` or `Body`. `WebhookOption` can set a static response, or hold each request until a step calls `WebhookRequest.RespondWith`. The token in the URL is its only authorization, so verify provider signatures before trusting the payload.
 
 ```go
 webhook, err := workflow.CreateWebhook[Payment](ctx)
@@ -389,7 +382,9 @@ payment, err := workflow.Step(ctx, func(ctx context.Context, request *workflow.W
 
 ## Composing workflows
 
-A runner can compose another workflow in two ways, as in the Workflow SDK.
+A runner can compose another workflow in two ways: by calling its runner
+directly, or by starting it as a child run.
+
 Calling the other workflow's runner directly runs its steps in the current run.
 
 ```go
@@ -409,7 +404,7 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return workflows.ParentResult{}, err
 	} else if owner != nil {
-		return workflows.ParentResult{}, workflow.ErrHookConflict
+		return workflows.ParentResult{}, &workflow.HookConflictError{}
 	}
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
 		return workflows.ParentResult{}, err

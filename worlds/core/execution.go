@@ -532,9 +532,9 @@ func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(er
 		switch {
 		case err == nil:
 			return worlds.EventResult{}
-		case errors.Is(err, worlds.ErrInBandSuperseded):
+		case is[*worlds.InBandSupersededError](err):
 			e.supersede()
-		case errors.Is(err, worlds.ErrEventConflict):
+		case errors.Is(err, worlds.ErrEntityConflict):
 			// Another writer recorded it, as the Workflow SDK's runtime
 			// takes an EntityConflictError: the log holds it now.
 			e.reload()
@@ -759,7 +759,7 @@ func (e *Execution) writeBatch(events []worlds.EventsCreateEvent) map[string]boo
 	eventCount := len(e.events)
 	result, err := e.world.EventsCreateBatch(e.ctx, worlds.EventsCreateBatchInput{RunID: e.run.RunID, InBandCount: e.InBandCount(), EventCount: &eventCount, Events: events})
 	switch {
-	case errors.Is(err, worlds.ErrInBandSuperseded):
+	case is[*worlds.InBandSupersededError](err):
 		e.supersede()
 	case err != nil:
 		panic(e.exit(deliveryError{cause: err}))
@@ -940,7 +940,7 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, attempt int, result w
 		input.Event.OccurredAt = time.Now().UTC().Truncate(time.Millisecond)
 	}
 	created, err := e.world.EventsCreate(e.ctx, input)
-	if errors.Is(err, worlds.ErrRunTerminal) && eventType == worlds.EventTypeStepRetrying {
+	if is[*worlds.RunExpiredError](err) && eventType == worlds.EventTypeStepRetrying {
 		// A terminal run permits the started step's final failure, but no retry.
 		result.RetryAfter, result.CreatorMessageID = nil, ""
 		if input.Event.Data, err = json.Marshal(result); err != nil {
@@ -950,10 +950,10 @@ func (e *Execution) recordStepResult(stepID worlds.StepID, attempt int, result w
 		created, err = e.world.EventsCreate(e.ctx, input)
 	}
 	switch {
-	case errors.Is(err, worlds.ErrInBandSuperseded):
+	case is[*worlds.InBandSupersededError](err):
 		e.superseded = true
 		return worlds.Event{}, errReplaySuperseded
-	case errors.Is(err, worlds.ErrRunTerminal) || errors.Is(err, worlds.ErrEventConflict) || errors.Is(err, worlds.ErrStepNotStartable):
+	case is[*worlds.RunExpiredError](err) || errors.Is(err, worlds.ErrEntityConflict) || errors.Is(err, worlds.ErrStepNotStartable):
 		// The first writer of a step's result wins.
 		delete(e.ranInline, stepID)
 		return worlds.Event{}, nil

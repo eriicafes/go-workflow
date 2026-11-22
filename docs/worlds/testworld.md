@@ -35,9 +35,10 @@ instantly. See [Testing](/guide/testing#sleeps-and-timers).
 
 ## Encryption
 
-`SetEncryptionKey(key)` makes the World encrypt every run's payloads with a key
-derived from a 32-byte key, as a World configured with an `EncryptionKey` does,
-so tests cover encrypted runs. Set it before starting runs.
+`SetEncryptionKey(key, scope)` makes the World encrypt every run's payloads with
+a key derived from a 32-byte key in scope, as a World configured with an
+`EncryptionKey` and `EncryptionScope` does, so tests cover encrypted runs. Set
+it before starting runs.
 
 ## Manual delivery
 

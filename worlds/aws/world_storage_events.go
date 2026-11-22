@@ -78,7 +78,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 			// The run may exist, or a concurrent claimant took the token.
 			if _, found, getErr := w.item(ctx, runKey(string(input.RunID))); getErr == nil && !found {
 				if item, found, getErr := w.item(ctx, tokenKey(input.StartHook.Token)); getErr == nil && found {
-					return worlds.EventResult{}, w.rejectStart(ctx, input, &worlds.HookConflictError{RunID: tokenFromItem(item).runID})
+					return worlds.EventResult{}, w.rejectStart(ctx, input, &worlds.HookConflictError{Token: input.StartHook.Token, RunID: tokenFromItem(item).runID, Start: true})
 				}
 			}
 		}
@@ -129,7 +129,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
-		// A first flow's run_started creates a run whose run_created never
+		// A first delivery's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
 		if err := worlds.CreateRunForStart(ctx, w, input.RunID, input.Event.Data); err != nil {
 			return worlds.EventResult{}, err
@@ -260,10 +260,10 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 			}
 			replay, err := tx.admit(ctx, run, value)
 			if err == nil && replay != nil {
-				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, value.EventType, value.CorrelationID)
 			}
 			if err != nil {
-				if !refusal(err) {
+				if !worlds.IsEventRefusal(err) {
 					return err
 				}
 				item.Err = err
@@ -304,17 +304,6 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	return result, nil
 }
 
-// refusal reports whether err is an event's refusal by the transition rules,
-// rather than a failure to read or write.
-func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
-}
-
 // createdAt returns the creation time of event: its OccurredAt for an
 // in-band write that sets one, and now otherwise.
 func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
@@ -324,12 +313,12 @@ func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
 	return time.Now().UTC()
 }
 
-// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// fence returns an *InBandSupersededError when an in-band write's count is not the
 // run's InBandCount. The commit's condition on the event count keeps the two
 // read together.
 func fence(run *runEntry, count *int) error {
 	if count != nil && *count != run.view.InBandCount {
-		return worlds.ErrInBandSuperseded
+		return &worlds.InBandSupersededError{}
 	}
 	return nil
 }
@@ -888,7 +877,7 @@ func (tx *appendTx) owns(ctx context.Context, hook *worlds.Hook) (*tokenEntry, b
 
 // admit applies the transition rules, as the Workflow SDK's Worlds do. An
 // event that repeats a creation the log holds is refused with
-// ErrEventConflict. It returns a non-nil result, holding no event, for a
+// ErrEntityConflict. It returns a non-nil result, holding no event, for a
 // run_started of a run that started before, which appends nothing.
 func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) (*worlds.EventResult, error) {
 	// A run of a newer spec version is a newer release's, as the Workflow
@@ -938,7 +927,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 			return nil, err
 		}
 		if entry.eventID != "" {
-			return nil, fmt.Errorf("%w: wait %s already completed", worlds.ErrEventConflict, requested.CorrelationID)
+			return nil, fmt.Errorf("%w: wait %s already completed", worlds.ErrEntityConflict, requested.CorrelationID)
 		}
 		// A wait completes once it was created.
 		created, err := tx.logged(ctx, run, worlds.EventTypeWaitCreated, requested.CorrelationID)
@@ -965,19 +954,19 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if disposal := entry.disposal; disposal != nil && disposal.runID == run.view.RunID {
 			// A hook another run took over redirects the delivery.
 			if disposal.forced {
-				return nil, worlds.ErrHookForceClaimed
+				return nil, &worlds.HookForceClaimedError{}
 			}
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 		_, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return nil, err
 		}
 		if !owned {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: entry.hook.Token}
 		}
 		if err := worlds.FinishedRunHookRefusal(run.view.Status, requested); err != nil {
 			return nil, err
@@ -991,7 +980,7 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		// A disposed hook is gone, so disposing it again finds no hook, as
 		// in the Workflow SDK's Worlds.
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -1009,14 +998,14 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 				return nil, err
 			}
 			if token.cur != nil {
-				return nil, worlds.ErrHookConflict
+				return nil, &worlds.HookConflictError{Token: created.Token, RunID: token.cur.runID}
 			}
 		}
 	}
 	return nil, nil
 }
 
-// refuseRepeat refuses requested with ErrEventConflict when the run's log,
+// refuseRepeat refuses requested with ErrEntityConflict when the run's log,
 // as of the slot the transaction conditions its write on, holds an event of
 // its type and correlation ID, or the transaction appended one.
 func (tx *appendTx) refuseRepeat(ctx context.Context, run *runEntry, requested worlds.EventsCreateEvent) error {
@@ -1024,7 +1013,7 @@ func (tx *appendTx) refuseRepeat(ctx context.Context, run *runEntry, requested w
 	if err != nil || !logged {
 		return err
 	}
-	return fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
+	return fmt.Errorf("%w: %s %s already recorded", worlds.ErrEntityConflict, requested.EventType, requested.CorrelationID)
 }
 
 // logged reports whether the run's log, as of the slot the transaction
@@ -1420,7 +1409,7 @@ func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRun
 			// A retried create of a run that already holds its token.
 			return nil, worlds.ErrRunAlreadyExists
 		}
-		return nil, &worlds.HookConflictError{RunID: token.cur.runID}
+		return nil, &worlds.HookConflictError{Token: start.Token, RunID: token.cur.runID, Start: true}
 	}
 	id := worlds.StartHookID(input.RunID)
 	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now})

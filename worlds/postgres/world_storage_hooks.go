@@ -27,7 +27,7 @@ type tokenHolder struct {
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
 	hook, err := scanHook(w.pool.QueryRow(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h`+hookJoin(input.ResolveData)+` WHERE h.hook_id = $1 AND `+hookAvailable("$2")), input.HookID, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: string(input.HookID)}
 	}
 	return hook, err
 }
@@ -45,7 +45,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	hook, err := scanHook(w.pool.QueryRow(ctx, w.q(`SELECT `+hookColumns(input.ResolveData)+` FROM workflow.workflow_hooks h
 		JOIN workflow.workflow_runs r ON r.id = h.run_id`+hookJoin(input.ResolveData)+` WHERE h.token = $1 AND h.claims_token AND (r.status IN ('pending', 'running') OR h.token_retention_until > $2)`), input.Token, now()))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	return hook, err
 }
@@ -144,7 +144,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		if earlier, err := claimant.replay(ctx, worlds.EventTypeHookCreated, input.Event.CorrelationID, false); err != nil {
 			return err
 		} else if earlier.EventID != "" {
-			return fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, input.Event.CorrelationID)
+			return fmt.Errorf("%w: hook %s already created", worlds.ErrEntityConflict, input.Event.CorrelationID)
 		}
 		holder, err := w.lockToken(ctx, tx, token, now())
 		if err != nil {
@@ -190,7 +190,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		input.Event.Data, _ = json.Marshal(created)
 
 		event, err := claimant.append(ctx, input.Event)
-		if errors.Is(err, worlds.ErrHookConflict) {
+		if _, ok := errors.AsType[*worlds.HookConflictError](err); ok {
 			// A claimant inserted the token after lockToken saw none.
 			return errClaimRetry
 		}

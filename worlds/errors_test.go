@@ -133,3 +133,96 @@ func TestDeliveryRetryDelayWaitsForAThrottle(t *testing.T) {
 		}
 	}
 }
+
+func TestSDKErrorsAreRecordedAsTheSDKsTypes(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{worlds.FatalError{Cause: errSentinel}, `["FatalError",`},
+		{worlds.RetryableError{Cause: errSentinel, After: time.Minute}, `"retryAfter"`},
+		// A pointer keeps its Go type, so errors.As finds it as a pointer.
+		{&worlds.FatalError{Cause: errSentinel}, `"*github.com/eriicafes/go-workflow/worlds.FatalError"`},
+	} {
+		data, err := worlds.EncodeErrorPayload(test.err, worlds.PayloadOptions{NoCompression: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := string(data); !strings.Contains(text, test.want) {
+			t.Fatalf("%T recorded as %s, want %s", test.err, text, test.want)
+		}
+		// A decoded chain records the SDK's type again.
+		decoded := worlds.DecodeErrorPayload(data, nil)
+		again, err := worlds.EncodeErrorPayload(decoded, worlds.PayloadOptions{NoCompression: true})
+		if err != nil || !strings.Contains(string(again), test.want) {
+			t.Fatalf("%T recorded again as %s err=%v", test.err, again, err)
+		}
+	}
+	var retryable worlds.RetryableError
+	decoded := roundTripError(t, worlds.RetryableError{Cause: errSentinel, After: time.Hour})
+	if !errors.As(decoded, &retryable) || retryable.After < 59*time.Minute || retryable.After > time.Hour {
+		t.Fatalf("retryable after = %s", retryable.After)
+	}
+}
+
+func TestIsEventRefusalMatchesRefusalsOnly(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{worlds.ErrEntityConflict, true},
+		{fmt.Errorf("wrapped: %w", &worlds.RunExpiredError{}), true},
+		{errors.Join(errors.New("storage"), worlds.ErrStepNotFound), true},
+		{&worlds.HookConflictError{RunID: "wrun_1"}, true},
+		{&worlds.TooEarlyError{RetryAfter: time.Second}, true},
+		{errors.New("storage"), false},
+		{worlds.ErrRunNotFound, false},
+	} {
+		if got := worlds.IsEventRefusal(test.err); got != test.want {
+			t.Errorf("IsEventRefusal(%v) = %v, want %v", test.err, got, test.want)
+		}
+	}
+}
+
+func TestHookErrorsAreRecordedAsTheSDKsTypes(t *testing.T) {
+	conflict := roundTripError(t, &worlds.HookConflictError{Token: "tok", RunID: "wrun_1", Start: true})
+	var gotConflict *worlds.HookConflictError
+	if conflict.Type != "HookConflictError" || !errors.As(conflict, &gotConflict) || *gotConflict != (worlds.HookConflictError{Token: "tok", RunID: "wrun_1", Start: true}) {
+		t.Fatalf("conflict = %+v %+v", conflict, gotConflict)
+	}
+	if _, ok := conflict.Field("kind"); !ok {
+		t.Fatal("a start hook conflict has no kind")
+	}
+	claimed := roundTripError(t, fmt.Errorf("wait: %w", &worlds.HookForceClaimedError{Token: "tok", RunID: "wrun_2", HookID: "hook_2"}))
+	var gotClaimed *worlds.HookForceClaimedError
+	if !errors.As(claimed, &gotClaimed) || *gotClaimed != (worlds.HookForceClaimedError{Token: "tok", RunID: "wrun_2", HookID: "hook_2"}) {
+		t.Fatalf("claimed = %+v %+v", claimed, gotClaimed)
+	}
+}
+
+func TestExpiryAndLookupErrorsAreRecordedAsNamedErrors(t *testing.T) {
+	for _, test := range []struct {
+		err   error
+		name  string
+		check func(error) bool
+	}{
+		{&worlds.HookNotFoundError{Token: "tok"}, "HookNotFoundError", func(err error) bool {
+			got, ok := errors.AsType[*worlds.HookNotFoundError](err)
+			return ok && *got == worlds.HookNotFoundError{Token: "tok"}
+		}},
+		{&worlds.RunExpiredError{RunID: "wrun_1", RunStatus: worlds.StatusCompleted}, "RunExpiredError", func(err error) bool {
+			got, ok := errors.AsType[*worlds.RunExpiredError](err)
+			return ok && *got == worlds.RunExpiredError{RunID: "wrun_1", RunStatus: worlds.StatusCompleted}
+		}},
+		{&worlds.StreamExpiredError{RunID: "wrun_1", StreamID: "strm_1"}, "StreamExpiredError", func(err error) bool {
+			got, ok := errors.AsType[*worlds.StreamExpiredError](err)
+			return ok && *got == worlds.StreamExpiredError{RunID: "wrun_1", StreamID: "strm_1"}
+		}},
+	} {
+		recorded := roundTripError(t, fmt.Errorf("step: %w", test.err))
+		if recorded.Cause == nil || recorded.Cause.Name != test.name || !test.check(recorded) {
+			t.Errorf("%T recorded as %+v", test.err, recorded.Cause)
+		}
+	}
+}

@@ -183,7 +183,7 @@ func sleep(ctx context.Context, d time.Duration) bool {
 
 // coalescible reports whether a serialized flow may be coalesced into the
 // running delivery of its run, which re-runs to cover it: it carries nothing
-// the run's log does not hold. A run's first flow carries its creation, a
+// the run's log does not hold. A run's first delivery carries its creation, a
 // wake names waits the log does not, and a recovery flow asks its delivery
 // to send again what the queue lost, so those are never coalesced.
 func coalescible(input worlds.QueueInput) bool {

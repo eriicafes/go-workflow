@@ -55,6 +55,11 @@ type Config struct {
 	// key derived from it for the run. Empty leaves payloads unencrypted.
 	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
+	// EncryptionScope is the scope run keys are derived from EncryptionKey
+	// in. Worlds that share an EncryptionKey keep their runs' keys apart with
+	// different scopes. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionScope string
 	// Concurrency is how many deliveries execute at once. Zero uses
 	// WORKFLOW_LOCAL_QUEUE_CONCURRENCY, or 1000.
 	Concurrency int
@@ -77,8 +82,10 @@ type World struct {
 	db       *database
 	prepared bool
 	closed   bool
-	// encryptionKey is Config.EncryptionKey.
+	// encryptionKey and encryptionScope are Config.EncryptionKey and
+	// Config.EncryptionScope.
 	encryptionKey      []byte
+	encryptionScope    string
 	hookRetentionLimit time.Duration
 	skipRecovery       bool
 	// parent is Prepare's context, which ends delivery. ctx and cancel are
@@ -124,7 +131,7 @@ func Open(config Config, runners core.RunnerSet) (*World, error) {
 	if err != nil {
 		return nil, err
 	}
-	world := &World{workers: &sync.WaitGroup{}, dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
+	world := &World{workers: &sync.WaitGroup{}, dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), encryptionScope: config.EncryptionScope, hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
 	world.runtime = core.NewRuntime(world, runners)
 	world.execute = world.runtime.Execute
 	world.queue = newQueue(world, queueConcurrency(config.Concurrency))
@@ -341,7 +348,11 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from
-// Config.EncryptionKey, or nil when the World has none.
+// Config.EncryptionKey in Config.EncryptionScope, or nil when the World has
+// no key.
 func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
-	return worlds.ConfiguredRunKey(w.encryptionKey, runID)
+	if len(w.encryptionKey) == 0 {
+		return nil, nil
+	}
+	return worlds.DeriveRunKey(w.encryptionKey, w.encryptionScope, runID)
 }

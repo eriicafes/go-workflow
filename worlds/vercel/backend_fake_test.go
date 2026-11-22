@@ -495,7 +495,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		return outcome{status: http.StatusBadRequest, code: "invalid", message: err.Error()}
 	}
 	if eventType == worlds.EventTypeRunStarted && str(in.Meta, "workflowName") != "" {
-		// A first flow's run_started creates a run whose run_created never
+		// A first delivery's run_started creates a run whose run_created never
 		// landed.
 		creation, _ := eventData(wireEvent{EventType: string(worlds.EventTypeRunCreated), Data: stored})
 		if err := worlds.CreateRunForStart(ctx, f.store, runID, creation); err != nil {
@@ -523,7 +523,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 	}
 	result, err := f.store.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: eventType, CorrelationID: wire.CorrelationID, Data: data, OccurredAt: occurred, SpecVersion: spec}, Options: worlds.EventsCreateOptions{InBandCount: fence, EventCount: report, ResumeID: str(in.Meta, "resumeId"), ResumePayloadDigest: str(in.Meta, "resumePayloadDigest")}})
 	if err != nil {
-		if errors.Is(err, worlds.ErrInBandSuperseded) {
+		if _, ok := errors.AsType[*worlds.InBandSupersededError](err); ok {
 			seq, seqInBand := f.counters(ctx, runID)
 			return outcome{status: http.StatusPreconditionFailed, code: "in-band-superseded", message: err.Error(), seq: seq, seqInBand: seqInBand}
 		}
@@ -875,28 +875,28 @@ func goErrorStatus(err error) (int, string) {
 		return http.StatusNotFound, "run-not-found"
 	case errors.Is(err, worlds.ErrStepNotFound), errors.Is(err, worlds.ErrEventNotFound):
 		return http.StatusNotFound, "not-found"
-	case errors.Is(err, worlds.ErrHookNotFound), errors.Is(err, worlds.ErrHookNotActive):
+	case is[*worlds.HookNotFoundError](err), errors.Is(err, worlds.ErrHookNotActive):
 		return http.StatusNotFound, "hook-not-found"
-	case errors.Is(err, worlds.ErrTooEarly):
+	case is[*worlds.TooEarlyError](err):
 		return http.StatusTooEarly, "too-early"
 	case errors.Is(err, worlds.ErrAttributeInvalid):
 		return http.StatusBadRequest, "validation-error"
-	case errors.Is(err, worlds.ErrEventConflict) && errors.Is(err, worlds.ErrRunTerminal):
+	case errors.Is(err, worlds.ErrEntityConflict) && is[*worlds.RunExpiredError](err):
 		// A transition from, or a creation on, a finished run.
 		return http.StatusConflict, "run-terminal"
-	case errors.Is(err, worlds.ErrEventConflict):
+	case errors.Is(err, worlds.ErrEntityConflict):
 		return http.StatusConflict, "entity-conflict"
 	case errors.Is(err, worlds.ErrRunAlreadyExists):
 		return http.StatusConflict, "run-exists"
-	case errors.Is(err, worlds.ErrRunTerminal):
+	case is[*worlds.RunExpiredError](err):
 		// The backend answers a write to a finished run 410, which
 		// world-vercel reports as RunExpiredError.
 		return http.StatusGone, "run-expired"
 	case errors.Is(err, worlds.ErrStepNotStartable):
 		return http.StatusConflict, "step-not-startable"
-	case errors.Is(err, worlds.ErrHookForceClaimed):
+	case is[*worlds.HookForceClaimedError](err):
 		return http.StatusConflict, "hook-force-claimed"
-	case errors.Is(err, worlds.ErrHookConflict):
+	case is[*worlds.HookConflictError](err):
 		return http.StatusConflict, "hook-conflict"
 	case errors.Is(err, worlds.ErrStreamClosed):
 		return http.StatusConflict, "stream-closed"
@@ -1028,4 +1028,10 @@ func (f *fakeBackend) eventsSocket(ctx context.Context, writer http.ResponseWrit
 	}
 	// The client sends nothing more: the read ends when it closes.
 	_, _, _ = conn.Read(ctx)
+}
+
+// is reports whether err's chain has an error of type E.
+func is[E error](err error) bool {
+	_, ok := errors.AsType[E](err)
+	return ok
 }

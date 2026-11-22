@@ -61,7 +61,7 @@ After three re-routes, or when the World returns `ErrDeploymentUnavailable`,
 the run fails with an error matching `ErrDeploymentMismatch`. See
 [Pinning runs to a deployment](/guide/replay#pinning-runs-to-a-deployment).
 
-A flow whose write another flow superseded (`ErrInBandSuperseded`) queues one
+A flow whose write another flow superseded (`*InBandSupersededError`) queues one
 follow-up flow delivery right away and acknowledges its own. On a World that
 deduplicates, flows refused by the same write share that follow-up. See
 [Concurrent flows](/guide/replay#concurrent-flows).
@@ -175,7 +175,7 @@ runID)` returns a delivery addressed that way.
 orchestrator. The World appends it only when `Run.InBandCount`, which counts
 `run_created` too, still equals that count, advances the count by the
 positions it allocates, and returns it as `EventResult.InBandCount`. Otherwise
-it appends nothing and returns `ErrInBandSuperseded`. Appends without a count
+it appends nothing and returns an `*InBandSupersededError`. Appends without a count
 are out-of-band: never refused, and they leave the count alone. An in-band
 write with `EventCount` returns the events between that count and its own
 position in `Events`, and is stored with its `OccurredAt` as `CreatedAt`. See
@@ -314,7 +314,7 @@ type QueueInput struct {
 
 	StepName, StepAttempt, StepResent            // a step delivery's step
 	RunSpecVersion                               // SpecVersion
-	RunInput                                     // a run's first flow: the run's creation
+	RunInput                                     // a run's first delivery: the run's creation
 	CompleteWaits                                // waits a WakeUp's flow completes first
 	Recovery                                     // a flow queued after the World lost its messages
 	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt
@@ -451,7 +451,7 @@ The rest are the Client's own:
 | Method | Description |
 | --- | --- |
 | `RunsCreate` | Starts a run and queues its first delivery. Returns the run ID. |
-| `RunsCancel` | Cancels a run. Returns `ErrRunTerminal` if finished. |
+| `RunsCancel` | Cancels a run. Returns a `*RunExpiredError` if finished. |
 | `RunsWake` | Settles pending waits early. |
 | `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams one call at a time. |
 | `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
@@ -505,22 +505,22 @@ type EncryptionKeys interface {
 	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
 }
 
-func RunKeysFor(ctx context.Context, world any, runID RunID, deploymentID string) (*RunKeys, error)
+func RunKeysFor(ctx context.Context, world World, runID RunID, deploymentID string) (*RunKeys, error)
 func NewRunKeys(runKey []byte) (*RunKeys, error)
 func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error)
-func ConfiguredRunKey(key []byte, runID RunID) ([]byte, error)
 ```
 
 Payloads use the Workflow SDK's format: devalue text labelled `devl`,
 optionally compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
 [Data Format and Encryption](/guide/encryption). `EncryptionKeys` is the
 optional World interface the SDK calls `getEncryptionKeyForRun`. A World that
-takes a `Config.EncryptionKey` returns `ConfiguredRunKey(key, runID)`.
+takes a `Config.EncryptionKey` returns `DeriveRunKey(key, scope, runID)`, with
+its `Config.EncryptionScope` as the scope.
 `RunKeysFor` resolves and caches a run's keys. `EncodeStreamFrame` and
-`SplitStreamFrames` write and read stream frames, and `PayloadMarshaler`,
-`PayloadUnmarshaler`, and `PayloadReduced` let a type choose its encoding,
-such as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata`, the SDK's
-`Request`, `Response`, and `{respondWith}`.
+`SplitStreamFrames` write and read stream frames, and `PayloadMarshaler` and
+`PayloadUnmarshaler` let a type choose its encoding, as `WebhookRequest`,
+`WebhookResponse`, and `WebhookMetadata` do to be the SDK's `Request`,
+`Response`, and `{respondWith}`.
 
 ## Durable primitives
 
@@ -556,33 +556,33 @@ checking ownership.
 
 ## Errors
 
-| Variable | Meaning |
+| Error | Meaning |
 | --- | --- |
-| `ErrWorkflowNotFound` | No runner is registered for the run's workflow. |
+| `ErrWorkflowNotRegistered` | No runner is registered for the run's workflow. |
 | `ErrRunNotFound` | No run has the ID. |
 | `ErrRunAlreadyExists` | `EventsCreateRun` with an existing ID. |
-| `ErrRunTerminal` | Appending to or writing a stream of a finished run. |
+| `*RunExpiredError` | Appending to or writing a stream of a finished run, or reading a run whose data expired. |
 | `ErrRunCancelled` | The run was cancelled. |
 | `ErrStepNotFound` | No step has the ID. |
 | `ErrStepNotStartable` | A batch event of a step whose earlier event in the batch was refused. |
-| `ErrTooEarly` | A `step_started` before the step's retry is due. A `*TooEarlyError` says how long to wait. |
+| `*TooEarlyError` | A `step_started` before the step's retry is due. Its `RetryAfter` says how long to wait. |
 | `ErrEventNotFound` | No event (or wait) has the ID. |
-| `ErrEventConflict` | The event repeats a creation the run's log holds, such as a second `step_created`. |
+| `ErrEntityConflict` | The event repeats a creation the run's log holds, such as a second `step_created`. |
 | `ErrEventInvalid` | Malformed event, ID, or cursor, a new run's ID that is not a recent ULID, a resume digest that is not its payload's, or an item over a backend limit. |
 | `ErrAttributeInvalid` | Run attributes or an `attr_set`'s changes outside the attribute limits, or a `$` key without `AllowReservedAttributes`. |
-| `ErrHookNotFound` | No hook has the ID, no hook owns the token, or a `hook_received` or `hook_disposed` names a hook its run doesn't have. |
+| `*HookNotFoundError` | No hook has the ID, no hook owns the token, or a `hook_received` or `hook_disposed` names a hook its run doesn't have. |
 | `ErrHookNotActive` | The hook can no longer receive payloads, or a backend refused a hook event as a conflict. |
-| `ErrHookConflict` | Another active hook owns the token. |
-| `ErrHookForceClaimed` | Another hook took the token with `Force`. |
+| `*HookConflictError` | Another active hook owns the token. |
+| `*HookForceClaimedError` | Another hook took the token with `Force`. |
 | `ErrStartHookRejected` | A start hook candidate the World will never admit, such as one whose run ID is older than `StartHookCandidateMaxAge`. |
 | `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
 | `ErrStreamClosed` | Writing to a closed stream, on a World that refuses it. |
-| `ErrRunNotSupported` | An event on a run created under a newer spec version than this release supports. |
+| `*RunNotSupportedError` | An event on a run created under a newer spec version than this release supports. |
 | `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |
 | `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
 | `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |
 | `ErrDeploymentUnavailable` | `Queue` addressed a deployment that no longer exists. |
-| `ErrInBandSuperseded` | An in-band write's count is stale because another flow wrote to the run first. |
+| `*InBandSupersededError` | An in-band write's count is stale because another flow wrote to the run first. |
 | `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
 
 ```go

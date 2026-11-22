@@ -14,7 +14,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	defer w.mu.RUnlock()
 	value, ok := w.hooks[input.HookID]
 	if !ok {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: string(input.HookID)}
 	}
 	return w.hookPayloadLocked(cloneHook(value), input.ResolveData), nil
 }
@@ -29,7 +29,7 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 	id, ok := w.tokens[input.Token]
 	w.mu.Unlock()
 	if !ok {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	return w.HooksGet(ctx, worlds.HooksGetInput{HookID: id, ResolveData: input.ResolveData})
 }

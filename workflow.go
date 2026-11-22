@@ -53,6 +53,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eriicafes/go-workflow/internal/devalue"
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -267,7 +269,7 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 
 // Value returns the output of the run once it has finished. It returns the
 // run's error as an *Error when the run failed, ErrRunCancelled when it was
-// cancelled, and ErrRunExpired when its data was deleted.
+// cancelled, and a *RunExpiredError when its data was deleted.
 //
 // In workflow context, Value reads the run once and returns ErrRunNotFinished
 // when the run had not finished, so replay stays deterministic. In step context
@@ -300,7 +302,7 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 	case !run.Status.Terminal():
 		return zero, ErrRunNotFinished
 	case run.Status != worlds.StatusCancelled && worlds.RunDataExpired(run, time.Now()):
-		return zero, ErrRunExpired
+		return zero, &RunExpiredError{RunID: run.RunID, RunStatus: run.Status, ExpiredAt: *run.ExpiredAt}
 	}
 	keys, err := r.client.RunKeys(ctx, worlds.RunKeysInput{RunID: run.RunID, DeploymentID: run.DeploymentID})
 	if err != nil {
@@ -354,7 +356,7 @@ func runCancel(ctx context.Context, runID worlds.RunID) (struct{}, error) {
 		return struct{}{}, err
 	}
 	err = client.RunsCancel(ctx, worlds.ClientRunsCancelInput{RunID: runID})
-	if errors.Is(err, worlds.ErrRunTerminal) {
+	if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 		return struct{}{}, nil
 	}
 	return struct{}{}, err
@@ -436,7 +438,7 @@ var (
 	RetainDefault = worlds.RetainDefault
 	// RetainNone deletes a run's data as soon as the run finishes. Its
 	// metadata, such as its ID, status, and attributes, is kept, and
-	// Run.Value returns ErrRunExpired.
+	// Run.Value returns a *RunExpiredError.
 	RetainNone = worlds.RetainNone
 )
 
@@ -559,7 +561,7 @@ func (options StartOptions) settings() (startSettings, error) {
 		hookToken, hookRetention = hook.Token, hook.MinRetention
 		if hook.Metadata != nil {
 			var err error
-			if hookMetadata, err = worlds.MarshalDevalue(hook.Metadata); err != nil {
+			if hookMetadata, err = devalue.Marshal(hook.Metadata); err != nil {
 				return startSettings{}, fmt.Errorf("workflow: encode hook metadata: %w", err)
 			}
 		}
@@ -719,7 +721,7 @@ func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input
 	}
 	create := worlds.EventsCreateRunInput{RunID: runID, WorkflowName: name, Input: encoded, DeploymentID: deploymentID}
 	if keys != nil {
-		create.EncryptionPublicKey = worlds.EncodePublicKey(keys.PublicKey)
+		create.EncryptionPublicKey = envelope.EncodePublicKey(keys.PublicKey)
 	}
 	return create, nil
 }
@@ -794,7 +796,7 @@ const (
 // events, and hooks, and their streams' chunks. It cannot be undone. The
 // runs, steps, events, and hooks stay, with their IDs, names, statuses,
 // timestamps, and attributes, and a run's Run.Value then returns
-// ErrRunExpired.
+// a *RunExpiredError.
 //
 // A run that has not finished is skipped and left running. Each run's
 // outcome is in the result. Called in a step, DeleteRuns sends retryable

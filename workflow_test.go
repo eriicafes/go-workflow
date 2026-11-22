@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
@@ -94,7 +95,7 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return parentRunOutput{}, err
 		} else if owner != nil {
-			return parentRunOutput{}, workflow.ErrHookConflict
+			return parentRunOutput{}, &workflow.HookConflictError{}
 		}
 		run, err := workflow.Start(ctx, childRunInput{Token: hook.Token()})
 		if err != nil {
@@ -288,7 +289,8 @@ func TestRunValueReportsDeletedData(t *testing.T) {
 	if err != nil || result.Summary.Deleted != 1 {
 		t.Fatalf("delete = %+v, %v", result, err)
 	}
-	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+	_, err = run.Value(ctx)
+	if _, ok := errors.AsType[*workflow.RunExpiredError](err); !ok {
 		t.Fatalf("deleted run error = %v", err)
 	}
 }
@@ -311,7 +313,8 @@ func TestDeleteRuns(t *testing.T) {
 	if err != nil || result.Summary.Deleted != 1 || result.Summary.NotFound != 1 || result.Results[0].Outcome != worlds.DeleteDataDeleted {
 		t.Fatalf("DeleteRuns = %+v, %v", result, err)
 	}
-	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+	_, err = run.Value(ctx)
+	if _, ok := errors.AsType[*workflow.RunExpiredError](err); !ok {
 		t.Fatalf("deleted run error = %v", err)
 	}
 	if _, err := workflow.DeleteRuns(ctx); !errors.Is(err, worlds.ErrDeleteDataInvalid) {
@@ -457,10 +460,11 @@ func TestStartOptions(t *testing.T) {
 	if created.Attributes["tier"] != "gold" || created.Attributes[worlds.RetentionAttribute] != "0" {
 		t.Fatalf("attributes = %#v", created.Attributes)
 	}
-	if label := worlds.PayloadLabel(created.Input); label != worlds.PayloadDevalue {
+	if label := envelope.Peek(created.Input); label != envelope.PrefixDevalue {
 		t.Fatalf("uncompressed input label = %q", label)
 	}
-	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunExpired) {
+	_, err = run.Value(ctx)
+	if _, ok := errors.AsType[*workflow.RunExpiredError](err); !ok {
 		t.Fatalf("RetainNone run error = %v", err)
 	}
 
@@ -1181,7 +1185,7 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 		return encryptedOutput{Secret: secret, Resumed: resumed}, nil
 	}))
 	defer world.Close()
-	if err := world.SetEncryptionKey(bytes.Repeat([]byte{3}, 32)); err != nil {
+	if err := world.SetEncryptionKey(bytes.Repeat([]byte{3}, 32), "test"); err != nil {
 		t.Fatal(err)
 	}
 	client := workflow.NewClient(world)
@@ -1216,14 +1220,14 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 	}
 
 	stored, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
-	if err != nil || worlds.DecodePublicKey(stored.EncryptionPublicKey) == nil {
+	if err != nil || envelope.DecodePublicKey(stored.EncryptionPublicKey) == nil {
 		t.Fatalf("run = %#v err=%v", stored, err)
 	}
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := map[worlds.EventType]string{}
+	labels := map[worlds.EventType]envelope.Prefix{}
 	for _, event := range events.Data {
 		if bytes.Contains(event.Data, []byte("secret")) {
 			t.Fatalf("%s holds plaintext: %s", event.EventType, event.Data)
@@ -1233,17 +1237,17 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 		for _, field := range []string{"input", "result", "output", "payload"} {
 			var payload []byte
 			if json.Unmarshal(data[field], &payload) == nil && len(payload) > 0 {
-				labels[event.EventType] = worlds.PayloadLabel(payload)
+				labels[event.EventType] = envelope.Peek(payload)
 			}
 		}
 	}
-	want := map[worlds.EventType]string{
-		worlds.EventTypeRunCreated: worlds.PayloadEncrypted,
+	want := map[worlds.EventType]envelope.Prefix{
+		worlds.EventTypeRunCreated: envelope.PrefixEncrypted,
 		// The step runs inline, so its first step_started holds its input.
-		worlds.EventTypeStepStarted:   worlds.PayloadEncrypted,
-		worlds.EventTypeStepCompleted: worlds.PayloadEncrypted,
-		worlds.EventTypeHookReceived:  worlds.PayloadSealed,
-		worlds.EventTypeRunCompleted:  worlds.PayloadEncrypted,
+		worlds.EventTypeStepStarted:   envelope.PrefixEncrypted,
+		worlds.EventTypeStepCompleted: envelope.PrefixEncrypted,
+		worlds.EventTypeHookReceived:  envelope.PrefixSealed,
+		worlds.EventTypeRunCompleted:  envelope.PrefixEncrypted,
 	}
 	for eventType, label := range want {
 		if labels[eventType] != label {
@@ -1257,9 +1261,9 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 	if err != nil || len(chunks.Data) != 2 {
 		t.Fatalf("stream = %#v err=%v", chunks, err)
 	}
-	for index, label := range []string{worlds.PayloadEncrypted, worlds.PayloadSealed} {
+	for index, label := range []envelope.Prefix{envelope.PrefixEncrypted, envelope.PrefixSealed} {
 		payloads, err := worlds.SplitStreamFrames(chunks.Data[index].Data)
-		if err != nil || len(payloads) != 1 || worlds.PayloadLabel(payloads[0]) != label {
+		if err != nil || len(payloads) != 1 || envelope.Peek(payloads[0]) != label {
 			t.Fatalf("frame %d = %q err=%v, want %s", index, chunks.Data[index].Data, err, label)
 		}
 	}

@@ -61,7 +61,7 @@ func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return workflows.ParentResult{}, err
 	} else if owner != nil {
-		return workflows.ParentResult{}, workflow.ErrHookConflict
+		return workflows.ParentResult{}, &workflow.HookConflictError{}
 	}
 
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
@@ -105,7 +105,7 @@ for i, item := range input.Items {
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return Output{}, err
 	} else if owner != nil {
-		return Output{}, workflow.ErrHookConflict
+		return Output{}, &workflow.HookConflictError{}
 	}
 
 	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {

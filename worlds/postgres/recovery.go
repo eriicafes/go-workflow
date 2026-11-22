@@ -23,7 +23,7 @@ type recoveryRun struct {
 // recoverActiveRuns queues a flow for every active run, as world-postgres's
 // start() does through reenqueueActiveRuns when it runs workers, so a run
 // whose delivery was lost, as when its process exited before it queued the
-// run's first flow, resumes. The queue persists, so the flow is not a
+// run's first delivery, resumes. The queue persists, so the flow is not a
 // Recovery flow: the run's queued messages still arrive.
 //
 // A run parked on a hook or a wait is left out (see recoverableRuns), and

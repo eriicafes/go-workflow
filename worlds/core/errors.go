@@ -73,3 +73,9 @@ func (e deploymentMismatchError) Error() string {
 }
 
 func (e deploymentMismatchError) Unwrap() error { return worlds.ErrDeploymentMismatch }
+
+// is reports whether err's chain has an error of type E.
+func is[E error](err error) bool {
+	_, ok := errors.AsType[E](err)
+	return ok
+}

@@ -154,7 +154,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
-		// A first flow's run_started creates a run whose run_created never
+		// A first delivery's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
 		if err := worlds.CreateRunForStart(ctx, w, input.RunID, input.Event.Data); err != nil {
 			return worlds.EventResult{}, err
@@ -253,11 +253,11 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 				continue
 			}
 			replay, err := a.admit(ctx, value)
-			if err != nil && !refusal(err) {
+			if err != nil && !worlds.IsEventRefusal(err) {
 				return err
 			}
 			if err == nil && replay != nil {
-				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, value.EventType, value.CorrelationID)
 			}
 			if err != nil {
 				item.Err = err
@@ -284,17 +284,6 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, err
 	}
 	return result, nil
-}
-
-// refusal reports whether err is an admission refusal, as opposed to a
-// storage failure.
-func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
@@ -431,7 +420,7 @@ type appender struct {
 
 // admit applies the transition rules, as world-postgres's storage does. An
 // event that repeats a creation the log holds is refused with
-// ErrEventConflict. It returns a non-nil result, holding no event, for a
+// ErrEntityConflict. It returns a non-nil result, holding no event, for a
 // run_started of a run that started before, which appends nothing.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
 	// A run of a newer spec version is a newer release's, as the Workflow
@@ -499,7 +488,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return nil, err
 		}
 		if earlier.EventID != "" {
-			return nil, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
+			return nil, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEntityConflict, event.EventType, event.CorrelationID)
 		}
 
 	case worlds.EventTypeHookReceived:
@@ -515,19 +504,19 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 				return nil, err
 			}
 			if forced {
-				return nil, worlds.ErrHookForceClaimed
+				return nil, &worlds.HookForceClaimedError{}
 			}
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 		if hook.RunID != a.run.RunID {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 		owner, err := a.w.tokenOwner(ctx, a.tx, hook.Token)
 		if err != nil {
 			return nil, err
 		}
 		if owner != hook.HookID {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: hook.Token}
 		}
 		if err := worlds.FinishedRunHookRefusal(a.run.Status, event); err != nil {
 			return nil, err
@@ -541,7 +530,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		// A disposed hook is gone, so disposing it again finds no hook, as
 		// in world-postgres.
 		if !found || hook.RunID != a.run.RunID {
-			return nil, worlds.ErrHookNotFound
+			return nil, &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 
 	case worlds.EventTypeHookCreated:
@@ -554,7 +543,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return nil, err
 		}
 		if holder.hookID != "" {
-			return nil, worlds.ErrHookConflict
+			return nil, &worlds.HookConflictError{Token: created.Token, RunID: holder.runID}
 		}
 	}
 	return nil, nil
@@ -794,16 +783,16 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int6
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return worlds.ErrHookConflict
+		return &worlds.HookConflictError{Token: value.Token}
 	}
 	return nil
 }
 
-// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// fence returns an *InBandSupersededError when an in-band write's count is not the
 // locked run's in-band count.
 func (a *appender) fence(count *int) error {
 	if count != nil && *count != a.inBandCount {
-		return worlds.ErrInBandSuperseded
+		return &worlds.InBandSupersededError{}
 	}
 	a.inBand = count != nil
 	return nil
@@ -989,7 +978,7 @@ func (w *World) createStartHook(ctx context.Context, tx pgx.Tx, input worlds.Eve
 		return err
 	}
 	if holder.hookID != "" {
-		return &worlds.HookConflictError{RunID: holder.runID}
+		return &worlds.HookConflictError{Token: start.Token, RunID: holder.runID, Start: true}
 	}
 	// metadata_slot 1 joins run_created, which holds the hook's metadata.
 	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion})
@@ -1005,7 +994,7 @@ func (w *World) createStartHook(ctx context.Context, tx pgx.Tx, input worlds.Eve
 		if err := tx.QueryRow(ctx, w.q(`SELECT run_id FROM workflow.workflow_hooks WHERE token = $1 AND claims_token`), start.Token).Scan(&owner); err != nil {
 			return err
 		}
-		return &worlds.HookConflictError{RunID: owner}
+		return &worlds.HookConflictError{Token: start.Token, RunID: owner, Start: true}
 	}
 	return nil
 }

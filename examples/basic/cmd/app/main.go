@@ -157,7 +157,7 @@ func routes() *http.ServeMux {
 		}
 
 		err := workflow.ResumeHook(r.Context(), workflows.ReviewToken(runID), review)
-		if errors.Is(err, workflow.ErrHookNotFound) {
+		if _, ok := errors.AsType[*workflow.HookNotFoundError](err); ok {
 			http.Error(w, "this run is not waiting for a review", http.StatusConflict)
 			return
 		}

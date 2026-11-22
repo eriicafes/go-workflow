@@ -100,9 +100,9 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 		t.Fatalf("ResolveDataNone run = %#v err=%v", stripped, err)
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait"}})
-	conformExpect(t, err, worlds.ErrRunTerminal, "append after completion")
+	conformExpectType[*worlds.RunExpiredError](t, err, "append after completion")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}})
-	conformExpect(t, err, worlds.ErrRunTerminal, "cancel completed run")
+	conformExpectType[*worlds.RunExpiredError](t, err, "cancel completed run")
 
 	failed := conformCreateRun(t, world, "failed")
 	conformAppend(t, world, failed, worlds.EventTypeRunFailed, "", worlds.DataRunFailed{Error: json.RawMessage(`{"message":"boom"}`)})
@@ -230,7 +230,7 @@ func conformAttributes(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeRunCancelled, "", nil)
 	if world.Capabilities().SetAttributes {
 		err = world.RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{RunID: runID, Changes: []worlds.RunsAttributeChange{{Key: "zone", Value: &tier}}})
-		conformExpect(t, err, worlds.ErrRunTerminal, "attributes on terminal run")
+		conformExpectType[*worlds.RunExpiredError](t, err, "attributes on terminal run")
 	}
 }
 
@@ -389,7 +389,7 @@ func conformExpectDataDeleted(t *testing.T, world worlds.World, runID worlds.Run
 	}
 }
 
-// conformResilientStart checks that a first flow's run_started carrying the
+// conformResilientStart checks that a first delivery's run_started carrying the
 // run's creation creates a run whose run_created never landed, and is stored
 // without it.
 func conformResilientStart(t *testing.T, world worlds.World) {
@@ -421,14 +421,14 @@ func conformResilientStart(t *testing.T, world worlds.World) {
 // conformStartedAgain checks the answer to a run_started of a run that
 // started before. It is not started again: world-local and world-postgres
 // accept it and append nothing, so the answer holds no event, and Vercel's
-// backend refuses it as a conflict (ErrEventConflict).
+// backend refuses it as a conflict (ErrEntityConflict).
 func conformStartedAgain(t *testing.T, result worlds.EventResult, err error) {
 	t.Helper()
-	if errors.Is(err, worlds.ErrEventConflict) {
+	if errors.Is(err, worlds.ErrEntityConflict) {
 		return
 	}
 	if err != nil || result.EventID != "" || result.AllocatedEventCount != 0 {
-		t.Fatalf("repeated run_started = %#v err = %v, want no event or ErrEventConflict", result, err)
+		t.Fatalf("repeated run_started = %#v err = %v, want no event or ErrEntityConflict", result, err)
 	}
 }
 
@@ -477,6 +477,6 @@ func conformValidation(t *testing.T, world worlds.World) {
 		conformEvent(t, worlds.EventTypeStepFailed, "step_done", worlds.DataStepResult{StepName: "done", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
 	} {
 		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: event})
-		conformExpect(t, err, worlds.ErrEventConflict, string(event.EventType)+" of a finished step")
+		conformExpect(t, err, worlds.ErrEntityConflict, string(event.EventType)+" of a finished step")
 	}
 }

@@ -36,7 +36,8 @@ func TestCheckRunSpecVersion(t *testing.T) {
 	if err := CheckRunSpecVersion("wrun_a", SpecVersion); err != nil {
 		t.Fatalf("current spec version: %v", err)
 	}
-	if err := CheckRunSpecVersion("wrun_a", SpecVersion+1); !errors.Is(err, ErrRunNotSupported) {
-		t.Fatalf("newer spec version = %v, want ErrRunNotSupported", err)
+	err := CheckRunSpecVersion("wrun_a", SpecVersion+1)
+	if _, ok := errors.AsType[*RunNotSupportedError](err); !ok {
+		t.Fatalf("newer spec version = %v, want &RunNotSupportedError{}", err)
 	}
 }

@@ -55,7 +55,7 @@ type queueMessage struct {
 	RetentionMs int64 `json:"retentionMs,omitempty"`
 }
 
-// queueRunInput is a first flow's RunInput in a queueMessage: the run's
+// queueRunInput is a first delivery's RunInput in a queueMessage: the run's
 // creation, as the Workflow SDK's runInput carries it.
 type queueRunInput struct {
 	WorkflowName        string            `json:"workflowName"`

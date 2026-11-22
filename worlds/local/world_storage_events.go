@@ -138,7 +138,7 @@ const noEvent worlds.EventID = "-"
 
 // admit applies the transition rules to the staged state, as world-local's
 // events-storage does. An event that repeats a creation the log holds is
-// refused with ErrEventConflict. A non-empty event ID is noEvent.
+// refused with ErrEntityConflict. A non-empty event ID is noEvent.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
 	// A run of a newer spec version is a newer release's, as the Workflow
 	// SDK's Worlds refuse it.
@@ -198,7 +198,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			return "", err
 		}
 		if earlier != "" {
-			return "", fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
+			return "", fmt.Errorf("%w: %s %s already recorded", worlds.ErrEntityConflict, event.EventType, event.CorrelationID)
 		}
 
 	case worlds.EventTypeHookDisposed:
@@ -209,7 +209,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			return "", err
 		}
 		if hook == nil || hook.RunID != t.run.RunID {
-			return "", worlds.ErrHookNotFound
+			return "", &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 
 	case worlds.EventTypeHookReceived:
@@ -221,23 +221,23 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 		if disposal != nil && disposal.RunID == t.run.RunID {
 			if disposal.ForceClaimedBy != nil {
-				return "", worlds.ErrHookForceClaimed
+				return "", &worlds.HookForceClaimedError{RunID: disposal.ForceClaimedBy.RunID, HookID: disposal.ForceClaimedBy.HookID}
 			}
-			return "", worlds.ErrHookNotFound
+			return "", &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
 		}
 		if hook == nil || hook.RunID != t.run.RunID {
-			return "", worlds.ErrHookNotFound
+			return "", &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
 		owner, err := t.token(hook.Token)
 		if err != nil {
 			return "", err
 		}
 		if owner == nil || owner.HookID != hook.HookID {
-			return "", worlds.ErrHookNotFound
+			return "", &worlds.HookNotFoundError{Token: hook.Token}
 		}
 		if err := worlds.FinishedRunHookRefusal(t.run.Status, event); err != nil {
 			return "", err
@@ -253,7 +253,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			return "", err
 		}
 		if owner.held(now) {
-			return "", worlds.ErrHookConflict
+			return "", &worlds.HookConflictError{Token: created.Token, RunID: owner.RunID}
 		}
 	}
 	return "", nil
@@ -573,11 +573,11 @@ func (t *txn) applyRetention(now time.Time) bool {
 	return purge
 }
 
-// fence returns ErrInBandSuperseded when an in-band write's count is not the
+// fence returns an *InBandSupersededError when an in-band write's count is not the
 // run's current InBandCount.
 func (t *txn) fence(count *int) error {
 	if count != nil && *count != t.run.InBandCount {
-		return worlds.ErrInBandSuperseded
+		return &worlds.InBandSupersededError{}
 	}
 	return nil
 }
@@ -805,7 +805,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 func (w *World) appendEvent(s *store, input worlds.EventsCreateInput) (worlds.EventResult, bool, error) {
 	now := time.Now().UTC()
 	if input.Event.EventType == worlds.EventTypeRunStarted {
-		// A first flow's run_started creates a run whose run_created never
+		// A first delivery's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
 		var created worlds.DataRunCreated
 		if json.Unmarshal(input.Event.Data, &created) == nil && created.WorkflowName != "" {
@@ -923,9 +923,9 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 		now := time.Now().UTC()
 		replay, err := t.admit(value, now)
 		if err == nil && replay != "" {
-			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
+			err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, value.EventType, value.CorrelationID)
 		}
-		if err != nil && !refusal(err) {
+		if err != nil && !worlds.IsEventRefusal(err) {
 			return worlds.EventBatchResult{}, false, err
 		}
 		if err != nil {
@@ -1060,17 +1060,6 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 		return nil
 	})
 	return page, err
-}
-
-// refusal reports whether err is an event's refusal rather than a storage
-// failure.
-func refusal(err error) bool {
-	for _, target := range []error{worlds.ErrEventInvalid, worlds.ErrEventConflict, worlds.ErrEventNotFound, worlds.ErrRunNotSupported, worlds.ErrAttributeInvalid, worlds.ErrTooEarly, worlds.ErrStepNotFound, worlds.ErrRunTerminal, worlds.ErrStepNotStartable, worlds.ErrHookNotFound, worlds.ErrHookNotActive, worlds.ErrHookForceClaimed, worlds.ErrHookConflict} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return false
 }
 
 func validAppend(eventType worlds.EventType) bool {

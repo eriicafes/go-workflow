@@ -158,6 +158,21 @@ func conformExpect(t *testing.T, err, want error, label string) {
 	}
 }
 
+// conformExpectType checks that err's chain has an error of type E.
+func conformExpectType[E error](t *testing.T, err error, label string) {
+	t.Helper()
+	if !is[E](err) {
+		var want E
+		t.Fatalf("%s: error = %v, want a %T", label, err, want)
+	}
+}
+
+// is reports whether err's chain has an error of type E.
+func is[E error](err error) bool {
+	_, ok := errors.AsType[E](err)
+	return ok
+}
+
 // conformExpectDropped checks the answer to a write a stream takes no more
 // data for: world-local and world-postgres drop it without an error, and
 // Vercel's backend refuses it (ErrStreamClosed).

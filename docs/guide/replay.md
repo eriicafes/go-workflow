@@ -87,7 +87,7 @@ A run's flow is its only orchestrator, and its writes are **in-band**: the
 run counts the positions they take (`Run.InBandCount`, `run_created`
 included), a flow reads the count with its log, and every write it makes
 carries the count. When another flow has written in-band since, the World
-refuses the write with `worlds.ErrInBandSuperseded` and appends nothing. The
+refuses the write with a `*worlds.InBandSupersededError` and appends nothing. The
 refused flow stops writing and starting steps, and asks the queue for its
 message again a second later, when it replays the run with the other flow's
 writes. Since every event of an inline step is in-band too, two flows never

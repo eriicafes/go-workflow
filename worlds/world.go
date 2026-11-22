@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -104,6 +105,15 @@ type RegionalRunIDs interface {
 	// RegionForRunID returns the region a run's data lives in, from its ID
 	// alone, and false when id is not a run ID.
 	RegionForRunID(id RunID) (Region, bool)
+}
+
+// EncryptionKeys is an optional World interface that resolves run keys. A
+// run's payloads are encrypted with the 32-byte key it returns. A nil key, or
+// a World that does not implement it, leaves them unencrypted. deploymentID
+// is the run's deployment, and the same run must always resolve to the same
+// key.
+type EncryptionKeys interface {
+	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
 }
 
 // RegionRunID returns id tagged with region when world implements
@@ -301,15 +311,15 @@ func WakeRun(ctx context.Context, world World, runID RunID, correlationIDs []str
 	return len(selected), nil
 }
 
-// FirstFlow returns the delivery that starts the run input creates, pinned
-// to its deployment, keyed by the run so a retried start queues it once, and
-// carrying the run's creation.
-func FirstFlow(input EventsCreateRunInput) QueueInput {
+// StartQueueInput returns the QueueInput of the run input creates' first
+// delivery: pinned to its deployment, keyed by the run so a retried start
+// queues it once, and carrying the run's creation.
+func StartQueueInput(input EventsCreateRunInput) QueueInput {
 	run := input
 	return QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID, RunSpecVersion: SpecVersion, RunInput: &run}
 }
 
-// StartRun creates the run input describes and queues its first flow at the
+// StartRun creates the run input describes and queues its first delivery at the
 // same time, as the Workflow SDK's start does. A failure to queue fails the
 // start. A creation that fails retryably does not: the queued flow's
 // run_started creates the run. Nor does a run that exists already, which the
@@ -320,7 +330,7 @@ func StartRun(ctx context.Context, world World, input EventsCreateRunInput) erro
 		_, err := world.EventsCreateRun(ctx, input)
 		created <- err
 	}()
-	_, queueErr := world.Queue(ctx, FirstFlow(input))
+	_, queueErr := world.Queue(ctx, StartQueueInput(input))
 	createErr := <-created
 	if queueErr != nil {
 		return queueErr
@@ -348,7 +358,7 @@ func IsRetryableWorldError(err error) bool {
 }
 
 // CreateRunForStart creates the run of a run_started whose data carries the
-// run's creation, when the run does not exist: the first flow of a start
+// run's creation, when the run does not exist: the first delivery of a start
 // whose run_created never landed. A World that implements EventsCreate calls
 // it for every run_started and stores the event without its data.
 func CreateRunForStart(ctx context.Context, world World, runID RunID, data []byte) error {
@@ -422,7 +432,7 @@ func ResumeDigest(payload []byte) string {
 
 // ResumeHook appends payload to hook as a hook_received event and queues a
 // delivery so the hook's run resumes, addressed to the run's deployment. When
-// the World refuses the payload with ErrHookNotFound or ErrHookNotActive, it
+// the World refuses the payload with a *HookNotFoundError or ErrHookNotActive, it
 // still queues the
 // delivery, because an earlier resume may have recorded its payload without
 // queueing one, and returns the error.
@@ -463,7 +473,7 @@ func ResumeHook(ctx context.Context, world World, hook Hook, payload []byte, res
 		}
 		result, err = world.EventsCreate(ctx, input)
 	}
-	if err != nil && !errors.Is(err, ErrHookNotFound) && !errors.Is(err, ErrHookNotActive) {
+	if err != nil && !is[*HookNotFoundError](err) && !errors.Is(err, ErrHookNotActive) {
 		return result, err
 	}
 	// The hook carries the context of its run, so resuming it reads no run.
@@ -568,7 +578,7 @@ func RunDelivery(ctx context.Context, world World, runID RunID) (QueueInput, err
 // none, encrypted with the run's key from client, or unencrypted when the run
 // has no key.
 func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadOptions, error) {
-	if publicKey := DecodePublicKey(hook.ResumeContext.EncryptionPublicKey); publicKey != nil {
+	if publicKey := envelope.DecodePublicKey(hook.ResumeContext.EncryptionPublicKey); publicKey != nil {
 		return PayloadOptions{SealTo: publicKey}, nil
 	}
 	keys, err := client.RunKeys(ctx, RunKeysInput{RunID: hook.RunID, DeploymentID: hook.ResumeContext.DeploymentID})

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"math/big"
 	"net/http"
@@ -15,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eriicafes/go-workflow/internal/envelope"
 )
 
 // sdkVectors are payloads the Workflow SDK encoded, written by
@@ -55,7 +56,7 @@ func TestPayloadKeysMatchTheSDK(t *testing.T) {
 	if err != nil || !bytes.Equal(keys.PublicKey, vectors.PublicKey) {
 		t.Fatalf("public key = %x err=%v, want %x", keys.PublicKey, err, vectors.PublicKey)
 	}
-	if got := DecodePublicKey(EncodePublicKey(keys.PublicKey)); !bytes.Equal(got, keys.PublicKey) {
+	if got := envelope.DecodePublicKey(envelope.EncodePublicKey(keys.PublicKey)); !bytes.Equal(got, keys.PublicKey) {
 		t.Fatalf("public key round trip = %x", got)
 	}
 }
@@ -139,8 +140,8 @@ func TestPayloadDecodesSDKErrors(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	recorded := err.(*Error)
-	if len(recorded.chain) != 2 || recorded.chain[1].Message != "inner" || recorded.chain[0].Type != "Error" {
-		t.Fatalf("chain = %+v", recorded.chain)
+	if recorded.Type != "Error" || recorded.Cause == nil || recorded.Cause.Message != "inner" || recorded.Cause.Cause != nil {
+		t.Fatalf("chain = %+v", recorded)
 	}
 	var fatal error
 	if decodeErr := DecodePayload(vectors.Values["fatal"], nil, &fatal); decodeErr != nil {
@@ -184,11 +185,11 @@ func TestPayloadDecodesSDKShapesAndEnvelopes(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"zstd", "gzip"} {
-		if PayloadLabel(vectors.Compressed[name]) != name {
-			t.Fatalf("%s vector is %q", name, PayloadLabel(vectors.Compressed[name]))
+		if envelope.Peek(vectors.Compressed[name]) != envelope.Prefix(name) {
+			t.Fatalf("%s vector is %q", name, envelope.Peek(vectors.Compressed[name]))
 		}
-		text, err := OpenPayload(vectors.Compressed[name], nil)
-		plain, _ := OpenPayload(vectors.Compressed["plain"], nil)
+		text, err := envelope.Unwrap(vectors.Compressed[name], nil)
+		plain, _ := envelope.Unwrap(vectors.Compressed["plain"], nil)
 		if err != nil || !bytes.Equal(text, plain) {
 			t.Fatalf("%s: err=%v", name, err)
 		}
@@ -248,9 +249,9 @@ func TestPayloadRoundTrips(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		wantLabel := map[string]string{"plain": PayloadZstd, "gzip": PayloadGzip, "encr": PayloadEncrypted, "encp": PayloadSealed, "stored": PayloadDevalue}[name]
-		if PayloadLabel(payload) != wantLabel {
-			t.Fatalf("%s label = %q", name, PayloadLabel(payload))
+		wantLabel := map[string]envelope.Prefix{"plain": envelope.PrefixZstd, "gzip": envelope.PrefixGzip, "encr": envelope.PrefixEncrypted, "encp": envelope.PrefixSealed, "stored": envelope.PrefixDevalue}[name]
+		if envelope.Peek(payload) != wantLabel {
+			t.Fatalf("%s label = %q", name, envelope.Peek(payload))
 		}
 		var got payloadRecord
 		if err := DecodePayload(payload, keys, &got); err != nil {
@@ -269,42 +270,16 @@ func TestPayloadRoundTrips(t *testing.T) {
 	}
 }
 
-func TestPayloadMarshalsSDKShapes(t *testing.T) {
-	for _, test := range []struct {
-		value any
-		want  string
-	}{
-		{[]byte{1, 2, 3}, `[["Uint8Array",1],"AQID"]`},
-		{time.Date(2024, 1, 2, 3, 4, 5, 678e6, time.UTC), `[["Date",1],"2024-01-02T03:04:05.678Z"]`},
-		{map[int]string{1: "a"}, `[["Map",1],[2],[3,4],1,"a"]`},
-		{nil, `[null]`},
-		{math.Inf(1), `-4`},
-		{[]any{1, nil}, `[[1,2],1,null]`},
-		{struct {
-			A int `json:"a,omitempty"`
-			B int `json:"b"`
-		}{B: 2}, `[{"b":1},2]`},
-	} {
-		got, err := MarshalDevalue(test.value)
-		if err != nil || string(got) != test.want {
-			t.Errorf("MarshalDevalue(%#v) = %s err=%v, want %s", test.value, got, err, test.want)
-		}
-	}
-	if _, err := MarshalDevalue(func() {}); err == nil {
-		t.Fatal("encoded a func")
-	}
-}
-
 func TestPayloadStreamFrames(t *testing.T) {
 	keys, _ := NewRunKeys(bytes.Repeat([]byte{9}, 32))
-	sealer, err := NewPayloadSealer(keys.PublicKey)
+	sealer, err := envelope.NewSealer(keys.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var chunk []byte
 	for _, frame := range []struct {
 		keys   *RunKeys
-		sealer *PayloadSealer
+		sealer *envelope.Sealer
 	}{{nil, nil}, {keys, nil}, {nil, sealer}} {
 		encoded, err := EncodeStreamFrame([]byte("chunk"), frame.keys, frame.sealer)
 		if err != nil {
@@ -333,17 +308,22 @@ func TestWriteGoPayloadVectors(t *testing.T) {
 	}
 	link, _ := url.Parse("https://example.com/a?b=c")
 	values := map[string]any{
-		"object":    map[string]any{"s": "hi", "n": 1.5, "list": []any{1, "a"}},
-		"bytes":     []byte{1, 2, 3},
-		"date":      time.Date(2024, 1, 2, 3, 4, 5, 678e6, time.UTC),
-		"bigint":    big.NewInt(42),
-		"map":       map[int]string{1: "a"},
-		"url":       link,
-		"headers":   http.Header{"Content-Type": {"text/plain"}},
-		"error":     errors.New("boom"),
-		"fatal":     FatalError{Cause: errors.New("fatal")},
-		"retryable": RetryableError{Cause: errors.New("later"), After: time.Hour},
-		"large":     strings.Repeat("workflow ", 400),
+		"object":     map[string]any{"s": "hi", "n": 1.5, "list": []any{1, "a"}},
+		"bytes":      []byte{1, 2, 3},
+		"date":       time.Date(2024, 1, 2, 3, 4, 5, 678e6, time.UTC),
+		"bigint":     big.NewInt(42),
+		"map":        map[int]string{1: "a"},
+		"url":        link,
+		"headers":    http.Header{"Content-Type": {"text/plain"}},
+		"error":      errors.New("boom"),
+		"fatal":      FatalError{Cause: errors.New("fatal")},
+		"retryable":  RetryableError{Cause: errors.New("later"), After: time.Hour},
+		"conflict":   &HookConflictError{Token: "tok", RunID: "wrun_1", Start: true},
+		"claimed":    &HookForceClaimedError{Token: "tok", RunID: "wrun_2", HookID: "hook_2"},
+		"notFound":   &HookNotFoundError{Token: "tok"},
+		"expired":    &RunExpiredError{RunID: "wrun_3", RunStatus: StatusCompleted},
+		"streamGone": &StreamExpiredError{RunID: "wrun_4", StreamID: "strm_1"},
+		"large":      strings.Repeat("workflow ", 400),
 	}
 	result := map[string]map[string]string{"plain": {}, "encr": {}, "encp": {}, "stream": {}}
 	for name, value := range values {
@@ -359,10 +339,10 @@ func TestWriteGoPayloadVectors(t *testing.T) {
 			result[mode][name] = base64.StdEncoding.EncodeToString(payload)
 		}
 	}
-	sealer, _ := NewPayloadSealer(keys.PublicKey)
+	sealer, _ := envelope.NewSealer(keys.PublicKey)
 	for mode, frame := range map[string]struct {
 		keys   *RunKeys
-		sealer *PayloadSealer
+		sealer *envelope.Sealer
 	}{"plain": {}, "encr": {keys, nil}, "encp": {nil, sealer}} {
 		encoded, err := EncodeStreamFrame([]byte("hi"), frame.keys, frame.sealer)
 		if err != nil {
@@ -373,36 +353,5 @@ func TestWriteGoPayloadVectors(t *testing.T) {
 	data, _ := json.MarshalIndent(result, "", "\t")
 	if err := os.WriteFile(out, data, 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// bigID marshals itself as JSON holding a 64-bit integer.
-type bigID struct{ N uint64 }
-
-func (b bigID) MarshalJSON() ([]byte, error) { return []byte(fmt.Sprintf(`{"n":%d}`, b.N)), nil }
-
-func (b *bigID) UnmarshalJSON(data []byte) error {
-	var value struct{ N uint64 }
-	err := json.Unmarshal(data, &value)
-	b.N = value.N
-	return err
-}
-
-func TestPayloadKeepsJSONNumbersAndKeyOrder(t *testing.T) {
-	type record struct {
-		Raw json.RawMessage `json:"raw"`
-		ID  bigID           `json:"id"`
-	}
-	raw := `{"z":12345678901234567890,"a":[1.50,-0,1e400],"m":{"b":null,"a":"x"}}`
-	payload, err := EncodePayload(record{Raw: json.RawMessage(raw), ID: bigID{N: math.MaxUint64}}, PayloadOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got record
-	if err := DecodePayload(payload, nil, &got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got.Raw) != raw || got.ID.N != math.MaxUint64 {
-		t.Fatalf("raw = %s, id = %d", got.Raw, got.ID.N)
 	}
 }

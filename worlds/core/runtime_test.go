@@ -37,7 +37,7 @@ func TestRuntimeMarksRunsWithUnknownWorkflowsAsFailed(t *testing.T) {
 			t.Fatal(err)
 		}
 		if run.Status == worlds.StatusFailed {
-			if !strings.Contains(string(run.Error), "workflow not found") {
+			if !strings.Contains(string(run.Error), "workflow is not registered") {
 				t.Fatalf("failure = %q", run.Error)
 			}
 			return
@@ -409,7 +409,7 @@ func awaitHook(ctx context.Context, input hookedInput) (hookedOutput, error) {
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return hookedOutput{}, err
 	} else if owner != nil {
-		return hookedOutput{}, workflow.ErrHookConflict
+		return hookedOutput{}, &workflow.HookConflictError{}
 	}
 
 	value, err := hook.Next(ctx)
@@ -469,7 +469,7 @@ func TestDeploymentAffinityReroutesDeliveriesToTheRunsDeployment(t *testing.T) {
 		t.Fatalf("run deployment = %q", stored.DeploymentID)
 	}
 
-	// dpl_1 executes the first flow, which addresses the step to dpl_1.
+	// dpl_1 executes the first delivery, which addresses the step to dpl_1.
 	deliverNext(t, ctx, world, v1)
 	if queued := world.Queued(); len(queued) != 1 || queued[0].DeploymentID != "dpl_1" {
 		t.Fatalf("queued step = %#v", queued)
@@ -705,7 +705,7 @@ func awaitWithNudge(ctx context.Context, input nudgeInput) (nudgeOutput, error) 
 	if owner, err := hook.GetConflict(ctx); err != nil {
 		return nudgeOutput{}, err
 	} else if owner != nil {
-		return nudgeOutput{}, workflow.ErrHookConflict
+		return nudgeOutput{}, &workflow.HookConflictError{}
 	}
 
 	preparation := workflow.Background(ctx, prepare, struct{}{})
@@ -941,7 +941,7 @@ type refusingWorld struct {
 func (w *refusingWorld) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
 	if !w.refused && input.Options.InBandCount != nil && input.Event.EventType == worlds.EventTypeWaitCreated {
 		w.refused = true
-		return worlds.EventResult{}, worlds.ErrInBandSuperseded
+		return worlds.EventResult{}, &worlds.InBandSupersededError{}
 	}
 	return w.World.EventsCreate(ctx, input)
 }
@@ -1302,8 +1302,10 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 			t.Fatalf("%v decoded without its type", err)
 		}
 	}
-	if message := (worlds.FatalError{}).Error(); message == "" {
-		t.Fatal("a FatalError without a cause has no message")
+	// Without a cause the message is empty, as an SDK FatalError's is
+	// without one.
+	if message := (worlds.FatalError{}).Error(); message != "" {
+		t.Fatalf("a FatalError without a cause has message %q", message)
 	}
 }
 
@@ -1359,7 +1361,7 @@ func fanOut(ctx context.Context, input inlineInput) (inlineOutput, error) {
 }
 
 // startInline starts a run of runner on a manual World and returns the World,
-// a Runtime for runner, the run's ID, and its first flow delivery.
+// a Runtime for runner, the run's ID, and its first delivery.
 func startInline(t *testing.T, ctx context.Context, runner core.Runner, input inlineInput) (*testworld.World, *core.Runtime, worlds.RunID, testworld.QueueMessage) {
 	t.Helper()
 	world := testworld.NewManual()
@@ -2118,7 +2120,7 @@ func TestFirstDeliveryOfARunReplaysWithoutReadingTheLog(t *testing.T) {
 	}
 	first := base.QueuedMessages()[0].Input
 	if first.RunInput == nil {
-		t.Fatal("the first flow carries no run input")
+		t.Fatal("the first delivery carries no run input")
 	}
 	runtime := core.NewRuntime(world, core.Runners(turboRunner))
 	if err := runtime.Execute(ctx, first); err != nil {
@@ -2141,7 +2143,7 @@ func TestFirstDeliveryOfARunReplaysWithoutReadingTheLog(t *testing.T) {
 	}
 }
 
-func TestFirstFlowCreatesARunWhoseCreationNeverLanded(t *testing.T) {
+func TestStartQueueInputCreatesARunWhoseCreationNeverLanded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	world := testworld.NewManual()
@@ -2151,8 +2153,8 @@ func TestFirstFlowCreatesARunWhoseCreationNeverLanded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Only the first flow was queued.
-	first := worlds.FirstFlow(worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[turboInput](), Input: input})
+	// Only the first delivery was queued.
+	first := worlds.StartQueueInput(worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[turboInput](), Input: input})
 	first.DeliveryCount, first.Attempt = 1, 1
 	if err := core.NewRuntime(world, core.Runners(turboRunner)).Execute(ctx, first); err != nil {
 		t.Fatal(err)

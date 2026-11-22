@@ -38,6 +38,7 @@ context before calling `Close`.
 | --- | --- | --- |
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. |
 | `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionScope` | empty | The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `URL` | `WORKFLOW_POSTGRES_URL`, or `DATABASE_URL` | Connection string, used by `Open`. |
 | `Schema` | `workflow` | The schema the World's tables live in, created when missing. |
 | `HookRetentionLimit` | `WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |

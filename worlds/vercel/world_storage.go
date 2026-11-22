@@ -331,7 +331,7 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
 	var values map[string]any
 	if err := w.api.do(ctx, http.MethodGet, "/v2/hooks/"+pathEscape(string(input.HookID)), nil, nil, &values); err != nil {
-		return worlds.Hook{}, notFound(err, worlds.ErrHookNotFound)
+		return worlds.Hook{}, notFound(err, &worlds.HookNotFoundError{Token: string(input.HookID)})
 	}
 	return w.hookView(ctx, values, input.ResolveData)
 }
@@ -339,7 +339,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
 	var values map[string]any
 	if err := w.api.do(ctx, http.MethodGet, "/v2/hooks/by-token", url.Values{"token": {input.Token}}, nil, &values); err != nil {
-		return worlds.Hook{}, notFound(err, worlds.ErrHookNotFound)
+		return worlds.Hook{}, notFound(err, &worlds.HookNotFoundError{Token: input.Token})
 	}
 	return w.hookView(ctx, values, input.ResolveData)
 }

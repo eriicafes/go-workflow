@@ -181,7 +181,7 @@ const StartHookCandidateMaxAge = 24 * time.Hour
 // StartHookDecision is a World's permanent decision on a start hook
 // candidate, by its run ID: accepted, or rejected because ConflictingRunID
 // held the token. Every later attempt for the candidate, by run_created or by
-// a first flow's run_started, gets the same decision.
+// a first delivery's run_started, gets the same decision.
 type StartHookDecision struct {
 	Token            string `json:"token" cbor:"token"`
 	Accepted         bool   `json:"accepted" cbor:"accepted"`
@@ -193,7 +193,7 @@ func (d StartHookDecision) Err() error {
 	if d.Accepted {
 		return nil
 	}
-	return &HookConflictError{RunID: d.ConflictingRunID}
+	return &HookConflictError{Token: d.Token, RunID: d.ConflictingRunID, Start: true}
 }
 
 // StartHookRejectionRefusal returns the error EventsCreateRun refuses input,
@@ -364,7 +364,7 @@ func runErrorCode(err error) string {
 		return "MAX_DELIVERIES_EXCEEDED"
 	case errors.Is(err, ErrDeploymentMismatch):
 		return "DEPLOYMENT_MISMATCH"
-	case errors.Is(err, ErrWorkflowNotFound):
+	case errors.Is(err, ErrWorkflowNotRegistered):
 		return "WORKFLOW_NOT_REGISTERED"
 	case coded:
 		return coder.RunErrorCode()
@@ -582,12 +582,11 @@ const (
 // Workflow SDK's Worlds refuse it, or nil when the event is checked further.
 //
 //   - A run_cancelled of a cancelled run is recorded: nil.
-//   - A run_started is refused with ErrRunTerminal, the SDK's
-//     RunExpiredError.
+//   - A run_started is refused with a *RunExpiredError.
 //   - A terminal transition, a step, wait, or hook creation, an inline
 //     step's creating step_started, and an attr_set are refused with
-//     ErrEventConflict, the SDK's EntityConflictError. The error also
-//     matches ErrRunTerminal, which says why.
+//     ErrEntityConflict, the SDK's EntityConflictError. The error also
+//     matches *RunExpiredError, which says why.
 //   - A wait_completed is refused with ErrEventNotFound, since a run's waits
 //     end with it.
 //   - Another step event is checked as CheckStepEvent says, and a
@@ -598,14 +597,14 @@ func FinishedRunRefusal(status Status, event EventsCreateEvent) error {
 		if status == StatusCancelled {
 			return nil
 		}
-		return fmt.Errorf("%w: %w: cannot transition a run from terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+		return fmt.Errorf("%w: cannot transition a run: %w", ErrEntityConflict, &RunExpiredError{RunStatus: status})
 	case EventTypeRunCompleted, EventTypeRunFailed:
-		return fmt.Errorf("%w: %w: cannot transition a run from terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+		return fmt.Errorf("%w: cannot transition a run: %w", ErrEntityConflict, &RunExpiredError{RunStatus: status})
 	case EventTypeStepCreated, EventTypeWaitCreated, EventTypeHookCreated, EventTypeAttrSet:
-		return fmt.Errorf("%w: %w: cannot record %s on a run in terminal status %s", ErrEventConflict, ErrRunTerminal, event.EventType, status)
+		return fmt.Errorf("%w: cannot record %s: %w", ErrEntityConflict, event.EventType, &RunExpiredError{RunStatus: status})
 	case EventTypeStepStarted:
 		if StartCreatesStep(event.Data) {
-			return fmt.Errorf("%w: %w: cannot create a step on a run in terminal status %s", ErrEventConflict, ErrRunTerminal, status)
+			return fmt.Errorf("%w: cannot create a step: %w", ErrEntityConflict, &RunExpiredError{RunStatus: status})
 		}
 		return nil
 	case EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying, EventTypeHookReceived, EventTypeHookDisposed:
@@ -613,15 +612,14 @@ func FinishedRunRefusal(status Status, event EventsCreateEvent) error {
 	case EventTypeWaitCompleted:
 		return fmt.Errorf("%w: wait %s ended with its run", ErrEventNotFound, event.CorrelationID)
 	}
-	return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+	return &RunExpiredError{RunStatus: status}
 }
 
-// FinishedRunHookRefusal returns ErrRunTerminal, the Workflow SDK's
-// RunExpiredError, for a hook_received on a run in status that has
-// finished, once its hook was found, or nil.
+// FinishedRunHookRefusal returns a *RunExpiredError for a hook_received on
+// a run in status that has finished, once its hook was found, or nil.
 func FinishedRunHookRefusal(status Status, event EventsCreateEvent) error {
 	if event.EventType == EventTypeHookReceived && status.Terminal() {
-		return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, status)
+		return &RunExpiredError{RunStatus: status}
 	}
 	return nil
 }
@@ -631,13 +629,13 @@ func FinishedRunHookRefusal(status Status, event EventsCreateEvent) error {
 // or nil when the World answers with the earlier event. hookID and digest are
 // the earlier resume's hook and payload digest. A resume ID names one resume
 // of one hook, and its payload, when both resumes carry a digest: another is
-// refused with ErrEventConflict, the SDK's EntityConflictError.
+// refused with ErrEntityConflict, the SDK's EntityConflictError.
 func CheckResumeReplay(event EventsCreateEvent, resumeDigest string, hookID HookID, digest string) error {
 	if string(hookID) != event.CorrelationID {
-		return fmt.Errorf("%w: resume ID already recorded for hook %s", ErrEventConflict, hookID)
+		return fmt.Errorf("%w: resume ID already recorded for hook %s", ErrEntityConflict, hookID)
 	}
 	if resumeDigest != "" && digest != "" && resumeDigest != digest {
-		return fmt.Errorf("%w: resume ID already recorded with another payload", ErrEventConflict)
+		return fmt.Errorf("%w: resume ID already recorded with another payload", ErrEntityConflict)
 	}
 	return nil
 }
@@ -754,20 +752,19 @@ func CheckResumeDigest(event EventsCreateEvent, digest string) error {
 //
 //   - A step_created of a step that exists, and an inline step's creating
 //     step_started (StartCreatesStep) of one, are refused with
-//     ErrEventConflict.
+//     ErrEntityConflict.
 //   - Any other step event needs its step (ErrStepNotFound), which must not
-//     have finished (ErrEventConflict).
+//     have finished (ErrEntityConflict).
 //   - On a finished run, a step_started, and a step_failed of a step that is
-//     not running, are refused with ErrRunTerminal, the SDK's
-//     RunExpiredError. A step_completed and a step_retrying are not checked
-//     against the run.
+//     not running, are refused with a *RunExpiredError. A step_completed
+//     and a step_retrying are not checked against the run.
 //   - A step_started before the step's retry is due is refused with a
 //     *TooEarlyError (CheckStepStart).
 func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAfter *time.Time, runStatus Status, now time.Time) error {
 	switch event.EventType {
 	case EventTypeStepCreated:
 		if exists {
-			return fmt.Errorf("%w: step %s already created", ErrEventConflict, event.CorrelationID)
+			return fmt.Errorf("%w: step %s already created", ErrEntityConflict, event.CorrelationID)
 		}
 		return nil
 	case EventTypeStepStarted, EventTypeStepCompleted, EventTypeStepFailed, EventTypeStepRetrying:
@@ -777,27 +774,27 @@ func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAf
 	creates := event.EventType == EventTypeStepStarted && StartCreatesStep(event.Data)
 	switch {
 	case creates && exists:
-		return fmt.Errorf("%w: step %s already created", ErrEventConflict, event.CorrelationID)
+		return fmt.Errorf("%w: step %s already created", ErrEntityConflict, event.CorrelationID)
 	case creates:
 		return nil
 	case !exists:
 		return fmt.Errorf("%w: step %s", ErrStepNotFound, event.CorrelationID)
 	case status.Terminal():
-		return fmt.Errorf("%w: step %s is %s", ErrEventConflict, event.CorrelationID, status)
+		return fmt.Errorf("%w: step %s is %s", ErrEntityConflict, event.CorrelationID, status)
 	case runStatus.Terminal() && (event.EventType == EventTypeStepStarted || event.EventType == EventTypeStepFailed && status != StatusRunning):
-		return fmt.Errorf("%w: run is in terminal status %s", ErrRunTerminal, runStatus)
+		return &RunExpiredError{RunStatus: runStatus}
 	case event.EventType == EventTypeStepStarted:
 		return CheckStepStart(retryAfter, now)
 	}
 	return nil
 }
 
-// CheckRunSpecVersion returns ErrRunNotSupported for an event on a run whose
-// spec version, version, is newer than SpecVersion, as the Workflow SDK's
+// CheckRunSpecVersion returns a *RunNotSupportedError for an event on a
+// run whose spec version, version, is newer than SpecVersion, as the Workflow SDK's
 // Worlds refuse it, or nil.
 func CheckRunSpecVersion(runID RunID, version int) error {
 	if version > SpecVersion {
-		return fmt.Errorf("%w: run %s has spec version %d, over %d", ErrRunNotSupported, runID, version, SpecVersion)
+		return &RunNotSupportedError{RunSpecVersion: version, WorldSpecVersion: SpecVersion}
 	}
 	return nil
 }

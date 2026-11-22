@@ -17,15 +17,16 @@ const baseURL = "http://localhost/v1/workflow"
 // URL is http://localhost/v1/workflow.
 type World struct {
 	mu sync.RWMutex
-	// encryptionKey is the key SetEncryptionKey set.
-	encryptionKey []byte
-	ctx           context.Context
-	cancel        context.CancelFunc
-	runtime       *core.Runtime
-	runs          map[worlds.RunID]worlds.Run
-	events        map[worlds.RunID][]worlds.Event
-	steps         map[worlds.RunID]map[worlds.StepID]worlds.Step
-	hooks         map[worlds.HookID]worlds.Hook
+	// encryptionKey and encryptionScope are what SetEncryptionKey set.
+	encryptionKey   []byte
+	encryptionScope string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	runtime         *core.Runtime
+	runs            map[worlds.RunID]worlds.Run
+	events          map[worlds.RunID][]worlds.Event
+	steps           map[worlds.RunID]map[worlds.StepID]worlds.Step
+	hooks           map[worlds.HookID]worlds.Hook
 	// disposals holds each disposed hook's run and, after a forced claim,
 	// the claimant, as world-local's hook_disposals. The hook itself is
 	// deleted.
@@ -100,25 +101,28 @@ func (w *World) changed() <-chan struct{} {
 }
 
 // SetEncryptionKey makes the World encrypt every run's payloads with a key
-// derived from key, as a World configured with an EncryptionKey does. Set it
-// before starting runs.
-func (w *World) SetEncryptionKey(key []byte) error {
+// derived from key in scope, as a World configured with an EncryptionKey and
+// EncryptionScope does. Set it before starting runs.
+func (w *World) SetEncryptionKey(key []byte, scope string) error {
 	if err := worlds.CheckEncryptionKey(key); err != nil {
 		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.encryptionKey = bytes.Clone(key)
+	w.encryptionKey, w.encryptionScope = bytes.Clone(key), scope
 	return nil
 }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from the
-// key SetEncryptionKey set, or nil when it set none.
+// key and scope SetEncryptionKey set, or nil when it set no key.
 func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
 	w.mu.RLock()
-	key := w.encryptionKey
+	key, scope := w.encryptionKey, w.encryptionScope
 	w.mu.RUnlock()
-	return worlds.ConfiguredRunKey(key, runID)
+	if len(key) == 0 {
+		return nil, nil
+	}
+	return worlds.DeriveRunKey(key, scope, runID)
 }
 
 // resumeClaim is a deduplicated resume: its payload digest and the event it

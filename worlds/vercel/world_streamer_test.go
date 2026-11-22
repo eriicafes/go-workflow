@@ -87,17 +87,17 @@ func TestStreamReadsReportExpiry(t *testing.T) {
 	_, chunksErr := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_1", Name: "out", Cursor: "0"})
 	_, infoErr := world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: "wrun_1", Name: "out"})
 	for _, err := range []error{chunksErr, infoErr} {
-		if !errors.Is(err, worlds.ErrRunExpired) {
-			t.Fatalf("read of an expired run = %v, want ErrRunExpired", err)
+		if _, ok := errors.AsType[*worlds.RunExpiredError](err); !ok {
+			t.Fatalf("read of an expired run = %v, want &RunExpiredError{}", err)
 		}
 	}
-	// A stream that expired on its own is reported as ErrStreamExpired.
+	// A stream that expired on its own is reported as a *StreamExpiredError.
 	code = "stream-expired"
 	_, chunksErr = world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_1", Name: "out", Cursor: "0"})
 	_, infoErr = world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: "wrun_1", Name: "out"})
 	for _, err := range []error{chunksErr, infoErr} {
-		if errors.Is(err, worlds.ErrRunExpired) || !errors.Is(err, worlds.ErrStreamExpired) {
-			t.Fatalf("read of an expired stream = %v, want ErrStreamExpired", err)
+		if is[*worlds.RunExpiredError](err) || !is[*worlds.StreamExpiredError](err) {
+			t.Fatalf("read of an expired stream = %v, want &StreamExpiredError{}", err)
 		}
 	}
 }

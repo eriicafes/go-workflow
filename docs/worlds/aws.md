@@ -67,6 +67,7 @@ lambdaurl.Start(awsworld.HTTP(world))
 | --- | --- |
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
 | `EncryptionKey` | Optional. 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionScope` | Optional. The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `TableName` | Required. DynamoDB table, laid out as `CreateTable` creates it. |
 | `QueueURL` | Required. SQS standard queue that carries deliveries of unrouted workflows. |
 | `Queues` | Optional. Further queues by name, standard or FIFO. See [Queue routing](#queue-routing). |

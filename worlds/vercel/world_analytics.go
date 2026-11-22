@@ -201,7 +201,7 @@ func (a analytics) HooksGet(ctx context.Context, input worlds.AnalyticsHooksGetI
 	}
 	var values map[string]any
 	if err := a.get(ctx, "/hooks/"+pathEscape(string(input.HookID)), query, &values); err != nil {
-		return worlds.AnalyticsHook{}, notFound(err, worlds.ErrHookNotFound)
+		return worlds.AnalyticsHook{}, notFound(err, &worlds.HookNotFoundError{})
 	}
 	return toAnalyticsHook(values), nil
 }

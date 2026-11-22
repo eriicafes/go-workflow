@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
 )
@@ -367,8 +368,8 @@ func outsideStreamFrame(ctx context.Context, client Client, runID worlds.RunID) 
 	if err != nil {
 		return nil, err
 	}
-	if publicKey := worlds.DecodePublicKey(run.EncryptionPublicKey); publicKey != nil {
-		sealer, err := worlds.NewPayloadSealer(publicKey)
+	if publicKey := envelope.DecodePublicKey(run.EncryptionPublicKey); publicKey != nil {
+		sealer, err := envelope.NewSealer(publicKey)
 		if err != nil {
 			return nil, err
 		}

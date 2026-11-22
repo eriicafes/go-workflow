@@ -165,9 +165,15 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 		_, err = w.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepRetrying, CorrelationID: string(id), Data: data, SpecVersion: run.SpecVersion}})
 		// The step finished between the read and this write: nothing to
 		// release.
-		if err != nil && !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrStepNotFound) && !errors.Is(err, worlds.ErrRunTerminal) {
+		if err != nil && !errors.Is(err, worlds.ErrEntityConflict) && !errors.Is(err, worlds.ErrStepNotFound) && !is[*worlds.RunExpiredError](err) {
 			return err
 		}
 	}
 	return nil
+}
+
+// is reports whether err's chain has an error of type E.
+func is[E error](err error) bool {
+	_, ok := errors.AsType[E](err)
+	return ok
 }

@@ -61,7 +61,7 @@ A run's data is deleted as the Workflow SDK deletes it: its inputs, outputs
 and errors, the payloads in its events and hooks, and its streams' chunks. The
 run, step, event and hook records stay with their IDs, statuses, timestamps
 and attributes, the run's `ExpiredAt` is set, and the Workflow web UI shows its
-data as expired. Reading its result returns `workflow.ErrRunExpired`.
+data as expired. Reading its result returns a `*workflow.RunExpiredError`.
 
 A run's data is deleted:
 

@@ -187,7 +187,7 @@ func testManualWebhook(t *testing.T, encrypted bool) {
 	}))
 	defer world.Close()
 	if encrypted {
-		if err := world.SetEncryptionKey(bytes.Repeat([]byte{5}, 32)); err != nil {
+		if err := world.SetEncryptionKey(bytes.Repeat([]byte{5}, 32), "test"); err != nil {
 			t.Fatal(err)
 		}
 	}

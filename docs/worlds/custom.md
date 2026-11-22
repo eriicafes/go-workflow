@@ -37,9 +37,9 @@ type World interface {
 - **Atomic admission.** `EventsCreate` must check the transition rules and
   append in one atomic operation. A finished run refuses events as
   `worlds.FinishedRunRefusal` says, as the Workflow SDK's Worlds do: a
-  transition or a new step, wait, hook, or attribute with `ErrEventConflict`
-  (also matching `ErrRunTerminal`), another attempt or the result of a step
-  that is not running with `ErrRunTerminal`, and a `wait_completed` with
+  transition or a new step, wait, hook, or attribute with `ErrEntityConflict`
+  (also matching a `*RunExpiredError`), another attempt or the result of a step
+  that is not running with a `*RunExpiredError`, and a `wait_completed` with
   `ErrEventNotFound`. It still records a running step's result or retry. A
   `wait_completed` needs its `wait_created`. Check step events with
   `worlds.CheckStepEvent`: a step event needs its unfinished step, except an
@@ -56,10 +56,10 @@ type World interface {
 - **Refused repeats.** Refuse an event that repeats a creation the log holds,
   a second `step_created`, `wait_created`, `wait_completed`, `hook_created`,
   inline step creation, or workflow `attr_set` of one correlation ID, with
-  `ErrEventConflict`, as the Workflow SDK's Worlds refuse it with
+  `ErrEntityConflict`, as the Workflow SDK's Worlds refuse it with
   `EntityConflictError`. The runtime then reads the log. Answer a
   `run_started` of a running run with no event and nothing appended (or
-  `ErrEventConflict`), and append a `run_cancelled` of a cancelled run
+  `ErrEntityConflict`), and append a `run_cancelled` of a cancelled run
   without changing it. A `step_started` for a started step is not a repeat:
   it appends a new attempt.
 - **One copy of each payload.** The built-in Worlds keep run, step, and hook
@@ -69,13 +69,13 @@ type World interface {
 - **Exclusive hook tokens.** `EventsCreate(hook_created)` must give a token to exactly one
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run. `hook_disposed` and
-  `hook_received` need a hook of the same run (`ErrHookNotFound`).
+  `hook_received` need a hook of the same run (`*HookNotFoundError`).
 - **Hooks end.** A disposed hook is deleted, as the Workflow SDK's Worlds
   delete it, and so is a finished run's hook once its token retention ends:
-  `HooksGet` returns `ErrHookNotFound` and `HooksList` leaves it out, and a
-  repeated `hook_disposed` returns `ErrHookNotFound`. Remember a forced
+  `HooksGet` returns a `*HookNotFoundError` and `HooksList` leaves it out, and a
+  repeated `hook_disposed` returns a `*HookNotFoundError`. Remember a forced
   claim's disposal, so a `hook_received` for a force-claimed hook returns
-  `ErrHookForceClaimed`.
+  `*HookForceClaimedError`.
 - **Start hooks.** With `Capabilities().StartHook`, `EventsCreateRun`
   creates `EventsCreateRunInput.StartHook` with the run, as hook
   `worlds.StartHookID(runID)`, or creates nothing and returns a
@@ -103,7 +103,7 @@ type World interface {
   carries `InBandCount` (in `EventsCreateOptions`, or on
   `EventsCreateBatchInput` for the whole block) is accepted only when it
   equals the run's count, in the same atomic step as the append, and advances
-  it by the positions it allocates. A mismatch returns `ErrInBandSuperseded`
+  it by the positions it allocates. A mismatch returns an `*InBandSupersededError`
   and appends nothing. Out-of-band writes never move it.
 - **Snapshots and skipped slots.** Every `EventsList` page carries the run's
   counters in `Snapshot`, read before the page. An in-band write with
@@ -112,7 +112,7 @@ type World interface {
   `OccurredAt` as `CreatedAt`.
 - **Specification version.** Record `worlds.SpecVersion` on every run you
   create (`Run.SpecVersion`).
-- **Resilient start.** A run's first flow carries its creation
+- **Resilient start.** A run's first delivery carries its creation
   (`QueueInput.RunInput`), and so does its `run_started`, since a start queues
   the flow and writes `run_created` at the same time. Call
   `worlds.CreateRunForStart` for every `run_started`, which creates a run
