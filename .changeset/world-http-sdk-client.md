@@ -2,4 +2,4 @@
 "go-workflow": patch
 ---
 
-Make `world-http` return runs, steps and hooks the Workflow SDK accepts, report spec version 9, and support its resilient start.
+Make world-http compatible with the Workflow SDK's spec 9 client.

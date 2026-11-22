@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-A cancellation context's hook has the token `abrt_<ID>`, and running steps read its cancellation from the stream `strm_<ID>_system_abort` instead of `cancel:<hook ID>`.
+Store a run's cancellation in the `abrt_` hook and the `system_abort` stream.

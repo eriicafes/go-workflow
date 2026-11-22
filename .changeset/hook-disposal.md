@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Delete disposed hooks and a finished run's unretained hooks as the Workflow SDK does, dropping `Hook.DisposedAt` and `Hook.ForceClaimedBy`.
+Delete disposed hooks, and drop `Hook.DisposedAt` and `Hook.ForceClaimedBy`.

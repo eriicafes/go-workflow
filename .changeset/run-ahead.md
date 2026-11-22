@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Let flows run ahead of their inline steps' writes, set with `core.WithRunAheadDepth`.
+Let flows run ahead of their inline steps' writes.
