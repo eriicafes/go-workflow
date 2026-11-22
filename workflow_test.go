@@ -1163,12 +1163,15 @@ func TestRunCanCancelItselfThroughAnInlineStep(t *testing.T) {
 	if _, err := run.Value(ctx); !errors.Is(err, workflow.ErrRunCancelled) {
 		t.Fatalf("run error=%v", err)
 	}
+	// A step started behind a write ahead runs before its step_started
+	// lands, so its cancellation may land first and refuse the start. The
+	// run is cancelled by then, so a step not recorded now never will be.
 	for {
 		steps, err := world.StepsList(ctx, worlds.StepsListInput{RunID: worlds.RunID(run.ID())})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(steps.Data) == 1 && steps.Data[0].Status == worlds.StatusCompleted {
+		if len(steps.Data) == 0 || len(steps.Data) == 1 && steps.Data[0].Status == worlds.StatusCompleted {
 			break
 		}
 		if ctx.Err() != nil {
