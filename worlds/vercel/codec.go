@@ -196,7 +196,7 @@ func encodeEvent(event worlds.EventsCreateEvent) (map[string]any, []byte, error)
 			return nil, nil, err
 		}
 		meta["hookToken"] = data.Token
-		// Sent whether true or false, as world-vercel sends it.
+		// Sent whether true or false.
 		meta["hookIsWebhook"] = data.IsWebhook
 		if data.IsSystem {
 			meta["hookIsSystem"] = true
@@ -301,7 +301,7 @@ func eventData(wire wireEvent) ([]byte, error) {
 		return json.Marshal(result)
 	case worlds.EventTypeHookCreated, worlds.EventTypeHookConflict:
 		data := worlds.DataHookCreated{Token: str(d, "token"), Metadata: payload("metadata")}
-		// Data without isWebhook is a webhook's, as world-vercel reads it.
+		// Data without isWebhook is a webhook's.
 		data.IsWebhook = true
 		if value, ok := d["isWebhook"].(bool); ok {
 			data.IsWebhook = value

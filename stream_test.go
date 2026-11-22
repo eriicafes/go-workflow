@@ -221,7 +221,7 @@ func TestWritersDoNotWaitForEachOther(t *testing.T) {
 		t.Fatalf("stream = %q, %v", data, err)
 	}
 
-	// A closed stream drops a late writer's writes, as world-local does.
+	// A closed stream drops a late writer's writes.
 	late, err := run.Writer(ctx)
 	if err != nil {
 		t.Fatal(err)

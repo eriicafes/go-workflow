@@ -39,11 +39,11 @@ func (m *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 	stream := m.streamLocked(input.RunID, input.Name)
 	if worlds.RunDataExpired(m.runs[input.RunID], time.Now()) {
 		// A deleted run's streams take no more data, and a new one is closed
-		// as it is first written, as world-local closes it.
+		// as it is first written.
 		stream.closed = true
 	}
 	if stream.closed {
-		// A closed stream takes no more data, as world-local drops it.
+		// A closed stream takes no more data.
 		return nil
 	}
 	for _, chunk := range input.Chunks {

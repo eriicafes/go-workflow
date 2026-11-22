@@ -16,8 +16,7 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-// databaseFile is the World's database in its data directory, as
-// world-local names it.
+// databaseFile is the World's database in its data directory.
 const databaseFile = "world.db"
 
 // busyTimeout is how long a write waits for another connection, in this
@@ -29,8 +28,8 @@ const busyTimeout = 30 * time.Second
 // refused.
 const schemaVersion = 1
 
-// schema is world-local's schema (db/schema.js), without the snapshots
-// table, which holds QuickJS virtual machine images Go does not take.
+// schema is the Workflow SDK's local World schema, without its snapshots
+// table, which holds QuickJS virtual machine images that Go has no use for.
 const schema = `
 CREATE TABLE runs (
   run_id TEXT PRIMARY KEY,
@@ -133,7 +132,7 @@ type database struct {
 	read  *sql.DB
 }
 
-// openDatabase opens dir's database, configures it as world-local does, and
+// openDatabase opens dir's database, configures it, and
 // creates its schema when it has none.
 func openDatabase(ctx context.Context, dir string) (*database, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {

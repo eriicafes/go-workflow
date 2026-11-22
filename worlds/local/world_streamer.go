@@ -17,9 +17,9 @@ const streamRetryAfter = 50 * time.Millisecond
 // streams' end markers.
 
 // streamState returns how many chunks a stream has and whether it is closed.
-// A stream is keyed by its name alone, as world-local keys it: the run ID is
-// stored with each chunk, for StreamsList and purges, but a read, an append,
-// or an info of a stream names it only.
+// A stream is keyed by its name alone: the run ID is stored with each chunk,
+// for StreamsList and purges, but a read, an append, or an info of a stream
+// names it only.
 func (s *store) streamState(name string) (int, bool, error) {
 	var count, closed int
 	err := s.q.QueryRowContext(s.ctx, "SELECT coalesce(sum(1 - eof), 0), coalesce(max(eof), 0) FROM stream_chunks WHERE name = ?", name).Scan(&count, &closed)
@@ -37,13 +37,12 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			return err
 		}
 		if closed {
-			// A closed stream takes no more data, as world-local drops it.
+			// A closed stream takes no more data.
 			return nil
 		}
 		if count == 0 {
 			// A deleted run's streams take no more data: its purge closed the
-			// streams it had, and a new one is closed as it is first written,
-			// as world-local closes it.
+			// streams it had, and a new one is closed as it is first written.
 			run, err := s.getRunAnyTag(input.RunID)
 			if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
 				return err

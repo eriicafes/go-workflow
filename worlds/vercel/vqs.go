@@ -69,15 +69,14 @@ const (
 	vqsLease          = 5 * time.Minute
 	vqsLeaseRenewal   = time.Minute
 	vqsPayloadMaxSize = 1 << 20
-	// vqsRequestTimeout is the deadline of one Vercel Queues request, the
-	// Workflow SDK's QUEUE_REQUEST_TIMEOUT_MS.
+	// vqsRequestTimeout is the default deadline of one Vercel Queues
+	// request (see queueRequestTimeout).
 	vqsRequestTimeout = 30 * time.Second
 	// vqsSendMaxAttempts is how many times a send is made, the first
 	// included, vqsSendRetryJitter the most random spread added to each
 	// backoff, vqsSendRetryBudget how long after the first attempt a retry
 	// may still start, and vqsSendMaxRetryAfter the longest Retry-After of a
-	// 429 waited out in-process, as the Workflow SDK's queue-send-retry sets
-	// them.
+	// 429 waited out in-process.
 	vqsSendMaxAttempts   = 3
 	vqsSendRetryJitter   = 100 * time.Millisecond
 	vqsSendRetryBudget   = 35 * time.Second
@@ -85,7 +84,7 @@ const (
 )
 
 // vqsSendRetryDelays is the backoff before each retry of a send, the last
-// repeated, the Workflow SDK's QUEUE_SEND_RETRY_DELAYS_MS.
+// repeated.
 var vqsSendRetryDelays = []time.Duration{100 * time.Millisecond, 500 * time.Millisecond}
 
 // queueURL returns the Vercel Queues API root of region: Config.QueueURL when
@@ -124,9 +123,8 @@ func (w *World) vqsRequest(ctx context.Context, region worlds.Region, method, pa
 		reader = bytes.NewReader(body)
 	}
 	base, routing := w.queueURL(region)
-	// Every request has a deadline of its own, as the Workflow SDK's queue
-	// dispatcher gives it, so a hung queue does not hold a lease past its
-	// renewal.
+	// Every request has a deadline of its own, so a hung queue does not hold
+	// a lease past its renewal.
 	timeout := queueRequestTimeout()
 	requestCtx, cancel := context.WithTimeoutCause(ctx, timeout, errQueueRequestDeadline)
 	request, err := http.NewRequestWithContext(requestCtx, method, base+path, reader)
@@ -203,10 +201,9 @@ func messageLifetime(delay, retention time.Duration) (delaySecs, retentionSecs i
 // empty, addressed to send.DeploymentID when it is set, and returns the
 // message ID Vercel Queues gave it: empty when it answers 202, as it does when
 // it fails over to another region and cannot name the message. A send that
-// fails transiently is sent again, as the Workflow SDK's withQueueSendRetry
-// does (see sendRetryDelay). A send Vercel Queues refuses because it cannot
-// find the deployment's consumer returns an error wrapping
-// worlds.ErrDeploymentUnavailable once its retries run out.
+// fails transiently is sent again (see sendRetryDelay). A send Vercel Queues
+// refuses because it cannot find the deployment's consumer returns an error
+// wrapping worlds.ErrDeploymentUnavailable once its retries run out.
 func (w *World) publishVQS(ctx context.Context, message queueMessage, send vqsSend) (string, error) {
 	topic := send.Topic
 	if topic == "" {
@@ -327,13 +324,13 @@ func (e *vqsSendError) Unwrap() error {
 
 // sendRetryDelay returns how long to wait before sending again after err, the
 // retry-th retry's backoff of vqsSendRetryDelays plus up to vqsSendRetryJitter,
-// and false when err is not worth a re-send, as the Workflow SDK's
-// queueSendRetryDelayMs does. A transport failure, the queue request deadline,
-// a 5xx, and the 502 of a failed consumer discovery are sent again after the
-// backoff. A 429 is sent again after the backoff or its Retry-After, whichever
-// is longer, unless it asks for more than vqsSendMaxRetryAfter, which is left
-// to the caller. Any other 4xx means Vercel Queues decided, as does the 503 of
-// a consumer registry that is not configured.
+// and false when err is not worth a re-send. A transport failure, the queue
+// request deadline, a 5xx, and the 502 of a failed consumer discovery are
+// sent again after the backoff. A 429 is sent again after the backoff or its
+// Retry-After, whichever is longer, unless it asks for more than
+// vqsSendMaxRetryAfter, which is left to the caller. Any other 4xx means
+// Vercel Queues decided, as does the 503 of a consumer registry that is not
+// configured.
 func sendRetryDelay(ctx context.Context, err error, retry int) (time.Duration, bool) {
 	backoff := vqsSendRetryDelays[min(retry, len(vqsSendRetryDelays)-1)] + rand.N(vqsSendRetryJitter)
 	var sendErr *vqsSendError
@@ -379,8 +376,7 @@ var errQueueRequestDeadline = errors.New("workflow/vercel: queue request deadlin
 
 // queueRequestTimeout is the deadline of one Vercel Queues request:
 // WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS when it is set, within 5 seconds to 2
-// minutes, and vqsRequestTimeout otherwise, as the Workflow SDK's
-// getQueueRequestTimeoutMs reads it.
+// minutes, and vqsRequestTimeout otherwise.
 func queueRequestTimeout() time.Duration {
 	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS")))
 	if err != nil {

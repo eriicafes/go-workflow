@@ -4,12 +4,13 @@
 import localworld "github.com/eriicafes/go-workflow/worlds/local"
 ```
 
-The local World is a port of the Workflow SDK's `@workflow/world-local` for
-development and single-machine deployments. It stores runs, events, steps,
-waits, hooks, and stream chunks in a SQLite database, `world.db` in its data
-directory, and delivers queued work in-process from an in-memory queue. It
-needs no worker, queue service, or database server, and keeps every run
-across restarts. The SQLite driver is `modernc.org/sqlite`, which needs no cgo.
+The local World is the Go implementation of the Workflow SDK's local World,
+`@workflow/world-local`, for development and single-machine deployments. It
+stores runs, events, steps, waits, hooks, and stream chunks in a SQLite
+database, `world.db` in its data directory, and delivers queued work in-process
+from an in-memory queue. It needs no worker, queue service, or database server,
+and keeps every run across restarts. The SQLite driver is `modernc.org/sqlite`,
+which needs no cgo.
 
 ## Usage
 
@@ -36,7 +37,7 @@ client := workflow.NewClient(world)
 | `Dir` | `WORKFLOW_LOCAL_DATA_DIR`, or `.workflow-data` | Data directory, created with `0700` permissions. It holds `world.db`. |
 | `Tag` | untagged | Scopes the runs, hooks, and streams this World writes, such as a test's. See [Tags](#tags). |
 | `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
-| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it. See [Data Format and Encryption](/guide/encryption). |
 | `EncryptionScope` | empty | The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `Concurrency` | `WORKFLOW_LOCAL_QUEUE_CONCURRENCY`, or 1000 | How many deliveries execute at once. |
 | `HookRetentionLimit` | `WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |
@@ -55,8 +56,8 @@ client := workflow.NewClient(world)
   active runs again.
 - **`Clear(ctx)`** requires a prepared World. It cancels the deliveries in
   flight and deletes the World's data: a tagged World's runs, everything they
-  own, and its hooks and streams; an untagged World's whole database. The
-  World stays open, as world-local's `clear()` leaves it.
+  own, and its hooks and streams; an untagged World's whole database. The World
+  stays open.
 
 Several processes may share a data directory, such as an application and a
 script that starts runs. The database serializes their writes. Restart
@@ -108,10 +109,10 @@ or RPC API rather than reading the database.
 A tagged World writes its tag on the runs, hooks, start hook rejections, and
 stream chunks it creates. It sees its own tag's runs and untagged ones, and
 recovers only its own tag's runs. An untagged World sees only untagged runs.
-As in world-local, only runs are scoped by tag: steps, events, hooks, and
-streams are read by ID whatever their tag, and a run's steps, waits, and
-events belong to its tag. Tests can share one directory with a tag each, and
-`Clear` deletes only that tag's data.
+Only runs are scoped by tag: steps, events, hooks, and streams are read by ID
+whatever their tag, and a run's steps, waits, and events belong to its tag.
+Tests can share one directory with a tag each, and `Clear` deletes only that
+tag's data.
 
 ## Start hooks
 
@@ -124,17 +125,17 @@ refused with `ErrStartHookRejected`.
 ## Deleting run data
 
 A run created with `$retention: "0"` loses its data when it finishes, and
-`RunsDeleteDataMany` deletes a finished run's data on demand, as world-local
-does. The run, step, event, and remaining hook rows stay. The payloads in the run's
-events go, and its streams are cut to their end markers, in the same
-transaction that finishes the run or sets its `ExpiredAt`. A step that
-settles after its run's data was deleted has its result scrubbed as it lands,
-and a deleted run's streams refuse writes. After a deletion the World
-checkpoints the WAL and returns the freed pages to the file system.
+`RunsDeleteDataMany` deletes a finished run's data on demand. The run, step,
+event, and remaining hook rows stay. The payloads in the run's events go, and
+its streams are cut to their end markers, in the same transaction that finishes
+the run or sets its `ExpiredAt`. A step that settles after its run's data was
+deleted has its result scrubbed as it lands, and a deleted run's streams refuse
+writes. After a deletion the World checkpoints the WAL and returns the freed
+pages to the file system.
 
 ## Queue
 
-The queue is a port of world-local's, kept in memory as world-local's is.
+The queue is kept in memory.
 
 - **Messages.** IDs are `msg_<ULID>`, kept across redeliveries.
   `IdempotencyKey` deduplicates while the message with the key is in flight.
@@ -167,8 +168,7 @@ The queue is in memory, so a restart loses every message a run had queued.
 `Prepare` queues every active run of the World's own tag again:
 
 1. Steps that a previous process was running inline are released with
-   `step_retrying`, as world-local's `orphaned-steps.js` does. A released
-   step is sent as a step delivery.
+   `step_retrying`. A released step is sent as a step delivery.
 2. The run gets a flow with `QueueInput.Recovery`, which sends again the
    messages of its steps and the timers of its waits.
 3. Each of its open waits due within about 24.8 days gets a backstop wake,
@@ -179,7 +179,6 @@ runs.
 
 ## Waiting
 
-The local World does not push events, as world-local does not: a flow polls
-the run's log, and does not linger. `RunsWaitForTerminalStatus` and
-`StreamsGetChunks` wake on this process's commits, and poll every 100 ms for
-other processes'.
+The local World does not push events: a flow polls the run's log, and does
+not linger. `RunsWaitForTerminalStatus` and `StreamsGetChunks` wake on this
+process's commits, and poll every 100 ms for other processes'.

@@ -146,7 +146,7 @@ func TestStreamSocketReportsAClosedStream(t *testing.T) {
 	writer, fallback := openSocketWriter(t, world, server, "wrun_closed", "out", nil)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		before := fallback.writes.Load()
-		// A closed stream drops the write, as world-local does.
+		// A closed stream drops the write.
 		err := writer.Write(ctx, [][]byte{[]byte("late")})
 		if err != nil && !errors.Is(err, worlds.ErrStreamClosed) {
 			t.Fatalf("write to a closed stream = %v", err)

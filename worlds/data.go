@@ -28,9 +28,8 @@ var eventPayloadFields = map[EventType]string{
 
 // ResolveEventData returns the Data an event of eventType carries under
 // resolve. EventsResolveDataNone removes the type's payload field and keeps
-// its metadata, such as a step's name, as the Workflow SDK's
-// stripEventDataRefs does. Data that is not a JSON object, or has no field
-// left, is removed. Other resolve values return data unchanged.
+// its metadata, such as a step's name. Data that is not a JSON object, or
+// has no field left, is removed. Other resolve values return data unchanged.
 func ResolveEventData(eventType EventType, data []byte, resolve EventsResolveData) []byte {
 	return stripEventData(eventType, data, resolve, false)
 }
@@ -116,8 +115,7 @@ func EventPayloadFields() map[EventType]string {
 // ScrubEventData returns event Data without its user data, as deleting a
 // run's data leaves it: the payload field of eventType is removed and its
 // metadata, such as a step's name or a hook's token, is kept. A run_created
-// also loses its start hook's metadata, as world-local's run retention
-// scrubs it.
+// also loses its start hook's metadata.
 func ScrubEventData(eventType EventType, data []byte) []byte {
 	return stripEventData(eventType, data, EventsResolveDataNone, true)
 }
@@ -175,7 +173,7 @@ func StartHookID(runID RunID) HookID {
 
 // StartHookCandidateMaxAge is the age, by its run ID, past which a start hook
 // candidate is refused with ErrStartHookRejected: it can never be created,
-// and its token is free (@workflow/world START_HOOK_CANDIDATE_MAX_AGE_MS).
+// and its token is free.
 const StartHookCandidateMaxAge = 24 * time.Hour
 
 // StartHookDecision is a World's permanent decision on a start hook
@@ -198,9 +196,8 @@ func (d StartHookDecision) Err() error {
 
 // StartHookRejectionRefusal returns the error EventsCreateRun refuses input,
 // a start hook candidate, with once the World recorded rejection for its run
-// ID, as the Workflow SDK's Worlds refuse it: the rejection's
-// *HookConflictError, or ErrStartHookRejected when input carries another
-// token.
+// ID: the rejection's *HookConflictError, or ErrStartHookRejected when input
+// carries another token.
 func StartHookRejectionRefusal(input EventsCreateRunInput, rejection StartHookDecision) error {
 	if input.StartHook != nil && rejection.Token != input.StartHook.Token {
 		return fmt.Errorf("%w: run %s was already decided for a different start hook token", ErrStartHookRejected, input.RunID)
@@ -210,10 +207,9 @@ func StartHookRejectionRefusal(input EventsCreateRunInput, rejection StartHookDe
 
 // ExistingRunRefusal returns the error EventsCreateRun refuses input with
 // when its run exists, with the start hook its run_created recorded,
-// runCreated, as the Workflow SDK's Worlds refuse it, or nil when input
-// repeats its accepted start (RepeatsAcceptedStart). A start hook candidate
-// is refused with ErrStartHookRejected, and another creation with
-// ErrRunAlreadyExists.
+// runCreated, or nil when input repeats its accepted start
+// (RepeatsAcceptedStart). A start hook candidate is refused with
+// ErrStartHookRejected, and another creation with ErrRunAlreadyExists.
 func ExistingRunRefusal(runCreated []byte, input EventsCreateRunInput) error {
 	switch {
 	case RepeatsAcceptedStart(runCreated, input):
@@ -442,8 +438,7 @@ type DataWaitCompleted struct {
 }
 
 // DataHookCreated is the Data of a hook_created or hook_conflict event.
-// IsWebhook is always recorded, as the Workflow SDK's runtime records it,
-// and Data without it reads as a webhook, as the SDK's Worlds read it.
+// IsWebhook is always recorded, and Data without it reads as a webhook.
 type DataHookCreated struct {
 	Token     string `json:"token" cbor:"token"`
 	Metadata  []byte `json:"metadata,omitempty" cbor:"metadata,omitempty"`
@@ -578,15 +573,15 @@ const (
 )
 
 // FinishedRunRefusal returns the error a World refuses event with on a
-// finished run, the run's status, before checking its step or hook, as the
-// Workflow SDK's Worlds refuse it, or nil when the event is checked further.
+// finished run, the run's status, before checking its step or hook, or nil
+// when the event is checked further.
 //
 //   - A run_cancelled of a cancelled run is recorded: nil.
 //   - A run_started is refused with a *RunExpiredError.
 //   - A terminal transition, a step, wait, or hook creation, an inline
 //     step's creating step_started, and an attr_set are refused with
-//     ErrEntityConflict, the SDK's EntityConflictError. The error also
-//     matches *RunExpiredError, which says why.
+//     ErrEntityConflict. The error also matches *RunExpiredError, which
+//     says why.
 //   - A wait_completed is refused with ErrEventNotFound, since a run's waits
 //     end with it.
 //   - Another step event is checked as CheckStepEvent says, and a
@@ -625,11 +620,11 @@ func FinishedRunHookRefusal(status Status, event EventsCreateEvent) error {
 }
 
 // CheckResumeReplay returns the error a World refuses a hook_received
-// repeating the resume ID of an earlier one with, as world-local refuses it,
-// or nil when the World answers with the earlier event. hookID and digest are
-// the earlier resume's hook and payload digest. A resume ID names one resume
-// of one hook, and its payload, when both resumes carry a digest: another is
-// refused with ErrEntityConflict, the SDK's EntityConflictError.
+// repeating the resume ID of an earlier one with, or nil when the World
+// answers with the earlier event. hookID and digest are the earlier resume's
+// hook and payload digest. A resume ID names one resume of one hook, and its
+// payload, when both resumes carry a digest: another is refused with
+// ErrEntityConflict.
 func CheckResumeReplay(event EventsCreateEvent, resumeDigest string, hookID HookID, digest string) error {
 	if string(hookID) != event.CorrelationID {
 		return fmt.Errorf("%w: resume ID already recorded for hook %s", ErrEntityConflict, hookID)
@@ -640,8 +635,7 @@ func CheckResumeReplay(event EventsCreateEvent, resumeDigest string, hookID Hook
 	return nil
 }
 
-// Run ID time limits of a run's creation, as the Workflow SDK's
-// validateUlidTimestamp checks them.
+// Run ID time limits of a run's creation, which CheckRunCreation checks.
 const (
 	// RunIDMaxAge is how far in the past a new run's ID may have been minted.
 	RunIDMaxAge = 24 * time.Hour
@@ -650,12 +644,11 @@ const (
 )
 
 // CheckRunCreation returns the error a World refuses the creation input
-// describes with, as the Workflow SDK's Worlds check it, or nil. The run ID
-// must be wrun_ and a ULID minted within RunIDMaxAge before now and
-// RunIDMaxLead after it, unless the run is created FromRunStarted: otherwise
-// ErrEventInvalid, or ErrStartHookRejected for a run with a start hook. Its
-// attributes must be within the limits of CheckAttributes
-// (ErrAttributeInvalid).
+// describes with, or nil. The run ID must be wrun_ and a ULID minted within
+// RunIDMaxAge before now and RunIDMaxLead after it, unless the run is
+// created FromRunStarted: otherwise ErrEventInvalid, or ErrStartHookRejected
+// for a run with a start hook. Its attributes must be within the limits of
+// CheckAttributes (ErrAttributeInvalid).
 func CheckRunCreation(input EventsCreateRunInput, now time.Time) error {
 	if !input.FromRunStarted {
 		refused := ErrEventInvalid
@@ -676,8 +669,7 @@ func CheckRunCreation(input EventsCreateRunInput, now time.Time) error {
 }
 
 // CheckAttributeChanges returns ErrAttributeInvalid unless an attr_set's
-// changes may apply to a run's attributes, as the Workflow SDK's
-// validateAttributeChanges checks them: each key within the limits of
+// changes may apply to a run's attributes: each key within the limits of
 // CheckAttributes and set once, each value within MaxAttributeValueBytes,
 // and at most MaxAttributesPerRun attributes after the changes.
 func CheckAttributeChanges(attributes map[string]string, changes []RunsAttributeChange, allowReserved bool) error {
@@ -709,8 +701,7 @@ func CheckAttributeChanges(attributes map[string]string, changes []RunsAttribute
 	return nil
 }
 
-// MaxAttrSetDataBytes is the most JSON bytes an attr_set's Data may take, as
-// the Workflow SDK's ATTRIBUTE_EVENT_DATA_MAX_BYTES.
+// MaxAttrSetDataBytes is the most JSON bytes an attr_set's Data may take.
 const MaxAttrSetDataBytes = 8192
 
 // CheckAttrSet returns ErrAttributeInvalid unless the attr_set Data may apply
@@ -724,8 +715,7 @@ func CheckAttrSet(attributes map[string]string, data []byte) error {
 }
 
 // CheckStepStart returns a *TooEarlyError for a step_started of a step whose
-// retry is due at retryAfter, while now is before it, as the Workflow SDK's
-// Worlds refuse it, or nil.
+// retry is due at retryAfter, while now is before it, or nil.
 func CheckStepStart(retryAfter *time.Time, now time.Time) error {
 	if retryAfter == nil || !now.Before(*retryAfter) {
 		return nil
@@ -734,8 +724,8 @@ func CheckStepStart(retryAfter *time.Time, now time.Time) error {
 }
 
 // CheckResumeDigest returns ErrEventInvalid unless a hook_received's
-// ResumePayloadDigest is the digest of its payload, as world-postgres
-// checks it. An empty digest is not checked.
+// ResumePayloadDigest is the digest of its payload. An empty digest is not
+// checked.
 func CheckResumeDigest(event EventsCreateEvent, digest string) error {
 	if digest == "" || event.EventType != EventTypeHookReceived {
 		return nil
@@ -746,9 +736,9 @@ func CheckResumeDigest(event EventsCreateEvent, digest string) error {
 	return nil
 }
 
-// CheckStepEvent returns the error a World refuses a step event with, as the
-// Workflow SDK's Worlds refuse it, or nil. exists, status, and retryAfter
-// describe the event's step, and runStatus its run.
+// CheckStepEvent returns the error a World refuses a step event with, or
+// nil. exists, status, and retryAfter describe the event's step, and
+// runStatus its run.
 //
 //   - A step_created of a step that exists, and an inline step's creating
 //     step_started (StartCreatesStep) of one, are refused with
@@ -790,8 +780,7 @@ func CheckStepEvent(event EventsCreateEvent, exists bool, status Status, retryAf
 }
 
 // CheckRunSpecVersion returns a *RunNotSupportedError for an event on a
-// run whose spec version, version, is newer than SpecVersion, as the Workflow SDK's
-// Worlds refuse it, or nil.
+// run whose spec version, version, is newer than SpecVersion, or nil.
 func CheckRunSpecVersion(runID RunID, version int) error {
 	if version > SpecVersion {
 		return &RunNotSupportedError{RunSpecVersion: version, WorldSpecVersion: SpecVersion}

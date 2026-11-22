@@ -3,7 +3,8 @@ package worlds
 import "testing"
 
 func TestUserStreamNameMatchesTheSDK(t *testing.T) {
-	// Expected names are from the Workflow SDK's getWorkflowRunStreamId.
+	// Expected names join strm_, the run ID without wrun_, _user, and the
+	// name in unpadded base64url.
 	for _, test := range []struct{ name, want string }{
 		{"", "strm_01K_user"},
 		{"progress", "strm_01K_user_cHJvZ3Jlc3M"},

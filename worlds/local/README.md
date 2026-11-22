@@ -1,7 +1,7 @@
 # Local world
 
-`localworld` is a port of the Workflow SDK's `@workflow/world-local`, for
-development and single-machine deployments. It stores runs, events, steps,
+`localworld` is the Go implementation of the Workflow SDK's Local World
+(`@workflow/world-local`), for development and single-machine deployments. It stores runs, events, steps,
 waits, hooks, and stream chunks in a SQLite database, `world.db` in its data
 directory, and delivers queued work in-process from an in-memory queue.
 
@@ -46,8 +46,7 @@ JavaScript or for data written by older releases:
   since no JavaScript reads them.
 - **There is one schema version and no legacy data**, so the World writes no
   `version.txt` and prints no legacy notice.
-- **It appends batches** (`EventsCreateBatch`), which world-local does not:
-  the SDK's `createBatch` is optional, but Go's runtime records a flow's
-  steps and timers in one fenced write.
+- **It appends batches** (`EventsCreateBatch`), which world-local does not,
+  since Go's runtime records a flow's steps and timers in one fenced write.
 - **It serves analytics,** which world-local does not: runs and attributes
   from its tables, and steps, events, hooks, and waits from the event log.

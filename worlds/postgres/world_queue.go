@@ -19,12 +19,10 @@ import (
 const (
 	backoffBase = time.Second
 	backoffMax  = 5 * time.Minute
-	// maxJobAttempts is world-postgres's MAX_GRAPHILE_JOB_ATTEMPTS: the most
-	// deliveries of one job, the core's MAX_DELIVERIES_EXCEEDED delivery (49)
-	// plus 24 retries of its terminal write. A row's job starts when it is
-	// queued and again on every Redelivery, as world-postgres adds a new
-	// Graphile job for each reschedule, and a row whose job failed this many
-	// deliveries is deleted, as Graphile Worker stops retrying the job.
+	// maxJobAttempts is the most deliveries of one job: the core's
+	// MAX_DELIVERIES_EXCEEDED delivery (49) plus 24 retries of its terminal
+	// write. A row's job starts when it is queued and again on every
+	// Redelivery, and a row whose job failed this many deliveries is deleted.
 	maxJobAttempts = 49 + 24
 	// specVersionSingleOrchestrator is the first spec version whose runs
 	// have one orchestrator delivery at a time.
@@ -33,7 +31,7 @@ const (
 
 // storedDelivery is a queue row's payload: the delivery, and JobStart, the
 // row's deliveries when its current job began. deliveries - JobStart is the
-// job's attempts, Graphile Worker's job.attempts.
+// job's attempts.
 type storedDelivery struct {
 	worlds.QueueInput
 	JobStart int `json:"jobStart,omitempty"`
@@ -133,8 +131,7 @@ type delivery struct {
 // delivery included.
 func (d delivery) jobAttempts() int { return d.deliveries - d.jobStart }
 
-// newMessageID returns a queue message ID, msg_<ULID> as world-postgres
-// mints them.
+// newMessageID returns a queue message ID, msg_<ULID>.
 func newMessageID() string { return "msg_" + ulid.Make().String() }
 
 // claim leases up to limit due rows that are not leased by a live worker,
@@ -161,9 +158,8 @@ func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delive
 }
 
 // dropExhausted deletes the claimed rows whose job has no attempts left,
-// as after workers that claimed it crashed, and returns the others. Graphile
-// Worker leaves such a job unclaimed. A row that fails to delete stays
-// leased, and is dropped when it is claimed again.
+// as after workers that claimed it crashed, and returns the others. A row
+// that fails to delete stays leased, and is dropped when it is claimed again.
 func (w *World) dropExhausted(ctx context.Context, claimed []delivery) []delivery {
 	kept := claimed[:0]
 	for _, item := range claimed {
@@ -295,13 +291,12 @@ func (w *World) work(ctx context.Context, runtime executor, options WorkerOption
 }
 
 // deliver executes one claimed row, renewing its lease meanwhile. Success
-// deletes the row. A Redelivery keeps it, due after its delay, and starts
-// the row's next job, counting Attempt as world-postgres does (see
-// redeliveryHandoffs). Failure schedules a retry with capped exponential
-// backoff, until the row's job has failed maxJobAttempts deliveries, which
-// deletes it. A shutdown releases the lease so another worker takes it now.
-// A lease lost to another worker, as after this worker stalled past it,
-// cancels the execution.
+// deletes the row. A Redelivery keeps it, due after its delay, and starts the
+// row's next job, counting Attempt as redeliveryHandoffs describes. Failure
+// schedules a retry with capped exponential backoff, until the row's job has
+// failed maxJobAttempts deliveries, which deletes it. A shutdown releases the
+// lease so another worker takes it now. A lease lost to another worker, as
+// after this worker stalled past it, cancels the execution.
 func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 	executeCtx, loseLease := context.WithCancel(ctx)
 	defer loseLease()
@@ -375,13 +370,13 @@ func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 }
 
 // redeliveryHandoffs returns how many of a redelivered row's deliveries are
-// added to those not counted in Attempt, so that its next delivery's Attempt
-// is world-postgres's. A handoff (a Redelivery of zero of a spec 9 run's
-// message) keeps Attempt, and a spec 9 run's flow redelivered after a delay
-// is a counted redelivery, which adds one to it. Any other Redelivery, as a
-// step's in-place retry, starts Attempt over from where the row's job
-// started it, so a step retried in place many times on one message is not
-// failed by the core's MaxDeliveries.
+// added to those not counted in Attempt, which sets its next delivery's
+// Attempt. A handoff (a Redelivery of zero of a spec 9 run's message) keeps
+// Attempt, and a spec 9 run's flow redelivered after a delay is a counted
+// redelivery, which adds one to it. Any other Redelivery, as a step's
+// in-place retry, starts Attempt over from where the row's job started it, so
+// a step retried in place many times on one message is not failed by the
+// core's MaxDeliveries.
 func redeliveryHandoffs(item delivery, after time.Duration) int {
 	single := item.input.RunSpecVersion >= specVersionSingleOrchestrator
 	switch {

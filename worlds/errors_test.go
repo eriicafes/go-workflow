@@ -151,7 +151,7 @@ func TestSDKErrorsAreRecordedAsTheSDKsTypes(t *testing.T) {
 		if text := string(data); !strings.Contains(text, test.want) {
 			t.Fatalf("%T recorded as %s, want %s", test.err, text, test.want)
 		}
-		// A decoded chain records the SDK's type again.
+		// A decoded chain records the same type again.
 		decoded := worlds.DecodeErrorPayload(data, nil)
 		again, err := worlds.EncodeErrorPayload(decoded, worlds.PayloadOptions{NoCompression: true})
 		if err != nil || !strings.Contains(string(again), test.want) {

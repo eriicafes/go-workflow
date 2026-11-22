@@ -37,7 +37,7 @@ context before calling `Close`.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `BaseURL` | required | Public URL of `HTTP(world)`, including `/v1/workflow`. |
-| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it. See [Data Format and Encryption](/guide/encryption). |
 | `EncryptionScope` | empty | The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `URL` | `WORKFLOW_POSTGRES_URL`, or `DATABASE_URL` | Connection string, used by `Open`. |
 | `Schema` | `workflow` | The schema the World's tables live in, created when missing. |
@@ -93,16 +93,16 @@ They differ from world-postgres's where Go needs it:
   the slot of the event holding each payload, and reads join it.
 - `payload_cbor` is Go's own CBOR (`worlds.EncodeEventData`), with payloads as
   raw bytes, not cbor-x. There are no deprecated `jsonb` columns.
-- Steps are keyed by run and step, since a step ID is unique only within its
-  run, as world-local keys them.
+- Steps are keyed by run and step, since a step ID is unique only within
+  its run.
 - `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
   `Config.Retention`.
 - Hooks fill in `resume_context`, which world-postgres leaves empty, with the
   run's workflow, deployment, public key, and spec version, so a resume
   queues its delivery without reading the run. There are no `owner_id`,
   `project_id`, or `environment` columns.
-- The queue is Go's own. There are no graphile-worker, snapshot, or
-  invocation tables.
+- The queue is Go's own, `workflow_queue`. There are no snapshot or invocation
+  tables.
 
 Attributes are `jsonb`, execution contexts and start hooks are CBOR in
 world-postgres's `_cbor` columns, and timestamps are `timestamptz` at
@@ -147,30 +147,28 @@ nothing and return that message's ID. A delivery without a key is never
 deduplicated. A delivery with `Retention` expires that long after it was
 queued, and workers delete expired rows before claiming.
 
-A message's ID is `msg_<ULID>`, as world-postgres mints it. `Worker` claims
-due rows with `FOR UPDATE SKIP LOCKED`, sets `lease_until`, and increments
-`deliveries`, which fences the lease. Every delivery of a message has the row's
-ID as its `MessageID`, `deliveries` as its `DeliveryCount`, and
-`deliveries - handoffs` as its `Attempt`. The worker executes each:
+A message's ID is `msg_<ULID>`. `Worker` claims due rows with
+`FOR UPDATE SKIP LOCKED`, sets `lease_until`, and increments `deliveries`, which
+fences the lease. Every delivery of a message has the row's ID as its
+`MessageID`, `deliveries` as its `DeliveryCount`, and `deliveries - handoffs` as
+its `Attempt`. The worker executes each:
 
 - success deletes the row.
-- a `worlds.Redelivery` keeps the row and makes it due again after its delay,
-  as the next job of its message, counting `Attempt` as world-postgres does. A
-  handoff (a delay of zero on a spec 9 run's message) keeps `Attempt`. A
-  spec 9 run's flow redelivered after a delay is a counted redelivery, one
-  more `Attempt`. Any other redelivery, such as a step's in-place retry,
-  starts `Attempt` over from where the job started it, so a step retried in
-  place many times on one message is not failed by the runtime's
+- a `worlds.Redelivery` keeps the row and makes it due again after its delay, as
+  the next job of its message. A handoff (a delay of zero on a spec 9 run's
+  message) keeps `Attempt`. A spec 9 run's flow redelivered after a delay is a
+  counted redelivery, one more `Attempt`. Any other redelivery, such as a step's
+  in-place retry, starts `Attempt` over from where the job started it, so a step
+  retried in place many times on one message is not failed by the runtime's
   `MaxDeliveries`.
 - failure keeps the row and sets `not_before` to now plus a capped exponential
   backoff by attempt (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
-  `*worlds.ThrottleError` asks for when that is longer, and logs the error.
-  Once the message's current job has been delivered 73 times (world-postgres's
-  Graphile `max_attempts`: the runtime's `MaxDeliveries` failure on delivery 49
-  plus 24 retries of its terminal write), its last failure deletes the row, as
-  Graphile Worker stops retrying the job. A row a crashed worker left with no
-  attempts is deleted when it is next claimed. Every `Redelivery` starts a new
-  job with all 73.
+  `*worlds.ThrottleError` asks for when that is longer, and logs the error. Once
+  the message's current job has been delivered 73 times (the runtime's
+  `MaxDeliveries` failure on delivery 49 plus 24 retries of its terminal write),
+  its last failure deletes the row. A row a crashed worker left with no attempts
+  is deleted when it is next claimed. Every `Redelivery` starts a new job with
+  all 73.
 - shutdown releases the lease so another worker picks the row up immediately.
 
 Flows of one run execute one at a time across every worker. A claimed
@@ -187,19 +185,18 @@ make duplicate deliveries inert.
 ## Recovery
 
 The first `Worker` of a World queues a flow for every pending or running run
-before it claims anything, as world-postgres's `start()` does when it runs
-workers, so a run whose process exited before it queued the run's delivery
-resumes. A process that runs no `Worker` recovers nothing, and
+before it claims anything, so a run whose process exited before it queued the
+run's delivery resumes. A process that runs no `Worker` recovers nothing, and
 `Config.SkipRecovery` turns recovery off.
 
 Recovery leaves out a running run that is parked: one of spec 2 or later with a
 hook or an open wait, no pending or running step, no open wait that is due, and
-no flow of its run in the queue that is due or leased (world-postgres's
-`wake_pending` and locked orchestrator jobs). Its next wake is a hook delivery
-or a wait timer that queues its own flow. Each recovery flow carries the run's
-spec version and is keyed `startup-recovery:<run ID>`, so starting more workers
-while it is queued or executing queues nothing more. The queue persists, so the
-flow is not a `Recovery` flow: the run's queued messages still arrive.
+no flow of its run in the queue that is due or leased. Its next wake is a hook
+delivery or a wait timer that queues its own flow. Each recovery flow carries
+the run's spec version and is keyed `startup-recovery:<run ID>`, so starting
+more workers while it is queued or executing queues nothing more. The queue
+persists, so the flow is not a `Recovery` flow: the run's queued messages still
+arrive.
 
 ## Start hooks
 
@@ -212,13 +209,12 @@ deleted as new ones are made.
 
 ## Retention
 
-A run's data is deleted as the Workflow SDK deletes it: the run, step, event
-and remaining hook rows stay with their IDs, statuses, timestamps and attributes, the
-payloads in the run's events are removed from their CBOR, keeping the rest of
-each event's data, and its streams' chunks are deleted, leaving each stream
-empty and closed. The run's `expired_at` is set and
-`data_purged` records that its rows no longer hold its data. Reads hide a run's
-payloads once `expired_at` has passed.
+When a run's data is deleted, the run, step, event and remaining hook rows stay
+with their IDs, statuses, timestamps and attributes, the payloads in the run's
+events are removed from their CBOR, keeping the rest of each event's data, and
+its streams' chunks are deleted, leaving each stream empty and closed. The run's
+`expired_at` is set and `data_purged` records that its rows no longer hold its
+data. Reads hide a run's payloads once `expired_at` has passed.
 
 - **`$retention: "0"`.** The append that finishes the run deletes its data in
   the same transaction, before waiters are notified.
@@ -239,17 +235,16 @@ to a deleted run is refused.
 
 Each World opens one dedicated connection on first use and listens on
 world-postgres's channels, `workflow_run_events` (the run ID of every committed
-write), `workflow_run_status` (sent when a run ends), and
-`workflow_event_chunk` (a written chunk's `{streamId, chunkId}`), and on
-`workflow_queue`. Workers, flows waiting on their inline steps,
-`RunsWaitForTerminalStatus`, and `StreamsGetChunks` wake on these
-notifications and also re-check every `PollInterval`, so a lost notification
-only adds latency. As in world-postgres, a write sends its notifications after
-its transaction commits, since a `NOTIFY` inside the transaction could fail
-the write and Postgres serializes the commits of notifying transactions. A
-write that ends a run or writes a stream chunk returns once its notifications
-are sent. Other writes don't wait for them. A failed notification never fails
-the write.
+write), `workflow_run_status` (sent when a run ends), and `workflow_event_chunk`
+(a written chunk's `{streamId, chunkId}`), and on `workflow_queue`. Workers,
+flows waiting on their inline steps, `RunsWaitForTerminalStatus`, and
+`StreamsGetChunks` wake on these notifications and also re-check every
+`PollInterval`, so a lost notification only adds latency. A write sends its
+notifications after its transaction commits, since a `NOTIFY` inside the
+transaction could fail the write and Postgres serializes the commits of
+notifying transactions. A write that ends a run or writes a stream chunk returns
+once its notifications are sent. Other writes don't wait for them. A failed
+notification never fails the write.
 
 ::: warning Connection poolers
 Poolers in transaction mode, such as PgBouncer, do not support `LISTEN`. Point

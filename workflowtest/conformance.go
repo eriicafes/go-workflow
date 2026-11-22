@@ -174,7 +174,7 @@ func is[E error](err error) bool {
 }
 
 // conformExpectDropped checks the answer to a write a stream takes no more
-// data for: world-local and world-postgres drop it without an error, and
+// data for: the local and Postgres Worlds drop it without an error, and
 // Vercel's backend refuses it (ErrStreamClosed).
 func conformExpectDropped(t *testing.T, err error, label string) {
 	t.Helper()

@@ -57,11 +57,11 @@ followed by the prefix, such as `http://workflow-worker:8081/v1/workflow`.
 
 ## Retention
 
-A run's data is deleted as the Workflow SDK deletes it: its inputs, outputs
-and errors, the payloads in its events and hooks, and its streams' chunks. The
-run, step, event and hook records stay with their IDs, statuses, timestamps
-and attributes, the run's `ExpiredAt` is set, and the Workflow web UI shows its
-data as expired. Reading its result returns a `*workflow.RunExpiredError`.
+Deleting a run's data removes its inputs, outputs and errors, the payloads in
+its events and hooks, and its streams' chunks. The run, step, event and hook
+records stay with their IDs, statuses, timestamps and attributes, the run's
+`ExpiredAt` is set, and the Workflow web UI shows its data as expired. Reading
+its result returns a `*workflow.RunExpiredError`.
 
 A run's data is deleted:
 
@@ -94,9 +94,9 @@ how and when it deletes.
 
 Every World delivers **at least once**. The runtime decides whether a delivery
 may run by appending events, and every World admits or rejects appends
-atomically, so duplicate and stale deliveries are harmless. A failed delivery
-is retried with backoff, and the runtime gives up on a delivery after 48
-attempts, as the Workflow SDK does, failing its run or step.
+atomically, so duplicate and stale deliveries are harmless. A failed delivery is
+retried with backoff, and the runtime gives up on a delivery after 48 attempts,
+failing its run or step.
 
 | World | Native max delay | Failed delivery backoff |
 | --- | --- | --- |

@@ -22,10 +22,9 @@ func (m *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 }
 
 func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 200)
-	// An empty status filter matches no runs, as in the Workflow SDK's
-	// Worlds (status: []). A nil one matches every status.
+	// An empty status filter matches no runs, and a nil one matches every
+	// status.
 	if input.Status != nil && len(input.Status) == 0 {
 		return worlds.Page[worlds.Run]{Data: []worlds.Run{}}, nil
 	}

@@ -128,8 +128,7 @@ Credentials that need I/O to fetch belong in a provider that resolves them per
 request, inside the model call step. Don't read them in an inline step: its
 result, and so the secret, would be stored in the run's event log.
 
-`Stream` writes to the run's default stream, like `getWritable()` in the
-Workflow SDK, and closes it when the turn ends. Streams can only be opened in
+`Stream` writes to the run's default stream and closes it when the turn ends. Streams can only be opened in
 step context, so the steps that write open it with `workflow.Writer`. To write
 a named stream instead, set `Writer`, and read the stream with the same name in
 the server's handler:

@@ -12,7 +12,7 @@ import (
 )
 
 // TestRunSeedVectors checks the generator against values seedrandom, ulid's
-// monotonicFactory, and the SDK's seeded Nano ID produce for the same runs.
+// monotonicFactory, and a seeded Nano ID produce for the same runs.
 func TestRunSeedVectors(t *testing.T) {
 	raw, err := os.ReadFile("testdata/seed.json")
 	if err != nil {
@@ -85,8 +85,8 @@ func TestIncrementBase32Overflow(t *testing.T) {
 	}
 }
 
-// TestExecutionDrawsFromRunSeed checks that declarations draw the SDK's IDs
-// and tokens for the run, in declaration order.
+// TestExecutionDrawsFromRunSeed checks that declarations draw their IDs and
+// tokens from the run's seed, in declaration order.
 func TestExecutionDrawsFromRunSeed(t *testing.T) {
 	run := worlds.Run{RunID: "wrun_41JQ8Z5K3M50NP6Q7R8S9T0VWX", WorkflowName: "checkout"}
 	execution, err := newExecution(t.Context(), nil, run, nil, nil)

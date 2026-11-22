@@ -9,8 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// defaultSchema is the schema the World's tables live in, as world-postgres
-// names it.
+// defaultSchema is the schema the World's tables live in.
 const defaultSchema = "workflow"
 
 // schemaLockKey serializes migrations across processes sharing a database.
@@ -19,25 +18,24 @@ const schemaLockKey int64 = 0x676f5f776f726b66
 // migrations are applied in order, and the index plus one is the recorded
 // version. Never edit a released migration, append a new one instead.
 //
-// The tables are world-postgres's (drizzle/schema.js), in the World's
+// The tables are the Workflow SDK's Postgres World tables, in the World's
 // schema, which every statement names as "workflow." and qualify rewrites.
-// They differ from world-postgres's where Go needs it:
+// They differ where Go needs it:
 //   - Payloads are stored once, in the events. The run, step, and hook views
 //     name the slots of the events carrying them, and reads join
 //     workflow_events. A run's input is always slot 1 (run_created).
 //   - An event's data is payload_cbor, Go's own CBOR (worlds.EncodeEventData),
 //     with payloads as raw bytes. There are no jsonb twins.
-//   - Steps are keyed by run and step, as world-local keys them, since a step
-//     ID is unique only within its run.
+//   - Steps are keyed by run and step, since a step ID is unique only within
+//     its run.
 //   - Hooks fill in resume_context, the run's workflow, deployment, public
-//     key, and spec version, which wake the run, where world-postgres leaves
-//     it empty, and have no owner_id, project_id, or environment. A hook's
-//     row goes when it is disposed or done with its token, as in
-//     world-postgres.
+//     key, and spec version, which wake the run, where the SDK leaves it
+//     empty, and have no owner_id, project_id, or environment. A hook's row
+//     goes when it is disposed or done with its token.
 //   - workflow_runs.data_purged records that a run's rows no longer hold its
 //     data, for Config.Retention's background purge.
-//   - There are no snapshots, invocations, dynamic workflow code, or
-//     graphile-worker tables. workflow_queue is Go's queue.
+//   - There are no snapshot, invocation, dynamic workflow code, or
+//     graphile-worker tables. workflow_queue is Go's own queue.
 //
 // A queue row keeps its message across redeliveries: payload holds the whole
 // delivery with the delivery count its current job began at, deliveries

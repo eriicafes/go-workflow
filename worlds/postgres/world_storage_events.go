@@ -23,8 +23,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	// The run ID and attributes are checked as the Workflow SDK's Worlds
-	// check them.
+	// The run ID and attributes are checked.
 	if err := worlds.CheckRunCreation(input, time.Now()); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -62,8 +61,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 		var decision, conflicting, token string
 		err := w.pool.QueryRow(ctx, w.q(`SELECT decision, coalesce(conflicting_run_id, ''), token FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`), input.RunID).Scan(&decision, &conflicting, &token)
 		if err == nil && token != start.Token {
-			// A candidate is decided for its token, as world-postgres's
-			// recordedDecision refuses another.
+			// A candidate is decided for its token, and another is refused.
 			return worlds.EventResult{}, fmt.Errorf("%w: run %s was already admitted with a different start hook token", worlds.ErrStartHookRejected, input.RunID)
 		}
 		if err == nil && decision == "rejected" {
@@ -149,7 +147,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !validEvent(input.Event) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	// A resume's digest must be its payload's, as world-postgres checks it.
+	// A resume's digest must be its payload's.
 	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -323,14 +321,13 @@ func (w *World) runExists(ctx context.Context, runID worlds.RunID) error {
 // EventsList reads the run's counters before its page, so the page covers
 // every position the snapshot counts.
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
-	// The list's defaults are world-postgres's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	var inBandCount int64
 	var last *string
 	err := w.pool.QueryRow(ctx, w.q(`SELECT s.seq_in_band, (SELECT max(e.id) FROM workflow.workflow_events e WHERE e.run_id = s.run_id)
 		FROM workflow.workflow_event_slots s WHERE s.run_id = $1`), input.RunID).Scan(&inBandCount, &last)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// A missing run has no events and no snapshot, as in world-postgres.
+		// A missing run has no events and no snapshot.
 		return worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}}, nil
 	}
 	if err != nil {
@@ -344,7 +341,6 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	// The list's defaults are world-postgres's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 100)
 	return w.listEvents(ctx, input.RunID, &input.CorrelationID, input.Pagination, input.ResolveData)
 }
@@ -387,8 +383,8 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, correlationI
 		resolve = worlds.EventsResolveDataNone
 	}
 	events = worlds.ResolveEvents(events, resolve)
-	// A missing run has no events, as in world-postgres. The last page's
-	// cursor resumes after its last event.
+	// A missing run has no events. The last page's cursor resumes after its
+	// last event.
 	page := worlds.Page[worlds.Event]{Data: events}
 	if pagination.Limit > 0 && len(events) > pagination.Limit {
 		page.Data, page.HasMore = events[:pagination.Limit], true
@@ -418,13 +414,12 @@ type appender struct {
 	errorCode  *string
 }
 
-// admit applies the transition rules, as world-postgres's storage does. An
-// event that repeats a creation the log holds is refused with
-// ErrEntityConflict. It returns a non-nil result, holding no event, for a
-// run_started of a run that started before, which appends nothing.
+// admit applies the transition rules. An event that repeats a creation the
+// log holds is refused with ErrEntityConflict. It returns a non-nil result,
+// holding no event, for a run_started of a run that started before, which
+// appends nothing.
 func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*worlds.EventResult, error) {
-	// A run of a newer spec version is a newer release's, as the Workflow
-	// SDK's Worlds refuse it.
+	// A run of a newer spec version is a newer release's, and is refused.
 	if err := worlds.CheckRunSpecVersion(a.run.RunID, a.run.SpecVersion); err != nil {
 		return nil, err
 	}
@@ -451,9 +446,9 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 			return &worlds.EventResult{}, nil
 		}
 	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		// A step is created once, and its other events need it unfinished,
-		// as in world-postgres. A started step may be started again, and
-		// each start records a new attempt.
+		// A step is created once, and its other events need it unfinished.
+		// A started step may be started again, and each start records a new
+		// attempt.
 		var status worlds.Status
 		var retryAfter *time.Time
 		if step != nil {
@@ -498,7 +493,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		}
 		if !found {
 			// A disposed hook is gone. One another run took over redirects
-			// the delivery, as world-postgres's forceClaimRefusal.
+			// the delivery.
 			forced, err := a.forceClaimed(ctx, event.CorrelationID)
 			if err != nil {
 				return nil, err
@@ -527,8 +522,7 @@ func (a *appender) admit(ctx context.Context, event worlds.EventsCreateEvent) (*
 		if err != nil {
 			return nil, err
 		}
-		// A disposed hook is gone, so disposing it again finds no hook, as
-		// in world-postgres.
+		// A disposed hook is gone, so disposing it again finds no hook.
 		if !found || hook.RunID != a.run.RunID {
 			return nil, &worlds.HookNotFoundError{Token: event.CorrelationID}
 		}
@@ -642,8 +636,7 @@ func (a *appender) append(ctx context.Context, value worlds.EventsCreateEvent) (
 // the event log, and the views record the slots holding them.
 func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int64) error {
 	at := event.CreatedAt
-	// The run itself changes, and is updated, only on its own events, as
-	// the Workflow SDK's Worlds update it.
+	// The run itself changes, and is updated, only on its own events.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		a.run.UpdatedAt = at
@@ -718,9 +711,8 @@ func (a *appender) materialize(ctx context.Context, event worlds.Event, slot int
 
 // updateStep applies a step event at slot. A step_completed becomes the
 // step's output slot, and a step_failed or step_retrying its error slot,
-// which a later step_completed keeps, as world-postgres keeps a step's
-// error. A step_retrying sets the step's retry time, which its next start
-// clears.
+// which a later step_completed keeps. A step_retrying sets the step's retry
+// time, which its next start clears.
 func (a *appender) updateStep(ctx context.Context, event worlds.Event, status worlds.Status, slot int64) error {
 	var result worlds.DataStepResult
 	_ = json.Unmarshal(event.Data, &result)
@@ -1009,8 +1001,7 @@ func (w *World) EventsSubscribe(ctx context.Context, runID worlds.RunID, afterSl
 
 // resumed returns the result of the hook_received the resume resumeID
 // committed, or nil when it committed none. A repeat of the resume for
-// another hook or payload digest is refused with ErrEventInvalid,
-// as world-postgres's createHookResume refuses it.
+// another hook or payload digest is refused with ErrEventInvalid.
 func (a *appender) resumed(ctx context.Context, requested worlds.EventsCreateEvent, resumeID, digest string) (*worlds.EventResult, error) {
 	if resumeID == "" {
 		return nil, nil

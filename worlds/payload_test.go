@@ -294,7 +294,7 @@ func TestPayloadStreamFrames(t *testing.T) {
 }
 
 // TestWriteGoPayloadVectors writes payloads Go encoded for
-// testdata/payload/verify.mjs to decode with the SDK, when
+// testdata/payload/verify.mjs to decode with the Workflow SDK, when
 // WORKFLOW_PAYLOAD_VECTORS_OUT names the file to write.
 func TestWriteGoPayloadVectors(t *testing.T) {
 	out := os.Getenv("WORKFLOW_PAYLOAD_VECTORS_OUT")

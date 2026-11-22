@@ -35,9 +35,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 
 // liveHooks returns the items of the hooks that still exist. A disposed
 // hook's item records only its disposal, and a hook of a finished run whose
-// token retention has lapsed is gone, as the Workflow SDK's Worlds delete
-// it when its run ends: its item stays until a claim of its token replaces
-// it, since DynamoDB cannot delete a run's hooks with its last event.
+// token retention has lapsed is gone: its item stays until a claim of its
+// token replaces it, since DynamoDB cannot delete a run's hooks with its last
+// event.
 func (w *World) liveHooks(ctx context.Context, items []map[string]ddb.AttributeValue) ([]map[string]ddb.AttributeValue, error) {
 	keys := make([]map[string]ddb.AttributeValue, 0, len(items))
 	for _, item := range items {
@@ -111,7 +111,6 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 // hook created a moment ago may be missing from the result. The hooks it
 // returns are read consistently.
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	if err := ctx.Err(); err != nil {
 		return worlds.Page[worlds.Hook]{}, err

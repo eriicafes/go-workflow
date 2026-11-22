@@ -165,7 +165,7 @@ const (
 // message is delivered again at once, and the redelivery does not count as
 // an Attempt. Any other Redelivery counts as one, except where a World
 // restarts the count for a delayed retry, as the Postgres World restarts it
-// for a step's, as world-postgres does.
+// for a step's.
 type Redelivery struct {
 	After time.Duration
 }

@@ -741,7 +741,7 @@ type RPCBatchEventResult struct {
 func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID string, result EventResult) (RPCEventResult, error) {
 	if result.EventID == "" {
 		// An event accepted without appending, such as a run_started of a
-		// running run, is answered with the run alone, as world-local's is.
+		// running run, is answered with the run alone.
 		value := RPCEventResult{Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
 		run, err := world.RunsGet(ctx, RunsGetInput{RunID: runID})
 		if err != nil {

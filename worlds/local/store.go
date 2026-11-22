@@ -379,8 +379,8 @@ func (s *store) openWaits(runID worlds.RunID) ([]worlds.Wait, error) {
 
 // Hooks.
 
-// getHook returns the hook, whatever its tag, or nil. world-local scopes
-// only runs by tag.
+// getHook returns the hook, whatever its tag, or nil: only runs are scoped
+// by tag.
 func (s *store) getHook(hookID worlds.HookID) (*hookRecord, error) {
 	return s.scanHook(s.q.QueryRowContext(s.ctx, "SELECT doc FROM hooks WHERE hook_id = ?", string(hookID)))
 }

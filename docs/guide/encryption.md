@@ -37,8 +37,7 @@ encoding, a type implements `worlds.PayloadMarshaler` and
 
 A run's input is its argument list, `[input]`, and a step's input is
 `{args: [input]}`, as the SDK records them. Payloads of 1 KiB or more are
-compressed when that saves at least 5%: with zstd at level 3, as the SDK does,
-or with gzip when `WORKFLOW_COMPRESSION_CODEC=gzip`. `WORKFLOW_DISABLE_COMPRESSION=1` turns
+compressed when that saves at least 5%: with zstd at level 3, or with gzip when `WORKFLOW_COMPRESSION_CODEC=gzip`. `WORKFLOW_DISABLE_COMPRESSION=1` turns
 compression off.
 
 A stream is a stream of values, as the SDK's `getWritable()` writes one: each
@@ -48,8 +47,7 @@ A stream is a stream of values, as the SDK's `getWritable()` writes one: each
 ## Encryption
 
 A World encrypts a run's payloads with a key it resolves for the run, through
-the optional `worlds.EncryptionKeys` interface, the SDK's
-`getEncryptionKeyForRun`. The runtime and the client encrypt and decrypt;
+the optional `worlds.EncryptionKeys` interface. The runtime and the client encrypt and decrypt;
 Worlds store payloads as opaque bytes and never open them.
 
 The local, Postgres, AWS, and test Worlds take a 32-byte key:
@@ -72,8 +70,8 @@ that share a key keep their runs' keys apart with different scopes. Changing the
 or the scope leaves earlier runs' payloads unreadable. The test World takes a
 key and scope with `SetEncryptionKey`.
 
-The [Vercel World](/worlds/vercel#encryption) resolves keys as the SDK does on
-Vercel, from the deployment's key, so it needs no configuration.
+The [Vercel World](/worlds/vercel#encryption) resolves keys from the
+deployment's key on Vercel, so it needs no configuration.
 
 ### What is encrypted
 

@@ -100,8 +100,7 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		result.ConflictRunID = created.ConflictingRunID
 	}
 	// The run the token was taken from is woken to read its disposal while it
-	// runs, which the World says by naming its workflow, as the Workflow
-	// SDK's runtime wakes it.
+	// runs, which the World says by naming its workflow.
 	if from := created.ForceClaimedFrom; from != nil && from.RunID != options.Execution.run.RunID && from.WorkflowName != "" {
 		queue, err := worlds.RunDelivery(options.Execution.ctx, options.Execution.World(), created.ForceClaimedFrom.RunID)
 		if err != nil {
@@ -189,7 +188,7 @@ func DurableDisposeHook(execution *Execution, hookID worlds.HookID) {
 	}
 	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID)}, func(err error) error {
 		// A run that ended, a hook that is gone, and a concurrent disposal
-		// leave nothing to dispose, as the Workflow SDK's runtime skips them.
+		// leave nothing to dispose.
 		if is[*worlds.RunExpiredError](err) || is[*worlds.HookNotFoundError](err) || errors.Is(err, worlds.ErrHookNotActive) {
 			return nil
 		}

@@ -23,8 +23,8 @@ func TestStreamWithALongNameNotifies(t *testing.T) {
 }
 
 // TestStreamsAreKeyedByName checks a stream is read, appended to, and
-// described by its name alone, as world-postgres keys it, while StreamsList
-// still lists a run's own streams.
+// described by its name alone, while StreamsList still lists a run's own
+// streams.
 func TestStreamsAreKeyedByName(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)
@@ -68,7 +68,7 @@ func TestStreamsAreKeyedByName(t *testing.T) {
 }
 
 // TestStreamReadWithAnInvalidCursorStartsOver checks a cursor that does not
-// decode reads from the start, as world-postgres reads it.
+// decode reads from the start.
 func TestStreamReadWithAnInvalidCursorStartsOver(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)

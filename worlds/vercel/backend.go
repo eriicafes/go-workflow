@@ -154,8 +154,8 @@ func (b *backend) request(ctx context.Context, method, path string, query url.Va
 	if response.StatusCode == http.StatusTooManyRequests && response.Header.Get("X-Vercel-Mitigated") != "challenge" {
 		return nil, &worlds.ThrottleError{Cause: err, After: retryAfter(response.Header.Get("Retry-After"))}
 	}
-	// A 425 is a step started before its retry is due, which world-vercel
-	// reports as a TooEarlyError with the Retry-After wait.
+	// A 425 is a step started before its retry is due, returned as a
+	// TooEarlyError with the Retry-After wait.
 	if response.StatusCode == http.StatusTooEarly {
 		return nil, &worlds.TooEarlyError{RetryAfter: retryAfter(response.Header.Get("Retry-After"))}
 	}
@@ -315,8 +315,7 @@ func asTime(value any) (time.Time, bool) {
 		parsed, err := time.Parse(time.RFC3339Nano, value)
 		if err != nil {
 			// Analytics answers carry timezone-naive UTC times, such as
-			// 2026-07-13 17:09:11.593, as @workflow/world's UTCDateSchema
-			// reads them.
+			// 2026-07-13 17:09:11.593, which are read as UTC.
 			parsed, err = time.Parse("2006-01-02 15:04:05.999999999", strings.Replace(value, "T", " ", 1))
 		}
 		return parsed.UTC(), err == nil
@@ -349,8 +348,7 @@ func classify(err error, eventType worlds.EventType) error {
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			return fmt.Errorf("%w: %v", &worlds.HookNotFoundError{}, err)
 		case worlds.EventTypeWaitCompleted:
-			// A wait that was never created, as world-vercel's backend
-			// refuses it.
+			// A wait that was never created, which the backend refuses.
 			if api.Code != "run-not-found" {
 				return fmt.Errorf("%w: %v", worlds.ErrEventNotFound, err)
 			}
@@ -387,12 +385,11 @@ func classify(err error, eventType worlds.EventType) error {
 		}
 		return fmt.Errorf("%w: %v", claimed, err)
 	case api.Status == http.StatusConflict && (api.Code == "run-already-started" || api.Code == "entity-conflict"):
-		// A repeat of an event the log holds, which world-vercel reports as
-		// an EntityConflictError: a run_started of a running run, or a
-		// second creation.
+		// A repeat of an event the log holds, returned as a conflict: a
+		// run_started of a running run, or a second creation.
 		return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 	case api.Status == http.StatusGone:
-		// world-vercel's RunExpiredError: the run finished.
+		// A 410 is a RunExpiredError: the run finished.
 		return fmt.Errorf("%w: %v", &worlds.RunExpiredError{}, err)
 	case api.Status == http.StatusConflict:
 		if strings.Contains(api.Code, "run") {
@@ -400,7 +397,7 @@ func classify(err error, eventType worlds.EventType) error {
 				return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
 			}
 			// A transition from, or a creation on, a finished run: a 409,
-			// which world-vercel reports as an EntityConflictError, where a
+			// returned as a conflict that is also a RunExpiredError, where a
 			// finished run's other refusals are a 410's RunExpiredError.
 			return fmt.Errorf("%w: %w: %v", worlds.ErrEntityConflict, &worlds.RunExpiredError{}, err)
 		}
@@ -408,12 +405,11 @@ func classify(err error, eventType worlds.EventType) error {
 		case worlds.EventTypeRunCreated:
 			return fmt.Errorf("%w: %v", worlds.ErrRunAlreadyExists, err)
 		case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed, worlds.EventTypeRunCancelled, worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet, worlds.EventTypeHookCreated:
-			// The backend refuses a second creation, as world-vercel's
-			// EntityConflictError reports it.
+			// The backend refuses a second creation, returned as a
+			// conflict.
 			return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 		case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-			// A step that finished, as world-vercel's EntityConflictError
-			// reports it.
+			// A step that finished, returned as a conflict.
 			return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			if strings.Contains(api.Code, "run") {

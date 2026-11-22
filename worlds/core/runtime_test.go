@@ -985,8 +985,8 @@ func TestRuntimeRecordsARetryAfterRunCancellationAndStartsNoAttempt(t *testing.T
 	}
 	deliverNext(t, ctx, world, runtime)
 	delivery := deliverNext(t, ctx, world, runtime)
-	// As in the Workflow SDK, a finished run records the retry of a step that
-	// was running when it finished. The retry's delivery waits for its time,
+	// A finished run records the retry of a step that was running when it
+	// finished. The retry's delivery waits for its time,
 	// then finds the run finished and starts no attempt.
 	step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: worlds.RunID(run.ID()), StepID: *delivery.StepID})
 	if err != nil || step.Status != worlds.StatusPending || step.RetryAfter == nil || step.Attempt != 1 || !errors.Is(worlds.DecodeErrorPayload(step.Error, nil), cause) {
@@ -1294,7 +1294,7 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 				t.Fatalf("fatal = %v, cause = %v", fatal, fatal.Cause)
 			}
 		case errors.As(decoded, &retryable):
-			// The SDK records when to retry, so the delay shrinks as time passes.
+			// The time to retry is recorded, so the delay shrinks as time passes.
 			if retryable.Error() != "boom" || retryable.After <= 59*time.Second || retryable.After > time.Minute || !errors.Is(retryable, cause) {
 				t.Fatalf("retryable = %v, cause = %v", retryable, retryable.Cause)
 			}
@@ -1302,8 +1302,7 @@ func TestDecodedFatalErrorKeepsItsCause(t *testing.T) {
 			t.Fatalf("%v decoded without its type", err)
 		}
 	}
-	// Without a cause the message is empty, as an SDK FatalError's is
-	// without one.
+	// Without a cause the message is empty.
 	if message := (worlds.FatalError{}).Error(); message != "" {
 		t.Fatalf("a FatalError without a cause has message %q", message)
 	}

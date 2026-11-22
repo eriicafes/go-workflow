@@ -110,8 +110,8 @@ func recoveryFlows(t *testing.T, world *World) map[worlds.RunID]worlds.QueueInpu
 }
 
 // TestRecoverActiveRuns checks recovery queues one flow, keyed by its run,
-// for every active run but those parked on a hook or a wait, as
-// world-postgres's start() does, however many times it runs.
+// for every active run but those parked on a hook or a wait, however many
+// times it runs.
 func TestRecoverActiveRuns(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)

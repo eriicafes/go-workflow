@@ -370,8 +370,8 @@ func conformEventsList(t *testing.T, world worlds.World) {
 			t.Fatalf("ascending events = %v", ascending)
 		}
 	}
-	// The last page's cursor resumes after it, as in the Workflow SDK's
-	// Worlds, so a reader that reached the end picks up new events from it.
+	// The last page's cursor resumes after it, so a reader that reached the
+	// end picks up new events from it.
 	resumed := conformCreateRun(t, world, "events_resume")
 	last, err := world.EventsList(ctx, worlds.EventsListInput{RunID: resumed})
 	if err != nil || last.HasMore || last.Cursor == "" {
@@ -415,7 +415,7 @@ func conformEventsList(t *testing.T, world worlds.World) {
 	conformExpect(t, err, worlds.ErrEventNotFound, "missing event")
 	_, err = world.EventsGet(ctx, worlds.EventsGetInput{RunID: "wrun_missing", EventID: worlds.EventIDForSlot(1)})
 	conformExpect(t, err, worlds.ErrRunNotFound, "event of missing run")
-	// A missing run's events list is empty, as in the Workflow SDK's Worlds.
+	// A missing run's events list is empty.
 	if missing, err := world.EventsList(ctx, worlds.EventsListInput{RunID: "wrun_missing"}); err != nil || len(missing.Data) != 0 || missing.HasMore {
 		t.Fatalf("events of missing run = %+v err = %v, want an empty page", missing, err)
 	}
@@ -452,14 +452,14 @@ func conformEventsList(t *testing.T, world worlds.World) {
 func conformWaits(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "waits")
-	// A wait completes once it was created, as in the Workflow SDK's Worlds.
+	// A wait completes once it was created.
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
 	conformExpect(t, err, worlds.ErrEventNotFound, "wait_completed of a wait never created")
 	resumeAt := time.Now().Add(time.Hour).UTC()
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_b", worlds.DataWaitCreated{ResumeAt: resumeAt})
 	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
-	// A wait completes once, as in the Workflow SDK's Worlds.
+	// A wait completes once.
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
 	conformExpect(t, err, worlds.ErrEntityConflict, "repeated wait_completed")
 	if events := conformAllEvents(t, world, runID); len(events) != 4 {
@@ -519,8 +519,8 @@ func conformEventsSubscribe(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_after", nil)
 }
 
-// conformEventShapes checks the shapes the Workflow SDK gives events and the
-// entities writes return: every event and entity carries its spec version, a
+// conformEventShapes checks the shapes of events and the entities writes
+// return: every event and entity carries its spec version, a
 // hook its run's, a wait write returns the wait, a run's attributes are never
 // nil, and no writer may append a noop.
 func conformEventShapes(t *testing.T, world worlds.World) {
@@ -569,9 +569,8 @@ func conformEventShapes(t *testing.T, world worlds.World) {
 }
 
 // conformRepeats checks that a World refuses an event that repeats a
-// creation the run's log holds, as the Workflow SDK's Worlds refuse it with
-// EntityConflictError: a wait_created, a hook_created, and an attr_set of
-// the workflow.
+// creation the run's log holds as a conflict (ErrEntityConflict): a
+// wait_created, a hook_created, and an attr_set of the workflow.
 func conformRepeats(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "repeats")

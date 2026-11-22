@@ -47,7 +47,7 @@ type hookRecord struct {
 }
 
 // disposalRecord is a disposed hook's run, and the hook that took its token
-// when a forced claim disposed it, as world-local's hook_disposals row.
+// when a forced claim disposed it.
 type disposalRecord struct {
 	RunID          worlds.RunID
 	ForceClaimedBy *worlds.HookForceClaim
@@ -167,8 +167,7 @@ func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string
 	})
 	start := 0
 	if pagination.Cursor != "" {
-		// A cursor that does not decode starts from the first page, as
-		// world-local's parseEntityCursor reads it.
+		// A cursor that does not decode starts from the first page.
 		if raw, err := base64.RawURLEncoding.DecodeString(pagination.Cursor); err == nil {
 			after := string(raw)
 			start = len(values)
@@ -188,7 +187,7 @@ func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string
 	if page.Data == nil {
 		page.Data = []T{}
 	}
-	// The last page's cursor resumes after it, as world-local's does.
+	// The last page's cursor resumes after it.
 	if end > start {
 		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
 	}

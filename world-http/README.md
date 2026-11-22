@@ -1,8 +1,8 @@
 # `go-workflow/world-http`
 
 JavaScript World adapter for
-[go-workflow](https://go-workflow.vercel.app), a durable workflow library for
-Go.
+[go-workflow](https://go-workflow.vercel.app), the Go implementation of the
+Workflow SDK.
 
 `createWorld` exposes a Go `worlds.HTTPHandler` as a JavaScript World-shaped
 object, so the [Workflow SDK](https://workflow-sdk.dev) CLI and web UI can

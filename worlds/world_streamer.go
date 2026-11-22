@@ -28,8 +28,8 @@ func UserStreamName(runID RunID, name string) string {
 // order the World stores them.
 type Streamer interface {
 	// StreamsWrite appends Chunk. A closed stream, and a stream of a
-	// run whose data was deleted, takes no more data: the write is dropped, as
-	// world-local and world-postgres drop it, or refused with
+	// run whose data was deleted, takes no more data: the write is dropped,
+	// as the local and Postgres Worlds drop it, or refused with
 	// ErrStreamClosed, as Vercel's backend refuses it.
 	StreamsWrite(context.Context, StreamsWriteInput) error
 	// StreamsWriteMulti appends Chunks in order, as StreamsWrite does.

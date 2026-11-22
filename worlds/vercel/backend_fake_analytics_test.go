@@ -11,8 +11,8 @@ import (
 )
 
 // analytics serves /v2/analytics from the store's analytics, in the shapes
-// @workflow/world's analytics schemas read. Times are timezone-naive UTC
-// strings, as the backend's ClickHouse-backed answers are.
+// this World's analytics read. Times are timezone-naive UTC strings, as the
+// backend's ClickHouse-backed answers are.
 func (f *fakeBackend) analytics(ctx context.Context, writer http.ResponseWriter, request *http.Request, parts []string, query map[string][]string) {
 	store := f.store.Analytics()
 	first := func(key string) string {

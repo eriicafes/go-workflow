@@ -483,7 +483,7 @@ func sortedPage[T any](values []T, sortKey func(T) string, pagination worlds.Pag
 	if pagination.Limit > 0 && len(values) > pagination.Limit {
 		result.Data, result.HasMore = values[:pagination.Limit], true
 	}
-	// The last page's cursor resumes after it, as world-local's does.
+	// The last page's cursor resumes after it too.
 	if len(result.Data) > 0 {
 		result.Cursor = encodeCursor(map[string]string{"after": sortKey(result.Data[len(result.Data)-1])})
 	}

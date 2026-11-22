@@ -155,7 +155,7 @@ type flowPass struct {
 // TurboFirstDeliveries turns on the turbo path of a run's first delivery: the
 // first delivery of its first message replays without reading the log,
 // writes run_started without waiting for it, and starts its inline steps
-// before their writes commit, as the Workflow SDK's turbo mode does.
+// before their writes commit.
 var TurboFirstDeliveries = true
 
 // isTurbo reports whether the pass takes the turbo path: the first pass of the

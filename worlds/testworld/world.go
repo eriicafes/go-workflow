@@ -28,8 +28,7 @@ type World struct {
 	steps           map[worlds.RunID]map[worlds.StepID]worlds.Step
 	hooks           map[worlds.HookID]worlds.Hook
 	// disposals holds each disposed hook's run and, after a forced claim,
-	// the claimant, as world-local's hook_disposals. The hook itself is
-	// deleted.
+	// the claimant. The hook itself is deleted.
 	disposals map[worlds.HookID]hookDisposal
 	tokens    map[string]worlds.HookID
 	streams   map[worlds.RunID]map[string]*memoryStream

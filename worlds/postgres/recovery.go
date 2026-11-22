@@ -20,11 +20,10 @@ type recoveryRun struct {
 	specVersion  int
 }
 
-// recoverActiveRuns queues a flow for every active run, as world-postgres's
-// start() does through reenqueueActiveRuns when it runs workers, so a run
-// whose delivery was lost, as when its process exited before it queued the
-// run's first delivery, resumes. The queue persists, so the flow is not a
-// Recovery flow: the run's queued messages still arrive.
+// recoverActiveRuns queues a flow for every active run when the World runs
+// workers, so a run whose delivery was lost, as when its process exited
+// before it queued the run's first delivery, resumes. The queue persists, so
+// the flow is not a Recovery flow: the run's queued messages still arrive.
 //
 // A run parked on a hook or a wait is left out (see recoverableRuns), and
 // each run's flow is keyed startup-recovery:<run ID>, so a start while an
@@ -52,18 +51,17 @@ func (w *World) recoverActiveRuns(ctx context.Context) error {
 	return nil
 }
 
-// recoverableRuns lists the pending and running runs startup recovery
-// queues a flow for, as world-postgres's createRecoverableRunsList does. It
-// leaves out a running run that is parked: one of spec 2 or later with a hook
-// or an open wait, no pending or running step, no open wait that is due, and
-// no wake pending. Its next wake is a hook delivery or a wait timer that
-// queues its own flow, so replaying it on every start only adds load.
+// recoverableRuns lists the pending and running runs startup recovery queues
+// a flow for. It leaves out a running run that is parked: one of spec 2 or
+// later with a hook or an open wait, no pending or running step, no open wait
+// that is due, and no wake pending. Its next wake is a hook delivery or a
+// wait timer that queues its own flow, so replaying it on every start only
+// adds load.
 //
-// world-postgres reads a pending wake from workflow_runs.wake_pending, and a
-// delivery that may have been cut off from the orchestrator jobs a worker
-// holds locked. Go's queue keeps both as rows: a flow of the run that is due
-// or leased is a wake pending or a delivery in flight, and lists the run. A
-// wait timer that is not due yet is neither.
+// The queue keeps a pending wake and a delivery that may have been cut off as
+// rows: a flow of the run that is due or leased is a wake pending or a
+// delivery in flight, and lists the run. A wait timer that is not due yet is
+// neither.
 func (w *World) recoverableRuns(ctx context.Context) ([]recoveryRun, error) {
 	rows, err := w.pool.Query(ctx, w.q(`SELECT r.id, r.name, r.deployment_id, r.spec_version FROM workflow.workflow_runs r
 		WHERE r.status IN ('pending', 'running')

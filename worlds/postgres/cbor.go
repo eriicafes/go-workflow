@@ -7,8 +7,9 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// cborDecoding decodes the CBOR columns world-postgres keeps as bytea, such
-// as execution_context_cbor and start_hook_cbor, with maps keyed by string.
+// cborDecoding decodes the CBOR columns the Workflow SDK's Postgres World
+// keeps as bytea, such as execution_context_cbor and start_hook_cbor, with
+// maps keyed by string.
 var cborDecoding = func() cbor.DecMode {
 	mode, err := cbor.DecOptions{DefaultMapType: reflect.TypeOf(map[string]any(nil))}.DecMode()
 	if err != nil {

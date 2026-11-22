@@ -150,7 +150,7 @@ func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A closed stream drops the write, as world-local does.
+	// A closed stream drops the write.
 	if err := third.Write(ctx, [][]byte{[]byte("late")}); err != nil {
 		t.Fatalf("write to a closed stream = %v", err)
 	}
@@ -274,8 +274,8 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 		t.Fatalf("regular hook response = %d", response.Code)
 	}
 
-	// Each request resumed the hook with the SDK's Request, its body written
-	// to a byte stream of the run.
+	// Each request resumed the hook with a Request, its body written to a
+	// byte stream of the run.
 	events, err := world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: runWebhook, CorrelationID: "hook_public"})
 	if err != nil {
 		t.Fatal(err)

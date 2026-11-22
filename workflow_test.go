@@ -498,7 +498,7 @@ func TestStartOptions(t *testing.T) {
 		t.Fatalf("Start replaying a non-run ID error = %v", err)
 	}
 
-	// Attributes outside the SDK's limits start nothing.
+	// Attributes outside the attribute limits start nothing.
 	for _, attributes := range []map[string]string{
 		{"$reserved": "x"},
 		{"": "x"},
@@ -1161,7 +1161,7 @@ func writeSecret(ctx context.Context, text string) (struct{}, error) {
 // TestEncryptedRunsKeepPayloadsOpaque runs a workflow on a World with an
 // encryption key: its own payloads are encrypted with the run's key (encr),
 // and what is sent from outside the run is sealed to its public key (encp),
-// as in the Workflow SDK, while every value reads back.
+// while every value reads back.
 func TestEncryptedRunsKeepPayloadsOpaque(t *testing.T) {
 	for _, mode := range []string{"in process", "over HTTP"} {
 		t.Run(mode, func(t *testing.T) { testEncryptedRun(t, mode == "over HTTP") })

@@ -10,7 +10,7 @@ import (
 
 var (
 	// ErrWorkflowNotRegistered reports that the run's workflow is not registered
-	// with the Runtime, as the Workflow SDK's WorkflowNotRegisteredError does.
+	// with the Runtime.
 	ErrWorkflowNotRegistered = errors.New("workflow: workflow is not registered")
 	// ErrRunNotFound is returned when no run has the requested run ID.
 	ErrRunNotFound = errors.New("workflow: run not found")
@@ -44,10 +44,9 @@ var (
 	ErrEventInvalid = errors.New("workflow: event is invalid")
 	// ErrEntityConflict reports an event that repeats one the run's log
 	// already holds, such as a second step_created or wait_completed for
-	// the same step or wait, as the Workflow SDK's EntityConflictError does.
-	// What the event records is already in the log. A transition from, or
-	// a creation on, a finished run is refused with it too, and then also
-	// matches *RunExpiredError.
+	// the same step or wait. What the event records is already in the log.
+	// A transition from, or a creation on, a finished run is refused with it
+	// too, and then also matches *RunExpiredError.
 	ErrEntityConflict = errors.New("workflow: event conflicts with the run's log")
 	// ErrWebhookRequestTooLarge is reported by WebhookHandler, with status 413,
 	// when a webhook request body exceeds 128 KiB.
@@ -141,8 +140,8 @@ func init() {
 			recorded.Decode("token", &notFound.Token)
 			*e = notFound
 		})
-	// The SDK records these as Errors named after their class, without
-	// their fields, which Go keeps to read back. expiredAt is a Date, which
+	// These are recorded as Errors named after their class, with their
+	// fields kept for Go to read back. expiredAt is a Date, which
 	// a recorded field, as JSON, cannot hold, so it is not kept.
 	sdkerror.RegisterNamed("RunExpiredError",
 		func(e *RunExpiredError) []sdkerror.Field {
@@ -174,12 +173,11 @@ func init() {
 }
 
 // Error is the error a failed step or run returns after it is recorded and
-// read back: the chain of errors the original error wrapped, recorded as
-// the Workflow SDK records errors. Its message is the original error's
-// message, and errors.Is and errors.As keep working across replay: Is
-// matches a target with the type and message of an error in the chain, as
-// sentinel errors made by errors.New are matched, and As decodes an error of
-// the target's type from its JSON encoding.
+// read back: the chain of errors the original error wrapped. Its message is
+// the original error's message, and errors.Is and errors.As keep working
+// across replay: Is matches a target with the type and message of an error
+// in the chain, as sentinel errors made by errors.New are matched, and As
+// decodes an error of the target's type from its JSON encoding.
 type Error = sdkerror.Error
 
 // NewError returns an Error that records err and its chain. An Error in the
@@ -187,15 +185,15 @@ type Error = sdkerror.Error
 func NewError(err error) *Error { return sdkerror.New(err) }
 
 // FatalError marks an intentional failure that must not be retried. It is
-// recorded as the Workflow SDK's FatalError.
+// recorded as FatalError.
 type FatalError struct{ Cause error }
 
 func (e FatalError) Error() string { return causeMessage(e.Cause) }
 func (e FatalError) Unwrap() error { return e.Cause }
 
 // RetryableError requests a delay before the next attempt, while retries
-// remain. It is recorded as the Workflow SDK's RetryableError, with when the
-// retry is due as retryAfter.
+// remain. It is recorded as RetryableError, with when the retry is due as
+// retryAfter.
 type RetryableError struct {
 	Cause error
 	After time.Duration
@@ -204,8 +202,7 @@ type RetryableError struct {
 func (e RetryableError) Error() string { return causeMessage(e.Cause) }
 func (e RetryableError) Unwrap() error { return e.Cause }
 
-// causeMessage returns cause's message, or an empty one without a cause, as
-// the SDK's FatalError and RetryableError have without a message.
+// causeMessage returns cause's message, or an empty one without a cause.
 func causeMessage(cause error) string {
 	if cause == nil {
 		return ""
@@ -214,16 +211,15 @@ func causeMessage(cause error) string {
 }
 
 // HookConflictError reports that another active hook holds a hook's token
-// and the claim is not forced. It is recorded as the Workflow SDK's
-// HookConflictError.
+// and the claim is not forced. It is recorded as HookConflictError.
 type HookConflictError struct {
 	// Token is the hook token another run holds. Empty when the World did
 	// not name it.
 	Token string
 	// RunID is the run that holds the token.
 	RunID RunID
-	// Start reports that the hook is a run's start hook, which the SDK
-	// records as kind "start".
+	// Start reports that the hook is a run's start hook, which is recorded
+	// as kind "start".
 	Start bool
 }
 
@@ -235,7 +231,7 @@ func (e *HookConflictError) Error() string {
 }
 
 // HookForceClaimedError reports that another hook took over a hook's token.
-// It is recorded as the Workflow SDK's HookForceClaimedError.
+// It is recorded as HookForceClaimedError.
 type HookForceClaimedError struct {
 	// Token is the hook token that was taken over.
 	Token string
@@ -252,20 +248,18 @@ func (e *HookForceClaimedError) Error() string {
 }
 
 // HookNotFoundError reports that no hook has the requested token or hook
-// ID. It is recorded as an Error named HookNotFoundError, as the Workflow
-// SDK records its HookNotFoundError.
+// ID. It is recorded as an Error named HookNotFoundError.
 type HookNotFoundError struct {
-	// Token is the token looked up, or the hook ID, as the SDK's Worlds
-	// name it. Empty when the World did not name it.
+	// Token is the token looked up, or the hook ID, as the World names it.
+	// Empty when the World did not name it.
 	Token string
 }
 
 func (e *HookNotFoundError) Error() string { return "workflow: hook not found" }
 
 // RunExpiredError reports a run that is no longer available: it finished,
-// so it takes no more events, or its data was deleted, as the Workflow SDK's
-// RunExpiredError. It is recorded as an Error named RunExpiredError, as the
-// SDK records it.
+// so it takes no more events, or its data was deleted. It is recorded as an
+// Error named RunExpiredError.
 type RunExpiredError struct {
 	// RunID is the run, when the World named it.
 	RunID RunID
@@ -290,8 +284,7 @@ func (e *RunExpiredError) Error() string {
 }
 
 // StreamExpiredError reports a read of a stream whose data a World deleted.
-// It is recorded as an Error named StreamExpiredError, as the Workflow SDK
-// records its StreamExpiredError.
+// It is recorded as an Error named StreamExpiredError.
 type StreamExpiredError struct {
 	RunID    RunID
 	StreamID string
@@ -302,8 +295,8 @@ type StreamExpiredError struct {
 func (e *StreamExpiredError) Error() string { return "workflow: stream expired" }
 
 // RunNotSupportedError reports an event on a run created under a newer spec
-// version than this release supports (SpecVersion), as the Workflow SDK's
-// RunNotSupportedError does: a newer release runs it.
+// version than this release supports (SpecVersion): a newer release runs
+// it.
 type RunNotSupportedError struct {
 	RunSpecVersion   int
 	WorldSpecVersion int
@@ -331,7 +324,7 @@ func (e *ThrottleError) Error() string {
 func (e *ThrottleError) Unwrap() error { return e.Cause }
 
 // TooEarlyError reports a step_started refused before the step's retry is
-// due, as the Workflow SDK's TooEarlyError does.
+// due.
 type TooEarlyError struct {
 	// RetryAfter is how long until the retry is due.
 	RetryAfter time.Duration

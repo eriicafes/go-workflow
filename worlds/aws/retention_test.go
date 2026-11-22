@@ -76,7 +76,7 @@ func TestExpireRun(t *testing.T) {
 	if dynamo.has("expire-wrun_done") {
 		t.Error("the expiry record was not deleted")
 	}
-	// The run's items stay, as in the Workflow SDK, without its payloads.
+	// The run's items stay, without its payloads.
 	for _, id := range done {
 		if dynamo.items[id] == nil {
 			t.Errorf("%s was deleted", id)

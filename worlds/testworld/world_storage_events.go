@@ -22,7 +22,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	// A resume's digest must be its payload's, as world-postgres checks it.
+	// A resume's digest must be its payload's.
 	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -124,14 +124,12 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	if input.RunID == "" {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	// The run ID and attributes are checked as the Workflow SDK's Worlds
-	// check them.
+	// The run ID and attributes are checked.
 	if err := worlds.CheckRunCreation(input, time.Now()); err != nil {
 		return worlds.EventResult{}, err
 	}
 	if decision, ok := m.startDecisions[input.RunID]; ok && input.StartHook != nil {
-		// A refused candidate stays refused, as the Workflow SDK's Worlds
-		// answer it.
+		// A refused candidate stays refused.
 		return worlds.EventResult{}, worlds.StartHookRejectionRefusal(input, decision)
 	}
 	if _, exists := m.runs[input.RunID]; exists {
@@ -272,7 +270,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	if err := m.fenceLocked(input.RunID, input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
-	// A hook is created once, as in the Workflow SDK's Worlds.
+	// A hook is created once.
 	if _, disposed := m.disposals[worlds.HookID(input.Event.CorrelationID)]; disposed || m.hasEventLocked(input.RunID, worlds.EventTypeHookCreated, input.Event.CorrelationID) {
 		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEntityConflict, input.Event.CorrelationID)
 	}
@@ -287,8 +285,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 			input.Event.EventType = worlds.EventTypeHookConflict
 		} else {
 			// A live owner is woken to read its disposal, so the claim names
-			// its workflow; a finished one's hook is disposed of quietly, as
-			// in the Workflow SDK's Worlds.
+			// its workflow; a finished one's hook is disposed of quietly.
 			by := &worlds.HookForceClaim{RunID: input.RunID, HookID: worlds.HookID(input.Event.CorrelationID)}
 			created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: owner.RunID, HookID: ownerID}
 			if victim, ok := m.runs[owner.RunID]; !ok || victim.Status.Terminal() {
@@ -321,8 +318,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 // granting another execution.
 func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEvent) (worlds.EventResult, bool, error) {
 	run := m.runs[runID]
-	// A run of a newer spec version is a newer release's, as the Workflow
-	// SDK's Worlds refuse it.
+	// A run of a newer spec version is a newer release's, and is refused.
 	if err := worlds.CheckRunSpecVersion(runID, run.SpecVersion); err != nil {
 		return worlds.EventResult{}, false, err
 	}
@@ -337,9 +333,8 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		// the answer holds no event.
 		return worlds.EventResult{}, true, nil
 	}
-	// A step is created once, and its other events need it unfinished, as
-	// in the Workflow SDK's Worlds. A started step may be started again: each
-	// start records a new attempt.
+	// A step is created once, and its other events need it unfinished. A
+	// started step may be started again: each start records a new attempt.
 	if err := worlds.CheckStepEvent(requested, stepExists, step.Status, step.RetryAfter, run.Status, time.Now()); err != nil {
 		return worlds.EventResult{}, false, err
 	}
@@ -362,8 +357,7 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 			return worlds.EventResult{}, false, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEntityConflict, requested.EventType, requested.CorrelationID)
 		}
 	case worlds.EventTypeHookDisposed:
-		// A disposed hook is gone, so disposing it again finds no hook, as
-		// in the Workflow SDK's Worlds.
+		// A disposed hook is gone, so disposing it again finds no hook.
 		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if !exists || hook.RunID != runID {
 			return worlds.EventResult{}, false, &worlds.HookNotFoundError{Token: requested.CorrelationID}
@@ -479,8 +473,7 @@ func (m *World) deltaLocked(runID worlds.RunID, count *int, cursor string) []wor
 func (m *World) materializeLocked(event worlds.Event) {
 	run := m.runs[event.RunID]
 	now := event.CreatedAt
-	// The run itself changes, and is updated, only on its own events, as
-	// the Workflow SDK's Worlds update it.
+	// The run itself changes, and is updated, only on its own events.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		run.UpdatedAt = now
@@ -601,7 +594,7 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 		step.CompletedAt = &event.CreatedAt
 	}
 	// A start ends the wait for a retry, which a step_retrying sets, and a
-	// result keeps, as in the Workflow SDK's Worlds.
+	// result keeps.
 	switch event.EventType {
 	case worlds.EventTypeStepStarted:
 		step.RetryAfter = nil
@@ -615,7 +608,6 @@ func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {
 }
 
 func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	if err := ctx.Err(); err != nil {
 		return worlds.EventsPage{}, err
@@ -624,7 +616,7 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 	defer m.mu.RUnlock()
 	log, ok := m.events[input.RunID]
 	if !ok {
-		// A missing run has no events, as in world-local.
+		// A missing run has no events.
 		return worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}, Snapshot: worlds.EventsSnapshot{InBandCount: 1}}, nil
 	}
 	snapshot := worlds.EventsSnapshot{EventCount: len(log), InBandCount: m.runs[input.RunID].InBandCount}
@@ -642,7 +634,6 @@ func (m *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (m *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	all, err := m.EventsList(ctx, worlds.EventsListInput{RunID: input.RunID, ResolveData: input.ResolveData, Pagination: worlds.Pagination{SortOrder: input.Pagination.SortOrder, Limit: -1}})
 	if err != nil {
@@ -741,7 +732,7 @@ func eventPage(values []worlds.Event, pagination worlds.Pagination) worlds.Page[
 		end = len(values)
 	}
 	result := worlds.Page[worlds.Event]{Data: values[start:end], HasMore: end < len(values)}
-	// The last page's cursor resumes after it, as world-local's does.
+	// The last page's cursor resumes after it.
 	if end > start {
 		result.Cursor = string(values[end-1].EventID)
 	}

@@ -11,10 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The channels are world-postgres's: workflow_run_events carries the run ID
-// of every committed write, workflow_run_status the run ID of a run that
-// ended, and workflow_event_chunk a written chunk's {streamId, chunkId}.
-// workflow_queue wakes Go's workers.
+// The channels: workflow_run_events carries the run ID of every committed
+// write, workflow_run_status the run ID of a run that ended, and
+// workflow_event_chunk a written chunk's {streamId, chunkId}. workflow_queue
+// wakes Go's workers.
 const (
 	channelQueue   = "workflow_queue"
 	channelRuns    = "workflow_run_status"
@@ -171,10 +171,10 @@ type notifyingTx struct {
 
 type notification struct{ channel, payload string }
 
-// notify queues a notification on tx, sent once it commits (announce). As in
-// world-postgres, a NOTIFY never runs inside the write's transaction, where
-// its failure would fail the write and every notifying commit would queue on
-// Postgres's notification lock.
+// notify queues a notification on tx, sent once it commits (announce). A
+// NOTIFY never runs inside the write's transaction, where its failure would
+// fail the write and every notifying commit would queue on Postgres's
+// notification lock.
 func notify(tx pgx.Tx, channel, payload string) {
 	pending := tx.(*notifyingTx)
 	for _, queued := range pending.pending {
@@ -187,10 +187,10 @@ func notify(tx pgx.Tx, channel, payload string) {
 
 // announce sends a committed transaction's notifications. They are best
 // effort: a waiter that misses one finds the change on its next poll, so a
-// failure is ignored. As in world-postgres, the write returns once a run's
-// end (notifyRunTerminal) or a stream chunk (notifyStream) is announced, and
-// does not wait for the other channels (announceRunEvents). Notifications sent
-// together share one statement.
+// failure is ignored. The write returns once a run's end (notifyRunTerminal)
+// or a stream chunk (notifyStream) is announced, and does not wait for the
+// other channels (announceRunEvents). Notifications sent together share one
+// statement.
 func (w *World) announce(ctx context.Context, pending []notification) {
 	if len(pending) == 0 {
 		return
