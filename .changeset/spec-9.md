@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Record every run as a spec 9 run, with the run's flow as its only fenced writer, and move the runtime to `worlds/core`.
+Record runs as spec 9 runs, and move the runtime to `worlds/core`.

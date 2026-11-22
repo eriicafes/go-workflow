@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Retry a failed step after a second unless its error names a delay.
+Wait a second between step retries, and name the retry count when a step runs out.

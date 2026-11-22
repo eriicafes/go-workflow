@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Add `workflow.Version`, and record it, the encryption flag and the starting trace context on every run.
+Add `workflow.Version`, and record each run's execution context.
