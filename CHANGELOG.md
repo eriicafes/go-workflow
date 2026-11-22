@@ -1,5 +1,72 @@
 # go-workflow
 
+## 0.9.0
+
+### Minor Changes
+
+- 8e22d09: Report runs and waits in the Workflow SDK's analytics shapes, and add `Run.ErrorCode`.
+- 13ea9b0: Report steps, events, and hooks in the Workflow SDK's analytics shapes.
+- 1e2804d: Store a run's cancellation in the `abrt_` hook and the `system_abort` stream.
+- 39cb07e: Add `workflow.CancelOptions`, so `Run.Cancel` can record a reason.
+- 11ac7c5: Rename `WithRPCToken` and `WithRPCMiddleware` to `WithClientToken` and `WithClientMiddleware`.
+- 1789808: Add `workflow.DeleteRuns` and `worlds.RetainNone` to delete a run's data.
+- 99c101d: Wake waiting flows from the events a World pushes.
+- 39cb07e: Add `workflow.Version`, and record each run's execution context.
+- 08f82eb: Refuse events on a finished run.
+- 1103048: Delete disposed hooks, and drop `Hook.DisposedAt` and `Hook.ForceClaimedBy`.
+- a65eedb: Deduplicate hook resumes by resume ID and payload digest.
+- bad8732: Keep the local World open after `Clear`.
+- 98f6fc4: Store the local World in SQLite on world-local's schema.
+- 11ac7c5: Fail a run or step after 48 deliveries.
+- 23e96ad: Draw step, wait, and hook IDs and tokens from the run's seed.
+- 5af35a9: Add `Config.EncryptionKey` to encrypt run data.
+- 39cb07e: Default the Postgres World to 50 workers and a 500 ms poll.
+- 2a3a6e3: Store the Postgres World in world-postgres's tables.
+- 39cb07e: Report each refused message of `QueueBatch` on its result.
+- 11ac7c5: Remove `QueueCancel` from Worlds.
+- e3dd2ba: Add `workflow.RandReader` for deterministic random bytes in workflow code.
+- bd5fa00: Add `QueueInput.Recovery` for a World that lost its queue.
+- 5f95359: Refuse a repeated creation event with `ErrEntityConflict`.
+- d7da9be: Use the replay clock for `workflow.Now`, sleeps, and timeouts in workflow code.
+- d986301: Retention deletes a run's data instead of the run in the Postgres and AWS Worlds.
+- d842644: Rename the RPC version to `worlds.RPCVersion`, and remove `World.SpecVersion`.
+- d5921b2: Let flows run ahead of their inline steps' writes.
+- 39cb07e: Fail runs past 25,000 events or a replay time limit.
+- adde901: Match no runs with an empty status filter.
+- 3e7fd0e: Replace sentinel errors that have a Workflow SDK class with its error types.
+- 77360e3: Record a spec version on every event, step, and hook.
+- cdd1d3d: Align World reads, refusals, and retries with the Workflow SDK's Worlds.
+- 5af35a9: Record run data in the Workflow SDK's format, readable by its web UI and Vercel's dashboard.
+- 6ea9e15: Name streams and compress payloads in the Workflow SDK's formats.
+- 11ac7c5: Make `workflow.Writer` return a buffered `workflow.StreamWriter`.
+- 822457d: Drop writes to closed streams, and refuse runs of a newer spec version.
+- 02331c6: Validate run IDs, attributes, resumes, and step events in every World.
+- 5af35a9: Let webhooks take any number of requests, and remove `WebhookOption.Method`.
+- 16aa2ea: Add `workflow.SetAttributes` to set a run's attributes.
+- 5c22077: Record runs as spec 9 runs, and move the runtime to `worlds/core`.
+- 0d8a08e: Replace `workflow.StartOnLatest` with `StartOptions.Deployment`.
+- 59c8ad3: Add `StartOptions.Hook` to create a hook with the run.
+- fc5f97d: Add `workflow.StartOptions`.
+- ca40a1f: Add `StartOptions.Region`, and tag Vercel run IDs with their region.
+- b790971: Add `StartOptions.ReplayedFromRunID`.
+- 39cb07e: Wait a second between step retries, and name the retry count when a step runs out.
+- 11ac7c5: Serve stream writes over a WebSocket.
+- cc942a7: Add `*worlds.ThrottleError`, and wait out rate limits before retrying a delivery.
+- 1584f15: Support `Analytics()` in the Vercel World.
+- 11ac7c5: Store the Vercel World's runs in Vercel's managed workflow storage instead of Redis.
+- 39cb07e: Send Vercel queue requests through the API proxy when given an access token.
+
+### Patch Changes
+
+- 39cb07e: Refuse an `attr_set` over 8192 bytes in every World.
+- 8006067: Default the AWS module's `max_receive_count` to 50.
+- 39cb07e: Write integers beyond 2^53 as `BigInt`, so JavaScript tools read them exactly.
+- 39cb07e: Keep queued messages in the local and Postgres Worlds until they are delivered.
+- 39cb07e: Record errors under the Workflow SDK's class names.
+- 39cb07e: Retry and time out requests to the Vercel backend.
+- 39cb07e: Make world-http compatible with the Workflow SDK's spec 9 client.
+- 39cb07e: Fail instead of redelivering when the World refuses attributes or a hook as invalid.
+
 ## 0.8.0
 
 ### Minor Changes
