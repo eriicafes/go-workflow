@@ -33,10 +33,8 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 		q.where("r.status::text = ANY(" + q.arg(statusStrings(input.Status)) + ")")
 	}
 	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	if err := q.keyset(input.Pagination.Cursor, "r.created_at", "r.id", descending); err != nil {
-		return worlds.Page[worlds.Run]{}, err
-	}
-	sql := runSelect(input.ResolveData) + q.clause() + order("r.created_at", "r.id", descending) + q.limit(input.Pagination.Limit)
+	q.keyset(input.Pagination.Cursor, "r.id", descending)
+	sql := runSelect(input.ResolveData) + q.clause() + order("r.id", descending) + q.limit(input.Pagination.Limit)
 	rows, err := w.pool.Query(ctx, w.q(sql), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Run]{}, err
@@ -45,7 +43,7 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	if err != nil {
 		return worlds.Page[worlds.Run]{}, err
 	}
-	return keysetPage(runs, input.Pagination.Limit, func(run worlds.Run) (time.Time, string) { return run.CreatedAt, string(run.RunID) }), nil
+	return keysetPage(runs, input.Pagination.Limit, func(run worlds.Run) string { return string(run.RunID) }), nil
 }
 
 func (w *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {
@@ -191,7 +189,7 @@ func (w *World) deleteRunData(ctx context.Context, id worlds.RunID) worlds.Delet
 		return w.purgeRunData(ctx, tx, id)
 	})
 	if err != nil {
-		return worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "storage_error", Retryable: ctx.Err() == nil}
+		return worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "internal_error", Retryable: ctx.Err() == nil}
 	}
 	return result
 }

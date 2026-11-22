@@ -20,6 +20,16 @@ import (
 // maxFramePart caps one frame part read from the backend.
 const maxFramePart = 256 << 20
 
+// errFrameInvalid is a frame that arrived whole and cannot be decoded.
+var errFrameInvalid = errors.New("workflow/vercel: invalid frame")
+
+// truncatedError is an event list answer that ended, or whose connection
+// failed, before its end frame. The events read before it are whole.
+type truncatedError struct{ err error }
+
+func (e *truncatedError) Error() string { return e.err.Error() }
+func (e *truncatedError) Unwrap() error { return e.err }
+
 // frame is one decoded frame.
 type frame struct {
 	Meta map[string]any
@@ -62,7 +72,7 @@ func (f *frameReader) next() (frame, error) {
 	}
 	var decoded map[string]any
 	if err := cborDecode.Unmarshal(meta, &decoded); err != nil {
-		return frame{}, fmt.Errorf("workflow/vercel: decode frame meta: %w", err)
+		return frame{}, fmt.Errorf("%w: decode frame meta: %v", errFrameInvalid, err)
 	}
 	return frame{Meta: decoded, Body: body}, nil
 }
@@ -77,7 +87,7 @@ func (f *frameReader) part() ([]byte, error) {
 	}
 	length := binary.BigEndian.Uint32(size[:])
 	if length > maxFramePart {
-		return nil, fmt.Errorf("workflow/vercel: frame part of %d bytes is too large", length)
+		return nil, fmt.Errorf("%w: frame part of %d bytes is too large", errFrameInvalid, length)
 	}
 	data := make([]byte, length)
 	if _, err := io.ReadFull(f.r, data); err != nil {
@@ -97,26 +107,39 @@ type eventPage struct {
 	// Seq and SeqInBand are the run's position counters the backend read
 	// before the listing, when it reports them.
 	Seq, SeqInBand *int
+	// MaxEvents is the most events the run may hold, from the x-wf-max-events
+	// header, or zero when the answer names none.
+	MaxEvents int
 }
 
 // readEventPage reads event frames until the end frame. Each event frame's
 // meta is the event, and its body is the payload of the event's payload
-// field. A terminal error frame is returned as an error.
+// field. A terminal error frame is returned as an error. An answer cut off
+// before its end frame is returned as a *truncatedError, with the events read
+// before it.
 func readEventPage(body io.Reader, header interface{ Get(string) string }) (eventPage, error) {
 	reader := newFrameReader(body)
 	var page eventPage
 	for {
 		next, err := reader.next()
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				err = errors.New("workflow/vercel: event stream ended without its end frame")
+			if errors.Is(err, errFrameInvalid) {
+				return page, err
 			}
-			return page, err
+			if errors.Is(err, io.EOF) {
+				err = fmt.Errorf("workflow/vercel: event stream ended without its end frame (%d events read)", len(page.Events))
+			}
+			return page, &truncatedError{err}
 		}
 		if isControl(next.Meta, "_end") {
 			page.Cursor, _ = next.Meta["next"].(string)
 			page.HasMore, _ = next.Meta["hasMore"].(bool)
 			page.Seq, page.SeqInBand = snapshotCounters(next.Meta["snapshot"], header)
+			if header != nil {
+				if limit := headerCounter(header.Get("X-Wf-Max-Events")); limit != nil {
+					page.MaxEvents = *limit
+				}
+			}
 			return page, nil
 		}
 		if isControl(next.Meta, "_error") {

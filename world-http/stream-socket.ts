@@ -11,6 +11,14 @@ import { HTTPWorldError, type RPCClient, type RPC } from "./rpc.js";
 
 /** How long a session waits for its socket to open before giving up on it. */
 const CONNECT_TIMEOUT_MS = 10_000;
+/**
+ * A request the server refuses with 429 did not apply, so it is sent again
+ * under a new request ID after the wait the refusal names: at least
+ * `minWaitMs`, which is also the wait for a refusal that names none. One
+ * request waits `budgetMs` in all. Past it, the socket is given up and the
+ * request goes through RPC.
+ */
+export const streamSocketThrottle = { minWaitMs: 1_000, budgetMs: 30_000 };
 /** The most chunks, and chunk bytes, one write message carries. */
 const MAX_CHUNKS_PER_WRITE = 1_000;
 const MAX_MESSAGE_BYTES = 1 << 20;
@@ -27,6 +35,18 @@ type Pending = { resolve: (reply: Reply) => void; reject: (error: Error) => void
 
 /** The socket failed before the server answered a request. */
 class SocketFailed extends Error {}
+
+/** The server refused a request without applying it, and it is not sent on the socket again. */
+class SocketNotSent extends Error {}
+
+/** A 429's retryAfter in milliseconds: seconds, or an HTTP date. Zero when it names no wait. */
+function retryAfterMs(value: string | undefined): number {
+	if (!value) return 0;
+	const seconds = Number.parseInt(value, 10);
+	if (!Number.isNaN(seconds)) return Math.max(seconds, 0) * 1_000;
+	const date = Date.parse(value);
+	return Number.isNaN(date) ? 0 : Math.max(date - Date.now(), 0);
+}
 
 function encodeFrame(meta: object, body: Uint8Array): Uint8Array {
 	const encoded = encode(meta);
@@ -175,13 +195,26 @@ export class HTTPStreamWriteSession {
 	}
 
 	private async send(socket: WebSocket, meta: object, body: Uint8Array, ack: Reply["type"]): Promise<void> {
+		let waitedMs = 0;
 		for (;;) {
 			const reply = await this.request(socket, meta, body);
 			if (reply.type === ack) return;
 			if (reply.status === 429) {
-				const seconds = Number(reply.retryAfter) || 0.1;
-				await new Promise((resolve) => setTimeout(resolve, seconds * 1_000));
+				// The request did not apply. It is sent again, under a new
+				// request ID, unless the server is draining the socket or
+				// the waits would pass the budget.
+				const waitMs = Math.max(retryAfterMs(reply.retryAfter), streamSocketThrottle.minWaitMs);
+				if (this.draining || waitedMs + waitMs > streamSocketThrottle.budgetMs) {
+					throw new SocketNotSent("workflow: stream socket throttled");
+				}
+				waitedMs += waitMs;
+				await new Promise((resolve) => setTimeout(resolve, waitMs));
 				continue;
+			}
+			// A close is idempotent, so one the server failed is closed again
+			// through RPC.
+			if (ack === "close_ack" && reply.status !== undefined && reply.status >= 500) {
+				throw new SocketFailed(reply.message ?? `workflow: stream socket close failed with ${reply.status}`);
 			}
 			const code = reply.status === 409 || reply.status === 410 ? "stream_closed" : "stream_socket_error";
 			throw new HTTPWorldError(code, reply.message ?? `workflow: stream socket refused with ${reply.status}`, reply.status);
@@ -218,9 +251,10 @@ export class HTTPStreamWriteSession {
 				if (this.draining) this.giveUp();
 				return;
 			} catch (error) {
-				if (!(error instanceof SocketFailed)) throw error;
-				// The write may have landed; storing it again keeps the chunks,
-				// at the cost of a possible duplicate.
+				if (!(error instanceof SocketFailed) && !(error instanceof SocketNotSent)) throw error;
+				// A write the server kept refusing for its rate limit did not
+				// apply. One on a failed socket may have landed; storing it
+				// again keeps the chunks, at the cost of a possible duplicate.
 				this.giveUp();
 			}
 		}
@@ -237,7 +271,7 @@ export class HTTPStreamWriteSession {
 				this.giveUp();
 				return;
 			} catch (error) {
-				if (!(error instanceof SocketFailed)) throw error;
+				if (!(error instanceof SocketFailed) && !(error instanceof SocketNotSent)) throw error;
 				this.giveUp();
 			}
 		}

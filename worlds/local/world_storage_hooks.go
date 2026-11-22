@@ -11,6 +11,9 @@ import (
 )
 
 func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (worlds.Hook, error) {
+	if err := checkID("hook ID", string(input.HookID)); err != nil {
+		return worlds.Hook{}, err
+	}
 	var hook worlds.Hook
 	err := w.read(ctx, func(s *store) error {
 		record, err := s.getHook(input.HookID)
@@ -20,7 +23,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 		if record == nil {
 			return &worlds.HookNotFoundError{Token: string(input.HookID)}
 		}
-		if available, err := s.hookAvailable(*record, time.Now()); err != nil || !available {
+		if available, err := s.hookAvailable(*record, clock()); err != nil || !available {
 			if err == nil {
 				err = &worlds.HookNotFoundError{Token: string(input.HookID)}
 			}
@@ -49,23 +52,53 @@ func (s *store) hookAvailable(record hookRecord, now time.Time) (bool, error) {
 	return err == nil && !run.Status.Terminal(), err
 }
 
+// tokenHeld reports whether a token's owner still holds it at now. An owner
+// has let go once its hook is disposed, its run is gone, or its run has
+// finished and the token's retention is over. Its row stays until the next
+// claim replaces it.
+func (s *store) tokenHeld(owner *tokenRecord, now time.Time) (bool, error) {
+	if owner == nil {
+		return false, nil
+	}
+	if disposal, err := s.getDisposal(owner.HookID); err != nil || disposal != nil {
+		return false, err
+	}
+	run, err := s.getRunAnyTag(owner.RunID)
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !run.Status.Terminal() {
+		return true, nil
+	}
+	return owner.TokenRetentionUntil != nil && owner.TokenRetentionUntil.After(now), nil
+}
+
 func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByTokenInput) (worlds.Hook, error) {
-	// A token whose retention has passed is unclaimed. Its expired row is
-	// replaced by the next claim.
+	// The token's owner answers while its hook is readable. One snapshot
+	// reads both: a claim moves the token and deletes the previous owner's
+	// hook in one commit.
 	var hook worlds.Hook
 	err := w.read(ctx, func(s *store) error {
 		owner, err := s.getToken(input.Token)
 		if err != nil {
 			return err
 		}
-		if !owner.held(time.Now()) {
+		if owner == nil {
 			return &worlds.HookNotFoundError{Token: input.Token}
 		}
 		record, err := s.getHook(owner.HookID)
 		if err != nil {
 			return err
 		}
-		if record == nil {
+		if record == nil || record.Token != input.Token {
+			return &worlds.HookNotFoundError{Token: input.Token}
+		}
+		if available, err := s.hookAvailable(*record, clock()); err != nil {
+			return err
+		} else if !available {
 			return &worlds.HookNotFoundError{Token: input.Token}
 		}
 		hook, err = hookView(*record, s.committed(record.RunID), input.ResolveData)
@@ -83,7 +116,7 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 			return err
 		}
 		hooks := make([]worlds.Hook, 0, len(records))
-		now := time.Now()
+		now := clock()
 		for _, record := range records {
 			if available, err := s.hookAvailable(record, now); err != nil {
 				return err
@@ -96,8 +129,8 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 			}
 			hooks = append(hooks, hook)
 		}
-		page, err = keyPage(hooks, input.Pagination, func(hook worlds.Hook) string { return sortKey(hook.CreatedAt, string(hook.HookID)) })
-		return err
+		page = entityPage(hooks, input.Pagination, func(hook worlds.Hook) (time.Time, string) { return hook.CreatedAt, string(hook.HookID) })
+		return nil
 	})
 	return page, err
 }
@@ -112,7 +145,7 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		// The start hook's ID is the start hook's alone.
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	now := time.Now().UTC()
+	now := clock()
 	if created.TokenRetentionUntil != nil && created.TokenRetentionUntil.After(now.Add(w.hookRetentionLimit)) {
 		return worlds.EventResult{}, fmt.Errorf("%w: hook retention cannot exceed %s in the local World", worlds.ErrEventInvalid, w.hookRetentionLimit)
 	}
@@ -130,11 +163,15 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	if claimant.run.Status.Terminal() {
-		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.run.Status, input.Event)
-	}
+	// A superseded writer is refused before anything else is checked.
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
+	}
+	if err := worlds.CheckRunSpecVersion(claimant.run.RunID, claimant.run.SpecVersion); err != nil {
+		return worlds.EventResult{}, err
+	}
+	if claimant.run.Status.Terminal() {
+		return worlds.EventResult{}, worlds.FinishedRunRefusal(claimant.run.Status, input.Event)
 	}
 	// A hook is created once.
 	id := worlds.HookID(input.Event.CorrelationID)
@@ -156,7 +193,9 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	if err != nil {
 		return worlds.EventResult{}, err
 	}
-	if owner.held(now) {
+	if held, err := s.tokenHeld(owner, now); err != nil {
+		return worlds.EventResult{}, err
+	} else if held {
 		previous, err := s.getHook(owner.HookID)
 		if err != nil {
 			return worlds.EventResult{}, err

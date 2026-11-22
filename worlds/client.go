@@ -214,7 +214,11 @@ func (c worldClient) RunsCreate(ctx context.Context, input ClientRunsCreateInput
 }
 
 func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput) error {
-	_, err := c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled}})
+	data, err := EncodeRunCancelled(input.Reason)
+	if err != nil {
+		return err
+	}
+	_, err = c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled, Data: data}})
 	return err
 }
 
@@ -331,7 +335,8 @@ func (c *httpClient) call(ctx context.Context, method string, input, output any)
 	if output == nil {
 		return nil
 	}
-	if err := cbor.Unmarshal(envelope.Output, output); err != nil {
+	// Maps decode with string keys, as JSON encodes them.
+	if err := eventDataGeneric.Unmarshal(envelope.Output, output); err != nil {
 		return fmt.Errorf("workflow: decode RPC output: %w", err)
 	}
 	return nil

@@ -394,7 +394,7 @@ func (a LogAnalytics) HooksList(ctx context.Context, input AnalyticsHooksListInp
 	}
 	hooks := analyticsHooks(events)
 	return keyPage(hooks, input.Pagination, func(hook AnalyticsHook) string {
-		return hook.CreatedAt.UTC().Format(time.RFC3339Nano) + "/" + string(hook.HookID)
+		return hook.CreatedAt.UTC().Format(analyticsKeyTime) + "/" + string(hook.HookID)
 	})
 }
 
@@ -499,7 +499,7 @@ func (a LogAnalytics) WaitsList(ctx context.Context, input AnalyticsWaitsListInp
 		waits = slices.DeleteFunc(waits, func(wait AnalyticsWait) bool { return wait.Status != input.Status })
 	}
 	return keyPage(waits, input.Pagination, func(wait AnalyticsWait) string {
-		return wait.CreatedAt.UTC().Format(time.RFC3339Nano) + "/" + string(wait.WaitID)
+		return wait.CreatedAt.UTC().Format(analyticsKeyTime) + "/" + string(wait.WaitID)
 	})
 }
 
@@ -530,3 +530,7 @@ func (a LogAnalytics) waits(ctx context.Context, runID RunID) ([]AnalyticsWait, 
 	}
 	return waits, nil
 }
+
+// analyticsKeyTime formats the time of a sort key at a fixed width, so keys
+// order as their times do.
+const analyticsKeyTime = "2006-01-02T15:04:05.000000000Z"

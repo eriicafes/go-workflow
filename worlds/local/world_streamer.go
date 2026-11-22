@@ -3,7 +3,6 @@ package localworld
 import (
 	"context"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -26,6 +25,20 @@ func (s *store) streamState(name string) (int, bool, error) {
 	return count, closed == 1, err
 }
 
+// endPurgedStream writes the end marker of a new stream of a run whose data
+// was deleted, in row 0 as the run's purge leaves its other streams, and
+// reports whether it did.
+func (s *store) endPurgedStream(runID worlds.RunID, name string) (bool, error) {
+	run, err := s.getRunAnyTag(runID)
+	if errors.Is(err, worlds.ErrRunNotFound) {
+		return false, nil
+	}
+	if err != nil || !worlds.RunDataExpired(run.Run, time.Now()) {
+		return false, err
+	}
+	return true, s.exec("INSERT INTO stream_chunks (name, idx, run_id, tag, data, eof) VALUES (?, 0, ?, ?, NULL, 1)", name, string(runID), s.tagValue())
+}
+
 func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput) error {
 	return w.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: input.RunID, Name: input.Name, Chunks: [][]byte{input.Chunk}})
 }
@@ -43,12 +56,8 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 		if count == 0 {
 			// A deleted run's streams take no more data: its purge closed the
 			// streams it had, and a new one is closed as it is first written.
-			run, err := s.getRunAnyTag(input.RunID)
-			if err != nil && !errors.Is(err, worlds.ErrRunNotFound) {
+			if purged, err := s.endPurgedStream(input.RunID, input.Name); err != nil || purged {
 				return err
-			}
-			if err == nil && worlds.RunDataExpired(run.Run, time.Now()) {
-				return s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, 1, ?, NULL, 1)", string(input.RunID), input.Name, s.tagValue())
 			}
 		}
 		for index, chunk := range input.Chunks {
@@ -69,6 +78,13 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 		if err != nil || closed {
 			return err
 		}
+		if count == 0 {
+			// A deleted run's new stream is closed as its purge closed the
+			// others.
+			if purged, err := s.endPurgedStream(input.RunID, input.Name); err != nil || purged {
+				return err
+			}
+		}
 		return s.exec("INSERT INTO stream_chunks (run_id, name, idx, tag, data, eof) VALUES (?, ?, ?, ?, NULL, 1)", string(input.RunID), input.Name, count+1, s.tagValue())
 	})
 }
@@ -76,7 +92,7 @@ func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput
 func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChunksInput) (worlds.StreamChunksResult, error) {
 	// Sleep on this process's commits, polling for other processes', until a
 	// chunk past the cursor exists, the stream is done, or Wait elapses.
-	start := chunkCursor(input.Cursor)
+	start := parseChunkCursor(input.Cursor)
 	if input.Cursor == "" {
 		var err error
 		if start, err = worlds.StreamsStartIndex(ctx, w, input); err != nil {
@@ -114,7 +130,7 @@ func (s *store) readChunks(name string, start, limit int) (worlds.StreamChunksRe
 		return worlds.StreamChunksResult{}, false, err
 	}
 	end := max(start, min(start+limit, count))
-	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: strconv.Itoa(end), HasMore: end < count, Done: closed, RetryAfter: streamRetryAfter}
+	result := worlds.StreamChunksResult{Data: []worlds.StreamChunk{}, Cursor: chunkCursor(end), HasMore: end < count, Done: closed, RetryAfter: streamRetryAfter}
 	if end > start {
 		rows, err := s.q.QueryContext(s.ctx, "SELECT idx, data FROM stream_chunks WHERE name = ? AND eof = 0 AND idx > ? AND idx <= ? ORDER BY idx", name, start, end)
 		if err != nil {
@@ -152,8 +168,8 @@ func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoI
 func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
 	names := []string{}
 	err := w.read(ctx, func(s *store) error {
-		condition, args := s.tagged("tag")
-		rows, err := s.q.QueryContext(s.ctx, "SELECT DISTINCT name FROM stream_chunks WHERE run_id = ? AND "+condition+" ORDER BY name", append([]any{string(input.RunID)}, args...)...)
+		// A run's streams are listed whatever their tag.
+		rows, err := s.q.QueryContext(s.ctx, "SELECT DISTINCT name FROM stream_chunks WHERE run_id = ? ORDER BY name", string(input.RunID))
 		if err != nil {
 			return err
 		}

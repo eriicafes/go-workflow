@@ -33,6 +33,8 @@ JSON object, and each type keeps its payload in one named field:
 | `DataRunFailed` | `run_failed` | `error` |
 | `DataHookCreated` | `hook_created`, `hook_conflict` | `metadata` |
 | `DataHookReceived` | `hook_received` | `payload` |
+| `HookDisposedEventData` | `hook_disposed` | |
+| `DataRunCancelled` | `run_cancelled` | |
 | `DataWaitCreated` | `wait_created` | |
 | `DataAttrSet` | `attr_set` | |
 
@@ -78,7 +80,7 @@ Every event carries the `specVersion` of its writer, 9.
 | `run_started` | A flow started replaying the runner. |
 | `run_completed` | The run's output. |
 | `run_failed` | The run's error. |
-| `run_cancelled` | The run was cancelled. |
+| `run_cancelled` | The run was cancelled, with the `cancelReason` its caller gave, if any. |
 | `attr_set` | Changes to the run's attributes. |
 
 ### Steps
@@ -97,8 +99,8 @@ Every event carries the `specVersion` of its writer, 9.
 | --- | --- |
 | `hook_created` | A hook and the token it claims. |
 | `hook_received` | A hook's payload, or a webhook's request. |
-| `hook_disposed` | The hook released its token, or lost it to a forced claim (`forceClaimedBy` set). |
-| `hook_conflict` | The hook could not be created because another run owns its token. |
+| `hook_disposed` | The hook released its token, recording the `token`, or lost it to a forced claim (`forceClaimedBy` set). |
+| `hook_conflict` | The hook could not be created because another run owns its token. Its data is only the `token` and the `conflictingRunId`, and only a World records one. |
 
 ### Waits
 

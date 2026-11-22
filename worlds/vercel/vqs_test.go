@@ -2,10 +2,12 @@ package vercelworld
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -46,6 +50,9 @@ func newRecorder(t *testing.T, respond func(recorded) (int, string)) *recorder {
 		status, response := http.StatusCreated, `{"messageId":"msg_1"}`
 		if r.respond != nil {
 			status, response = r.respond(entry)
+		}
+		if strings.HasPrefix(response, "--vqs-test\r\n") {
+			writer.Header().Set("Content-Type", "multipart/mixed; boundary=vqs-test")
 		}
 		writer.WriteHeader(status)
 		_, _ = writer.Write([]byte(response))
@@ -83,10 +90,23 @@ func TestPublishVQS(t *testing.T) {
 		"Vqs-Experimental-Concurrency-Key": "wrun_1",
 		"Vqs-Delay-Seconds":                "91",
 		"Vqs-Deployment-Id":                "dpl_1",
+		"X-Vercel-Workflow-Run-Id":         "wrun_1",
+		"User-Agent":                       world.api.userAgent,
 	} {
 		if got := first.Header.Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
+	}
+	// A flow's message names its run, and a step's message its step too.
+	if got := first.Header.Get("X-Vercel-Workflow-Step-Id"); got != "" {
+		t.Fatalf("flow message names step %q", got)
+	}
+	stepID := worlds.StepID("step_1")
+	if _, err := world.publishVQS(context.Background(), queueMessage{ID: "03ID", RunID: "wrun_1", StepID: &stepID}, vqsSend{}); err != nil {
+		t.Fatal(err)
+	}
+	if step := server.all()[2].Header; step.Get("X-Vercel-Workflow-Run-Id") != "wrun_1" || step.Get("X-Vercel-Workflow-Step-Id") != "step_1" {
+		t.Fatalf("step message headers = %v", step)
 	}
 	if got := first.Header.Get("Vqs-Retention-Seconds"); got != "" {
 		t.Fatalf("publish sets retention %q, want Vercel's default", got)
@@ -112,6 +132,7 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	sent := worlds.QueueInput{
 		RunID: "wrun_1", QueueName: "queue", WorkflowName: "wf", StepID: &stepID, NotBefore: &due, IdempotencyKey: "key", DeploymentID: "dpl_run",
 		ReplayDivergenceCount: 2, DeploymentMismatchRetryCount: 1, StepName: "double", StepAttempt: 3, StepResent: true,
+		StepCreatedAt:  time.UnixMilli(1_700_000_000_123).UTC(),
 		RunSpecVersion: worlds.SpecVersion,
 		CompleteWaits:  []string{"wait_1"}, Recovery: true, WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_2", Attempt: 1, ResumeAt: &resumeAt, HopAt: &hopAt},
 		Retention: worlds.StepRetention,
@@ -206,6 +227,134 @@ func TestMessageLifetimeClampsRetentionAndDelay(t *testing.T) {
 		if delay != test.wantDelay || retention != test.wantRetention {
 			t.Errorf("messageLifetime(%s, %s) = %d, %d, want %d, %d", test.delay, test.retention, delay, retention, test.wantDelay, test.wantRetention)
 		}
+	}
+}
+
+func TestQueueBatchSendsOneRequestPerDestination(t *testing.T) {
+	var mu sync.Mutex
+	type batch struct {
+		path, deployment string
+		parts            []http.Header
+		bodies           []string
+	}
+	var batches []batch
+	refuse := ""
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, params, _ := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		got := batch{path: request.URL.Path, deployment: request.Header.Get("Vqs-Deployment-Id")}
+		results := []map[string]any{}
+		reader := multipart.NewReader(request.Body, params["boundary"])
+		for {
+			part, err := reader.NextRawPart()
+			if err != nil {
+				break
+			}
+			data, _ := io.ReadAll(part)
+			got.parts, got.bodies = append(got.parts, http.Header(part.Header)), append(got.bodies, string(data))
+			var message queueMessage
+			_ = json.Unmarshal(data, &message)
+			switch {
+			case refuse != "" && string(message.RunID) == refuse:
+				results = append(results, map[string]any{"status": "failed", "statusCode": 503, "error": "refused", "retryable": true})
+			case message.StepID != nil:
+				results = append(results, map[string]any{"status": "deferred", "messageId": nil})
+			default:
+				results = append(results, map[string]any{"status": "sent", "messageId": "msg_" + string(message.RunID)})
+			}
+		}
+		mu.Lock()
+		batches = append(batches, got)
+		mu.Unlock()
+		_ = json.NewEncoder(writer).Encode(map[string]any{"results": results})
+	}))
+	t.Cleanup(server.Close)
+	world, err := New(Config{BaseURL: "https://app.example.com/v1/workflow", QueueURL: server.URL + "/api/v3", Topic: "workflow", Topics: map[string]string{"slow": "workflow-slow"}, Routes: map[string]string{"routed": "slow"}, OIDCToken: staticOIDCToken("static-token"), DeploymentID: "dpl_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	stepID := worlds.StepID("step_1")
+	results, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: []worlds.QueueInput{
+		{RunID: "wrun_a", WorkflowName: "w"},
+		{RunID: "wrun_b", WorkflowName: "routed"},
+		{RunID: "wrun_c", WorkflowName: "w", StepID: &stepID, IdempotencyKey: "step_1", Retention: time.Hour},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Results are in the order of the items, and a message accepted without an
+	// ID has none.
+	if want := []worlds.QueueResult{{MessageID: "msg_wrun_a"}, {MessageID: "msg_wrun_b"}, {}}; !reflect.DeepEqual(results, want) {
+		t.Fatalf("results = %+v, want %+v", results, want)
+	}
+	if len(batches) != 2 {
+		t.Fatalf("%d requests, want one per topic", len(batches))
+	}
+	for _, sent := range batches {
+		if sent.deployment != "dpl_1" {
+			t.Errorf("batch to %s names deployment %q", sent.path, sent.deployment)
+		}
+		switch sent.path {
+		case "/api/v3/topic/workflow/batch":
+			if len(sent.parts) != 2 {
+				t.Fatalf("default topic batch has %d messages, want 2", len(sent.parts))
+			}
+			flow, step := sent.parts[0], sent.parts[1]
+			if flow.Get("Vqs-Experimental-Concurrency-Key") != "wrun_a" || flow.Get("X-Vercel-Workflow-Run-Id") != "wrun_a" || flow.Get("Content-Type") != "application/json" || !strings.Contains(sent.bodies[0], `"runId":"wrun_a"`) {
+				t.Errorf("flow message = %v %s", flow, sent.bodies[0])
+			}
+			if step.Get("Vqs-Idempotency-Key") != "step_1" || step.Get("Vqs-Retention-Seconds") != "3600" || step.Get("X-Vercel-Workflow-Step-Id") != "step_1" || step.Get("Vqs-Experimental-Concurrency-Key") != "" {
+				t.Errorf("step message = %v", step)
+			}
+		case "/api/v3/topic/workflow-slow/batch":
+			if len(sent.parts) != 1 || sent.parts[0].Get("X-Vercel-Workflow-Run-Id") != "wrun_b" {
+				t.Errorf("routed batch = %v", sent.parts)
+			}
+		default:
+			t.Errorf("batch sent to %s", sent.path)
+		}
+	}
+
+	// More messages than one request takes go in several.
+	batches = nil
+	many := make([]worlds.QueueInput, vqsBatchMax+1)
+	for index := range many {
+		many[index] = worlds.QueueInput{RunID: worlds.RunID(fmt.Sprintf("wrun_%d", index)), WorkflowName: "w"}
+	}
+	if results, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: many}); err != nil || len(results) != len(many) || len(batches) != 2 || len(batches[0].parts) != vqsBatchMax || len(batches[1].parts) != 1 || results[vqsBatchMax].MessageID != fmt.Sprintf("msg_wrun_%d", vqsBatchMax) {
+		t.Fatalf("large batch = %d results in %d requests, %v", len(results), len(batches), err)
+	}
+
+	// A message Vercel Queues refuses is reported in its own result, beside
+	// the results of the others, with whether sending it again may succeed.
+	refuse = "wrun_b"
+	items := []worlds.QueueInput{{RunID: "wrun_a", WorkflowName: "w"}, {RunID: "wrun_b", WorkflowName: "w"}}
+	results, err = world.QueueBatch(ctx, worlds.QueueBatchInput{Items: items})
+	if err != nil || len(results) != 2 || results[0] != (worlds.QueueResult{MessageID: "msg_wrun_a"}) || results[1].MessageID != "" || results[1].Err == nil || !strings.Contains(results[1].Err.Error(), "503: refused") || !results[1].Retryable {
+		t.Fatalf("batch with a refused message = %+v, %v", results, err)
+	}
+	// A caller that needs the whole batch stored gets one error for it.
+	var failed *worlds.QueueBatchError
+	if _, err := worlds.QueueAll(ctx, world, items); !errors.As(err, &failed) || failed.Failed != 1 || failed.Total != 2 || !failed.Retryable {
+		t.Fatalf("QueueAll with a refused message = %v", err)
+	}
+}
+
+func TestMaxQueueDelayFromEnv(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": vqsMaxQueueDelay, "nope": vqsMaxQueueDelay, "0": vqsMaxQueueDelay, "600": 10 * time.Minute} {
+		t.Setenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", value)
+		if got := maxQueueDelay(); got != want {
+			t.Errorf("VERCEL_QUEUE_MAX_DELAY_SECONDS=%q: %v, want %v", value, got, want)
+		}
+	}
+	// It caps the delay of a message without a retention, and is the World's
+	// MaxQueueDelay.
+	t.Setenv("VERCEL_QUEUE_MAX_DELAY_SECONDS", "600")
+	if delay, _ := messageLifetime(time.Hour, 0); delay != 600 {
+		t.Fatalf("delay = %ds, want it capped at 600", delay)
+	}
+	if delay, _ := messageLifetime(3*time.Hour, 6*time.Hour); delay != 3*60*60 {
+		t.Fatalf("delay of a message with a retention = %ds, want its own cap", delay)
 	}
 }
 
@@ -395,6 +544,7 @@ func TestQueueConsumerPaths(t *testing.T) {
 	}
 
 	// A failing execution schedules a retry.
+	shorten(t, &readRetryBase, time.Millisecond)
 	world.api.baseURL = "http://127.0.0.1:1"
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, deliveryRequest("msg_3", message(queueMessage{ID: "fail", RunID: "wrun_1"})))
@@ -424,13 +574,18 @@ func TestQueueConsumerPaths(t *testing.T) {
 }
 
 func TestQueueConsumerReceivesByID(t *testing.T) {
-	payload := base64.StdEncoding.EncodeToString([]byte(`{"id":"gone"}`))
+	// Vercel Queues answers a claim with the message as one multipart part:
+	// its lease and counts in the part's headers, its payload as the body.
+	message := "--vqs-test\r\n" +
+		"Content-Type: application/json\r\nVqs-Message-Id: msg_1\r\nVqs-Receipt-Handle: rh_2\r\nVqs-Delivery-Count: 3\r\nVqs-Experimental-Handoff-Count: 1\r\n" +
+		"Vqs-Timestamp: 2026-01-02T03:04:05.000Z\r\nVqs-Expires-At: 2026-01-03T03:04:05.000Z\r\n\r\n" +
+		`{"id":"gone"}` + "\r\n--vqs-test--\r\n"
 	server := newRecorder(t, func(request recorded) (int, string) {
 		switch {
 		case strings.HasSuffix(request.Path, "/id/msg_gone"):
 			return http.StatusGone, ""
 		case strings.Contains(request.Path, "/id/"):
-			return http.StatusOK, `{"messageId":"msg_1","receiptHandle":"rh_2","deliveryCount":1,"contentType":"application/json","body":"` + payload + `"}` + "\n"
+			return http.StatusOK, message
 		}
 		return http.StatusNoContent, ""
 	})
@@ -446,11 +601,16 @@ func TestQueueConsumerReceivesByID(t *testing.T) {
 	if response.Code != http.StatusOK || len(requests) != 2 {
 		t.Fatalf("structured delivery: status %d requests %+v", response.Code, requests)
 	}
-	if receive := requests[0]; receive.Path != "/api/v3/topic/workflow/consumer/group/id/msg_1" || receive.Header.Get("Accept") != "application/x-ndjson" || receive.Header.Get("Vqs-Visibility-Timeout-Seconds") != "300" {
+	if receive := requests[0]; receive.Path != "/api/v3/topic/workflow/consumer/group/id/msg_1" || receive.Header.Get("Accept") != "multipart/mixed" || receive.Header.Get("Vqs-Visibility-Timeout-Seconds") != "300" {
 		t.Fatalf("receive = %+v", receive)
 	}
 	if ack := requests[1]; ack.Method != http.MethodDelete || ack.Path != "/api/v3/topic/workflow/consumer/group/lease/rh_2" {
 		t.Fatalf("ack = %+v", ack)
+	}
+
+	claimed, err := world.receiveByID(context.Background(), vqsDelivery{Topic: "workflow", ConsumerGroup: "group", MessageID: "msg_1", Region: RegionIAD1})
+	if err != nil || claimed.ReceiptHandle != "rh_2" || string(claimed.Body) != `{"id":"gone"}` || claimed.DeliveryCount != 3 || claimed.HandoffCount != 1 || claimed.CreatedAt.IsZero() || !claimed.ExpiresAt.Equal(claimed.CreatedAt.Add(24*time.Hour)) {
+		t.Fatalf("claimed message = %+v, %v", claimed, err)
 	}
 
 	// A v2beta delivery without a receipt handle is claimed by ID; one that
@@ -459,16 +619,16 @@ func TestQueueConsumerReceivesByID(t *testing.T) {
 	request.Header.Del("Ce-Vqsreceipthandle")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || len(server.all()) != 3 {
+	if response.Code != http.StatusOK || len(server.all()) != 4 {
 		t.Fatalf("processed delivery: status %d", response.Code)
 	}
 }
 
 func TestRetryDelay(t *testing.T) {
-	// Each delivery doubles the backoff from a second, within 25% jitter,
-	// never below Vercel Queues' 5 seconds and around 15 minutes at most.
+	// Each delivery doubles the backoff from a second, less up to 25% jitter,
+	// never below Vercel Queues' 5 seconds and 15 minutes at most.
 	for count, base := range map[int]time.Duration{0: time.Second, 1: time.Second, 4: 8 * time.Second, 6: 32 * time.Second, 10: 512 * time.Second, 11: 15 * time.Minute, 48: 15 * time.Minute} {
-		low, high := max(base*3/4, vqsMinRetry), max(base*5/4, vqsMinRetry)
+		low, high := max(base*3/4, vqsMinRetry), max(base, vqsMinRetry)
 		for range 50 {
 			if got := retryDelay(count); got < low || got > high {
 				t.Fatalf("retryDelay(%d) = %v, want between %v and %v", count, got, low, high)
@@ -700,18 +860,22 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	server := newRecorder(t, func(recorded) (int, string) { return http.StatusOK, `{"success":true}` })
 	world := newQueueWorld(t, server)
 	// Through the API proxy, the header names each request's region.
-	world.api.proxy = true
+	world.api.proxy, world.api.project, world.api.env = true, "prj_1", "production"
+	world.config.Token = "vercel-token"
 	t.Setenv("VERCEL_REGION", "cdg1")
 	ctx := context.Background()
 
 	// A message goes to the region its run ID carries, else VERCEL_REGION's.
 	tagged := tagRunID("wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", RegionSYD1)
-	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1"} {
+	// An ID tagged with a region this package does not know carries none.
+	unknown, _ := ulid.ParseStrict(strings.TrimPrefix(string(tagged), runIDPrefix))
+	unknown[runIDRegionByte] |= runIDRegionMask
+	for _, runID := range []worlds.RunID{tagged, "wrun_01ARZ3NDEKTSV4RRFFQ69G5FAV", "wrun_1", worlds.RunID(runIDPrefix + unknown.String())} {
 		if _, err := world.publishVQS(ctx, queueMessage{ID: "id", RunID: runID}, vqsSend{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for index, want := range []string{"syd1", "cdg1", "cdg1"} {
+	for index, want := range []string{"syd1", "cdg1", "cdg1", "cdg1"} {
 		if got := server.all()[index].Header.Get("X-Vercel-Queue-Region"); got != want {
 			t.Errorf("message %d region = %q, want %s", index, got, want)
 		}
@@ -725,6 +889,18 @@ func TestVQSRoutesByRegion(t *testing.T) {
 	if ack := requests[len(requests)-1]; ack.Method != http.MethodDelete || ack.Header.Get("X-Vercel-Queue-Region") != "hnd1" {
 		t.Fatalf("ack = %+v", ack)
 	}
+
+	// The proxy takes the access token and the project's headers, under its
+	// queues-proxy path unless QueueURL names another root.
+	if ack := requests[len(requests)-1]; ack.Header.Get("Authorization") != "Bearer vercel-token" || ack.Header.Get("X-Vercel-Project-Id") != "prj_1" || ack.Header.Get("X-Vercel-Environment") != "production" {
+		t.Fatalf("proxied ack headers = %v", ack.Header)
+	}
+	explicit := world.config.QueueURL
+	world.config.QueueURL = ""
+	if queue, header := world.queueURL(RegionSYD1); queue != world.api.baseURL+"/queues-proxy/api/v3" || header.Get("X-Vercel-Queue-Region") != "syd1" {
+		t.Fatalf("proxied queue = %q, %v", queue, header)
+	}
+	world.config.QueueURL = explicit
 
 	// Without the proxy, an explicit QueueURL is one endpoint, and each
 	// region otherwise has its own host.

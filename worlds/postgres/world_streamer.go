@@ -75,7 +75,13 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			SELECT c.id, $1, $2, c.data, false FROM unnest($3::varchar[], $4::bytea[]) AS c(id, data)`), input.Name, input.RunID, ids, values); err != nil {
 			return err
 		}
-		return notifyChunk(tx, input.Name, ids[len(ids)-1])
+		// Each chunk is announced.
+		for _, id := range ids {
+			if err := notifyChunk(tx, input.Name, id); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -17,13 +18,20 @@ type DurableSetAttributesOptions struct {
 	AllowReservedAttributes bool
 }
 
+// worldValidationFailure reports whether err is a World refusing an event
+// for what it holds, which the same event meets on every attempt.
+func worldValidationFailure(err error) bool {
+	return errors.Is(err, worlds.ErrAttributeInvalid) || errors.Is(err, worlds.ErrEventInvalid)
+}
+
 // DurableSetAttributes draws the next attribute write's ID, attr_ and the
 // run's next correlation ULID, and records an attr_set event with Changes
 // written by the workflow, or on replay matches the recorded one. It returns
 // once the walk reaches the event, which does not move the replay clock. A
 // step delivery that reaches an unrecorded write suspends, leaving it to a
 // flow. When the event recorded with its ID is not the same write, it ends
-// the replay with a panic carrying a replayDivergenceError.
+// the replay with a panic carrying a replayDivergenceError. A write the World
+// refuses as invalid returns a FatalError.
 func DurableSetAttributes(options DurableSetAttributesOptions) error {
 	execution := options.Execution
 	id := "attr_" + execution.seed.ulid()
@@ -36,7 +44,21 @@ func DurableSetAttributes(options DurableSetAttributesOptions) error {
 		if err != nil {
 			return err
 		}
-		execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, CorrelationID: id, Data: data}, nil)
+		var refusal error
+		execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, CorrelationID: id, Data: data}, func(err error) error {
+			if worldValidationFailure(err) {
+				refusal = err
+				return nil
+			}
+			return err
+		})
+		if refusal != nil {
+			// The World refuses the write whenever it is made, such as one
+			// past the run's attribute limit, which only the World can
+			// check. A redelivery would replay into the same refusal, so the
+			// workflow gets it as an error that fails the run.
+			return worlds.FatalError{Cause: fmt.Errorf("workflow: SetAttributes failed World validation: %w", refusal)}
+		}
 		index, _ = execution.declared(id)
 	}
 	event := execution.events[index]

@@ -57,6 +57,8 @@ func eventDataType(eventType EventType) any {
 		return &DataRunCompleted{}
 	case EventTypeRunFailed:
 		return &DataRunFailed{}
+	case EventTypeRunCancelled:
+		return &DataRunCancelled{}
 	case EventTypeStepCreated:
 		return &DataStepCreated{}
 	case EventTypeStepStarted:

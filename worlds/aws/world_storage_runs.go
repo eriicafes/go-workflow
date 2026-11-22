@@ -104,7 +104,7 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 		item, found, err := w.item(ctx, runKey(string(id)))
 		switch {
 		case err != nil:
-			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
+			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "internal_error", true
 			continue
 		case !found:
 			results[index].Outcome = worlds.DeleteDataNotFound
@@ -117,7 +117,7 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 		alreadyExpired, err := w.purgeRun(ctx, id)
 		switch {
 		case err != nil:
-			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "storage_error", true
+			results[index].Outcome, results[index].Code, results[index].Retryable = worlds.DeleteDataFailed, "internal_error", true
 		case alreadyExpired:
 			results[index].Outcome = worlds.DeleteDataAlreadyDeleted
 		default:

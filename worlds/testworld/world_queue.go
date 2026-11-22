@@ -48,6 +48,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 
 func (w *World) deliver(id string, input worlds.QueueInput) {
 	input.MessageID = id
+	input.CreatedAt = time.Now().UTC()
 	wait := func(until *time.Time) bool {
 		if until == nil {
 			return true
@@ -196,16 +197,10 @@ func (w *World) Acknowledge(ctx context.Context, id string) error {
 	return ErrMessageNotFound
 }
 
+// QueueBatch queues the items one after another, and reports an item that
+// failed in its result.
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
-	result := make([]worlds.QueueResult, 0, len(input.Items))
-	for _, item := range input.Items {
-		value, err := w.Queue(ctx, item)
-		if err != nil {
-			return result, err
-		}
-		result = append(result, value)
-	}
-	return result, nil
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 // Queued returns the inputs of the deliveries not yet acknowledged, in the

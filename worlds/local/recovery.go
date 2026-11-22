@@ -76,7 +76,6 @@ func (w *World) recoverActiveRuns(ctx context.Context) error {
 // stepOwnership is what a run's events record of a step's inline ownership.
 type stepOwnership struct {
 	name      string
-	attempt   int
 	inline    bool
 	retried   bool
 	finished  bool
@@ -130,7 +129,6 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 					step.name, step.inline = data.StepName, true
 				}
 			}
-			step.attempt++
 			step.startedAt = event.CreatedAt
 		case worlds.EventTypeStepCreated:
 			if step == nil {
@@ -148,17 +146,15 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 			}
 		}
 	}
-	payload, err := worlds.EncodeErrorPayload(errors.New(orphanedStepMessage), worlds.PayloadOptions{})
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
+	payload := orphanedStepError()
 	for _, id := range running {
 		step := owned[id]
 		if step == nil || !step.inline || step.retried || step.finished || step.startedAt.IsZero() || !step.startedAt.Before(bootedAt) {
 			continue
 		}
-		data, err := json.Marshal(worlds.DataStepResult{StepName: step.name, Attempt: step.attempt, Error: payload, RetryAfter: &now})
+		// The event names the step and its error alone, so the step retries
+		// at once.
+		data, err := json.Marshal(worlds.DataStepResult{StepName: step.name, Error: payload})
 		if err != nil {
 			return err
 		}
@@ -170,6 +166,16 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 		}
 	}
 	return nil
+}
+
+// orphanedStepError returns the error payload a released step's attempt
+// records, the bytes the Workflow SDK's local World records: the "devl"
+// format prefix, then the devalue encoding of an Error with a name and a
+// message. It is not encrypted even in a run that has a key, since a payload
+// without an encryption prefix is read as it is and the message is fixed.
+func orphanedStepError() []byte {
+	message, _ := json.Marshal(orphanedStepMessage)
+	return []byte(`devl[["Error",1],{"name":2,"message":3},"Error",` + string(message) + `]`)
 }
 
 // is reports whether err's chain has an error of type E.

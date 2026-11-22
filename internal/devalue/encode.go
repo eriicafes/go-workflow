@@ -16,6 +16,9 @@ import (
 	"time"
 )
 
+// maxSafeInteger is the largest integer a JavaScript number holds exactly.
+const maxSafeInteger = 1<<53 - 1
+
 // encoder encodes Go values as nodes.
 type encoder struct{}
 
@@ -113,8 +116,15 @@ func (e encoder) encodeNode(v reflect.Value, seen map[uintptr]bool) (any, error)
 	case reflect.Bool:
 		return v.Bool(), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		// An integer a JavaScript number cannot hold exactly is a BigInt.
+		if n := v.Int(); n > maxSafeInteger || n < -maxSafeInteger {
+			return Typed{"BigInt", strconv.FormatInt(n, 10)}, nil
+		}
 		return Number(strconv.FormatInt(v.Int(), 10)), nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if v.Uint() > maxSafeInteger {
+			return Typed{"BigInt", strconv.FormatUint(v.Uint(), 10)}, nil
+		}
 		return Number(strconv.FormatUint(v.Uint(), 10)), nil
 	case reflect.Float32, reflect.Float64:
 		return floatNode(v.Float(), t.Bits()), nil

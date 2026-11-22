@@ -3,9 +3,11 @@ package vercelworld
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +77,84 @@ func TestStreamsCloseRetriesTransientFailures(t *testing.T) {
 	answers = []int{http.StatusServiceUnavailable}
 	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_1", Name: "out", Chunk: []byte("x")}); err == nil || requests.Load() != 1 {
 		t.Fatalf("write = %v after %d requests, want an error after 1", err, requests.Load())
+	}
+}
+
+func TestStreamWritesRetryAFailedConnect(t *testing.T) {
+	shorten(t, &streamAppendRetryBase, time.Millisecond)
+	var requests, dials atomic.Int32
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.WriteHeader(status)
+	}))
+	t.Cleanup(server.Close)
+	refused := int32(2)
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		if dials.Add(1) <= refused {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}}
+	world, err := New(Config{BaseURL: "https://app.example.com/v1/workflow", Topic: "workflow", BackendURL: server.URL, OIDCToken: staticOIDCToken("static-token"), HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// A write whose connection was never made cannot have been stored, so it
+	// is sent again.
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_1", Name: "out", Chunk: []byte("a")}); err != nil || dials.Load() != 3 || requests.Load() != 1 {
+		t.Fatalf("write over a refused connection = %v after %d dials and %d requests, want one stored write", err, dials.Load(), requests.Load())
+	}
+	dials.Store(0)
+	if err := world.StreamsWriteMulti(ctx, worlds.StreamsWriteMultiInput{RunID: "wrun_1", Name: "out", Chunks: [][]byte{[]byte("a"), []byte("b")}}); err != nil || dials.Load() != 3 {
+		t.Fatalf("multi write over a refused connection = %v after %d dials", err, dials.Load())
+	}
+	// And no more than streamAppendMaxRetries times.
+	dials.Store(0)
+	refused = 100
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_1", Name: "out", Chunk: []byte("a")}); err == nil || dials.Load() != streamAppendMaxRetries+1 {
+		t.Fatalf("write that never connects = %v after %d dials, want %d", err, dials.Load(), streamAppendMaxRetries+1)
+	}
+	// A write that reached the backend may have been stored, and is not.
+	refused, status = 0, http.StatusBadGateway
+	requests.Store(0)
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_1", Name: "out", Chunk: []byte("a")}); statusOf(err) != http.StatusBadGateway || requests.Load() != 1 {
+		t.Fatalf("write answered 502 = %v after %d requests, want one", err, requests.Load())
+	}
+}
+
+func TestStreamWritesWaitOutARateLimit(t *testing.T) {
+	shorten(t, &throttleMinWait, time.Millisecond)
+	var requests atomic.Int32
+	limited, challenge := int32(2), false
+	world := newBackendWorld(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= limited {
+			if challenge {
+				writer.Header().Set("X-Vercel-Mitigated", "challenge")
+			}
+			writer.WriteHeader(http.StatusTooManyRequests)
+		}
+	})
+	ctx := context.Background()
+	write := func() error {
+		requests.Store(0)
+		return world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: "wrun_1", Name: "out", Chunk: []byte("a")})
+	}
+	// A rate limit refuses the write before it is stored.
+	if err := write(); err != nil || requests.Load() != 3 {
+		t.Fatalf("rate limited write = %v after %d requests, want success on the third", err, requests.Load())
+	}
+	// It is sent again streamAppendMaxRetries times at most.
+	limited = 100
+	var throttled *worlds.ThrottleError
+	if err := write(); !errors.As(err, &throttled) || requests.Load() != streamAppendMaxRetries+1 {
+		t.Fatalf("write rate limited every time = %v after %d requests", err, requests.Load())
+	}
+	// A firewall challenge is not a rate limit to wait out.
+	challenge = true
+	if err := write(); err == nil || errors.As(err, &throttled) || requests.Load() != 1 {
+		t.Fatalf("challenged write = %v after %d requests, want one", err, requests.Load())
 	}
 }
 

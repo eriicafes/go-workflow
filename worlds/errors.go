@@ -34,9 +34,21 @@ var (
 	// candidate the World will never admit: one whose run ID is older than
 	// StartHookCandidateMaxAge.
 	ErrStartHookRejected = errors.New("workflow: start hook admission rejected")
+	// ErrStartHookDisabled is returned for a start hook candidate by a
+	// World whose start hook admission is switched off, with nothing
+	// recorded for the candidate. It is not the candidate's outcome: a
+	// later copy can still be admitted, so a start reports it as a
+	// *StartError and the candidate's queued delivery is delivered again.
+	ErrStartHookDisabled = errors.New("workflow: start hook admission is switched off")
 	// ErrMaxDeliveriesExceeded is the error of a run or step whose delivery
 	// was attempted more than MaxDeliveries times.
 	ErrMaxDeliveriesExceeded = errors.New("workflow: delivery exceeded the maximum attempts")
+	// ErrMaxEventsExceeded is the error a run fails with when its event log
+	// reaches the most events a run may hold.
+	ErrMaxEventsExceeded = errors.New("workflow: run exceeded the maximum events")
+	// ErrReplayTimeout is the error a run fails with when replaying it keeps
+	// taking longer than a delivery's replay budget.
+	ErrReplayTimeout = errors.New("workflow: replay exceeded the maximum duration")
 	// ErrStreamClosed reports a write to a closed stream.
 	ErrStreamClosed = errors.New("workflow: stream is closed")
 	// ErrEventInvalid is returned when an event, event ID, or event cursor is
@@ -76,6 +88,14 @@ var (
 )
 
 func init() {
+	// Failures the Workflow SDK has a class for are recorded under its name.
+	sdkerror.RegisterSentinel("CorruptedEventLogError", ErrCorruptedEventLog)
+	sdkerror.RegisterSentinel("WorkflowNotRegisteredError", ErrWorkflowNotRegistered)
+	sdkerror.RegisterSentinel("WorkflowDeploymentMismatchError", ErrDeploymentMismatch)
+	sdkerror.RegisterSentinel("WorkflowRunNotFoundError", ErrRunNotFound)
+	sdkerror.RegisterSentinel("WorkflowRunCancelledError", ErrRunCancelled)
+	sdkerror.RegisterSentinel("EntityConflictError", ErrEntityConflict)
+	sdkerror.RegisterSentinel("MaxEventsExceededError", ErrMaxEventsExceeded)
 	sdkerror.Register("FatalError",
 		func(FatalError) []sdkerror.Field { return nil },
 		func(e *FatalError, recorded *sdkerror.Error) {
@@ -130,6 +150,16 @@ func init() {
 			recorded.Decode("claimedByRunId", &claimed.RunID)
 			recorded.Decode("claimedByHookId", &claimed.HookID)
 			*e = claimed
+		})
+	sdkerror.RegisterNamed("WorkflowStartError",
+		func(e *StartError) []sdkerror.Field {
+			return []sdkerror.Field{sdkerror.NewField("runId", e.RunID), sdkerror.NewField("stage", e.Stage)}
+		},
+		func(e **StartError, recorded *sdkerror.Error) {
+			failed := &StartError{Cause: recorded.Unwrap()}
+			recorded.Decode("runId", &failed.RunID)
+			recorded.Decode("stage", &failed.Stage)
+			*e = failed
 		})
 	sdkerror.RegisterNamed("HookNotFoundError",
 		func(e *HookNotFoundError) []sdkerror.Field {
@@ -209,6 +239,37 @@ func causeMessage(cause error) string {
 	}
 	return cause.Error()
 }
+
+// Stages of a start whose outcome a *StartError could not confirm.
+const (
+	StartStageQueue     = "queue"
+	StartStageAdmission = "admission"
+)
+
+// StartError reports a start with a start hook whose outcome could not be
+// confirmed: whether the World admitted the candidate run RunID
+// (StartStageAdmission), or whether its first delivery was queued
+// (StartStageQueue). The run may exist and run. Starting again with the same
+// hook token is safe while the token is held: it never admits a second run
+// while the first one holds it. It is recorded as WorkflowStartError.
+type StartError struct {
+	RunID RunID
+	// Stage is the step whose outcome is not known, StartStageQueue or
+	// StartStageAdmission.
+	Stage string
+	// Cause is the failure that left the outcome unknown.
+	Cause error `json:"-" cbor:"-"`
+}
+
+func (e *StartError) Error() string {
+	outcome := "admitted"
+	if e.Stage == StartStageQueue {
+		outcome = "queued"
+	}
+	return fmt.Sprintf("workflow: could not confirm whether run %s was %s: %s. Retrying with the same hook token is safe while the token is held", e.RunID, outcome, causeMessage(e.Cause))
+}
+
+func (e *StartError) Unwrap() error { return e.Cause }
 
 // HookConflictError reports that another active hook holds a hook's token
 // and the claim is not forced. It is recorded as HookConflictError.

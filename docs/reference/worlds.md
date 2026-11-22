@@ -180,6 +180,15 @@ write with `EventCount` returns the events between that count and its own
 position in `Events`, and is stored with its `OccurredAt` as `CreatedAt`. See
 [Concurrent flows](/guide/replay#concurrent-flows).
 
+`EventsCreateOptions` also carries two hints from the runtime, which a World
+may ignore. `AfterStepBody` marks a `step_failed` that records the failure of a
+step function that ran, as every `step_completed` and `step_retrying` does:
+losing the write to a redelivery runs the function again, so a World may keep
+it waiting longer than another write. `StepCreatedAt` is when the step a
+`step_started` starts was created, set on the first attempt's start of a step
+created by a `step_created`, for a World that reports the time from a step's
+creation to its start. It is not stored in the event.
+
 `ResumeHook(ctx, world, hook, payload, resumeID)` appends a hook's payload
 with `EventsCreateOptions.ResumeID` and `ResumePayloadDigest`
 (`ResumeDigest(payload)`) when the World deduplicates resumes
@@ -311,6 +320,7 @@ type QueueInput struct {
 	DeliveryCount                int    // 1-based delivery count, set by the World before Execute
 
 	StepName, StepAttempt, StepResent            // a step delivery's step
+	StepCreatedAt                                // when that step was created, on its first attempt's message
 	RunSpecVersion                               // SpecVersion
 	RunInput                                     // a run's first delivery: the run's creation
 	CompleteWaits                                // waits a WakeUp's flow completes first
@@ -319,6 +329,26 @@ type QueueInput struct {
 	Retention                                    // how long the message may live
 }
 ```
+
+```go
+type QueueResult struct {
+	MessageID string
+	Err       error // why QueueBatch did not store the item; nil for a stored one
+	Retryable bool  // with Err: sending the batch again may store it
+}
+
+func QueueAll(ctx context.Context, queue Queue, items []QueueInput) ([]QueueResult, error)
+func QueueEach(ctx context.Context, queue func(context.Context, QueueInput) (QueueResult, error), items []QueueInput) []QueueResult
+```
+
+`QueueBatch` returns one result per item, in order. An item the queue did not
+store has its `Err` set, and `Retryable` when sending the batch again may store
+it. `QueueBatch` returns an error only for a failure that leaves no item's
+outcome known. `QueueAll` sends a batch that must be stored whole, and returns
+a `*QueueBatchError` when it was not. `QueueEach` is a `QueueBatch` for a queue
+without a batch send. The runtime sends the messages of the steps a flow
+creates through `QueueAll`, 16 to a batch, with the step's key on each, and
+fails the delivery when one is not stored, so its redelivery sends them again.
 
 Delivery is at least once, and a queued delivery cannot be cancelled: one that
 is no longer needed only replays its run. A message with an `IdempotencyKey` is
@@ -502,6 +532,12 @@ type PayloadOptions struct {
 
 type EncryptionKeys interface {
 	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
+}
+
+// StepExecutions is an optional World interface the runtime calls right
+// before a step's function runs, for every attempt.
+type StepExecutions interface {
+	RecordStepExecution(ctx context.Context, stepID StepID)
 }
 
 func RunKeysFor(ctx context.Context, world World, runID RunID, deploymentID string) (*RunKeys, error)

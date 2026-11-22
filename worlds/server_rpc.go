@@ -70,6 +70,9 @@ var errRPCInvalidInput = errors.New("workflow: invalid RPC request")
 // rpcErrors names the errors an RPC failure carries to clients, with the
 // code each is reported under. A failure takes the first entry it matches.
 var rpcErrors = []rpcErrorKind{
+	// A start whose outcome is not known comes first: its cause is the
+	// failure of one of the kinds below.
+	rpcType[*StartError]("start_unconfirmed", "internal"),
 	rpcSentinel("workflow_not_registered", "not_found", ErrWorkflowNotRegistered),
 	rpcSentinel("run_not_found", "not_found", ErrRunNotFound),
 	rpcSentinel("step_not_found", "not_found", ErrStepNotFound),
@@ -87,6 +90,7 @@ var rpcErrors = []rpcErrorKind{
 	rpcType[*StreamExpiredError]("stream_expired", "not_found"),
 	rpcType[*HookConflictError]("hook_conflict", "conflict"),
 	rpcSentinel("start_hook_rejected", "invalid_argument", ErrStartHookRejected),
+	rpcSentinel("start_hook_disabled", "invalid_argument", ErrStartHookDisabled),
 	rpcSentinel("hook_not_active", "conflict", ErrHookNotActive),
 	rpcType[*HookForceClaimedError]("hook_force_claimed", "conflict"),
 	rpcType[*InBandSupersededError]("in_band_superseded", "conflict"),
@@ -392,7 +396,14 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		return encodeRPC(value)
+		results := make([]RPCQueueBatchResult, len(value))
+		for index, result := range value {
+			results[index] = RPCQueueBatchResult{MessageID: result.MessageID, Retryable: result.Retryable}
+			if result.Err != nil {
+				results[index].Error = result.Err.Error()
+			}
+		}
+		return encodeRPC(results)
 	case "streams.write":
 		input, err := decodeRPC[StreamsWriteInput](request.Input)
 		if err != nil {
@@ -578,7 +589,11 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if err != nil {
 			return nil, err
 		}
-		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled}}); err != nil {
+		data, err := EncodeRunCancelled(input.Reason)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled, Data: data}}); err != nil {
 			return nil, err
 		}
 		return encodeRPC(struct{}{})
@@ -670,8 +685,12 @@ type (
 		Region Region
 	}
 	// ClientRunsCancelInput holds the arguments to the client.runs.cancel RPC
-	// method, which cancels the run.
-	ClientRunsCancelInput struct{ RunID RunID }
+	// method, which cancels the run. Reason, when set, is recorded as the
+	// run_cancelled's CancelReason.
+	ClientRunsCancelInput struct {
+		RunID  RunID
+		Reason string `json:",omitempty"`
+	}
 	// ClientRunsWakeInput holds the arguments to the client.runs.wake RPC
 	// method, which calls WakeRun.
 	ClientRunsWakeInput struct {
@@ -734,6 +753,15 @@ type RPCBatchEventResult struct {
 	Run     *Run   `cbor:",omitempty"`
 	Step    *Step  `cbor:",omitempty"`
 	Wait    *Wait  `cbor:",omitempty"`
+}
+
+// RPCQueueBatchResult is one item's outcome in the output of the
+// queue.queueBatch RPC method: the stored message's ID, or the Error the item
+// was refused with, Retryable when sending the batch again may store it.
+type RPCQueueBatchResult struct {
+	MessageID string
+	Error     string `cbor:",omitempty"`
+	Retryable bool   `cbor:",omitempty"`
 }
 
 // rpcEventResult reads the committed event of result and the entity it
@@ -870,7 +898,8 @@ func decodeRPC[T any](raw cbor.RawMessage) (T, error) {
 	if len(raw) == 0 {
 		return value, fmt.Errorf("%w: missing input", errRPCInvalidInput)
 	}
-	if err := cbor.Unmarshal(raw, &value); err != nil {
+	// Maps decode with string keys, as JSON encodes them.
+	if err := eventDataGeneric.Unmarshal(raw, &value); err != nil {
 		return value, fmt.Errorf("%w: decode input: %w", errRPCInvalidInput, err)
 	}
 	return value, nil

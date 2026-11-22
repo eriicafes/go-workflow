@@ -46,6 +46,19 @@ JavaScript or for data written by older releases:
   since no JavaScript reads them.
 - **There is one schema version and no legacy data**, so the World writes no
   `version.txt` and prints no legacy notice.
+- **A forced hook claim within one run advances `seq_in_band` by two**, one
+  for each event it appends, where world-local advances by one: Go's World
+  interface counts every position an in-band write allocates.
+- **A write returns the events before it**, after the caller's `EventCount`
+  or `SinceCursor`, without a page limit. world-local returns a page of 20
+  that includes the written event, and the whole log with `run_started`.
+- **`StreamsGetChunks` always returns a cursor and reports `Done` whenever
+  the stream is closed**, since Go follows a live stream by polling with the
+  cursor, where world-local hands out a `ReadableStream`.
+- **A resume's digest is checked against its payload**, which world-local
+  stores unchecked.
+- **Recovery finds an orphaned step by its inline creation**, since Go's
+  `step_started` records no owning queue message.
 - **It appends batches** (`EventsCreateBatch`), which world-local does not,
   since Go's runtime records a flow's steps and timers in one fenced write.
 - **It serves analytics,** which world-local does not: runs and attributes

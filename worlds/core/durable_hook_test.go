@@ -151,6 +151,11 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 			for _, event := range page.Data {
 				if event.EventType == worlds.EventTypeHookDisposed {
 					disposed++
+					// A hook that disposes of itself names the token it
+					// releases.
+					if string(event.Data) != `{"token":"deferred-disposal"}` {
+						t.Fatalf("hook_disposed data = %s", event.Data)
+					}
 				}
 			}
 			if disposed != 1 {

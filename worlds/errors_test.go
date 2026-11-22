@@ -226,3 +226,18 @@ func TestExpiryAndLookupErrorsAreRecordedAsNamedErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestStartErrorIsRecordedWithItsRunAndStage(t *testing.T) {
+	disabled := fmt.Errorf("%w: off", worlds.ErrStartHookDisabled)
+	failed := &worlds.StartError{RunID: "wrun_1", Stage: worlds.StartStageAdmission, Cause: disabled}
+	if !errors.Is(failed, worlds.ErrStartHookDisabled) || !strings.Contains(failed.Error(), "run wrun_1 was admitted") {
+		t.Fatalf("StartError = %v, want it to name the run and stage and wrap its cause", failed)
+	}
+	if queue := (&worlds.StartError{RunID: "wrun_1", Stage: worlds.StartStageQueue}); !strings.Contains(queue.Error(), "was queued") {
+		t.Fatalf("StartError for the queue = %v", queue)
+	}
+	var read *worlds.StartError
+	if recorded := worlds.NewError(failed); recorded.Name != "WorkflowStartError" || !errors.As(recorded, &read) || read.RunID != "wrun_1" || read.Stage != worlds.StartStageAdmission {
+		t.Fatalf("recorded StartError = %+v, read back %+v", recorded, read)
+	}
+}

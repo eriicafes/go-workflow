@@ -61,6 +61,38 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
+// TestConfigDefaults checks the poll interval and concurrency a World uses
+// when its Config sets none: the environment's, or 500ms and 50.
+func TestConfigDefaults(t *testing.T) {
+	url, schema := testSchema(t)
+	pool := testPool(t, url, schema)
+	open := func() *World {
+		t.Helper()
+		world, err := New(context.Background(), pool, Config{BaseURL: testBaseURL, Schema: schema})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(world.Close)
+		return world
+	}
+	t.Setenv("WORKFLOW_POSTGRES_POLL_INTERVAL_MS", "")
+	t.Setenv("WORKFLOW_POSTGRES_WORKER_CONCURRENCY", "")
+	if world := open(); world.interval != 500*time.Millisecond || world.concurrency != 50 {
+		t.Fatalf("defaults = %v, %d", world.interval, world.concurrency)
+	}
+	t.Setenv("WORKFLOW_POSTGRES_POLL_INTERVAL_MS", "125")
+	t.Setenv("WORKFLOW_POSTGRES_WORKER_CONCURRENCY", "7")
+	if world := open(); world.interval != 125*time.Millisecond || world.concurrency != 7 {
+		t.Fatalf("defaults from the environment = %v, %d", world.interval, world.concurrency)
+	}
+	// A value that is not a positive integer is ignored.
+	t.Setenv("WORKFLOW_POSTGRES_POLL_INTERVAL_MS", "soon")
+	t.Setenv("WORKFLOW_POSTGRES_WORKER_CONCURRENCY", "-1")
+	if world := open(); world.interval != 500*time.Millisecond || world.concurrency != 50 {
+		t.Fatalf("defaults over an invalid environment = %v, %d", world.interval, world.concurrency)
+	}
+}
+
 type countInput struct{ N int }
 type countOutput struct{ N int }
 

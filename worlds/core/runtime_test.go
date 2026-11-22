@@ -92,6 +92,10 @@ func (w *compensationFailureWorld) Queue(ctx context.Context, input worlds.Queue
 	return w.World.Queue(ctx, input)
 }
 
+func (w *compensationFailureWorld) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
+}
+
 func TestCompensationDeliveryErrors(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string
@@ -439,6 +443,10 @@ func (w deployedWorld) Queue(ctx context.Context, input worlds.QueueInput) (worl
 		return worlds.QueueResult{}, worlds.ErrDeploymentUnavailable
 	}
 	return w.World.Queue(ctx, input)
+}
+
+func (w deployedWorld) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 func TestDeploymentAffinityReroutesDeliveriesToTheRunsDeployment(t *testing.T) {
@@ -850,6 +858,10 @@ func (w *lossyWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds
 	return w.World.Queue(ctx, input)
 }
 
+func (w *lossyWorld) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
+}
+
 func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	resetCalls()
 	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
@@ -1097,6 +1109,10 @@ func (w *flowQueueFailure) Queue(ctx context.Context, input worlds.QueueInput) (
 		return worlds.QueueResult{}, errQueueUnavailable
 	}
 	return w.World.Queue(ctx, input)
+}
+
+func (w *flowQueueFailure) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 func TestRedeliveredStepQueuesTheFlowItFailedToQueue(t *testing.T) {
@@ -1973,6 +1989,12 @@ func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
 	if err != nil || run.Status != worlds.StatusFailed || !strings.Contains(string(run.Error), "maximum attempts") {
 		t.Fatalf("run past the cap = %#v err=%v", run, err)
 	}
+	code, failure := runFailure(t, ctx, world, flowCap)
+	var fatal worlds.FatalError
+	if code != "MAX_DELIVERIES_EXCEEDED" || failure.Message != "Workflow exceeded maximum queue deliveries (49/48)" ||
+		!errors.As(failure, &fatal) || !errors.Is(failure, worlds.ErrMaxDeliveriesExceeded) {
+		t.Fatalf("run past the cap failed with code %q and %#v", code, failure)
+	}
 	// The cap itself still executes.
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: flowAtCap, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
@@ -2039,8 +2061,22 @@ func TestStepDeliveryPastTheCapFailsAStepWithNoActivityForAnHour(t *testing.T) {
 			t.Fatal(err)
 		}
 		step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runStalled, StepID: stepID})
-		if err != nil || step.Status != worlds.StatusFailed || !strings.Contains(string(step.Error), "maximum attempts") {
+		if err != nil || step.Status != worlds.StatusFailed {
 			t.Fatalf("stalled step past the cap = %#v err=%v", step, err)
+		}
+		failure := worlds.DecodeErrorPayload(step.Error, nil)
+		if want := `Step "a" failed with MAX_DELIVERIES_EXCEEDED: its queue message was delivered 49 times (more than 48) without the step starting`; failure.Message != want ||
+			failure.Type != "FatalError" || !errors.Is(failure, worlds.ErrMaxDeliveriesExceeded) {
+			t.Fatalf("stalled step failed with %#v, want %q", failure, want)
+		}
+		// The failure is of the attempt that would have run.
+		events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runStalled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var failed worlds.DataStepResult
+		if last := events.Data[len(events.Data)-1]; last.EventType != worlds.EventTypeStepFailed || json.Unmarshal(last.Data, &failed) != nil || failed.Attempt != 1 {
+			t.Fatalf("last event = %s %s, want the step's failure as attempt 1", last.EventType, last.Data)
 		}
 	})
 }
@@ -2176,3 +2212,346 @@ func turboResult(t *testing.T, ctx context.Context, world worlds.World, runID wo
 // runRetry is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runRetry = worlds.NewRunID()
+
+// runFailure returns the error code and the decoded error of the run's
+// run_failed event.
+func runFailure(t *testing.T, ctx context.Context, world worlds.World, runID worlds.RunID) (string, *worlds.Error) {
+	t.Helper()
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events.Data {
+		if event.EventType == worlds.EventTypeRunFailed {
+			return worlds.RunFailedErrorCode(event.Data), worlds.DecodeErrorPayload(worlds.DecodeRunFailed(event.Data), nil)
+		}
+	}
+	return "", nil
+}
+
+func TestFlowThatReplaysPastItsBudgetIsRetriedAndThenFailsItsRun(t *testing.T) {
+	// Any replay at all is past this budget.
+	core.ReplayTimeout = time.Nanosecond
+	t.Cleanup(func() { core.ReplayTimeout = 0 })
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaOnly)))
+	run := startVersioned(t, ctx, world)
+	runID := worlds.RunID(run.ID())
+	message := world.QueuedMessages()[0].Input
+
+	// The first three deliveries of the message fail, so the queue delivers
+	// it again, and write nothing that fails the run.
+	for attempt := 1; attempt <= core.DefaultReplayTimeoutRetries; attempt++ {
+		message.Attempt, message.DeliveryCount = attempt, attempt
+		err := runtime.Execute(ctx, message)
+		if _, redelivery := worlds.RedeliveryOf(err); err == nil || redelivery || !strings.Contains(err.Error(), "replay exceeded maximum duration") {
+			t.Fatalf("delivery %d = %v, want a failed delivery", attempt, err)
+		}
+		if code, _ := runFailure(t, ctx, world, runID); code != "" {
+			t.Fatalf("delivery %d failed the run with %s", attempt, code)
+		}
+	}
+	// The fourth fails the run, and is acknowledged.
+	message.Attempt, message.DeliveryCount = 4, 4
+	if err := runtime.Execute(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	code, failure := runFailure(t, ctx, world, runID)
+	var fatal worlds.FatalError
+	if code != "REPLAY_TIMEOUT" || failure == nil || failure.Message != "Workflow replay exceeded maximum duration (0.000000001s) after 4 attempts" ||
+		!errors.Is(failure, worlds.ErrReplayTimeout) || !errors.As(failure, &fatal) {
+		t.Fatalf("run failed with code %q and %#v", code, failure)
+	}
+}
+
+func TestRunWhoseLogIsFullFails(t *testing.T) {
+	resetCalls()
+	// run_created, run_started, and alpha's creation, start and result.
+	core.MaxEvents = 5
+	t.Cleanup(func() { core.MaxEvents = 0 })
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
+	run := startVersioned(t, ctx, world)
+	drain(t, ctx, world, runtime)
+
+	code, failure := runFailure(t, ctx, world, worlds.RunID(run.ID()))
+	if code != "MAX_EVENTS_EXCEEDED" || failure == nil || failure.Name != "MaxEventsExceededError" ||
+		failure.Message != "Workflow exceeded the maximum of 5 events per run" || !errors.Is(failure, worlds.ErrMaxEventsExceeded) {
+		t.Fatalf("run failed with code %q and %#v", code, failure)
+	}
+	if alphaCalls.Load() != 1 || betaCalls.Load() != 0 {
+		t.Fatalf("alpha ran %d times and beta %d, want 1 and 0", alphaCalls.Load(), betaCalls.Load())
+	}
+}
+
+// pagedWorld lists a run's events a few at a time, and reports a limit of
+// events for every run when maxEvents is set.
+type pagedWorld struct {
+	*testworld.World
+	pageSize, maxEvents int
+}
+
+func (w pagedWorld) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
+	if input.Pagination.Limit == 0 {
+		input.Pagination.Limit = w.pageSize
+	}
+	page, err := w.World.EventsList(ctx, input)
+	page.MaxEvents = w.maxEvents
+	return page, err
+}
+
+func TestFlowStopsReadingALogThatIsPastTheLimitTheWorldReports(t *testing.T) {
+	resetCalls()
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	base := testworld.NewManual()
+	defer base.Close()
+	// The World's limit for the run applies, not the default.
+	world := pagedWorld{World: base, pageSize: 3, maxEvents: 3}
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
+	run := startVersioned(t, ctx, base)
+	drain(t, ctx, base, runtime)
+
+	code, failure := runFailure(t, ctx, base, worlds.RunID(run.ID()))
+	if code != "MAX_EVENTS_EXCEEDED" || failure == nil ||
+		failure.Message != "Workflow exceeded the maximum of 3 events per run (its event log holds at least 3 events)" {
+		t.Fatalf("run failed with code %q and %#v", code, failure)
+	}
+}
+
+func alphaAndBeta(ctx context.Context, _ versionedInput) (versionedOutput, error) {
+	first := workflow.Background(ctx, alpha, struct{}{})
+	second := workflow.Background(ctx, beta, struct{}{})
+	if _, err := first.Value(ctx); err != nil {
+		return versionedOutput{}, err
+	}
+	if _, err := second.Value(ctx); err != nil {
+		return versionedOutput{}, err
+	}
+	return versionedOutput{Version: "v1"}, nil
+}
+
+func TestReplayDivergenceCatchesAnOperationASuspendedReplayNeverDeclared(t *testing.T) {
+	resetCalls()
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	v1 := core.NewRuntime(world, core.Runners(workflow.Use(alphaAndBeta)))
+	v2 := core.NewRuntime(world, core.Runners(workflow.Use(alphaOnly)))
+	run := startVersioned(t, ctx, world)
+	runID := worlds.RunID(run.ID())
+
+	// v1 creates alpha and beta. v2 declares alpha alone and waits for it,
+	// with beta's creation in the log.
+	deliverNext(t, ctx, world, v1)
+	flow := worlds.QueueInput{RunID: runID, Attempt: 1, DeliveryCount: 1}
+	if err := v2.Execute(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	queued := world.Queued()
+	if recovery := queued[len(queued)-1]; recovery.StepID != nil || recovery.ReplayDivergenceCount != 1 {
+		t.Fatalf("queued after the divergence = %#v, want a recovery flow", queued)
+	}
+	// Once its recovery replays diverged too, the run fails.
+	flow.ReplayDivergenceCount = 3
+	if err := v2.Execute(ctx, flow); err != nil {
+		t.Fatal(err)
+	}
+	code, failure := runFailure(t, ctx, world, runID)
+	if code != "CORRUPTED_EVENT_LOG" || failure == nil || !strings.Contains(failure.Error(), "replay suspended without reaching the recorded operation") {
+		t.Fatalf("run failed with code %q and %v", code, failure)
+	}
+}
+
+type unawaitedInput struct{}
+type unawaitedOutput struct{}
+
+func (unawaitedInput) Workflow(unawaitedOutput) {}
+
+func TestRunRecordsTheStepsAndTimersItNeverWaitedForAsItEnds(t *testing.T) {
+	resetCalls()
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fail=%t", fail), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			world := testworld.NewManual()
+			defer world.Close()
+			runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
+				workflow.Background(ctx, alpha, struct{}{})
+				workflow.Timer(ctx, time.Hour)
+				if fail {
+					return unawaitedOutput{}, errors.New("failed")
+				}
+				return unawaitedOutput{}, nil
+			})))
+			run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), unawaitedInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain(t, ctx, world, runtime)
+			events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var types []string
+			for _, event := range events.Data {
+				types = append(types, string(event.EventType))
+				switch event.EventType {
+				case worlds.EventTypeStepCreated:
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(event.Data, &fields); err != nil {
+						t.Fatal(err)
+					}
+					if string(fields["inline"]) != "false" || fields["creatorMessageId"] != nil || fields["input"] == nil || fields["stepName"] == nil {
+						t.Fatalf("step_created data = %s", event.Data)
+					}
+				case worlds.EventTypeWaitCreated:
+					var created worlds.DataWaitCreated
+					if err := json.Unmarshal(event.Data, &created); err != nil || created.ResumeAt.IsZero() || created.CreatorMessageID != "" {
+						t.Fatalf("wait_created data = %s err=%v", event.Data, err)
+					}
+				}
+			}
+			end := "run_completed"
+			if fail {
+				end = "run_failed"
+			}
+			if want := "run_created run_started step_created wait_created " + end; strings.Join(types, " ") != want {
+				t.Fatalf("events = %v, want %s", types, want)
+			}
+			// Nothing runs the step or arms the timer.
+			if queued := world.Queued(); len(queued) != 0 {
+				t.Fatalf("queued = %#v, want nothing", queued)
+			}
+			if alphaCalls.Load() != 0 {
+				t.Fatal("the step nobody waited for ran")
+			}
+		})
+	}
+}
+
+func TestStepDeliveryThatRecordsARetryQueuesAFlow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
+		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
+			return struct{}{}, errors.New("not yet")
+		}, struct{}{})
+		return unawaitedOutput{}, err
+	})))
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), unawaitedInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The flow creates the step, and the step's delivery fails its first
+	// attempt.
+	deliverNext(t, ctx, world, runtime)
+	step := world.QueuedMessages()[0]
+	if step.Input.StepID == nil {
+		t.Fatalf("queued = %#v, want the step's delivery", step.Input)
+	}
+	if _, redelivery := worlds.RedeliveryOf(runtime.Execute(ctx, step.Input)); !redelivery {
+		t.Fatal("the step's delivery did not ask for its message again")
+	}
+	flows := 0
+	for _, queued := range world.Queued() {
+		if queued.StepID == nil && queued.RunID == worlds.RunID(run.ID()) {
+			flows++
+		}
+	}
+	if flows != 1 {
+		t.Fatalf("%d flows queued after the retry was recorded, want 1", flows)
+	}
+}
+
+func TestFirstDeliveryOfAnOldMessageReadsTheLog(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	base := testworld.NewManual()
+	defer base.Close()
+	world := &runReads{World: base}
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(base)), turboInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A first delivery of a message queued a while ago may be a platform
+	// running a crashed delivery again, so it decides from the log.
+	first := base.QueuedMessages()[0].Input
+	first.CreatedAt = time.Now().Add(-core.TurboFirstDeliveryMaxAge - time.Second)
+	runtime := core.NewRuntime(world, core.Runners(turboRunner))
+	if err := runtime.Execute(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if world.reads == 0 {
+		t.Fatal("the first delivery of an old message did not read the log")
+	}
+	if output, err := turboResult(t, ctx, base, worlds.RunID(run.ID())); err != nil || output.Value != 7 {
+		t.Fatalf("output = %+v err = %v", output, err)
+	}
+	// A message queued just now takes the turbo path.
+	world.reads = 0
+	second, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(base)), turboInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := base.QueuedMessages()[len(base.QueuedMessages())-1].Input
+	fresh.CreatedAt = time.Now()
+	if fresh.RunID != worlds.RunID(second.ID()) {
+		t.Fatalf("queued = %#v", fresh)
+	}
+	if err := runtime.Execute(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if world.reads != 0 {
+		t.Fatalf("the first delivery of a new message read the run %d times", world.reads)
+	}
+}
+
+// candidateWorld answers the creation of a start hook candidate's run with
+// refusal.
+type candidateWorld struct {
+	*testworld.World
+	refusal error
+}
+
+func (w candidateWorld) EventsCreateRun(context.Context, worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	return worlds.EventResult{}, w.refusal
+}
+
+func TestFirstDeliveryOfAStartHookCandidateTheWorldDidNotAdmit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	manual := testworld.NewManual()
+	defer manual.Close()
+	// The candidate's run_created never landed, so its first delivery
+	// creates the run.
+	delivery := worlds.StartQueueInput(worlds.EventsCreateRunInput{RunID: worlds.NewRunID(), WorkflowName: worlds.WorkflowName[versionedInput](), StartHook: &worlds.StartHook{Token: "candidate"}})
+	delivery.DeliveryCount, delivery.Attempt = 1, 1
+	execute := func(refusal error) error {
+		return core.NewRuntime(candidateWorld{World: manual, refusal: refusal}, core.Runners(workflow.Use(alphaThenBeta))).Execute(ctx, delivery)
+	}
+	// A candidate refused for good never becomes a run: its message is
+	// acknowledged.
+	for _, refusal := range []error{&worlds.HookConflictError{Token: "candidate", RunID: "wrun_owner", Start: true}, fmt.Errorf("%w: too old", worlds.ErrStartHookRejected)} {
+		if err := execute(refusal); err != nil {
+			t.Fatalf("delivery of a candidate refused with %v = %v, want it acknowledged", refusal, err)
+		}
+	}
+	// One answered while admission is switched off is not decided, so its
+	// message is delivered again.
+	if err := execute(fmt.Errorf("%w: off", worlds.ErrStartHookDisabled)); !errors.Is(err, worlds.ErrStartHookDisabled) {
+		t.Fatalf("delivery of a candidate answered while admission is off = %v, want the failure", err)
+	}
+	if _, isRedelivery := worlds.RedeliveryOf(execute(fmt.Errorf("%w: off", worlds.ErrStartHookDisabled))); isRedelivery {
+		t.Fatal("an undecided candidate asked for a handoff instead of failing its delivery")
+	}
+}

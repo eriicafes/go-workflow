@@ -48,6 +48,10 @@ func (q *queueRecorder) Queue(_ context.Context, input worlds.QueueInput) (world
 	return worlds.QueueResult{}, nil
 }
 
+func (q *queueRecorder) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
+	return worlds.QueueEach(ctx, q.Queue, input.Items), nil
+}
+
 func (*queueRecorder) Capabilities() worlds.Capabilities { return worlds.Capabilities{} }
 
 func TestDeliveryThatMayHoldACoalescedTimerArmsNearDueWaitsByTheSecond(t *testing.T) {

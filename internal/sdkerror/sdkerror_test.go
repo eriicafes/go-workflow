@@ -60,7 +60,7 @@ func TestNewRecordsTheChain(t *testing.T) {
 	for node := recorded; node != nil; node = node.Cause {
 		names = append(names, node.Name)
 	}
-	if len(names) != 4 || names[0] != "*fmt.wrapError" || names[2] != "github.com/eriicafes/go-workflow/internal/sdkerror.codeError" {
+	if len(names) != 4 || names[0] != "" || names[3] != "" || names[2] != "github.com/eriicafes/go-workflow/internal/sdkerror.codeError" {
 		t.Fatalf("chain = %q", names)
 	}
 	if recorded.Error() != "outer: code 7\nsentinel" || New(nil) != nil {
@@ -129,5 +129,29 @@ func TestNamedTypesAreRecordedAsNamedErrors(t *testing.T) {
 	recorded.Type = "Error"
 	if target, ok := errors.AsType[*namedError](recorded); !ok || target.Key != "k" {
 		t.Fatalf("read back = %+v", target)
+	}
+}
+
+var errClassed = errors.New("classed failure")
+
+func init() { RegisterSentinel("ClassedError", errClassed) }
+
+func TestSentinelIsRecordedUnderItsClassName(t *testing.T) {
+	// The sentinel and an error wrapping it are both named after the class,
+	// and both still match the sentinel when read back.
+	for _, err := range []error{errClassed, fmt.Errorf("%w: detail", errClassed)} {
+		recorded := New(err)
+		if recorded.Name != "ClassedError" || recorded.Message != err.Error() {
+			t.Fatalf("recorded = %#v", recorded)
+		}
+		data, _ := json.Marshal(recorded)
+		var read Error
+		if json.Unmarshal(data, &read) != nil || !errors.Is(&read, errClassed) || errors.Is(&read, errSentinel) {
+			t.Fatalf("read back = %#v", read)
+		}
+	}
+	// A plain error has no name and matches an error of the same message.
+	if plain := New(errSentinel); plain.Name != "" || !errors.Is(plain, errSentinel) {
+		t.Fatalf("plain = %#v", plain)
 	}
 }

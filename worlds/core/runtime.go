@@ -88,13 +88,13 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	defer stop()
 	ctx = worlds.NewClientContext(ctx, nil)
 	ctx = context.WithValue(ctx, cancelContextKey{}, nil)
-	if input.Attempt > MaxDeliveries {
-		if input.StepID == nil || r.stepStalled(ctx, input) {
-			return r.exceedDeliveries(ctx, input)
-		}
-	}
 	if input.StepID != nil {
+		// A step's message is delivered again while the step retries, so
+		// past MaxDeliveries its delivery decides from the log.
 		return r.executeStep(ctx, input)
+	}
+	if input.Attempt > MaxDeliveries {
+		return r.exceedDeliveries(ctx, input)
 	}
 	if input.Intermediate() {
 		return r.continueWaitHop(ctx, input)
@@ -108,7 +108,8 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 	// wait falls due (see linger.go).
 	restarts, lingered := 0, false
 	var pass *Execution
-	err := r.executeFlow(ctx, input, flowPass{runAhead: true, first: true}, &pass)
+	budget := newReplayBudget()
+	err := r.executeFlow(ctx, input, flowPass{runAhead: true, first: true, budget: budget}, &pass)
 	for {
 		var stop errRunAheadStop
 		if errors.As(err, &stop) {
@@ -118,17 +119,23 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 				return worlds.Redeliver(0)
 			}
 			restarts++
-			err = r.executeFlow(ctx, input, flowPass{lingered: lingered}, &pass)
+			err = r.executeFlow(ctx, input, flowPass{lingered: lingered, budget: budget}, &pass)
 			continue
 		}
 		if errors.As(err, new(errRunAheadRepair)) {
-			err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered}, &pass)
+			err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered, budget: budget}, &pass)
 			continue
 		}
-		if err == nil && pass != nil && pass.parked && r.linger(ctx, pass) {
-			lingered = true
-			err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered}, &pass)
-			continue
+		if err == nil && pass != nil && pass.parked {
+			// Lingering is not replay.
+			budget.pause()
+			again := r.linger(ctx, pass)
+			budget.resume()
+			if again {
+				lingered = true
+				err = r.executeFlow(ctx, input, flowPass{runAhead: restarts == 0, lingered: lingered, budget: budget}, &pass)
+				continue
+			}
 		}
 		break
 	}
@@ -146,10 +153,11 @@ func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
 }
 
 // flowPass is how one pass of a flow delivery runs: whether it may run ahead,
-// whether the delivery lingered before it, and whether it is the delivery's
-// first.
+// whether the delivery lingered before it, whether it is the delivery's
+// first, and the delivery's replay time.
 type flowPass struct {
 	runAhead, lingered, first bool
+	budget                    *replayBudget
 }
 
 // TurboFirstDeliveries turns on the turbo path of a run's first delivery: the
@@ -158,12 +166,23 @@ type flowPass struct {
 // before their writes commit.
 var TurboFirstDeliveries = true
 
+// TurboFirstDeliveryMaxAge is how old a run's first message may be for its
+// first delivery to take the turbo path. A platform that runs a delivery
+// again after it crashed sends the same request, which counts as a first
+// delivery too, while the crashed one may have run the run for minutes. A
+// first delivery arrives within seconds of the start, so an older message is
+// taken as such a repeat and reads the log.
+var TurboFirstDeliveryMaxAge = 15 * time.Second
+
 // isTurbo reports whether the pass takes the turbo path: the first pass of the
 // first delivery of a run's first message, which carries the run's creation,
-// and not a start hook's candidate, which its run_started may refuse.
+// and not a start hook's candidate, which its run_started may refuse, nor a
+// message older than TurboFirstDeliveryMaxAge. A message whose World does not
+// report when it was queued is taken as young enough.
 func isTurbo(input worlds.QueueInput, pass flowPass) bool {
 	return TurboFirstDeliveries && pass.first && input.RunInput != nil && input.RunInput.StartHook == nil &&
-		input.DeliveryCount == 1 && input.Attempt <= 1 && input.WaitContinuation == nil && len(input.CompleteWaits) == 0
+		input.DeliveryCount == 1 && input.Attempt <= 1 && input.WaitContinuation == nil && len(input.CompleteWaits) == 0 &&
+		(input.CreatedAt.IsZero() || time.Since(input.CreatedAt) <= TurboFirstDeliveryMaxAge)
 }
 
 // executeFlow loads the run's log, records run_started on the run's first
@@ -174,18 +193,19 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, pass
 	if isTurbo(input, pass) {
 		return r.executeTurbo(ctx, input, pass, current)
 	}
-	run, events, err := r.loadRun(ctx, input.RunID)
+	loaded, err := r.loadLog(ctx, input.RunID, true)
 	if errors.Is(err, worlds.ErrRunNotFound) && input.RunInput != nil {
 		// The start's run_created never landed: its first delivery creates the
 		// run, or exits when its start hook is refused.
 		if err := r.createRunForStart(ctx, input); err != nil {
 			return err
 		}
-		run, events, err = r.loadRun(ctx, input.RunID)
+		loaded, err = r.loadLog(ctx, input.RunID, true)
 	}
 	if err != nil {
 		return err
 	}
+	run, events := loaded.run, loaded.events
 	if run.Status.Terminal() {
 		return nil
 	}
@@ -194,16 +214,25 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, pass
 	}
 	execution, err := newExecution(ctx, r.world, run, events, nil)
 	if err != nil {
-		return err
+		// A run the runtime cannot replay at all fails at once: every
+		// delivery would stop here.
+		return r.failSetup(ctx, run, err)
 	}
 	execution.delivery = input
 	execution.lingered = pass.lingered
+	execution.budget, execution.maxEvents = pass.budget, loaded.maxEvents
 	*current = execution
 	if pass.runAhead {
 		execution.aheadDepth = r.runAheadDepth
 	}
 	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
+	}
+	if loaded.truncated {
+		// The run is past the most events it may hold, and fails on the
+		// part of its log read so far.
+		failure := maxEventsExceededError{count: countEvents(events), limit: loaded.maxEvents, atLeast: true}
+		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(failure.recorded()))
 	}
 	if run.Status == worlds.StatusPending {
 		if err := r.startRun(execution); err != nil {
@@ -228,8 +257,34 @@ func (r *Runtime) startRun(execution *Execution) (err error) {
 			err = replayExit(recovered)
 		}
 	}()
-	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: runStartedData(execution.delivery)}, nil)
+	result := execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: runStartedData(execution.delivery)}, nil)
+	if result.EventID != "" {
+		execution.runStartedAt = time.Now()
+	}
 	return nil
+}
+
+// failSetup fails a run whose replay could not be set up, for cause, with
+// the error code RUNTIME_ERROR, as an out-of-band write.
+func (r *Runtime) failSetup(ctx context.Context, run worlds.Run, cause error) error {
+	keys, err := worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID)
+	if err != nil {
+		return err
+	}
+	payload, err := worlds.EncodeErrorPayload(&worlds.Error{Name: "WorkflowRuntimeError", Message: cause.Error()}, worlds.PayloadOptions{Keys: keys})
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(worlds.DataRunFailed{Error: payload, ErrorCode: "RUNTIME_ERROR"})
+	if err != nil {
+		return err
+	}
+	log.Printf("workflow: run %s cannot be replayed: %v", run.RunID, cause)
+	_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: run.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}})
+	if is[*worlds.RunExpiredError](err) || errors.Is(err, worlds.ErrEntityConflict) {
+		return nil
+	}
+	return err
 }
 
 // runStartedData returns the Data of a flow's run_started: the run's
@@ -248,7 +303,10 @@ func runStartedData(input worlds.QueueInput) []byte {
 func (r *Runtime) createRunForStart(ctx context.Context, input worlds.QueueInput) error {
 	err := worlds.CreateRunForStart(ctx, r.world, input.RunID, runStartedData(input))
 	var conflict *worlds.HookConflictError
-	if errors.As(err, &conflict) {
+	// A candidate the World refused, for a run that holds its token or for
+	// good, never becomes a run. One answered while admission is switched
+	// off is not decided, and its message is delivered again.
+	if errors.As(err, &conflict) || errors.Is(err, worlds.ErrStartHookRejected) {
 		return errStartRefused
 	}
 	return err
@@ -291,6 +349,8 @@ func (r *Runtime) executeTurbo(ctx context.Context, input worlds.QueueInput, pas
 		return err
 	}
 	execution.delivery = input
+	execution.budget, execution.maxEvents = pass.budget, maxEventsFor(0)
+	execution.turbo, execution.runStartedAt = true, now
 	*current = execution
 	if pass.runAhead {
 		execution.aheadDepth = r.runAheadDepth
@@ -329,12 +389,16 @@ func replayExit(recovered any) error {
 // event log is handed to recoverDivergence.
 func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.Run, execution *Execution) (err error) {
 	ctx := execution.Context()
-	if resendErr := r.resend(execution); resendErr != nil {
-		return resendErr
+	var output []byte
+	if err = r.checkLimits(execution); err == nil {
+		if resendErr := r.resend(execution); resendErr != nil {
+			return resendErr
+		}
+		output, err = r.run(runner, ctx, run.Input)
 	}
-	output, err := r.run(runner, ctx, run.Input)
 	// Steps and timers the runner declared and no longer waits for are not
-	// created.
+	// queued or armed. A run that ends records them as created.
+	execution.unawaited, execution.unawaitedWaits = execution.pending, execution.pendingWaits
 	execution.pending, execution.pendingWaits = nil, nil
 	defer func() {
 		if finishErr := execution.finishSteps(); finishErr != nil {
@@ -357,14 +421,27 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	// Interpret replay control flow or materialize the root outcome.
 	var divergenceErr replayDivergenceError
 	var deliveryErr deliveryError
+	var eventsErr maxEventsExceededError
 	switch {
 	case context.Cause(ctx) != nil:
 		return context.Cause(ctx)
 	case errors.Is(err, errReplayComplete):
 		return nil
 	case errors.Is(err, errReplaySuspended):
+		// Every recorded event is delivered and the runner waits, so an
+		// operation the log records and the runner never declared is one
+		// this replay will not reach.
+		if id, ok := execution.orphaned(); ok {
+			return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "replay suspended without reaching the recorded operation"})
+		}
 		execution.parked = true
 		return nil
+	case errors.Is(err, errReplayBudgetExhausted):
+		return r.exhaustReplayBudget(input, execution)
+	case errors.As(err, &eventsErr):
+		// The run fails without running its compensations, which would
+		// add to a log that is full.
+		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(eventsErr.recorded()))
 	case errors.Is(err, errReplaySuperseded):
 		return errReplaySuperseded
 	case errors.As(err, new(errRunAheadStop)):
@@ -406,6 +483,48 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	}
 }
 
+// checkLimits returns the error that ends a pass before it replays: the
+// delivery has replayed for its limit, or the run's log is full.
+func (r *Runtime) checkLimits(execution *Execution) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			var ok bool
+			if err, ok = recovered.(error); !ok {
+				err = fmt.Errorf("workflow: panic: %v", recovered)
+			}
+		}
+	}()
+	execution.checkLimits()
+	return nil
+}
+
+// exhaustReplayBudget ends a flow delivery that has replayed for its limit.
+// While the message has been delivered no more than the retries allowed, it
+// returns an error, so the queue delivers the message again. After that it
+// fails the run with the error code REPLAY_TIMEOUT, as an in-band write.
+func (r *Runtime) exhaustReplayBudget(input worlds.QueueInput, execution *Execution) error {
+	limit, retries := execution.budget.seconds(), replayTimeoutRetries()
+	if input.Attempt <= retries {
+		log.Printf("workflow: warning: replay of run %s exceeded its maximum duration (%ss); retrying the delivery (attempt %d of %d)", input.RunID, limit, input.Attempt, retries+1)
+		return fmt.Errorf("workflow: replay exceeded maximum duration (%ss)", limit)
+	}
+	log.Printf("workflow: replay of run %s exceeded its maximum duration (%ss) on %d attempts; failing the run", input.RunID, limit, input.Attempt)
+	failure := fatalError(fmt.Sprintf("Workflow replay exceeded maximum duration (%ss) after %d attempts", limit, input.Attempt), worlds.ErrReplayTimeout)
+	return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(failure))
+}
+
+// recordUnawaited records the steps and timers the runner never waited for
+// as the run ends. It returns an error only when the flow was superseded.
+func (r *Runtime) recordUnawaited(execution *Execution) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = replayExit(recovered)
+		}
+	}()
+	execution.recordUnawaited()
+	return nil
+}
+
 // resend queues again the step deliveries a delivery that stopped may have
 // left unqueued, and completes the waits the delivery wakes the run for.
 func (r *Runtime) resend(execution *Execution) (err error) {
@@ -444,31 +563,56 @@ func (r *Runtime) armTimers(execution *Execution) (err error) {
 	return nil
 }
 
+// loadedRun is a run and its event log as a delivery read them.
+type loadedRun struct {
+	run    worlds.Run
+	events []worlds.Event
+	// maxEvents is the most events the run may hold, and truncated reports
+	// that the read stopped there with more of the log left.
+	maxEvents int
+	truncated bool
+}
+
 // loadRun reads the run and its complete event log before user code runs,
 // and takes the in-band count that fences the flow's writes from the
 // snapshot the log was listed under. Replaying primitives then use only this
 // in-memory log.
 func (r *Runtime) loadRun(ctx context.Context, runID worlds.RunID) (worlds.Run, []worlds.Event, error) {
+	loaded, err := r.loadLog(ctx, runID, false)
+	return loaded.run, loaded.events, err
+}
+
+// loadLog reads the run and its event log as loadRun does. With stopAtLimit,
+// a flow's read, it stops once it holds the most events the run may, when
+// more follow: the run fails on what was read, so the rest is not.
+func (r *Runtime) loadLog(ctx context.Context, runID worlds.RunID, stopAtLimit bool) (loadedRun, error) {
 	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
 	if err != nil {
-		return worlds.Run{}, nil, err
+		return loadedRun{}, err
 	}
 	page, err := r.world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
 	if err != nil {
-		return worlds.Run{}, nil, err
+		return loadedRun{}, err
 	}
 	// The flow fences its writes with the in-band count of the snapshot the
 	// listing was read under, which covers every event it returns.
 	run.InBandCount = page.Snapshot.InBandCount
-	events := page.Data
+	loaded := loadedRun{run: run, events: page.Data, maxEvents: maxEventsFor(page.MaxEvents)}
 	for page.HasMore {
+		if stopAtLimit && countEvents(loaded.events) >= loaded.maxEvents {
+			loaded.truncated = true
+			break
+		}
 		page, err = r.world.EventsList(ctx, worlds.EventsListInput{RunID: runID, Pagination: worlds.Pagination{Cursor: page.Cursor}})
 		if err != nil {
-			return worlds.Run{}, nil, err
+			return loadedRun{}, err
 		}
-		events = append(events, page.Data...)
+		loaded.events = append(loaded.events, page.Data...)
+		if page.MaxEvents > 0 {
+			loaded.maxEvents = maxEventsFor(page.MaxEvents)
+		}
 	}
-	return run, events, nil
+	return loaded, nil
 }
 
 // completeRun records successful root output unless another delivery already
@@ -481,6 +625,9 @@ func (r *Runtime) completeRun(ctx context.Context, input worlds.QueueInput, exec
 	completed, err := json.Marshal(worlds.DataRunCompleted{Output: data})
 	if err != nil {
 		return r.failRun(ctx, input, execution, fmt.Errorf("workflow: encode run output: %w", err))
+	}
+	if err := r.recordUnawaited(execution); err != nil {
+		return err
 	}
 	return r.recordRunEnd(execution, worlds.EventTypeRunCompleted, completed)
 }
@@ -536,6 +683,9 @@ func (r *Runtime) failRun(ctx context.Context, input worlds.QueueInput, executio
 	if id, ok := execution.unreached(); ok {
 		return r.recoverDivergence(ctx, input, replayDivergenceError{CorrelationID: id, Reason: "runner returned without reaching the recorded operation"})
 	}
+	if err := r.recordUnawaited(execution); err != nil {
+		return err
+	}
 	return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(failure))
 }
 
@@ -552,7 +702,16 @@ func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) erro
 	if due, ok := r.pendingRetry(ctx, input); ok {
 		return worlds.Redeliver(time.Until(due))
 	}
+	pastCap := input.Attempt > MaxDeliveries
+	if past := input.Attempt - MaxDeliveries; pastCap && past&(past-1) == 0 {
+		// At the first delivery past the cap, and then at every power of
+		// two past it.
+		log.Printf("workflow: warning: step delivery %s for run %s was delivered %d times, more than %d", input.MessageID, input.RunID, input.Attempt, MaxDeliveries)
+	}
 	run, events, err := r.loadRun(ctx, input.RunID)
+	if pastCap && errors.Is(err, worlds.ErrRunNotFound) {
+		return nil
+	}
 	if err != nil || run.Status.Terminal() {
 		return err
 	}
@@ -576,10 +735,16 @@ func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) erro
 		return err
 	}
 	execution.delivery = input
+	// Past MaxDeliveries, a step no delivery got as far as starting for a
+	// long while fails instead of starting.
+	execution.stalled = pastCap && stepStalled(events, stepID, time.Now())
 	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
 	runner, ok := r.runners[run.WorkflowName]
+	if !ok && execution.stalled {
+		return r.failStalledStep(ctx, execution, stepID)
+	}
 	if !ok {
 		execution.targetAttempt = 1
 		return r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotRegistered, run.WorkflowName))})
@@ -643,6 +808,13 @@ func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.
 	switch {
 	case context.Cause(ctx) != nil:
 		return context.Cause(ctx)
+	case execution.stalled:
+		// The replay that reached the step chose its failure. One that did
+		// not reach it is why no delivery started the step.
+		if result, ok := execution.GetTargetResult(); ok && errors.Is(err, errReplayComplete) {
+			return r.completeStep(ctx, execution, stepID, result)
+		}
+		return r.failStalledStep(ctx, execution, stepID)
 	case errors.Is(err, errReplayComplete):
 		result, ok := execution.GetTargetResult()
 		if !ok {
@@ -671,15 +843,27 @@ func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.
 	}
 }
 
-// completeStep records a targeted step's result out-of-band. A retry asks for
-// the step's message again once it is due, and a final result queues a flow
-// that consumes it.
+// failStalledStep fails the step of a delivery made past MaxDeliveries that
+// no delivery got as far as starting, as the attempt that would have run.
+func (r *Runtime) failStalledStep(ctx context.Context, execution *Execution, stepID worlds.StepID) error {
+	starts, _ := stepAttempts(execution.events, stepID)
+	execution.targetAttempt = starts + 1
+	failure := deliveriesExceededStepError(stepNameIn(execution.events, stepID), execution.delivery.Attempt)
+	return r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(failure)})
+}
+
+// completeStep records a targeted step's result out-of-band, and queues a
+// flow, which consumes a final result. A retry also asks for the step's
+// message again once it is due.
 func (r *Runtime) completeStep(ctx context.Context, execution *Execution, stepID worlds.StepID, result worlds.DataStepResult) error {
-	event, err := execution.recordStepResult(stepID, max(execution.targetAttempt, 1), result, false)
+	event, err := execution.recordStepResult(stepID, max(execution.targetAttempt, 1), result, false, execution.targetRan)
 	if err != nil || event.EventID == "" {
 		return err
 	}
 	if event.EventType == worlds.EventTypeStepRetrying && result.RetryAfter != nil {
+		if err := r.wake(ctx, execution.run); err != nil {
+			return err
+		}
 		return worlds.Redeliver(time.Until(*result.RetryAfter))
 	}
 	return r.wake(ctx, execution.run)
@@ -828,9 +1012,6 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 // redelivering a failing step message at least this long.
 const stepStallWindow = time.Hour
 
-// stepStalled reports whether the step of input, delivered past
-// MaxDeliveries, has shown no activity for stepStallWindow. A step whose log
-// cannot be read is taken as stalled.
 // pendingRetry returns when the retry a step delivery waits for is due, read
 // from the step's latest event alone before the delivery reads the whole
 // log, when that event is a step_retrying not yet due. Only a delivery that
@@ -855,22 +1036,15 @@ func (r *Runtime) pendingRetry(ctx context.Context, input worlds.QueueInput) (ti
 	return *data.RetryAfter, true
 }
 
-func (r *Runtime) stepStalled(ctx context.Context, input worlds.QueueInput) bool {
-	var events []worlds.Event
-	pagination := worlds.Pagination{Limit: -1}
-	for {
-		page, err := r.world.EventsListByCorrelationID(ctx, worlds.EventsListByCorrelationIDInput{RunID: input.RunID, CorrelationID: string(*input.StepID), Pagination: pagination})
-		if err != nil {
-			return true
-		}
-		events = append(events, page.Data...)
-		if !page.HasMore {
-			break
-		}
-		pagination.Cursor = page.Cursor
-	}
-	since := time.Now().Add(-stepStallWindow)
+// stepStalled reports whether the step stepID, whose message is delivered
+// past MaxDeliveries, has shown no activity among events for stepStallWindow
+// before now.
+func stepStalled(events []worlds.Event, stepID worlds.StepID, now time.Time) bool {
+	since := now.Add(-stepStallWindow)
 	for _, event := range events {
+		if event.CorrelationID != string(stepID) {
+			continue
+		}
 		switch event.EventType {
 		case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted:
 			if event.CreatedAt.After(since) {
@@ -887,69 +1061,43 @@ func (r *Runtime) stepStalled(ctx context.Context, input worlds.QueueInput) bool
 	return true
 }
 
-// MaxDeliveries is the most attempts of one delivery Runtime.Execute makes.
-// With a World's retry backoff it spans hours, short of a queue's retention,
-// so a delivery that keeps failing fails its run or step instead of expiring
-// unseen.
+// MaxDeliveries is the most attempts of one flow delivery Runtime.Execute
+// makes. With a World's retry backoff it spans hours, short of a queue's
+// retention, so a delivery that keeps failing fails its run instead of
+// expiring unseen. A step's message is delivered again on purpose while the
+// step retries, so past MaxDeliveries its step fails only when no delivery
+// got as far as starting it for stepStallWindow.
 const MaxDeliveries = 48
 
-// exceedDeliveries fails the run, or the step, of a delivery attempted more
-// than MaxDeliveries times. A failed step is handed to a flow, which decides
-// whether the run fails. It returns nil once the failure is recorded or
-// another delivery has finished the run or step, so the delivery is
-// acknowledged.
+// exceedDeliveries fails the run of a flow delivery attempted more than
+// MaxDeliveries times, as an in-band write decided from a fresh read of the
+// log. It returns nil once the failure is recorded or another delivery has
+// finished the run, so the delivery is acknowledged. When the fence refuses
+// the write it returns an error, so the queue delivers the message again,
+// which tries the write again from a new read.
 func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput) error {
-	cause := worlds.FatalError{Cause: fmt.Errorf("%w (%d attempts)", worlds.ErrMaxDeliveriesExceeded, input.Attempt-1)}
-	log.Printf("workflow: delivery %s for run %s exceeded %d attempts", input.MessageID, input.RunID, MaxDeliveries)
-	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: input.RunID, ResolveData: worlds.ResolveDataNone})
+	log.Printf("workflow: delivery %s for run %s exceeded max deliveries (%d/%d)", input.MessageID, input.RunID, input.Attempt, MaxDeliveries)
+	run, events, err := r.loadRun(ctx, input.RunID)
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		return nil
 	}
 	if err != nil || run.Status.Terminal() {
 		return err
 	}
-	if input.StepID == nil {
-		data, err := r.runFailedData(ctx, run.RunID, run.DeploymentID, cause)
-		if err != nil {
-			return err
-		}
-		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}})
-		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
-			return nil
-		}
-		return err
-	}
-	_, events, err := r.loadRun(ctx, input.RunID)
+	execution, err := newExecution(ctx, r.world, run, events, nil)
 	if err != nil {
+		return r.failSetup(ctx, run, err)
+	}
+	execution.delivery = input
+	if execution.keys, err = worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID); err != nil {
 		return err
 	}
-	stepID := *input.StepID
-	if _, ok := stepCreation(events, stepID); !ok {
-		return nil
+	failure := fatalError(fmt.Sprintf("Workflow exceeded maximum queue deliveries (%d/%d)", input.Attempt, MaxDeliveries), worlds.ErrMaxDeliveriesExceeded)
+	err = r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(failure))
+	if errors.Is(err, errReplaySuperseded) {
+		return fmt.Errorf("workflow: the failure of run %s for exceeding max deliveries was refused by the in-band fence; the delivery is retried", input.RunID)
 	}
-	if _, final := stepFinal(events, stepID); !final {
-		keys, err := worlds.RunKeysFor(ctx, r.world, run.RunID, run.DeploymentID)
-		if err != nil {
-			return err
-		}
-		payload, err := worlds.EncodeErrorPayload(cause, worlds.PayloadOptions{Keys: keys})
-		if err != nil {
-			return err
-		}
-		starts, _ := stepAttempts(events, stepID)
-		data, err := json.Marshal(worlds.DataStepResult{StepName: stepNameIn(events, stepID), Attempt: max(starts, 1), Error: payload})
-		if err != nil {
-			return err
-		}
-		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepFailed, CorrelationID: string(stepID), Data: data}})
-		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
-			return nil
-		}
-		if err != nil && !errors.Is(err, worlds.ErrEntityConflict) && !errors.Is(err, worlds.ErrStepNotStartable) {
-			return err
-		}
-	}
-	return r.wake(ctx, run)
+	return err
 }
 
 // runFailedData returns the Data of a run_failed event for err, encrypted

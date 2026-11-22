@@ -79,7 +79,9 @@ type World interface {
   the run's `run_created`, and a refused candidate stays refused, with the
   same conflicting run, even after the token is freed. Refuse a candidate
   whose run ID is older than `worlds.StartHookCandidateMaxAge` with
-  `ErrStartHookRejected`, refuse a `hook_created` under the start hook's ID
+  `ErrStartHookRejected`, answer one you record no decision for, such as while
+  admission is switched off, with `ErrStartHookDisabled`, so the start asks
+  again and the candidate's delivery is redelivered, refuse a `hook_created` under the start hook's ID
   with `ErrEventInvalid`, and echo the hook on `Run.StartHook` without its
   metadata.
 - **Resume deduplication.** With `Capabilities().HookResumeDedup`, a

@@ -80,7 +80,23 @@ func DurableHook[T any](options DurableHookOptions) DurableHookResult[T] {
 		if err != nil {
 			return DurableHookResult[T]{Err: err}
 		}
-		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: data}, nil)
+		var refusal error
+		// The time a hook takes to create is left out of the time to the
+		// run's first step.
+		started := time.Now()
+		options.Execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookCreated, CorrelationID: string(hookID), Data: data}, func(err error) error {
+			if worldValidationFailure(err) {
+				refusal = err
+				return nil
+			}
+			return err
+		})
+		options.Execution.hookBlocking += time.Since(started)
+		if refusal != nil {
+			// A hook the World refuses as invalid is refused on every
+			// replay, so the workflow gets an error that fails the run.
+			return DurableHookResult[T]{HookID: hookID, Token: options.Token, Err: worlds.FatalError{Cause: fmt.Errorf("workflow: hook creation failed World validation: %w", refusal)}}
+		}
 		creationIndex, _ = options.Execution.declared(string(hookID))
 	}
 	event := options.Execution.events[creationIndex]
@@ -174,19 +190,38 @@ func HookOutcome[T any](execution *Execution, hookID worlds.HookID, after worlds
 }
 
 // DurableDisposeHook records that the run's hook hookID released its token,
-// as a write of the flow, unless the log already records it. A step delivery
-// reaches a disposal the flow recorded before it declared the step, so it
-// records nothing.
+// which the event names, as a write of the flow, unless the log already
+// records it. A step delivery reaches a disposal the flow recorded before it
+// declared the step, so it records nothing.
 func DurableDisposeHook(execution *Execution, hookID worlds.HookID) {
+	var disposed worlds.HookDisposedEventData
 	for _, event := range execution.events {
-		if event.EventType == worlds.EventTypeHookDisposed && event.CorrelationID == string(hookID) {
+		if event.CorrelationID != string(hookID) {
+			continue
+		}
+		switch event.EventType {
+		case worlds.EventTypeHookDisposed:
 			return
+		case worlds.EventTypeHookCreated:
+			var created worlds.DataHookCreated
+			if json.Unmarshal(event.Data, &created) == nil {
+				disposed.Token = created.Token
+			}
 		}
 	}
 	if execution.target != nil {
 		return
 	}
-	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID)}, func(err error) error {
+	// The run's start hook was created with the run, which records its
+	// token.
+	if start := execution.StartHook(); disposed.Token == "" && start != nil && hookID == worlds.StartHookID(execution.run.RunID) {
+		disposed.Token = start.Token
+	}
+	var data []byte
+	if disposed.Token != "" {
+		data, _ = json.Marshal(disposed)
+	}
+	execution.CreateEvent(worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: string(hookID), Data: data}, func(err error) error {
 		// A run that ended, a hook that is gone, and a concurrent disposal
 		// leave nothing to dispose.
 		if is[*worlds.RunExpiredError](err) || is[*worlds.HookNotFoundError](err) || errors.Is(err, worlds.ErrHookNotActive) {

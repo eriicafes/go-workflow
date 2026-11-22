@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -29,7 +30,13 @@ const (
 	// wait before each retry, a Retry-After included.
 	streamCloseMaxRetries = 5
 	streamCloseMaxBackoff = 30 * time.Second
+	// streamAppendMaxRetries is how many times an append is sent again.
+	streamAppendMaxRetries = 5
 )
+
+// streamAppendRetryBase is the wait before an append's first retry after a
+// connection that was never made, doubling with each retry.
+var streamAppendRetryBase = 500 * time.Millisecond
 
 // streamCloseMinBackoff is the wait before a stream close's first retry,
 // doubling with each retry.
@@ -46,11 +53,44 @@ func (w *World) streamsPath(runID worlds.RunID, name, suffix string) string {
 	return "/v2/runs/" + pathEscape(string(runID)) + "/streams/" + pathEscape(name) + suffix
 }
 
+// putStream appends body to a stream. An append is not idempotent, so it is
+// sent again only when the backend cannot have stored it: after a connection
+// that was never made, each after streamAppendRetryBase doubled per retry,
+// and after a rate limit, waited out within the rate limit budget. It is
+// sent again at most streamAppendMaxRetries times.
 func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header) error {
-	return w.putStreamRetrying(ctx, runID, name, body, header, 0)
+	var throttle throttleWaiter
+	for retry := 0; ; retry++ {
+		err := w.putStreamRetrying(ctx, runID, name, body, header, 0)
+		if err == nil || retry == streamAppendMaxRetries {
+			return err
+		}
+		if throttled, ok := errors.AsType[*worlds.ThrottleError](err); ok {
+			if !throttle.wait(ctx, throttled.After) {
+				return err
+			}
+			continue
+		}
+		if !connectFailure(ctx, err) || sleep(ctx, streamAppendRetryBase<<retry) != nil {
+			return err
+		}
+	}
 }
 
-// putStreamRetrying is putStream sent again up to retries times after a
+// connectFailure reports whether err is a request whose connection was never
+// made: a failed lookup, or a refused or timed out dial.
+func connectFailure(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return true
+	}
+	failed, ok := errors.AsType[*net.OpError](err)
+	return ok && failed.Op == "dial"
+}
+
+// putStreamRetrying is a stream PUT sent again up to retries times after a
 // transport failure or a 429, 500, 502, 503 or 504: after the answer's
 // Retry-After, or a backoff from streamCloseMinBackoff doubling with each
 // retry, both capped at streamCloseMaxBackoff.
@@ -65,7 +105,7 @@ func (w *World) putStreamRetrying(ctx context.Context, runID worlds.RunID, name 
 	var response *http.Response
 	var err error
 	for retry := 1; ; retry++ {
-		response, err = w.api.request(ctx, http.MethodPut, w.streamPath(runID, name), nil, body, header)
+		response, err = w.api.request(ctx, streamRequest, http.MethodPut, w.streamPath(runID, name), nil, body, header)
 		if err == nil || retry > retries {
 			break
 		}
@@ -335,7 +375,7 @@ func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoI
 func (w *World) StreamsList(ctx context.Context, input worlds.StreamsListInput) ([]string, error) {
 	header := http.Header{}
 	header.Set("Accept", "application/json")
-	response, err := w.api.request(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/streams", nil, nil, header)
+	response, err := w.api.request(ctx, streamRequest, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/streams", nil, nil, header)
 	if statusOf(err) == http.StatusNotFound {
 		return []string{}, nil
 	}

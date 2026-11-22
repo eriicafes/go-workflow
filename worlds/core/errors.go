@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -10,9 +11,6 @@ import (
 var (
 	errReplayComplete  = errors.New("workflow: targeted replay complete")
 	errReplaySuspended = errors.New("workflow: replay suspended")
-	// errStepAttemptsExhausted fails a step whose every attempt started
-	// without recording a result.
-	errStepAttemptsExhausted = errors.New("workflow: step attempts exhausted")
 	// errReplaySuperseded ends a flow whose in-band write was refused
 	// because another orchestrator wrote first. The Runtime replays again.
 	errReplaySuperseded = errors.New("workflow: replay superseded")
@@ -73,6 +71,41 @@ func (e deploymentMismatchError) Error() string {
 }
 
 func (e deploymentMismatchError) Unwrap() error { return worlds.ErrDeploymentMismatch }
+
+// isoTime returns at as error messages write a time: UTC, to the millisecond.
+func isoTime(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000Z") }
+
+// retries returns "1 retry" or "n retries".
+func retries(n int) string {
+	if n == 1 {
+		return "1 retry"
+	}
+	return fmt.Sprintf("%d retries", n)
+}
+
+// retriesExhaustedError returns the error a step fails with when its last
+// allowed attempt fails with cause, which it keeps as its cause.
+func retriesExhaustedError(name string, maxRetries int, cause error) error {
+	return fatalError(fmt.Sprintf("Step \"%s\" failed after %s: %s", name, retries(maxRetries), cause.Error()), cause)
+}
+
+// attemptsUsedError returns the error a step fails with when every attempt
+// it is allowed started and the last, attempt, which started at startedAt,
+// recorded no result. A zero startedAt leaves the attempt out.
+func attemptsUsedError(name string, maxRetries, attempt int, startedAt time.Time) error {
+	message := fmt.Sprintf("Step \"%s\" exceeded max retries (%s)", name, retries(maxRetries))
+	if !startedAt.IsZero() {
+		message += fmt.Sprintf(": attempt %d started at %s and never recorded a result. The invocation running it likely crashed, ran out of memory, hit its timeout, or was stopped before it could record the result. Check that invocation's logs for the cause.", attempt, isoTime(startedAt))
+	}
+	return fatalError(message, nil)
+}
+
+// deliveriesExceededStepError returns the error a step fails with when its
+// message was delivered deliveries times, more than MaxDeliveries, without a
+// delivery starting it.
+func deliveriesExceededStepError(name string, deliveries int) error {
+	return fatalError(fmt.Sprintf("Step \"%s\" failed with MAX_DELIVERIES_EXCEEDED: its queue message was delivered %d times (more than %d) without the step starting", name, deliveries, MaxDeliveries), worlds.ErrMaxDeliveriesExceeded)
+}
 
 // is reports whether err's chain has an error of type E.
 func is[E error](err error) bool {

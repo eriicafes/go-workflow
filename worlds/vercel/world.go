@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +36,10 @@ type Config struct {
 	// request goes to. Empty sends each message to
 	// https://<region>.vercel-queue.com/api/v3 for the region its run ID
 	// carries, else that of VERCEL_REGION, else iad1, and releases each
-	// delivery in the region that delivered it. Through Vercel's API proxy,
-	// with Token, requests name the region in the x-vercel-queue-region
-	// header.
+	// delivery in the region that delivered it. With Token, queue requests go
+	// through Vercel's API proxy instead, at <BackendURL>/queues-proxy/api/v3,
+	// with Token and the project's headers, and name the region in the
+	// x-vercel-queue-region header.
 	QueueURL string
 	// Topic is the Vercel Queues topic that deliveries of unrouted workflows
 	// are published to. It is required.
@@ -50,24 +52,28 @@ type Config struct {
 	// so each topic can have its own trigger and concurrency.
 	Routes map[string]string
 	// OIDCToken returns the deployment's Vercel OIDC token. It is called for
-	// every Vercel Queues request, and every workflow backend request without
-	// Token, because Vercel rotates the token. Nil uses
-	// OIDCTokenFromEnv(DefaultOIDCTokenEnv).
+	// every Vercel Queues and workflow backend request without Token, because
+	// Vercel rotates the token. Nil uses OIDCTokenFromEnv(DefaultOIDCTokenEnv).
 	OIDCToken func(context.Context) (string, error)
-	// Token is a Vercel access token for reaching the workflow backend from
-	// outside a deployment, such as a script or a CLI. With it, requests go
-	// through Vercel's API proxy for ProjectID, TeamID, and Environment
-	// (default production), and the OIDC token is used only for Vercel
-	// Queues. Inside a deployment leave it empty.
+	// Token is a Vercel access token for reaching the workflow backend and
+	// Vercel Queues from outside a deployment, such as a script or a CLI. With
+	// it, requests go through Vercel's API proxy for ProjectID, TeamID, and
+	// Environment (default production), and the OIDC token is not used.
+	// Inside a deployment leave it empty.
 	Token       string
 	ProjectID   string
 	TeamID      string
 	Environment string
 	// BackendURL is the root of the workflow API. Empty uses
-	// DefaultBackendURL, or DefaultProxyURL with Token.
+	// DefaultBackendURL, or DefaultProxyURL with Token, unless the
+	// environment names another: VERCEL_WORKFLOW_SERVER_URL is a backend host,
+	// used directly with /api appended, or named to the proxy in the
+	// x-vercel-workflow-api-url header, and WORKFLOW_VERCEL_BACKEND_URL is the
+	// proxy's root.
 	BackendURL string
 	// HTTPClient sends workflow backend and Vercel Queues requests. Nil uses
-	// http.DefaultClient.
+	// http.DefaultClient. Backend requests never follow a redirect, whatever
+	// the client's CheckRedirect.
 	HTTPClient *http.Client
 	// DeploymentID identifies the deployment this World runs in. Runs created
 	// through the World are pinned to it, deliveries are addressed to the
@@ -176,13 +182,26 @@ func New(config Config) (*World, error) {
 	if config.Environment == "" {
 		config.Environment = "production"
 	}
+	// A backend other than Vercel's own is named by BackendURL, or else by
+	// the environment: VERCEL_WORKFLOW_SERVER_URL is the backend's host, which
+	// the API proxy is asked to forward to, and WORKFLOW_VERCEL_BACKEND_URL
+	// the proxy's root.
+	server := strings.TrimRight(os.Getenv("VERCEL_WORKFLOW_SERVER_URL"), "/")
 	if config.BackendURL == "" {
-		config.BackendURL = DefaultBackendURL
-		if config.Token != "" {
+		switch {
+		case config.Token != "" && os.Getenv("WORKFLOW_VERCEL_BACKEND_URL") != "":
+			config.BackendURL = os.Getenv("WORKFLOW_VERCEL_BACKEND_URL")
+		case config.Token != "":
 			config.BackendURL = DefaultProxyURL
+		case server != "":
+			config.BackendURL = server + "/api"
+		default:
+			config.BackendURL = DefaultBackendURL
 		}
 	}
-	userAgent := "go-workflow/vercelworld"
+	// The same shape as other workflow clients send: the client, its runtime
+	// and platform, and the deployment.
+	userAgent := fmt.Sprintf("go-workflow/vercelworld %s %s (%s)", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	if config.DeploymentID != "" {
 		userAgent += " " + config.DeploymentID
 	}
@@ -194,13 +213,16 @@ func New(config Config) (*World, error) {
 			proxy:     config.Token != "",
 			token:     config.Token,
 			oidc:      config.OIDCToken,
-			http:      config.HTTPClient,
+			http:      withoutRedirects(config.HTTPClient),
 			project:   config.ProjectID,
 			team:      config.TeamID,
 			env:       config.Environment,
 			userAgent: userAgent,
 		},
-		streamsOverHTTP: os.Getenv("WORKFLOW_STREAMS_TRANSPORT") == "http",
+		streamsOverHTTP: strings.EqualFold(strings.TrimSpace(os.Getenv("WORKFLOW_STREAMS_TRANSPORT")), "http"),
+	}
+	if world.api.proxy {
+		world.api.forwardTo = os.Getenv("VERCEL_WORKFLOW_SERVER_URL")
 	}
 	if config.DeploymentID != "" && os.Getenv("VERCEL_ENV") == "production" {
 		world.latestURL = baseURL + deploymentRouteSuffix
@@ -212,7 +234,7 @@ func (w *World) BaseURL() string             { return w.config.BaseURL }
 func (w *World) DeploymentID() string        { return w.config.DeploymentID }
 func (w *World) Analytics() worlds.Analytics { return analytics{world: w} }
 func (w *World) Capabilities() worlds.Capabilities {
-	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true, MaxQueueDelay: vqsMaxQueueDelay}
+	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeploymentAffinity: w.config.DeploymentID != "", DeleteData: true, StartHook: true, RegionalRunIDs: true, MaxQueueDelay: maxQueueDelay()}
 }
 
 // DefaultOIDCTokenEnv is the environment variable Vercel sets to the

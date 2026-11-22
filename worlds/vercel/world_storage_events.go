@@ -23,8 +23,11 @@ type createResponse struct {
 	StepCreated bool           `cbor:"stepCreated"`
 	Allocated   *int           `cbor:"allocated"`
 	// Events and HasMore are the skipped-slot report of an in-band write.
-	Events  []map[string]any `cbor:"events"`
-	HasMore bool             `cbor:"hasMore"`
+	// ReportIncomplete says the backend could not complete that report, which
+	// the writer reads as HasMore.
+	Events           []map[string]any `cbor:"events"`
+	HasMore          bool             `cbor:"hasMore"`
+	ReportIncomplete bool             `cbor:"reportIncomplete"`
 }
 
 // runCreationMeta returns the frame meta of a run's creation, which
@@ -75,7 +78,9 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
 	meta := w.runCreationMeta(input, worlds.EventTypeRunCreated)
-	response, err := w.postEvent(ctx, input.RunID, worlds.EventTypeRunCreated, meta, input.Input)
+	response, err := retryEventWrite(ctx, true, false, func() (createResponse, error) {
+		return w.postEvent(ctx, input.RunID, worlds.EventTypeRunCreated, meta, input.Input)
+	})
 	if err != nil {
 		return worlds.EventResult{}, classify(err, worlds.EventTypeRunCreated)
 	}
@@ -88,13 +93,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
-	if !input.Event.EventType.Valid() || input.Event.EventType == worlds.EventTypeRunCreated || input.Event.EventType == worlds.EventTypeHookConflict {
+	if !input.Event.EventType.Creatable() {
 		return worlds.EventResult{}, fmt.Errorf("%w: %s cannot be appended", worlds.ErrEventInvalid, input.Event.EventType)
 	}
 	// An attr_set whose data is over the backend's limit is refused before
 	// it is sent.
-	if input.Event.EventType == worlds.EventTypeAttrSet && len(input.Event.Data) > worlds.MaxAttrSetDataBytes {
-		return worlds.EventResult{}, fmt.Errorf("%w: %w: attr_set data is %d bytes, over %d", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, len(input.Event.Data), worlds.MaxAttrSetDataBytes)
+	if size := worlds.AttrSetDataSize(input.Event.Data); input.Event.EventType == worlds.EventTypeAttrSet && size > worlds.MaxAttrSetDataBytes {
+		return worlds.EventResult{}, fmt.Errorf("%w: %w: attr_set data is %d bytes, over %d", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, size, worlds.MaxAttrSetDataBytes)
 	}
 	meta, payload, err := encodeEvent(input.Event)
 	if err != nil {
@@ -127,7 +132,15 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		meta["inBand"] = true
 		meta["expectedSeqInBand"] = *input.Options.InBandCount
 	}
-	response, err := w.postEvent(ctx, input.RunID, input.Event.EventType, meta, payload)
+	if created := input.Options.StepCreatedAt; !created.IsZero() && input.Event.EventType == worlds.EventTypeStepStarted && meta["attempt"] == 1 && payload == nil {
+		// The backend reads the step's creation time, in milliseconds, only
+		// on the first attempt's start of a step created before it.
+		meta["stepCreatedAt"] = created.UnixMilli()
+	}
+	eligible := retriesTransient(input.Event.EventType, input.Options.InBandCount != nil, input.Options.ResumeID != "")
+	response, err := retryEventWrite(ctx, eligible, recordsStepOutcome(input.Event.EventType, input.Options), func() (createResponse, error) {
+		return w.postEvent(ctx, input.RunID, input.Event.EventType, meta, payload)
+	})
 	if err != nil {
 		return worlds.EventResult{}, classify(err, input.Event.EventType)
 	}
@@ -161,9 +174,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 			result.Hook = &hook
 		}
 	}
-	if input.Options.InBandCount != nil && hasHeld && response.Events != nil {
-		// The skipped-slot report of an in-band write.
-		result.Events, result.MoreEvents = make([]worlds.Event, 0, len(response.Events)), response.HasMore
+	if input.Options.InBandCount != nil && hasHeld && (response.Events != nil || response.ReportIncomplete) {
+		// The skipped-slot report of an in-band write, which an incomplete
+		// one leaves for the writer to read from the log.
+		result.Events, result.MoreEvents = make([]worlds.Event, 0, len(response.Events)), response.HasMore || response.ReportIncomplete
 		for _, wire := range response.Events {
 			event, err := toEvent(input.RunID, wireEventFromMap(wire), input.Options.ResolveData)
 			if err != nil {
@@ -241,9 +255,11 @@ type batchResponse struct {
 		createResponse
 	} `cbor:"results"`
 	Allocated *int `cbor:"allocated"`
-	// Events and HasMore are the skipped-slot report of an in-band batch.
-	Events  []map[string]any `cbor:"events"`
-	HasMore bool             `cbor:"hasMore"`
+	// Events and HasMore are the skipped-slot report of an in-band batch, and
+	// ReportIncomplete says the backend could not complete it.
+	Events           []map[string]any `cbor:"events"`
+	HasMore          bool             `cbor:"hasMore"`
+	ReportIncomplete bool             `cbor:"reportIncomplete"`
 }
 
 // EventsCreateBatch appends the events in one request, as one fenced
@@ -259,8 +275,12 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return result, nil
 	}
 	var body []byte
+	// A batch is sent again after a transient failure only when every event
+	// in it may be.
+	eligible := true
 	for _, event := range input.Events {
-		if !event.EventType.Valid() || event.EventType == worlds.EventTypeRunCreated || event.EventType == worlds.EventTypeHookConflict || event.EventType == worlds.EventTypeHookReceived || event.EventType == worlds.EventTypeHookCreated {
+		eligible = eligible && retriesTransient(event.EventType, input.InBandCount != nil, false)
+		if !event.EventType.Creatable() || event.EventType == worlds.EventTypeHookReceived || event.EventType == worlds.EventTypeHookCreated {
 			return worlds.EventBatchResult{}, fmt.Errorf("%w: %s cannot be batched", worlds.ErrEventInvalid, event.EventType)
 		}
 		meta, payload, err := encodeEvent(event)
@@ -283,18 +303,24 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 	}
 	header := http.Header{}
 	header.Set("Content-Type", "application/octet-stream")
-	response, err := w.api.request(ctx, http.MethodPost, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events/batch", nil, body, header)
+	decoded, err := retryEventWrite(ctx, eligible, false, func() (batchResponse, error) {
+		response, err := w.api.request(ctx, eventsRequest, http.MethodPost, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events/batch", nil, body, header)
+		if err != nil {
+			return batchResponse{}, err
+		}
+		defer response.Body.Close()
+		data, err := readAll(response.Body)
+		if err != nil {
+			return batchResponse{}, err
+		}
+		var decoded batchResponse
+		if err := cborDecode.Unmarshal(data, &decoded); err != nil {
+			return batchResponse{}, &transientError{err: fmt.Errorf("workflow/vercel: decode batch answer: %w", err)}
+		}
+		return decoded, nil
+	})
 	if err != nil {
 		return worlds.EventBatchResult{}, classify(err, input.Events[0].EventType)
-	}
-	defer response.Body.Close()
-	data, err := readAll(response.Body)
-	if err != nil {
-		return worlds.EventBatchResult{}, err
-	}
-	var decoded batchResponse
-	if err := cborDecode.Unmarshal(data, &decoded); err != nil {
-		return worlds.EventBatchResult{}, fmt.Errorf("workflow/vercel: decode batch answer: %w", err)
 	}
 	if len(decoded.Results) != len(input.Events) {
 		return worlds.EventBatchResult{}, fmt.Errorf("workflow/vercel: batch answer has %d results for %d events", len(decoded.Results), len(input.Events))
@@ -340,8 +366,8 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		for index := range result.Results {
 			result.Results[index].InBandCount = result.InBandCount
 		}
-		if input.EventCount != nil && decoded.Events != nil {
-			result.Events, result.MoreEvents = make([]worlds.Event, 0, len(decoded.Events)), decoded.HasMore
+		if input.EventCount != nil && (decoded.Events != nil || decoded.ReportIncomplete) {
+			result.Events, result.MoreEvents = make([]worlds.Event, 0, len(decoded.Events)), decoded.HasMore || decoded.ReportIncomplete
 			for _, wire := range decoded.Events {
 				event, err := toEvent(input.RunID, wireEventFromMap(wire), worlds.EventsResolveDataAll)
 				if err != nil {
@@ -362,7 +388,7 @@ func (w *World) postEvent(ctx context.Context, runID worlds.RunID, eventType wor
 	}
 	header := http.Header{}
 	header.Set("Content-Type", "application/octet-stream")
-	response, err := w.api.request(ctx, http.MethodPost, eventsRoute+"/runs/"+pathEscape(string(runID))+"/events/"+pathEscape(string(eventType)), nil, body, header)
+	response, err := w.api.request(ctx, eventsRequest, http.MethodPost, eventsRoute+"/runs/"+pathEscape(string(runID))+"/events/"+pathEscape(string(eventType)), nil, body, header)
 	if err != nil {
 		return createResponse{}, err
 	}
@@ -373,7 +399,7 @@ func (w *World) postEvent(ctx context.Context, runID worlds.RunID, eventType wor
 	}
 	var decoded createResponse
 	if err := cborDecode.Unmarshal(data, &decoded); err != nil {
-		return createResponse{}, fmt.Errorf("workflow/vercel: decode %s answer: %w", eventType, err)
+		return createResponse{}, &transientError{err: fmt.Errorf("workflow/vercel: decode %s answer: %w", eventType, err)}
 	}
 	if decoded.Event == nil {
 		return createResponse{}, fmt.Errorf("workflow/vercel: %s answer has no event", eventType)
@@ -383,7 +409,7 @@ func (w *World) postEvent(ctx context.Context, runID worlds.RunID, eventType wor
 
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
 	query := url.Values{"remoteRefBehavior": {"resolve"}}
-	response, err := w.api.request(ctx, http.MethodGet, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events/"+pathEscape(string(input.EventID)), query, nil, nil)
+	response, err := w.api.request(ctx, eventsRequest, http.MethodGet, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events/"+pathEscape(string(input.EventID)), query, nil, nil)
 	if statusOf(err) == http.StatusNotFound {
 		if _, runErr := w.getRun(ctx, input.RunID, worlds.ResolveDataNone, "", 0); runErr != nil {
 			return worlds.Event{}, runErr
@@ -403,13 +429,20 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
 	query := listQuery(input.Pagination)
+	if input.Pagination.Limit <= 0 {
+		// No limit reads the whole log.
+		query.Set("returnAll", "true")
+	}
 	query.Set("remoteRefBehavior", refBehavior(input.ResolveData))
-	var snapshot worlds.EventsSnapshot
-	page, err := w.eventsPage(ctx, input.RunID, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events", query, input.ResolveData, "", &snapshot)
-	return worlds.EventsPage{Page: page, Snapshot: snapshot}, err
+	var list worlds.EventsPage
+	page, err := w.eventsPage(ctx, input.RunID, eventsRoute+"/runs/"+pathEscape(string(input.RunID))+"/events", query, input.ResolveData, "", &list)
+	list.Page = page
+	return list, err
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
+	// The correlation route takes a cursor, a limit and an order, and no
+	// returnAll.
 	query := listQuery(input.Pagination)
 	query.Set("remoteRefBehavior", refBehavior(input.ResolveData))
 	query.Set("correlationId", input.CorrelationID)
@@ -417,11 +450,11 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 	return w.eventsPage(ctx, input.RunID, "/v4/events", query, input.ResolveData, input.CorrelationID, nil)
 }
 
-// eventsPage reads one list answer, and its counters into snapshot when it
-// is not nil. A correlation listing keeps only the run's events, since
+// eventsPage reads one list answer, and its counters and the run's event
+// limit into list when it is not nil. A correlation listing keeps only the run's events, since
 // correlation IDs are unique only within a run.
-func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string, query url.Values, resolve worlds.EventsResolveData, correlationID string, snapshot *worlds.EventsSnapshot) (worlds.Page[worlds.Event], error) {
-	page, err := w.readEvents(ctx, path, query)
+func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string, query url.Values, resolve worlds.EventsResolveData, correlationID string, list *worlds.EventsPage) (worlds.Page[worlds.Event], error) {
+	page, err := w.readEventLog(ctx, path, query, correlationID == "")
 	if statusOf(err) == http.StatusNotFound {
 		// The run is missing, or it has no such events.
 		if _, runErr := w.getRun(ctx, runID, worlds.ResolveDataNone, "", 0); runErr != nil {
@@ -432,8 +465,11 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string,
 	if err != nil {
 		return worlds.Page[worlds.Event]{}, err
 	}
-	if snapshot != nil && page.Seq != nil && page.SeqInBand != nil {
-		*snapshot = worlds.EventsSnapshot{EventCount: *page.Seq, InBandCount: *page.SeqInBand}
+	if list != nil {
+		list.MaxEvents = page.MaxEvents
+		if page.Seq != nil && page.SeqInBand != nil {
+			list.Snapshot = worlds.EventsSnapshot{EventCount: *page.Seq, InBandCount: *page.SeqInBand}
+		}
 	}
 	result := worlds.Page[worlds.Event]{Cursor: page.Cursor, HasMore: page.HasMore}
 	for _, wire := range page.Events {
@@ -451,10 +487,51 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string,
 	return result, nil
 }
 
+// maxPartialReads is how often a read of a whole log continues an answer
+// that was cut off before its end frame.
+const maxPartialReads = 2
+
+// readEventLog reads one list answer of path. A read of a run's whole log,
+// one whose query has returnAll, keeps what it has read: a rate limit is
+// waited out and the same page asked for again, and an answer cut off before
+// its end frame is continued after its last whole event, up to
+// maxPartialReads times. A read with a limit returns either as its error, as
+// does a correlation listing, runScoped false. A run's answer that returns
+// events or says there are more without moving the cursor is an error.
+func (w *World) readEventLog(ctx context.Context, path string, query url.Values, runScoped bool) (eventPage, error) {
+	fullLog := runScoped && query.Get("returnAll") == "true"
+	asked := maps.Clone(query)
+	var events []wireEvent
+	var throttle throttleWaiter
+	for partial := 0; ; {
+		page, err := w.readEvents(ctx, path, asked)
+		if err != nil {
+			if throttled, ok := errors.AsType[*worlds.ThrottleError](err); ok && fullLog && throttle.wait(ctx, throttled.After) {
+				continue
+			}
+			if _, truncated := errors.AsType[*truncatedError](err); !truncated || !fullLog || len(page.Events) == 0 || partial == maxPartialReads || ctx.Err() != nil {
+				return eventPage{}, err
+			}
+			partial++
+			events = append(events, page.Events...)
+			asked.Set("cursor", "eid:"+page.Events[len(page.Events)-1].EventID)
+			continue
+		}
+		if runScoped && (page.Cursor == "" || page.Cursor == asked.Get("cursor")) && (len(page.Events) > 0 || page.HasMore) {
+			return eventPage{}, errors.New("workflow/vercel: event list answer did not advance its cursor")
+		}
+		if page.Cursor == "" && partial > 0 {
+			page.Cursor = asked.Get("cursor")
+		}
+		page.Events = append(events, page.Events...)
+		return page, nil
+	}
+}
+
 func (w *World) readEvents(ctx context.Context, path string, query url.Values) (eventPage, error) {
 	header := http.Header{}
 	header.Set("Accept", frameContentType)
-	response, err := w.api.request(ctx, http.MethodGet, path, query, nil, header)
+	response, err := w.api.request(ctx, eventsRequest, http.MethodGet, path, query, nil, header)
 	if err != nil {
 		return eventPage{}, err
 	}
@@ -483,7 +560,7 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, after, limit
 	}
 	var loaded loadedEvents
 	for {
-		page, err := w.readEvents(ctx, eventsRoute+"/runs/"+pathEscape(string(runID))+"/events", query)
+		page, err := w.readEventLog(ctx, eventsRoute+"/runs/"+pathEscape(string(runID))+"/events", query, true)
 		if err != nil {
 			return loadedEvents{}, notFound(err, worlds.ErrRunNotFound)
 		}
@@ -504,13 +581,11 @@ func (w *World) listEvents(ctx context.Context, runID worlds.RunID, after, limit
 	}
 }
 
-// listQuery maps a Pagination to list parameters. No limit reads everything.
+// listQuery maps a Pagination to list parameters.
 func listQuery(pagination worlds.Pagination) url.Values {
 	query := url.Values{}
 	if pagination.Limit > 0 {
 		query.Set("limit", itoa(pagination.Limit))
-	} else {
-		query.Set("returnAll", "true")
 	}
 	if pagination.Cursor != "" {
 		query.Set("cursor", pagination.Cursor)

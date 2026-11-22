@@ -19,7 +19,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if err := ctx.Err(); err != nil {
 		return worlds.EventResult{}, err
 	}
-	if input.Event.EventType == worlds.EventTypeRunCreated || !input.Event.EventType.Valid() {
+	if !input.Event.EventType.Creatable() {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
 	// A resume's digest must be its payload's.
@@ -94,7 +94,7 @@ func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
 // not the run's current InBandCount.
 func (m *World) fenceLocked(runID worlds.RunID, count *int) error {
 	if count != nil && *count != m.runs[runID].InBandCount {
-		return &worlds.InBandSupersededError{}
+		return &worlds.InBandSupersededError{EventCount: len(m.events[runID]), InBandCount: m.runs[runID].InBandCount}
 	}
 	return nil
 }
@@ -180,7 +180,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		return worlds.EventBatchResult{}, err
 	}
 	for _, value := range input.Events {
-		if value.EventType == worlds.EventTypeRunCreated || value.EventType == worlds.EventTypeHookCreated || !value.EventType.Valid() {
+		if value.EventType == worlds.EventTypeHookCreated || !value.EventType.Creatable() {
 			return worlds.EventBatchResult{}, worlds.ErrEventInvalid
 		}
 	}
@@ -531,7 +531,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)

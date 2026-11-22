@@ -3,6 +3,7 @@ package localworld
 import (
 	"context"
 	"errors"
+	"log"
 	"slices"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 )
 
 func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	if err := checkID("run ID", string(input.RunID)); err != nil {
+		return worlds.Run{}, err
+	}
 	var run worlds.Run
 	err := w.read(ctx, func(s *store) error {
 		record, err := s.getRun(input.RunID)
@@ -24,8 +28,9 @@ func (w *World) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 200)
-	// An empty status filter matches no runs, and a nil one matches every
-	// status.
+	// The list holds the runs of every tag: only a read of one run is scoped
+	// by tag. An empty status filter matches no runs, and a nil one matches
+	// every status.
 	if input.Status != nil && len(input.Status) == 0 {
 		return worlds.Page[worlds.Run]{Data: []worlds.Run{}}, nil
 	}
@@ -43,8 +48,8 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 			}
 			runs = append(runs, run)
 		}
-		page, err = keyPage(runs, input.Pagination, func(run worlds.Run) string { return sortKey(run.CreatedAt, string(run.RunID)) })
-		return err
+		page = entityPage(runs, input.Pagination, func(run worlds.Run) (time.Time, string) { return run.CreatedAt, string(run.RunID) })
+		return nil
 	})
 	return page, err
 }
@@ -90,6 +95,12 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 	deleted := false
 	for index, id := range input.RunIDs {
 		result := worlds.DeleteDataResult{RunID: id}
+		if checkID("run ID", string(id)) != nil {
+			// No run is stored under an unsafe ID.
+			result.Outcome = worlds.DeleteDataNotFound
+			results[index] = result
+			continue
+		}
 		err := w.write(ctx, func(s *store) error {
 			run, err := s.getRun(id)
 			switch {
@@ -103,15 +114,16 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 				result.Reason, result.Status = worlds.DeleteDataRunNotTerminal, run.Status
 				return nil
 			}
-			now := time.Now().UTC()
-			if worlds.RunDataExpired(run.Run, now) {
-				result.Outcome = worlds.DeleteDataAlreadyDeleted
-				return nil
-			}
-			result.Outcome = worlds.DeleteDataDeleted
-			run.ExpiredAt = &now
-			if err := s.putRun(run); err != nil {
-				return err
+			// A run whose data was deleted before keeps its first ExpiredAt,
+			// and anything an earlier deletion left behind is deleted again.
+			now := clock()
+			result.Outcome = worlds.DeleteDataAlreadyDeleted
+			if !worlds.RunDataExpired(run.Run, now) {
+				result.Outcome = worlds.DeleteDataDeleted
+				run.ExpiredAt = &now
+				if err := s.putRun(run); err != nil {
+					return err
+				}
 			}
 			return s.purgeRun(run)
 		})
@@ -119,11 +131,13 @@ func (w *World) RunsDeleteDataMany(ctx context.Context, input worlds.RunsDeleteD
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return worlds.RunsDeleteDataManyResult{}, ctxErr
 			}
-			result = worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "storage_error", Retryable: true}
+			log.Printf("workflow/local: delete the data of run %s: %v", id, err)
+			result = worlds.DeleteDataResult{RunID: id, Outcome: worlds.DeleteDataFailed, Code: "internal_error", Retryable: true}
 		}
-		deleted = deleted || result.Outcome == worlds.DeleteDataDeleted
+		deleted = deleted || result.Outcome == worlds.DeleteDataDeleted || result.Outcome == worlds.DeleteDataAlreadyDeleted
 		results[index] = result
 	}
+	// The deleted bytes stay in the WAL until it is checkpointed.
 	if deleted {
 		w.maintain(ctx)
 	}

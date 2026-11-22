@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
 	"strconv"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -145,7 +148,7 @@ func TestBackendRateLimitIsAThrottleError(t *testing.T) {
 			writer.WriteHeader(http.StatusTooManyRequests)
 		}))
 		api := &backend{baseURL: server.URL, http: server.Client(), oidc: func(context.Context) (string, error) { return "token", nil }}
-		_, err := api.request(context.Background(), http.MethodGet, "/v2/runs/wrun_1", nil, nil, nil)
+		_, err := api.request(context.Background(), entityRequest, http.MethodGet, "/v2/runs/wrun_1", nil, nil, nil)
 		server.Close()
 		var throttle *worlds.ThrottleError
 		if errors.As(err, &throttle) != test.throttle || (test.throttle && throttle.After != test.after) {
@@ -243,7 +246,7 @@ func contractSend(t *testing.T, world *World, path string, body []byte) (map[str
 	t.Helper()
 	header := http.Header{}
 	header.Set("Content-Type", "application/octet-stream")
-	response, err := world.api.request(context.Background(), http.MethodPost, path, nil, body, header)
+	response, err := world.api.request(context.Background(), eventsRequest, http.MethodPost, path, nil, body, header)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +269,7 @@ func contractSnapshot(t *testing.T, world *World, version string, runID worlds.R
 	t.Helper()
 	header := http.Header{}
 	header.Set("Accept", frameContentType)
-	response, err := world.api.request(context.Background(), http.MethodGet, "/"+version+"/runs/"+pathEscape(string(runID))+"/events", url.Values{"returnAll": {"true"}, "remoteRefBehavior": {"resolve"}}, nil, header)
+	response, err := world.api.request(context.Background(), eventsRequest, http.MethodGet, "/"+version+"/runs/"+pathEscape(string(runID))+"/events", url.Values{"returnAll": {"true"}, "remoteRefBehavior": {"resolve"}}, nil, header)
 	if err != nil {
 		t.Fatalf("list events: %v", err)
 	}
@@ -499,4 +502,344 @@ func matchesError(err, want error) bool {
 		return errors.Is(err, want)
 	}
 	return errors.As(err, reflect.New(reflect.TypeOf(want)).Interface())
+}
+
+func TestClassifyReadsRefusalDetailsAtTheTopLevel(t *testing.T) {
+	api := decodeAPIError(http.StatusConflict, "application/json", []byte(`{"error":"start-hook-conflict","message":"taken","token":"tok","conflictingRunId":"wrun_owner"}`))
+	var conflict *worlds.HookConflictError
+	if err := classify(api, worlds.EventTypeRunCreated); !errors.As(err, &conflict) || !conflict.Start || conflict.Token != "tok" || conflict.RunID != "wrun_owner" {
+		t.Fatalf("start-hook-conflict = %#v, want the token and its owner", err)
+	}
+	api = decodeAPIError(http.StatusConflict, "application/json", []byte(`{"error":"hook-force-claimed","message":"taken","claimedBy":{"runId":"wrun_new","hookId":"hook_new"}}`))
+	var claimed *worlds.HookForceClaimedError
+	if err := classify(api, worlds.EventTypeHookReceived); !errors.As(err, &claimed) || claimed.RunID != "wrun_new" || claimed.HookID != "hook_new" {
+		t.Fatalf("hook-force-claimed = %#v, want the hook that took the token", err)
+	}
+}
+
+func TestBackendDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Add(1) }))
+	defer other.Close()
+	world := newBackendWorld(t, func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, other.URL+"/elsewhere", http.StatusTemporaryRedirect)
+	})
+	if _, err := world.RunsGet(context.Background(), worlds.RunsGetInput{RunID: "wrun_1"}); statusOf(err) != http.StatusTemporaryRedirect {
+		t.Fatalf("redirected read = %v, want the backend's 307", err)
+	}
+	if followed.Load() != 0 {
+		t.Fatal("the redirect was followed with the request's credentials")
+	}
+}
+
+// shorten sets *value to short for the test.
+func shorten(t *testing.T, value *time.Duration, short time.Duration) {
+	t.Helper()
+	old := *value
+	*value = short
+	t.Cleanup(func() { *value = old })
+}
+
+func TestBackendRetriesATransientRead(t *testing.T) {
+	shorten(t, &readRetryBase, time.Millisecond)
+	for _, test := range []struct {
+		kind     requestKind
+		method   string
+		status   int
+		requests int32
+	}{
+		{entityRequest, http.MethodGet, http.StatusBadGateway, maxReadRetries + 1},
+		{eventsRequest, http.MethodGet, http.StatusServiceUnavailable, maxReadRetries + 1},
+		// Only a 500, 502, 503 or 504 is worth another attempt.
+		{entityRequest, http.MethodGet, http.StatusNotImplemented, 1},
+		{entityRequest, http.MethodGet, http.StatusNotFound, 1},
+		// A write is only sent again by retryEventWrite, and a stream request
+		// by the streamer.
+		{eventsRequest, http.MethodPost, http.StatusBadGateway, 1},
+		{streamRequest, http.MethodGet, http.StatusBadGateway, 1},
+	} {
+		var requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			writer.WriteHeader(test.status)
+		}))
+		api := &backend{baseURL: server.URL, http: server.Client(), oidc: func(context.Context) (string, error) { return "token", nil }}
+		_, err := api.request(context.Background(), test.kind, test.method, "/v2/runs/wrun_1", nil, nil, nil)
+		server.Close()
+		if statusOf(err) != test.status || requests.Load() != test.requests {
+			t.Errorf("%s answered %d: %d requests and %v, want %d requests", test.method, test.status, requests.Load(), err, test.requests)
+		}
+	}
+}
+
+func TestBackendRetriesAFailedConnection(t *testing.T) {
+	shorten(t, &readRetryBase, time.Millisecond)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writeCBOR(writer, map[string]any{}) }))
+	defer server.Close()
+	var dials atomic.Int32
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		if dials.Add(1) <= 2 {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}}
+	api := &backend{baseURL: server.URL, http: client, oidc: func(context.Context) (string, error) { return "token", nil }}
+	if err := api.do(context.Background(), http.MethodGet, "/v2/runs/wrun_1", nil, nil, nil); err != nil || dials.Load() != 3 {
+		t.Fatalf("read over a connection refused twice = %v after %d dials, want success on the third", err, dials.Load())
+	}
+	// A write that never connected is left to its caller.
+	dials.Store(1)
+	if err := api.do(context.Background(), http.MethodPost, "/v4/runs/purge", nil, map[string]any{}, nil); err == nil || dials.Load() != 2 {
+		t.Fatalf("write over a refused connection = %v after %d dials, want its failure", err, dials.Load()-1)
+	}
+}
+
+func TestEntityReadRetriesAnUnreadableAnswer(t *testing.T) {
+	var requests atomic.Int32
+	garbled := int32(maxRequestRetries)
+	world := newBackendWorld(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= garbled {
+			writer.Header().Set("Content-Type", cborContentType)
+			_, _ = writer.Write([]byte{0xff, 0xff})
+			return
+		}
+		writeCBOR(writer, map[string]any{"runId": "wrun_1", "status": "running"})
+	})
+	run, err := world.getRun(context.Background(), "wrun_1", worlds.ResolveDataNone, "", 0)
+	if err != nil || run.RunID != "wrun_1" || requests.Load() != garbled+1 {
+		t.Fatalf("read of a garbled answer = %+v, %v after %d requests, want the run on request %d", run, err, requests.Load(), garbled+1)
+	}
+	requests.Store(0)
+	garbled = maxRequestRetries + 1
+	if _, err := world.getRun(context.Background(), "wrun_1", worlds.ResolveDataNone, "", 0); err == nil || requests.Load() != garbled {
+		t.Fatalf("read of an answer garbled every time = %v after %d requests", err, requests.Load())
+	}
+	// A write's answer is not asked for again: the write may have landed.
+	requests.Store(0)
+	var out map[string]any
+	if err := world.api.do(context.Background(), http.MethodPost, "/v4/runs/purge", nil, map[string]any{}, &out); err == nil || requests.Load() != 1 {
+		t.Fatalf("write with a garbled answer = %v after %d requests, want one", err, requests.Load())
+	}
+}
+
+func TestRequestTimeout(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": defaultRequestTimeout, "x": defaultRequestTimeout, "30000": 30 * time.Second, "1": minRequestTimeout, "999999": maxRequestTimeout} {
+		t.Setenv("WORKFLOW_REQUEST_TIMEOUT_MS", value)
+		if got := requestTimeout(); got != want {
+			t.Errorf("WORKFLOW_REQUEST_TIMEOUT_MS=%q: %v, want %v", value, got, want)
+		}
+	}
+}
+
+func TestBackendRequestsHaveADeadline(t *testing.T) {
+	t.Setenv("WORKFLOW_REQUEST_TIMEOUT_MS", "")
+	shorten(t, &defaultRequestTimeout, 60*time.Millisecond)
+	shorten(t, &eventsPhaseTimeout, 60*time.Millisecond)
+	shorten(t, &readRetryBase, time.Millisecond)
+	ctx := context.Background()
+	var requests atomic.Int32
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	flush := func(writer http.ResponseWriter, data []byte) {
+		_, _ = writer.Write(data)
+		writer.(http.Flusher).Flush()
+	}
+	end, _ := encodeFrame(nil, map[string]any{"_end": 1, "hasMore": false}, nil)
+	slot := func(index int) []byte {
+		data, _ := encodeFrame(nil, map[string]any{"runId": "wrun_1", "eventId": string(worlds.EventIDForSlot(uint64(index))), "eventType": "run_cancelled", "createdAt": time.Now()}, nil)
+		return data
+	}
+	var mode atomic.Value
+	world := newBackendWorld(t, func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		switch mode.Load() {
+		case "silent":
+			select {
+			case <-release:
+			case <-request.Context().Done():
+			}
+		case "stalled body":
+			writer.Header().Set("Content-Type", frameContentType)
+			flush(writer, slot(1))
+			select {
+			case <-release:
+			case <-request.Context().Done():
+			}
+		case "slow body":
+			// Longer in all than the phase timeout, without a silence that long.
+			writer.Header().Set("Content-Type", frameContentType)
+			for index := 1; index <= 6; index++ {
+				flush(writer, slot(index))
+				time.Sleep(25 * time.Millisecond)
+			}
+			next, _ := encodeFrame(nil, map[string]any{"_end": 1, "hasMore": false, "next": "eid:" + string(worlds.EventIDForSlot(6))}, nil)
+			flush(writer, next)
+		default:
+			flush(writer, end)
+		}
+	})
+	timedOut := func(err error) bool {
+		failed, ok := errors.AsType[*transientError](err)
+		return ok && failed.timeout
+	}
+
+	// An entity request has one deadline for all of it, and is not sent
+	// again once it passes.
+	mode.Store("silent")
+	if _, err := world.getRun(ctx, "wrun_1", worlds.ResolveDataNone, "", 0); !timedOut(err) || requests.Load() != 1 {
+		t.Fatalf("silent entity read = %v after %d requests, want one timeout", err, requests.Load())
+	}
+	// An event request waits the phase timeout for its headers.
+	requests.Store(0)
+	if _, err := world.readEvents(ctx, "/v5/runs/wrun_1/events", nil); !timedOut(err) || requests.Load() != 1 {
+		t.Fatalf("silent event read = %v after %d requests, want one timeout", err, requests.Load())
+	}
+	// And for each part of its body.
+	mode.Store("stalled body")
+	page, err := world.readEvents(ctx, "/v5/runs/wrun_1/events", nil)
+	if _, truncated := errors.AsType[*truncatedError](err); !truncated || !timedOut(err) || len(page.Events) != 1 {
+		t.Fatalf("stalled event read = %d events, %v, want the event read and a timeout", len(page.Events), err)
+	}
+	// A body that keeps arriving is read to its end however long it takes.
+	mode.Store("slow body")
+	if page, err := world.readEvents(ctx, "/v5/runs/wrun_1/events", nil); err != nil || len(page.Events) != 6 {
+		t.Fatalf("slow event read = %d events, %v, want all six", len(page.Events), err)
+	}
+	// A caller's own cancellation is not the request's timeout.
+	mode.Store("silent")
+	cancelled, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if _, err := world.getRun(cancelled, "wrun_1", worlds.ResolveDataNone, "", 0); err == nil || timedOut(err) {
+		t.Fatalf("cancelled read = %v, want the caller's cancellation", err)
+	}
+}
+
+func TestThrottleWaiter(t *testing.T) {
+	shorten(t, &throttleMinWait, time.Millisecond)
+	ctx := context.Background()
+	// The waits of one request add up to the budget and no further.
+	waiter := throttleWaiter{}
+	if !waiter.wait(ctx, 0) || waiter.waited != throttleMinWait {
+		t.Fatalf("a rate limit without a wait waited %v, want the minimum", waiter.waited)
+	}
+	waiter.waited = throttleBudget - time.Millisecond
+	if waiter.wait(ctx, 2*time.Millisecond) {
+		t.Fatal("a wait past the budget was made")
+	}
+	// No wait runs into the reserve before the context's deadline, whatever
+	// the budget.
+	near, cancel := context.WithTimeout(ctx, throttleDeadlineReserve+time.Second)
+	defer cancel()
+	if (&throttleWaiter{}).wait(near, 2*time.Second) || (&throttleWaiter{stepOutcome: true}).wait(near, 2*time.Second) {
+		t.Fatal("a wait ran into the reserve before the deadline")
+	}
+	// A step's outcome with a deadline has the long budget, and without one
+	// the short.
+	far, cancelFar := context.WithTimeout(ctx, time.Hour)
+	defer cancelFar()
+	outcome := throttleWaiter{stepOutcome: true, waited: throttleBudget}
+	if !outcome.wait(far, 0) {
+		t.Fatal("a step's outcome gave up at the short budget with time left")
+	}
+	if (&throttleWaiter{stepOutcome: true, waited: throttleBudget}).wait(ctx, 0) || (&throttleWaiter{waited: throttleBudget}).wait(far, 0) {
+		t.Fatal("the long budget was given without a step's outcome and a deadline")
+	}
+}
+
+func TestClassifyStartHookRefusals(t *testing.T) {
+	disabled := decodeAPIError(http.StatusBadRequest, "application/json", []byte(`{"error":"start-hook-disabled","message":"off"}`))
+	for _, eventType := range []worlds.EventType{worlds.EventTypeRunCreated, worlds.EventTypeRunStarted} {
+		if err := classify(disabled, eventType); !errors.Is(err, worlds.ErrStartHookDisabled) || worlds.IsEventRefusal(err) || errors.Is(err, worlds.ErrStartHookRejected) || worlds.IsRetryableWorldError(err) || statusOf(err) != http.StatusBadRequest {
+			t.Fatalf("%s with start-hook-disabled = %v, want ErrStartHookDisabled with the backend's answer and no verdict on the candidate", eventType, err)
+		}
+	}
+	cancelled := decodeAPIError(http.StatusConflict, "application/json", []byte(`{"error":"start-hook-candidate-cancelled","message":"fenced"}`))
+	for _, eventType := range []worlds.EventType{worlds.EventTypeRunCreated, worlds.EventTypeRunStarted} {
+		if err := classify(cancelled, eventType); !errors.Is(err, worlds.ErrStartHookRejected) || errors.Is(err, worlds.ErrRunAlreadyExists) {
+			t.Fatalf("%s of a cancelled candidate = %v, want ErrStartHookRejected", eventType, err)
+		}
+	}
+	var expired *worlds.RunExpiredError
+	if err := classify(cancelled, worlds.EventTypeRunCancelled); !errors.Is(err, worlds.ErrEntityConflict) || !errors.As(err, &expired) {
+		t.Fatalf("cancellation of a cancelled candidate = %v, want the conflict of a finished run", err)
+	}
+}
+
+func TestBackendServerErrorIsRetryable(t *testing.T) {
+	if !worlds.IsRetryableWorldError(classify(&apiError{Status: http.StatusBadGateway}, worlds.EventTypeRunCreated)) {
+		t.Fatal("a 502 on run_created is not retryable")
+	}
+	if worlds.IsRetryableWorldError(classify(&apiError{Status: http.StatusBadRequest}, worlds.EventTypeRunCreated)) {
+		t.Fatal("a 400 on run_created is retryable")
+	}
+}
+
+func TestRetryEventWrite(t *testing.T) {
+	shorten(t, &throttleMinWait, time.Millisecond)
+	ctx := context.Background()
+	unavailable := &apiError{Status: http.StatusServiceUnavailable}
+	for _, test := range []struct {
+		name     string
+		eligible bool
+		failures []error
+		calls    int
+		fails    bool
+	}{
+		{"a transient failure of an eligible write", true, []error{unavailable, &transientError{err: errors.New("reset")}}, 3, false},
+		{"more transient failures than retries", true, []error{unavailable, unavailable, unavailable}, 3, true},
+		{"a transient failure of a write that may land twice", false, []error{unavailable}, 1, true},
+		{"a refusal", true, []error{&apiError{Status: http.StatusConflict}}, 1, true},
+		{"a request past its own deadline", true, []error{&transientError{err: errors.New("timed out"), timeout: true}}, 2, false},
+		{"a firewall challenge", true, []error{&transientError{err: &apiError{Status: http.StatusTooManyRequests}}}, 2, false},
+		{"a rate limit, whatever the event", false, []error{&worlds.ThrottleError{After: time.Millisecond}}, 2, false},
+		{"a rate limit past the budget", false, []error{&worlds.ThrottleError{After: 2 * throttleBudget}}, 1, true},
+		{"a start hook whose run is not stored yet", false, []error{&apiError{Status: http.StatusServiceUnavailable, Code: "start-hook-run-pending", RetryAfter: time.Millisecond}}, 2, false},
+	} {
+		calls := 0
+		_, err := retryEventWrite(ctx, test.eligible, false, func() (int, error) {
+			calls++
+			if calls <= len(test.failures) {
+				return 0, test.failures[calls-1]
+			}
+			return calls, nil
+		})
+		if calls != test.calls || (err != nil) != test.fails {
+			t.Errorf("%s: %d calls and %v, want %d calls", test.name, calls, err, test.calls)
+		}
+	}
+	for eventType, want := range map[worlds.EventType]bool{
+		worlds.EventTypeStepCompleted: true,
+		worlds.EventTypeStepStarted:   false,
+		worlds.EventTypeStepRetrying:  false,
+		worlds.EventTypeHookReceived:  false,
+	} {
+		if got := retriesTransient(eventType, false, false); got != want {
+			t.Errorf("retriesTransient(%s) = %v, want %v", eventType, got, want)
+		}
+	}
+	if !retriesTransient(worlds.EventTypeHookReceived, false, true) || retriesTransient(worlds.EventTypeStepCompleted, true, false) {
+		t.Error("a resume with an ID is sent again, and an in-band write never is")
+	}
+}
+
+func TestRecordsStepOutcome(t *testing.T) {
+	marked := worlds.EventsCreateOptions{AfterStepBody: true}
+	for _, test := range []struct {
+		eventType worlds.EventType
+		options   worlds.EventsCreateOptions
+		want      bool
+	}{
+		{worlds.EventTypeStepCompleted, worlds.EventsCreateOptions{}, true},
+		{worlds.EventTypeStepRetrying, worlds.EventsCreateOptions{}, true},
+		// A step_failed is also written for a step that never ran, so only
+		// one its writer marks gets the long budget.
+		{worlds.EventTypeStepFailed, worlds.EventsCreateOptions{}, false},
+		{worlds.EventTypeStepFailed, marked, true},
+		{worlds.EventTypeStepStarted, marked, false},
+		{worlds.EventTypeRunFailed, marked, false},
+	} {
+		if got := recordsStepOutcome(test.eventType, test.options); got != test.want {
+			t.Errorf("%s with AfterStepBody %t: %t, want %t", test.eventType, test.options.AfterStepBody, got, test.want)
+		}
+	}
 }

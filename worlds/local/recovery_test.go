@@ -57,16 +57,30 @@ func TestRecoveryReleasesOrphanedInlineSteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	var released []string
+	var release worlds.Event
 	for _, event := range page.Data {
 		if event.EventType == worlds.EventTypeStepRetrying {
-			released = append(released, event.CorrelationID)
+			released, release = append(released, event.CorrelationID), event
 		}
 	}
 	if len(released) != 1 || released[0] != "step_inline" {
 		t.Fatalf("released %q, want the inline step", released)
 	}
+	// The release names the step and a fixed error, and nothing else.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(release.Data, &fields); err != nil || len(fields) != 2 || string(fields["stepName"]) != `"inline"` {
+		t.Fatalf("release data = %s err=%v, want its stepName and error alone", release.Data, err)
+	}
+	var result worlds.DataStepResult
+	const payload = `devl[["Error",1],{"name":2,"message":3},"Error","The process running this step exited before it finished."]`
+	if err := json.Unmarshal(release.Data, &result); err != nil || string(result.Error) != payload {
+		t.Fatalf("release error = %q err=%v", result.Error, err)
+	}
+	if decoded := worlds.DecodeErrorPayload(result.Error, nil); decoded == nil || decoded.Message != orphanedStepMessage {
+		t.Fatalf("decoded release error = %#v", decoded)
+	}
 	step, err := reopened.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_inline"})
-	if err != nil || step.Status != worlds.StatusPending || len(step.Error) == 0 {
+	if err != nil || step.Status != worlds.StatusPending || len(step.Error) == 0 || step.RetryAfter != nil {
 		t.Fatalf("released step = %#v err=%v", step, err)
 	}
 	// The recovery flow, then the open wait's backstop wake.

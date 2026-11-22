@@ -4,7 +4,7 @@ import { decode, encode } from "cbor-x";
 import { afterEach, expect, test } from "vitest";
 import { WebSocketServer } from "ws";
 import { RPCClient } from "./rpc.js";
-import { HTTPStreamWriteSession, streamSocketURL } from "./stream-socket.js";
+import { HTTPStreamWriteSession, streamSocketThrottle, streamSocketURL } from "./stream-socket.js";
 
 type Frame = { meta: Record<string, unknown>; chunks: string[] };
 
@@ -127,5 +127,65 @@ test("reports a closed stream from the socket", async () => {
 	await new Promise((resolve) => setTimeout(resolve, 100));
 	await expect(session.write(0, ["a"])).rejects.toMatchObject({ code: "stream_closed" });
 	session.dispose();
+	wss.close();
+});
+
+test("waits out a rate limit on the socket and falls back to RPC past its budget", async () => {
+	const throttle = { ...streamSocketThrottle };
+	Object.assign(streamSocketThrottle, { minWaitMs: 1, budgetMs: 20 });
+	try {
+		const requests: string[] = [];
+		let refuse = 2;
+		const wss = new WebSocketServer({ noServer: true });
+		wss.on("connection", (ws) => {
+			ws.on("message", (data: Buffer) => {
+				const frame = decodeFrame(new Uint8Array(data));
+				requests.push(`${frame.meta.type} ${frame.meta.reqId}`);
+				if (refuse > 0) {
+					refuse--;
+					ws.send(reply({ type: "error", reqId: frame.meta.reqId, status: 429, message: "busy", retryAfter: "0" }));
+					return;
+				}
+				ws.send(reply({ type: "write_ack", reqId: frame.meta.reqId }));
+			});
+		});
+		const { baseURL, calls } = await listen(wss);
+		const session = new HTTPStreamWriteSession(rpcClient(baseURL), { runId: "wrun_1", name: "out", writerId: "wrtr_1" });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		// A refused write did not apply: it is sent again under a new
+		// request ID, and never through RPC.
+		await session.write(0, ["a"]);
+		expect(requests).toEqual(["write 1", "write 2", "write 3"]);
+		expect(calls).toEqual([]);
+
+		// A server that keeps refusing is given up once the waits pass the
+		// budget, and the write and what follows go through RPC.
+		refuse = Number.POSITIVE_INFINITY;
+		await session.write(1, ["b"]);
+		const sent = requests.length;
+		expect(sent).toBeGreaterThan(4);
+		await session.write(2, ["c"]);
+		await session.close();
+		expect(requests.length).toBe(sent);
+		expect(calls.map((call) => call.method)).toEqual(["streams.writeMulti", "streams.writeMulti", "streams.close"]);
+		wss.close();
+	} finally {
+		Object.assign(streamSocketThrottle, throttle);
+	}
+});
+
+test("closes through RPC a stream whose close the socket failed", async () => {
+	const wss = new WebSocketServer({ noServer: true });
+	wss.on("connection", (ws) => {
+		ws.on("message", (data: Buffer) => {
+			const frame = decodeFrame(new Uint8Array(data));
+			ws.send(reply({ type: "error", reqId: frame.meta.reqId, status: 503, message: "reconciling" }));
+		});
+	});
+	const { baseURL, calls } = await listen(wss);
+	const session = new HTTPStreamWriteSession(rpcClient(baseURL), { runId: "wrun_1", name: "out", writerId: "wrtr_1" });
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	await session.close();
+	expect(calls.map((call) => call.method)).toEqual(["streams.close"]);
 	wss.close();
 });

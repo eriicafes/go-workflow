@@ -79,12 +79,12 @@ The schema is world-local's:
 | --- | --- |
 | `runs` | One row per run: its tag, workflow, status, creation time, event count (`seq`), in-band fence (`seq_in_band`), and the run as JSON. |
 | `events` | One row per event, keyed by run and slot, with its type and correlation ID. |
-| `steps`, `waits`, `hooks` | The views the events build. A run's waits are deleted when it ends. |
-| `hook_tokens` | Each token's owner, unique across runs, kept past its run's end while the hook's retention lasts. |
+| `steps`, `waits`, `hooks` | The views the events build. A wait's row is keyed by its correlation ID, and a run's waits are deleted when it ends. |
+| `hook_tokens` | Each token's owner, unique across runs, with the retention its hook asked for. The owner holds the token while its run is unfinished, then until the retention ends. |
 | `hook_disposals` | Hooks whose disposal committed, and the claim that took the token from a force-claimed one. The hook's own row is deleted, as is a finished run's hook once its token retention ends. |
 | `hook_resumes` | Deduplicated hook resumes, by run and resume ID. |
 | `start_hook_rejections` | Start hook candidates refused for good. |
-| `stream_chunks` | Stream chunks, numbered from 1, and each closed stream's end marker. |
+| `stream_chunks` | Stream chunks, numbered from 1, and each closed stream's end marker after its last chunk. A stream of a run whose data was deleted has only its end marker, in row 0. |
 
 It differs from world-local's in these ways:
 - It has no `snapshots` table, since Go has no dynamic workflow code.
@@ -92,6 +92,10 @@ It differs from world-local's in these ways:
   payloads as raw bytes. The encoding is Go's own, not cbor-x.
 - The run, step, and hook views hold no payloads. Each records the slot of the
   event that holds its payload, and reads load it from there.
+
+Times are recorded to the millisecond. See
+[Differences from world-local](#differences-from-world-local) for how the
+World's behavior differs.
 
 The database runs in WAL mode with `synchronous=NORMAL`, `secure_delete`, and
 incremental vacuum. Every write is one `BEGIN IMMEDIATE` transaction, which
@@ -107,12 +111,12 @@ or RPC API rather than reading the database.
 ## Tags
 
 A tagged World writes its tag on the runs, hooks, start hook rejections, and
-stream chunks it creates. It sees its own tag's runs and untagged ones, and
-recovers only its own tag's runs. An untagged World sees only untagged runs.
-Only runs are scoped by tag: steps, events, hooks, and streams are read by ID
-whatever their tag, and a run's steps, waits, and events belong to its tag.
-Tests can share one directory with a tag each, and `Clear` deletes only that
-tag's data.
+stream chunks it creates. Reading or writing one run is scoped by tag: a
+tagged World finds its own tag's runs and untagged ones, and an untagged World
+only untagged runs. Nothing else is: `RunsList` lists the runs of every tag,
+and steps, events, hooks, and streams are read by ID whatever their tag.
+`Prepare` recovers only the World's own tag's runs, and `Clear` deletes only
+its tag's data, so tests can share one directory with a tag each.
 
 ## Start hooks
 
@@ -132,6 +136,28 @@ the run or sets its `ExpiredAt`. A step that settles after its run's data was
 deleted has its result scrubbed as it lands, and a deleted run's streams refuse
 writes. After a deletion the World checkpoints the WAL and returns the freed
 pages to the file system.
+
+`RunsDeleteDataMany` reports `already_deleted` for a run whose data was deleted
+before. It keeps that run's first `ExpiredAt` and deletes again whatever is
+left of its data. A run ID that is not safe (see [IDs](#ids-and-pages)) is
+reported `not_found`, and a deletion the database fails is reported `failed`
+with the code `internal_error`.
+
+## IDs and pages
+
+- **IDs.** A run ID, step ID, hook ID, event ID, or correlation ID that is
+  empty or contains `.`, `/`, `\`, or a NUL byte is refused with
+  `ErrEventInvalid`, on a write and on a read by ID.
+- **Runs, steps, and hooks** are paged by creation time, to the millisecond,
+  then ID. The cursor is `<time>|<id>`, such as
+  `2026-01-02T03:04:05.006Z|step_01J…`. A cursor that does not parse starts
+  from the first page.
+- **Events** are paged by position. The cursor is `key:<event ID>`; a bare
+  event ID and `<time>|<event ID>` are read too, and a cursor that names no
+  event starts from the first page. A page ends early, with `HasMore`, once
+  it holds 8 MiB of stored events, and always holds at least one.
+- **Stream chunks.** The cursor is base64 of `{"i":<count>}`, the number of
+  chunks before the next one. A plain decimal count is read too.
 
 ## Queue
 
@@ -155,8 +181,8 @@ The queue is kept in memory.
   its delay. A failed delivery is retried after 5 seconds for its first 32
   failures, then after a delay that doubles up to a minute, or after the wait
   a `*worlds.ThrottleError` asks for. A message is dropped after 256
-  deliveries, handoffs and re-runs aside, or once it is older than its
-  `Retention`.
+  deliveries, handoffs and re-runs aside. It does not expire: its `Retention`
+  is not applied.
 - **Counts.** `DeliveryCount` counts every delivery, and `Attempt` the same
   without handoffs and re-runs.
 
@@ -168,7 +194,9 @@ The queue is in memory, so a restart loses every message a run had queued.
 `Prepare` queues every active run of the World's own tag again:
 
 1. Steps that a previous process was running inline are released with
-   `step_retrying`. A released step is sent as a step delivery.
+   `step_retrying`, which records the step's name and the error "The process
+   running this step exited before it finished." A released step is sent as
+   a step delivery.
 2. The run gets a flow with `QueueInput.Recovery`, which sends again the
    messages of its steps and the timers of its waits.
 3. Each of its open waits due within about 24.8 days gets a backstop wake,
@@ -182,3 +210,38 @@ runs.
 The local World does not push events: a flow polls the run's log, and does
 not linger. `RunsWaitForTerminalStatus` and `StreamsGetChunks` wake on this
 process's commits, and poll every 100 ms for other processes'.
+
+## Differences from world-local
+
+The World keeps world-local's tables, refusals, and stored values. Besides
+the [database's encoding](#database), it differs where Go's `worlds.World`
+interface or runtime does:
+
+- **A forced hook claim within one run advances `seq_in_band` by two.** The
+  claim appends the previous hook's `hook_disposed` and its own
+  `hook_created` to the same run, and Go's interface counts every position
+  an in-band write allocates (`AllocatedEventCount` is 2). world-local
+  advances by one.
+- **The events a write returns.** `EventResult.Events` holds the events
+  after `EventCount`, or after `SinceCursor` when `EventCount` is unset, that
+  were in the log before the write, without the written event and without a
+  page limit. world-local returns a page of 20 from `sinceCursor` that
+  includes the written event, gives `sinceCursor` precedence, and returns
+  the whole log with `run_started`.
+- **Stream reads.** `StreamsGetChunks` always returns a cursor and reports
+  `Done` whenever the stream is closed, also on a page with `HasMore`, since
+  Go follows a live stream by polling with the cursor. world-local returns a
+  cursor only with `hasMore`, reports `done` on the last page, and follows a
+  live stream with a `ReadableStream`.
+- **A resume's digest is checked.** A `hook_received` whose
+  `ResumePayloadDigest` is not the digest of its payload is refused with
+  `ErrEventInvalid`. world-local stores the digest unchecked. A correct
+  caller never sees the difference.
+- **Orphaned steps are found by their creation.** Recovery releases a
+  running step that was created inline, which is how a spec 9 run marks a
+  step its flow runs. world-local reads `ownerMessageId` from the step's
+  latest `step_started`, which only a runtime below spec 9 writes.
+- **No legacy data.** There is one schema version, so the World writes no
+  `version.txt` and prints no legacy notice.
+- **Batches and analytics.** The World appends batches (`EventsCreateBatch`)
+  and serves analytics, which world-local does not.

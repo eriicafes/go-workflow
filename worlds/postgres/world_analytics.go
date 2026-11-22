@@ -34,10 +34,8 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 	if err := runFilter(&q, input.WorkflowName, input.Status, input.StartTime, input.EndTime, input.Attributes); err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
-	if err := q.keyset(input.Pagination.Cursor, "created_at", "id", false); err != nil {
-		return worlds.Page[worlds.AnalyticsRun]{}, err
-	}
-	rows, err := a.world.pool.Query(ctx, a.world.q(`SELECT `+analyticsRunColumns+` FROM workflow.workflow_runs`+q.clause()+order("created_at", "id", false)+q.limit(input.Pagination.Limit)), q.args...)
+	q.keyset(input.Pagination.Cursor, "id", false)
+	rows, err := a.world.pool.Query(ctx, a.world.q(`SELECT `+analyticsRunColumns+` FROM workflow.workflow_runs`+q.clause()+order("id", false)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
@@ -45,7 +43,7 @@ func (a analytics) RunsList(ctx context.Context, input worlds.AnalyticsRunsListI
 	if err != nil {
 		return worlds.Page[worlds.AnalyticsRun]{}, err
 	}
-	return keysetPage(runs, input.Pagination.Limit, func(run worlds.AnalyticsRun) (time.Time, string) { return run.CreatedAt, string(run.RunID) }), nil
+	return keysetPage(runs, input.Pagination.Limit, func(run worlds.AnalyticsRun) string { return string(run.RunID) }), nil
 }
 
 func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAttributesListInput) (worlds.Page[worlds.AnalyticsAttribute], error) {

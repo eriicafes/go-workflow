@@ -235,42 +235,82 @@ func (w *socketStreamWriter) writeBatch(ctx context.Context, chunks [][]byte) er
 	if conn == nil {
 		return w.fallback.Write(ctx, chunks)
 	}
-	w.reqID++
-	frame, err := encodeSocketFrame(streamSocketWrite{Type: "write", ReqID: w.reqID, ChunkSeq: w.chunkSeq, NumChunks: len(chunks)}, encodeSocketChunks(chunks))
-	if err != nil {
+	body := encodeSocketChunks(chunks)
+	err := w.requestRetrying(ctx, conn, "write_ack", func(reqID int) ([]byte, error) {
+		return encodeSocketFrame(streamSocketWrite{Type: "write", ReqID: reqID, ChunkSeq: w.chunkSeq, NumChunks: len(chunks)}, body)
+	})
+	switch {
+	case errors.Is(err, errStreamSocketNotSent):
+		// The server refused the write without applying it, so it and the
+		// writes after it go through the fallback.
+		w.giveUp(websocket.StatusNormalClosure, "throttled")
+		return w.fallback.Write(ctx, chunks)
+	case errors.Is(err, errStreamSocketFailed):
+		// The write may or may not have landed; storing it again keeps
+		// the chunks, at the cost of a possible duplicate.
+		w.giveUp(websocket.StatusGoingAway, "socket failed")
+		return w.fallback.Write(ctx, chunks)
+	case err != nil:
 		return err
 	}
-	for {
-		reply, err := w.request(ctx, conn, frame, "write_ack")
-		var retry streamSocketRetry
-		switch {
-		case errors.As(err, &retry):
-			if err := sleepContext(ctx, retry.after); err != nil {
-				return err
-			}
-			continue
-		case errors.Is(err, errStreamSocketFailed):
-			// The write may or may not have landed; storing it again keeps
-			// the chunks, at the cost of a possible duplicate.
-			w.giveUp(websocket.StatusGoingAway, "socket failed")
-			return w.fallback.Write(ctx, chunks)
-		case err != nil:
-			return err
-		}
-		_ = reply
-		if w.draining {
-			w.giveUp(websocket.StatusNormalClosure, "drained")
-		}
-		return nil
+	if w.draining {
+		w.giveUp(websocket.StatusNormalClosure, "drained")
 	}
+	return nil
 }
 
-var errStreamSocketFailed = errors.New("workflow: stream socket failed")
+var (
+	errStreamSocketFailed = errors.New("workflow: stream socket failed")
+	// errStreamSocketNotSent is a request the server refused with 429,
+	// without applying it, that is not sent on the socket again.
+	errStreamSocketNotSent = errors.New("workflow: stream socket request not applied")
+)
 
 // streamSocketRetry is a request the server refused with 429.
 type streamSocketRetry struct{ after time.Duration }
 
 func (r streamSocketRetry) Error() string { return "workflow: stream socket throttled" }
+
+// streamSocketRefusal is a request the server refused with a status that
+// has no error of its own.
+type streamSocketRefusal struct {
+	status  int
+	message string
+}
+
+func (r streamSocketRefusal) Error() string {
+	return fmt.Sprintf("workflow: stream socket request refused with %d: %s", r.status, r.message)
+}
+
+// requestRetrying sends the request frame encodes for a request ID and
+// waits for ack, its acknowledgment. A request refused with 429 is sent again
+// under a new ID after the wait the refusal asks for. Once the waits of the
+// request would pass their budget or run into the reserve before ctx's
+// deadline (see streamSocketThrottle), or when the server is draining the
+// socket, it returns errStreamSocketNotSent instead: the request did not
+// apply.
+func (w *socketStreamWriter) requestRetrying(ctx context.Context, conn *websocket.Conn, ack string, frame func(reqID int) ([]byte, error)) error {
+	var throttle streamSocketThrottle
+	for {
+		w.reqID++
+		encoded, err := frame(w.reqID)
+		if err != nil {
+			return err
+		}
+		_, err = w.request(ctx, conn, encoded, ack)
+		retry, throttled := errors.AsType[streamSocketRetry](err)
+		if !throttled {
+			return err
+		}
+		wait, again := throttle.next(ctx, retry.after)
+		if w.draining || !again {
+			return errStreamSocketNotSent
+		}
+		if err := sleepContext(ctx, wait); err != nil {
+			return err
+		}
+	}
+}
 
 // request sends frame and reads messages until the reply to it, noting a
 // drain notice on the way.
@@ -308,8 +348,7 @@ func (w *socketStreamWriter) request(ctx context.Context, conn *websocket.Conn, 
 		case reply.Type == ack:
 			return reply, nil
 		case reply.Type == "error" && reply.Status == http.StatusTooManyRequests:
-			after, _ := strconv.Atoi(reply.RetryAfter)
-			return streamSocketReply{}, streamSocketRetry{after: max(time.Duration(after)*time.Second, 100*time.Millisecond)}
+			return streamSocketReply{}, streamSocketRetry{after: socketRetryAfter(reply.RetryAfter)}
 		case reply.Type == "error":
 			return streamSocketReply{}, streamSocketError(reply.Status, reply.Message)
 		}
@@ -325,7 +364,7 @@ func streamSocketError(status int, message string) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("%w: %s", ErrRunNotFound, message)
 	}
-	return fmt.Errorf("workflow: stream socket request refused with %d: %s", status, message)
+	return streamSocketRefusal{status: status, message: message}
 }
 
 // giveUp closes the socket and writes through the fallback from then on.
@@ -356,31 +395,23 @@ func (w *socketStreamWriter) CloseStream(ctx context.Context) error {
 		return errStreamWriterDone
 	}
 	if conn := w.socket(); conn != nil {
-		w.reqID++
-		frame, err := encodeSocketFrame(streamSocketClose{Type: "close", ReqID: w.reqID}, nil)
-		if err != nil {
-			return err
-		}
-		for {
-			_, err = w.request(ctx, conn, frame, "close_ack")
-			var retry streamSocketRetry
-			if errors.As(err, &retry) {
-				if err := sleepContext(ctx, retry.after); err != nil {
-					return err
-				}
-				continue
-			}
-			break
-		}
+		err := w.requestRetrying(ctx, conn, "close_ack", func(reqID int) ([]byte, error) {
+			return encodeSocketFrame(streamSocketClose{Type: "close", ReqID: reqID}, nil)
+		})
+		refusal, refused := errors.AsType[streamSocketRefusal](err)
 		switch {
 		case err == nil:
 			w.done = true
 			w.giveUp(websocket.StatusNormalClosure, "closed")
 			return w.fallback.Release(ctx)
-		case !errors.Is(err, errStreamSocketFailed):
+		case errors.Is(err, errStreamSocketFailed), errors.Is(err, errStreamSocketNotSent), refused && refusal.status >= http.StatusInternalServerError:
+			// A close is idempotent, so closing again through the fallback
+			// is harmless if the close landed. It is also how a close the
+			// server failed, or kept refusing for its rate limit, is sent
+			// again.
+		default:
 			return err
 		}
-		// Closing again through the fallback is harmless if the close landed.
 		w.giveUp(websocket.StatusGoingAway, "socket failed")
 	}
 	w.cancelDial()
@@ -470,7 +501,8 @@ func serveStreamSocketMessage(ctx context.Context, writer StreamWriter, data []b
 		return reply, false
 	}
 	refuse := func(err error) []byte {
-		status := http.StatusInternalServerError
+		status, retryAfter := http.StatusInternalServerError, ""
+		throttled, isThrottled := errors.AsType[*ThrottleError](err)
 		switch {
 		case errors.Is(err, ErrStreamClosed):
 			status = http.StatusConflict
@@ -478,11 +510,18 @@ func serveStreamSocketMessage(ctx context.Context, writer StreamWriter, data []b
 			status = http.StatusNotFound
 		case errors.Is(err, errStreamWriterDone):
 			status = http.StatusGone
+		case isThrottled:
+			// The World refused the request for its rate limit, without
+			// applying it, so the writer may send it again.
+			status = http.StatusTooManyRequests
+			if throttled.After > 0 {
+				retryAfter = strconv.Itoa(int((throttled.After + time.Second - 1) / time.Second))
+			}
 		}
 		if status == http.StatusInternalServerError {
 			log.Printf("workflow: stream socket %s: %v", request.Type, err)
 		}
-		reply, _ := encodeSocketFrame(streamSocketReply{Type: "error", ReqID: request.ReqID, Status: status, Message: err.Error()}, nil)
+		reply, _ := encodeSocketFrame(streamSocketReply{Type: "error", ReqID: request.ReqID, Status: status, Message: err.Error(), RetryAfter: retryAfter}, nil)
 		return reply
 	}
 	switch request.Type {

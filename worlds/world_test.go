@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -452,3 +453,58 @@ var runWaitAnalytics = worlds.NewRunID()
 // runWebhook is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runWebhook = worlds.NewRunID()
+
+// scriptedStartWorld answers a start's EventsCreateRun and Queue calls with
+// the errors scripted for them, in order, and then as the World would.
+type scriptedStartWorld struct {
+	*testworld.World
+	create, queue   []error
+	creates, queues int
+}
+
+func (w *scriptedStartWorld) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	w.creates++
+	if w.creates <= len(w.create) && w.create[w.creates-1] != nil {
+		return worlds.EventResult{}, w.create[w.creates-1]
+	}
+	return w.World.EventsCreateRun(ctx, input)
+}
+
+func (w *scriptedStartWorld) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
+	w.queues++
+	if w.queues <= len(w.queue) && w.queue[w.queues-1] != nil {
+		return worlds.QueueResult{}, w.queue[w.queues-1]
+	}
+	return w.World.Queue(ctx, input)
+}
+
+func TestStartRunDecidesAStartHookCandidateBeforeItReturns(t *testing.T) {
+	defer worlds.SetStartHookConfirmDelays(time.Millisecond, time.Millisecond, time.Millisecond)()
+	ctx := context.Background()
+	disabled := fmt.Errorf("%w: off", worlds.ErrStartHookDisabled)
+	throttled := &worlds.ThrottleError{}
+	start := func(create, queue []error) (*scriptedStartWorld, worlds.RunID, error) {
+		manual := testworld.NewManual()
+		t.Cleanup(manual.Close)
+		world := &scriptedStartWorld{World: manual, create: create, queue: queue}
+		runID := worlds.NewRunID()
+		return world, runID, worlds.StartRun(ctx, world, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "flow", StartHook: &worlds.StartHook{Token: "token-" + string(runID)}})
+	}
+	// An admission that is switched off, or fails retryably, is asked for
+	// again: the World answers every copy of a candidate the same.
+	world, runID, err := start([]error{disabled, throttled}, nil)
+	if err != nil || world.creates != 3 || world.queues != 1 {
+		t.Fatalf("start = %v after %d creations and %d sends, want it admitted on the third", err, world.creates, world.queues)
+	}
+	if run, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || run.StartHook == nil {
+		t.Fatalf("run = %+v, %v, want the admitted candidate", run, err)
+	}
+	// A candidate another run's token refuses is refused at once, with the
+	// run that holds the token, and its delivery stays queued to be refused.
+	taken := worlds.NewRunID()
+	err = worlds.StartRun(ctx, world, worlds.EventsCreateRunInput{RunID: taken, WorkflowName: "flow", StartHook: &worlds.StartHook{Token: "token-" + string(runID)}})
+	var conflict *worlds.HookConflictError
+	if !errors.As(err, &conflict) || conflict.RunID != runID || world.creates != 4 {
+		t.Fatalf("start with a held token = %v after %d creations, want the conflict at once", err, world.creates)
+	}
+}

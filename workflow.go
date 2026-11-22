@@ -56,6 +56,8 @@ import (
 	"github.com/eriicafes/go-workflow/internal/devalue"
 	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/oklog/ulid/v2"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
@@ -339,23 +341,45 @@ func runValue(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 	return run, err
 }
 
+// CancelOptions configures Run.Cancel.
+type CancelOptions struct {
+	// Reason is recorded on the run's run_cancelled event as its
+	// cancelReason, in plain text, so tools can show why the run was
+	// cancelled. It holds at most worlds.MaxCancelReasonLength characters.
+	Reason string
+}
+
 // Cancel cancels the run. Cancelling a run that has already finished is a
-// no-op.
-func (r *Run[Out]) Cancel(ctx context.Context) error {
+// no-op. If multiple options are passed, the last one applies.
+func (r *Run[Out]) Cancel(ctx context.Context, options ...CancelOptions) error {
+	var reason string
+	if len(options) != 0 {
+		reason = options[len(options)-1].Reason
+	}
+	input := runCancelInput{RunID: r.id, Reason: reason}
 	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		_, err := InlineStep(execution.Context(), runCancel, r.id)
+		_, err := InlineStep(execution.Context(), runCancel, input)
 		return err
 	}
-	_, err := runCancel(NewContext(ctx, r.client), r.id)
+	_, err := runCancel(NewContext(ctx, r.client), input)
 	return err
 }
 
-func runCancel(ctx context.Context, runID worlds.RunID) (struct{}, error) {
+// runCancelInput is the input of the step that cancels a run: the run and
+// the reason to record, if any.
+type runCancelInput struct {
+	RunID  worlds.RunID
+	Reason string
+}
+
+// runCancel cancels the run input names. A run that has already finished is
+// left as it is.
+func runCancel(ctx context.Context, input runCancelInput) (struct{}, error) {
 	client, err := clientFromContext(ctx)
 	if err != nil {
 		return struct{}{}, err
 	}
-	err = client.RunsCancel(ctx, worlds.ClientRunsCancelInput{RunID: runID})
+	err = client.RunsCancel(ctx, worlds.ClientRunsCancelInput{RunID: input.RunID, Reason: input.Reason})
 	if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 		return struct{}{}, nil
 	}
@@ -602,13 +626,27 @@ func (settings startSettings) startHook(keys *worlds.RunKeys) (*worlds.StartHook
 	return hook, nil
 }
 
-// runExecutionContext returns the run's ExecutionContext, or nil when it has
-// none.
-func (settings startSettings) runExecutionContext() map[string]any {
-	if settings.ReplayedFrom == "" {
-		return nil
+// runExecutionContext returns the ExecutionContext of a run started from ctx
+// whose payloads are encrypted or not: the release that started it, whether
+// it is encrypted, the trace it was started in, and the run it replays.
+func (settings startSettings) runExecutionContext(ctx context.Context, encrypted bool) map[string]any {
+	// The carrier is the trace context of ctx as the configured propagator
+	// writes it, and empty outside a trace.
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	trace := make(map[string]any, len(carrier))
+	for key, value := range carrier {
+		trace[key] = value
 	}
-	return map[string]any{worlds.ExecutionContextReplayedFromRunID: settings.ReplayedFrom}
+	executionContext := map[string]any{
+		worlds.ExecutionContextTraceCarrier:        trace,
+		worlds.ExecutionContextWorkflowCoreVersion: Version,
+		worlds.ExecutionContextFeatures:            map[string]any{"encryption": encrypted},
+	}
+	if settings.ReplayedFrom != "" {
+		executionContext[worlds.ExecutionContextReplayedFromRunID] = settings.ReplayedFrom
+	}
+	return executionContext
 }
 
 // deployment returns the Deployment settings record.
@@ -701,7 +739,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 	create.Attributes = settings.attributes(nil)
 	// The retention is a reserved attribute the framework sets.
 	create.AllowReservedAttributes = settings.AllowReservedAttributes || settings.Retention != ""
-	create.ExecutionContext = settings.runExecutionContext()
+	create.ExecutionContext = settings.runExecutionContext(ctx, keys != nil)
 	if create.StartHook, err = settings.startHook(keys); err != nil {
 		return nil, err
 	}
@@ -770,11 +808,16 @@ func startChild[In any](ctx context.Context, input childStartInput[In]) (worlds.
 	})
 	// The lineage is reserved attributes the framework sets.
 	create.AllowReservedAttributes = true
-	create.ExecutionContext = input.Settings.runExecutionContext()
+	create.ExecutionContext = input.Settings.runExecutionContext(ctx, keys != nil)
 	if create.StartHook, err = input.Settings.startHook(keys); err != nil {
 		return "", err
 	}
 	if err := worlds.StartRun(ctx, execution.World(), create); err != nil {
+		// A start hook's refusal is decided and a retry cannot change it, so
+		// it fails the step at once, and the workflow reads the refusal.
+		if _, conflict := errors.AsType[*worlds.HookConflictError](err); create.StartHook != nil && (conflict || errors.Is(err, worlds.ErrStartHookRejected)) {
+			return "", FatalError(err)
+		}
 		return "", err
 	}
 	return id, nil

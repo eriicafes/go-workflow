@@ -42,8 +42,8 @@ context before calling `Close`.
 | `URL` | `WORKFLOW_POSTGRES_URL`, or `DATABASE_URL` | Connection string, used by `Open`. |
 | `Schema` | `workflow` | The schema the World's tables live in, created when missing. |
 | `HookRetentionLimit` | `WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |
-| `PollInterval` | 250 ms | Longest sleep of workers and waiters when no notification arrives. |
-| `Concurrency` | 10 | Deliveries one `Worker` call executes at once. |
+| `PollInterval` | `WORKFLOW_POSTGRES_POLL_INTERVAL_MS`, or 500 ms | Longest sleep of workers and waiters when no notification arrives. |
+| `Concurrency` | `WORKFLOW_POSTGRES_WORKER_CONCURRENCY`, or 50 | Deliveries one `Worker` call executes at once. A step that waits for a child run holds its delivery meanwhile, so a low limit starves workflows that fan out. |
 | `LeaseDuration` | 1 min | How long a claimed delivery is hidden from other workers. Workers renew it while executing, so it only bounds how quickly a crashed worker's delivery is retried. |
 | `Routes` | none | The queue of each routed workflow. See [routing](#routing-workflows-to-queues). |
 | `Retention`, `Retentions` | keep forever | How long finished runs keep their data, by default and per workflow. See [retention](#retention). |
@@ -84,9 +84,9 @@ The tables are world-postgres's, with its names and columns:
 | `workflow_steps` | Steps, keyed by `(run_id, step_id)`, with the slots of their input and result. |
 | `workflow_hooks` | Hooks. `claims_token` marks the hook that holds its token, unique per token. A hook's row is deleted when it is disposed, and when its run ends unless its token is retained, then when its token is next claimed. |
 | `workflow_waits` | A run's waits, deleted when it ends. |
-| `workflow_start_hook_admissions` | Each start hook candidate's decision, kept for a day. |
+| `workflow_start_hook_admissions` | Each start hook candidate's decision, kept for 25 hours. |
 | `workflow_stream_chunks` | Stream chunks, ordered by their `chnk_` ID. An `eof` chunk closes a stream. |
-| `workflow_queue` | Live messages: the whole delivery in `payload`, with `not_before`, `deliveries`, `handoffs`, `lease_until`, `running`, and `expires_at`. |
+| `workflow_queue` | Live messages: the whole delivery in `payload`, with `not_before`, `deliveries`, `handoffs`, `lease_until`, and `running`. |
 
 They differ from world-postgres's where Go needs it:
 - Payloads are stored once, in the events. The run, step, and hook rows name
@@ -94,7 +94,8 @@ They differ from world-postgres's where Go needs it:
 - `payload_cbor` is Go's own CBOR (`worlds.EncodeEventData`), with payloads as
   raw bytes, not cbor-x. There are no deprecated `jsonb` columns.
 - Steps are keyed by run and step, since a step ID is unique only within
-  its run.
+  its run. That key leads with the run, so there is no
+  `workflow_steps_run_id_index`.
 - `workflow_runs.spec_version` is an `integer`, and `data_purged` serves
   `Config.Retention`.
 - Hooks fill in `resume_context`, which world-postgres leaves empty, with the
@@ -104,8 +105,21 @@ They differ from world-postgres's where Go needs it:
 - The queue is Go's own, `workflow_queue`. There are no snapshot or invocation
   tables.
 
+Indexes have world-postgres's names (`workflow_runs_name_index`,
+`workflow_hooks_token_claim_unique`, and so on). The World's own are
+`workflow_runs_expired_index` and those of `workflow_queue`.
+
+## Lists
+
+`RunsList`, `StepsList`, and `HooksList` order by ID: runs and steps newest
+first, hooks oldest first, unless `Pagination.SortOrder` says otherwise. IDs
+end in a ULID, so that is the order they were minted in, which for a run
+minted before it was stored is not the order of `created_at`. A page's cursor
+is its last ID, and the last page has one too. `Analytics().RunsList` pages
+the same way, oldest first.
+
 Attributes are `jsonb`, execution contexts and start hooks are CBOR in
-world-postgres's `_cbor` columns, and timestamps are `timestamptz` at
+world-postgres's `_cbor` columns, a hook's `claimed_from` is CBOR in `bytea`, and timestamps are `timestamptz` at
 microsecond precision. Times returned by the World are UTC.
 
 ## Consistency
@@ -144,8 +158,12 @@ sends `NOTIFY workflow_queue`. A delivery with an
 `IdempotencyKey` is stored once while its message lives: a unique index on the
 run and key makes a `Queue` with the key of a queued or executing message store
 nothing and return that message's ID. A delivery without a key is never
-deduplicated. A delivery with `Retention` expires that long after it was
-queued, and workers delete expired rows before claiming.
+deduplicated.
+
+A message does not expire. Its row stays until a delivery of it succeeds or
+its job runs out of attempts, since a dropped message would leave its step or
+flow with nothing to run it. `QueueInput.Retention` is a limit of queues that
+expire messages, and is stored with the delivery but not enforced.
 
 A message's ID is `msg_<ULID>`. `Worker` claims due rows with
 `FOR UPDATE SKIP LOCKED`, sets `lease_until`, and increments `deliveries`, which
@@ -161,12 +179,14 @@ its `Attempt`. The worker executes each:
   in-place retry, starts `Attempt` over from where the job started it, so a step
   retried in place many times on one message is not failed by the runtime's
   `MaxDeliveries`.
-- failure keeps the row and sets `not_before` to now plus a capped exponential
-  backoff by attempt (1 s, 2 s, 4 s, … up to 5 minutes), or the wait a
+- failure keeps the row and sets `not_before` to now plus a backoff of
+  e<sup>n</sup> seconds after the job's nth failed delivery, growing over the
+  first ten (2.7 s, 7.4 s, 20 s, 55 s, … up to about 6 hours), or the wait a
   `*worlds.ThrottleError` asks for when that is longer, and logs the error. Once
   the message's current job has been delivered 73 times (the runtime's
   `MaxDeliveries` failure on delivery 49 plus 24 retries of its terminal write),
-  its last failure deletes the row. A row a crashed worker left with no attempts
+  its last failure deletes the row. Those 24 retries span about 6 days. A row a
+  crashed worker left with no attempts
   is deleted when it is next claimed. Every `Redelivery` starts a new job with
   all 73.
 - shutdown releases the lease so another worker picks the row up immediately.
@@ -200,12 +220,17 @@ arrive.
 
 ## Start hooks
 
-`EventsCreateRun` with a `StartHook` creates the hook `hook_<run ULID>` and
-claims its token in the transaction that creates the run. When another run
-holds the token, the transaction rolls back and returns a
-`*worlds.HookConflictError` naming it. Each candidate's decision is recorded,
-so a refused candidate stays refused, and decisions older than a day are
-deleted as new ones are made.
+`EventsCreateRun` with a `StartHook` decides its candidate in one transaction:
+it creates the hook `hook_<run ULID>`, claims its token, records the
+candidate as accepted, and creates the run. When another run holds the token,
+the transaction records the candidate as rejected, naming that run, and
+commits, and the call returns a `*worlds.HookConflictError` naming it. A
+decision is permanent: every later attempt for the candidate gets the same
+answer, an accepted one its `run_created`. Decisions older than 25 hours are
+deleted, up to 100 at a time, as new ones are made.
+
+A run ID that already names a run created without a start hook is refused
+with `ErrStartHookRejected`.
 
 ## Retention
 
@@ -236,7 +261,7 @@ to a deleted run is refused.
 Each World opens one dedicated connection on first use and listens on
 world-postgres's channels, `workflow_run_events` (the run ID of every committed
 write), `workflow_run_status` (sent when a run ends), and `workflow_event_chunk`
-(a written chunk's `{streamId, chunkId}`), and on `workflow_queue`. Workers,
+(each written chunk's `{streamId, chunkId}`), and on `workflow_queue`. Workers,
 flows waiting on their inline steps, `RunsWaitForTerminalStatus`, and
 `StreamsGetChunks` wake on these notifications and also re-check every
 `PollInterval`, so a lost notification only adds latency. A write sends its

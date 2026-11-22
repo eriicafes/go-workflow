@@ -308,8 +308,8 @@ func TestTagIsolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A tagged World sees its tag's runs and untagged ones; an untagged World
-	// only untagged ones.
+	// A tagged World reads its tag's runs and untagged ones; an untagged World
+	// only untagged ones. A list is not scoped by tag: it holds every run.
 	for _, check := range []struct {
 		world   *localworld.World
 		visible []worlds.RunID
@@ -328,17 +328,17 @@ func TestTagIsolation(t *testing.T) {
 			if _, err := check.world.RunsGet(ctx, worlds.RunsGetInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
 				t.Fatalf("hidden run %s = %v", id, err)
 			}
-			// A run's events are read whatever its tag.
+			// A run's events and streams are read whatever its tag.
 			if page, err := check.world.EventsList(ctx, worlds.EventsListInput{RunID: id}); err != nil || len(page.Data) != 1 {
 				t.Fatalf("hidden run %s events = %+v err=%v", id, page, err)
 			}
-			if names, err := check.world.StreamsList(ctx, worlds.StreamsListInput{RunID: id}); err != nil || len(names) != 0 {
+			if names, err := check.world.StreamsList(ctx, worlds.StreamsListInput{RunID: id}); err != nil || len(names) != 1 {
 				t.Fatalf("hidden run %s streams = %q err=%v", id, names, err)
 			}
 		}
 		page, err := check.world.RunsList(ctx, worlds.RunsListInput{})
-		if err != nil || len(page.Data) != len(check.visible) {
-			t.Fatalf("listed %d runs, want %d: %v", len(page.Data), len(check.visible), err)
+		if err != nil || len(page.Data) != 3 {
+			t.Fatalf("listed %d runs, want every tag's 3: %v", len(page.Data), err)
 		}
 	}
 	// Clearing a tag removes only its data.

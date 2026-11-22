@@ -103,7 +103,7 @@ func fullInput() worlds.QueueInput {
 	return worlds.QueueInput{
 		RunID: "wrun_full", QueueName: "q", WorkflowName: "flow", StepID: &stepID,
 		IdempotencyKey: "key", DeploymentID: "dpl", DeploymentMismatchRetryCount: 1, ReplayDivergenceCount: 2,
-		StepName: "step", StepAttempt: 3, StepResent: true, RunSpecVersion: worlds.SpecVersion,
+		StepName: "step", StepAttempt: 3, StepResent: true, StepCreatedAt: hopAt, RunSpecVersion: worlds.SpecVersion,
 		CompleteWaits:    []string{"wait_1"},
 		Recovery:         true,
 		WaitContinuation: &worlds.WaitContinuation{CorrelationID: "wait_1", Attempt: 2, ResumeAt: &resumeAt, HopAt: &hopAt},
@@ -121,6 +121,11 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 		t.Fatal(err)
 	}
 	record, _, err := world.queueRecord(ctx, result.MessageID)
+	// The World stamps when the message was queued.
+	if err == nil && record.input.CreatedAt.IsZero() {
+		t.Fatal("record has no CreatedAt")
+	}
+	input.CreatedAt = record.input.CreatedAt
 	if err != nil || !reflect.DeepEqual(record.input, input) {
 		t.Fatalf("record input = %+v, %v; want %+v", record.input, err, input)
 	}

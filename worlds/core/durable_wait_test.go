@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -186,5 +187,46 @@ func TestCancelledDeadlinesDoNotFireOnReplayAfterExpiry(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestWaitCompletedForAnotherTimeThanItsWaitDiverges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	world := testworld.NewManual()
+	defer world.Close()
+	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
+		return durableWaitOutput{}, workflow.Sleep(ctx, time.Hour)
+	})))
+	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), durableWaitInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := worlds.RunID(run.ID())
+	if err := runtime.Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+		t.Fatal(err)
+	}
+	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := events.Data[len(events.Data)-1]
+	var wait worlds.DataWaitCreated
+	if created.EventType != worlds.EventTypeWaitCreated || json.Unmarshal(created.Data, &wait) != nil {
+		t.Fatalf("last event = %s %s, want the wait's creation", created.EventType, created.Data)
+	}
+	// A completion that names another time is not the completion of the
+	// wait the log created.
+	other := wait.ResumeAt.Add(time.Second)
+	data, _ := json.Marshal(worlds.DataWaitCompleted{ResumeAt: &other})
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: created.CorrelationID, Data: data}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Execute(ctx, worlds.QueueInput{RunID: runID, Attempt: 1, DeliveryCount: 1, ReplayDivergenceCount: 3}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = run.Value(workflow.NewContext(ctx, workflow.NewClient(world)))
+	if !errors.Is(err, worlds.ErrCorruptedEventLog) || !strings.Contains(err.Error(), "recorded wait_completed has resumeAt") {
+		t.Fatalf("run = %v, want a corrupted event log for the wait's completion", err)
 	}
 }

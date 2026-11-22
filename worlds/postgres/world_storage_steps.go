@@ -3,7 +3,6 @@ package postgresworld
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/jackc/pgx/v5"
@@ -22,10 +21,8 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	var q query
 	q.where("s.run_id = " + q.arg(input.RunID))
 	descending := input.Pagination.SortOrder == worlds.SortOrderDescending
-	if err := q.keyset(input.Pagination.Cursor, "s.created_at", "s.step_id", descending); err != nil {
-		return worlds.Page[worlds.Step]{}, err
-	}
-	rows, err := w.pool.Query(ctx, w.q(stepSelect(input.ResolveData)+q.clause()+order("s.created_at", "s.step_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
+	q.keyset(input.Pagination.Cursor, "s.step_id", descending)
+	rows, err := w.pool.Query(ctx, w.q(stepSelect(input.ResolveData)+q.clause()+order("s.step_id", descending)+q.limit(input.Pagination.Limit)), q.args...)
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
@@ -33,7 +30,7 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	if err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}
-	return keysetPage(steps, input.Pagination.Limit, func(step worlds.Step) (time.Time, string) { return step.CreatedAt, string(step.StepID) }), nil
+	return keysetPage(steps, input.Pagination.Limit, func(step worlds.Step) string { return string(step.StepID) }), nil
 }
 
 // stepSelect selects steps as s with their payloads joined from the event

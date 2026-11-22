@@ -93,23 +93,16 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	return worlds.QueueResult{MessageID: id}, err
 }
 
+// QueueBatch queues the items one after another, and reports an item that
+// failed in its result.
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
-	results := make([]worlds.QueueResult, 0, len(input.Items))
-	for _, item := range input.Items {
-		result, err := w.Queue(ctx, item)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, result)
-	}
-	return results, nil
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 // message is one queued message, delivered until a delivery of it succeeds.
 type message struct {
-	id        string
-	input     worlds.QueueInput
-	createdAt time.Time
+	id    string
+	input worlds.QueueInput
 }
 
 func (q *queue) send(input worlds.QueueInput) (string, error) {
@@ -127,7 +120,9 @@ func (q *queue) send(input worlds.QueueInput) (string, error) {
 	q.mu.Unlock()
 	// The World sets the delivery fields on each delivery.
 	input.MessageID, input.Attempt, input.DeliveryCount = "", 0, 0
-	m := &message{id: id, input: input, createdAt: time.Now()}
+	// The message is created now, whatever the caller set.
+	input.CreatedAt = time.Now().UTC().Truncate(time.Millisecond)
+	m := &message{id: id, input: input}
 	q.live.Add(1)
 	if !q.w.spawn(func(ctx context.Context) { q.run(ctx, m) }) {
 		q.done(m)
@@ -240,10 +235,10 @@ func (q *queue) run(ctx context.Context, m *message) {
 			}
 			rerunsThisHold = 0
 		}
-		if retention := m.input.Retention; retention > 0 && time.Since(m.createdAt) > retention {
-			log.Printf("workflow/local: delivery %s expired after %s, dropping it", m.id, retention)
-			return
-		}
+		// A message does not expire: it is in memory, and dropping it would
+		// leave its step or flow with nothing to run it. Its Retention is a
+		// limit of queues that do expire messages, which the runtime keeps
+		// retries within.
 		deliveries++
 		input := m.input
 		input.MessageID, input.DeliveryCount, input.Attempt = m.id, deliveries, deliveries-handoffs-reruns

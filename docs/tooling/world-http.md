@@ -95,6 +95,12 @@ custom headers.
 The adapter is a client only. Deliveries are executed by your Go process, so it
 cannot create queue handlers. Its deployment ID is the Go World's.
 
+The Workflow SDK's client operations work against it: `start`, `resumeHook`,
+cancelling and waking a run, and its reads. Every run is a spec version 9 run,
+which is what the adapter declares and what a run reports. A run started through
+it takes the run ID the SDK mints, so on a World with regional run IDs it is
+placed as an untagged ID is, not in a region you name.
+
 ::: warning
 The RPC endpoint is unauthenticated unless you protect it. Point the adapter
 only at Worlds on a trusted network, or

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -17,8 +18,8 @@ import (
 )
 
 const (
-	backoffBase = time.Second
-	backoffMax  = 5 * time.Minute
+	// backoffCap is the most failed deliveries the retry delay grows over.
+	backoffCap = 10
 	// maxJobAttempts is the most deliveries of one job: the core's
 	// MAX_DELIVERIES_EXCEEDED delivery (49) plus 24 retries of its terminal
 	// write. A row's job starts when it is queued and again on every
@@ -41,11 +42,18 @@ type storedDelivery struct {
 // IdempotencyKey is stored once while its message lives: a Queue with the key
 // of a run's message that is still queued or executing stores nothing and
 // returns that message's ID.
+//
+// A message does not expire: its row stays until a delivery succeeds or its
+// job runs out of attempts, since dropping it would leave its step or flow
+// with nothing to run it. QueueInput.Retention is a limit of queues that do
+// expire messages, which the runtime keeps a step's retries within.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err
 	}
 	input.MessageID, input.Attempt, input.DeliveryCount = "", 0, 0
+	// The message is created now, whatever the caller set.
+	input.CreatedAt = time.Now().UTC().Truncate(time.Millisecond)
 	payload, err := json.Marshal(storedDelivery{QueueInput: input})
 	if err != nil {
 		return worlds.QueueResult{}, fmt.Errorf("workflow/postgres: queue: %w", err)
@@ -55,19 +63,14 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		value := string(*input.StepID)
 		stepID = &value
 	}
-	var expiresIn *float64
-	if input.Retention > 0 {
-		seconds := input.Retention.Seconds()
-		expiresIn = &seconds
-	}
 	for attempt := 1; ; attempt++ {
 		var id string
 		err := w.inTx(ctx, func(tx pgx.Tx) error {
 			id = ""
 			var inserted bool
 			err := tx.QueryRow(ctx, w.q(`WITH inserted AS (
-					INSERT INTO workflow.workflow_queue (id, queue_name, run_id, step_id, idempotency_key, not_before, payload, serialized, expires_at)
-					VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, now() + make_interval(secs => $9))
+					INSERT INTO workflow.workflow_queue (id, queue_name, run_id, step_id, idempotency_key, not_before, payload, serialized)
+					VALUES ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8)
 					ON CONFLICT (run_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING
 					RETURNING id
 				)
@@ -75,7 +78,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 				UNION ALL
 				SELECT id, false FROM workflow.workflow_queue WHERE $5 <> '' AND run_id = $3 AND idempotency_key = $5
 				LIMIT 1`),
-				newMessageID(), w.queueName(input), input.RunID, stepID, input.IdempotencyKey, input.NotBefore, payload, input.SerializedFlow(), expiresIn).Scan(&id, &inserted)
+				newMessageID(), w.queueName(input), input.RunID, stepID, input.IdempotencyKey, input.NotBefore, payload, input.SerializedFlow()).Scan(&id, &inserted)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
@@ -99,16 +102,10 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	}
 }
 
+// QueueBatch queues the items one after another, and reports an item that
+// failed in its result.
 func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([]worlds.QueueResult, error) {
-	results := make([]worlds.QueueResult, 0, len(input.Items))
-	for _, item := range input.Items {
-		result, err := w.Queue(ctx, item)
-		if err != nil {
-			return results, err
-		}
-		results = append(results, result)
-	}
-	return results, nil
+	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
 // executor executes deliveries, as core.Runtime does.
@@ -134,16 +131,12 @@ func (d delivery) jobAttempts() int { return d.deliveries - d.jobStart }
 // newMessageID returns a queue message ID, msg_<ULID>.
 func newMessageID() string { return "msg_" + ulid.Make().String() }
 
-// claim leases up to limit due rows that are not leased by a live worker,
-// after deleting the rows whose message expired. A serialized flow is
-// claimed only while no other serialized flow of its run is running, and at
+// claim leases up to limit due rows that are not leased by a live worker. A
+// serialized flow is claimed only while no other serialized flow of its run is running, and at
 // most one per run, and the unique index on running flows turns a race
 // between two workers into a retry. The deliveries counter doubles as a
 // fencing token for later updates.
 func (w *World) claim(ctx context.Context, limit int, queues []string) ([]delivery, error) {
-	if _, err := w.pool.Exec(ctx, w.q(`DELETE FROM workflow.workflow_queue WHERE expires_at < now() AND (lease_until IS NULL OR lease_until < now())`)); err != nil {
-		return nil, err
-	}
 	for attempt := 1; ; attempt++ {
 		claimed, err := w.claimOnce(ctx, limit, queues)
 		var pgErr *pgconn.PgError
@@ -192,7 +185,6 @@ func (w *World) claimOnce(ctx context.Context, limit int, queues []string) ([]de
 	rows, err := w.pool.Query(ctx, w.q(`WITH locked AS (
 			SELECT q.id, q.run_id, q.serialized, q.not_before FROM workflow.workflow_queue q
 			WHERE q.not_before <= now() AND (q.lease_until IS NULL OR q.lease_until < now())
-				AND (q.expires_at IS NULL OR q.expires_at >= now())
 				AND ($3::text[] IS NULL OR q.queue_name = ANY($3))
 				AND (NOT q.serialized OR NOT EXISTS (
 					SELECT 1 FROM workflow.workflow_queue r WHERE r.run_id = q.run_id AND r.running AND r.id <> q.id))
@@ -293,7 +285,7 @@ func (w *World) work(ctx context.Context, runtime executor, options WorkerOption
 // deliver executes one claimed row, renewing its lease meanwhile. Success
 // deletes the row. A Redelivery keeps it, due after its delay, and starts the
 // row's next job, counting Attempt as redeliveryHandoffs describes. Failure
-// schedules a retry with capped exponential backoff, until the row's job has
+// schedules a retry after backoff, until the row's job has
 // failed maxJobAttempts deliveries, which deletes it. A shutdown releases the
 // lease so another worker takes it now. A lease lost to another worker, as
 // after this worker stalled past it, cancels the execution.
@@ -354,7 +346,7 @@ func (w *World) deliver(ctx context.Context, runtime executor, item delivery) {
 		updateErr = w.dropDelivery(finish, item)
 		notify = false
 	default:
-		delay := worlds.DeliveryRetryDelay(err, backoff(item.input.Attempt))
+		delay := worlds.DeliveryRetryDelay(err, backoff(item.jobAttempts()))
 		log.Printf("workflow/postgres: delivery %s for run %s failed (attempt %d, retry in %v): %v", item.id, item.input.RunID, item.input.Attempt, delay, err)
 		_, updateErr = w.pool.Exec(finish, w.q(`UPDATE workflow.workflow_queue SET lease_until = NULL, running = false, not_before = now() + make_interval(secs => $3) WHERE id = $1 AND deliveries = $2`),
 			item.id, item.deliveries, delay.Seconds())
@@ -396,16 +388,14 @@ func (d delivery) stored() worlds.QueueInput {
 	return input
 }
 
-// backoff returns the retry delay after the given number of attempts, which
-// is 1s, 2s, 4s, ... capped at 5 minutes.
+// backoff returns the retry delay after a job's given number of failed
+// deliveries: e^attempts seconds, growing over the first backoffCap, so 2.7s,
+// 7.4s, 20s, 55s, ... up to about 6 hours. The 24 deliveries a job has past
+// the runtime's MaxDeliveries failure then retry its terminal write for about
+// 6 days.
 func backoff(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	if attempts > 20 {
-		return backoffMax
-	}
-	return min(backoffBase<<(attempts-1), backoffMax)
+	attempts = min(max(attempts, 1), backoffCap)
+	return time.Duration(math.Exp(float64(attempts)) * float64(time.Second))
 }
 
 // queueName returns the queue a delivery is stored on: its workflow's route,

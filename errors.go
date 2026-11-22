@@ -37,6 +37,17 @@ var (
 )
 
 type (
+	// Error represents a recorded failure. It keeps the type, message, and exported
+	// fields of each error in the original chain, so errors.Is matches sentinel
+	// errors and errors.As decodes error types after replay.
+	Error = worlds.Error
+	// StartError is returned by Start with StartOptions.Hook when it could
+	// not confirm whether the World admitted the run or queued its first
+	// delivery. Starting again with the same hook token is safe.
+	StartError = worlds.StartError
+	// RunExpiredError is returned when awaiting a run whose data was deleted,
+	// such as a run started with RetainNone.
+	RunExpiredError = worlds.RunExpiredError
 	// HookNotFoundError reports that no active hook owns the requested
 	// token.
 	HookNotFoundError = worlds.HookNotFoundError
@@ -46,18 +57,10 @@ type (
 	// HookForceClaimedError reports that another hook took over this hook's
 	// token.
 	HookForceClaimedError = worlds.HookForceClaimedError
-	// RunExpiredError is returned when awaiting a run whose data was deleted,
-	// such as a run started with RetainNone.
-	RunExpiredError = worlds.RunExpiredError
 	// StreamExpiredError is returned when reading a stream whose data the
 	// World deleted.
 	StreamExpiredError = worlds.StreamExpiredError
 )
-
-// Error represents a recorded failure. It keeps the type, message, and exported
-// fields of each error in the original chain, so errors.Is matches sentinel
-// errors and errors.As decodes error types after replay.
-type Error = worlds.Error
 
 // FatalError wraps cause so that a step returning it fails without retrying.
 // It returns nil when cause is nil.

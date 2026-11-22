@@ -82,7 +82,8 @@ if err != nil {
 A failed attempt that can retry is handed to a step delivery, which runs the
 next attempt when its retry is due, and the runner waits for it like any
 step's result. Retries never run back to back in one delivery. After retries
-run out, or on a fatal error, the caller receives a `*workflow.Error`.
+run out, or on a fatal error, the caller receives a `*workflow.Error`, which
+after retries run out [keeps the last attempt's error as its cause](/guide/errors#step-retries).
 
 ## Replay behavior
 

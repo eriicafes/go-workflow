@@ -2,6 +2,9 @@ package localworld
 
 import (
 	"context"
+	"encoding/base64"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -96,4 +99,49 @@ func (a analytics) AttributesList(ctx context.Context, input worlds.AnalyticsAtt
 	pagination := input.Pagination
 	pagination.SortOrder = worlds.SortOrderAscending
 	return keyPage(values, pagination, func(item worlds.AnalyticsAttribute) string { return item.Key })
+}
+
+// sortKey orders analytics records by creation time, then ID. The fixed-width
+// UTC time sorts lexically.
+func sortKey(at time.Time, id string) string {
+	return at.UTC().Format("2006-01-02T15:04:05.000000000Z") + "\x00" + id
+}
+
+// keyPage sorts analytics values by key in the requested order and returns
+// the page after the opaque cursor, which encodes the last returned key.
+func keyPage[T any](values []T, pagination worlds.Pagination, key func(T) string) (worlds.Page[T], error) {
+	descending := pagination.SortOrder == worlds.SortOrderDescending
+	slices.SortFunc(values, func(a, b T) int {
+		if descending {
+			return strings.Compare(key(b), key(a))
+		}
+		return strings.Compare(key(a), key(b))
+	})
+	start := 0
+	if pagination.Cursor != "" {
+		// A cursor that does not decode starts from the first page.
+		if raw, err := base64.RawURLEncoding.DecodeString(pagination.Cursor); err == nil {
+			after := string(raw)
+			start = len(values)
+			for index, value := range values {
+				if compare := strings.Compare(key(value), after); descending && compare < 0 || !descending && compare > 0 {
+					start = index
+					break
+				}
+			}
+		}
+	}
+	end := len(values)
+	if pagination.Limit > 0 {
+		end = min(start+pagination.Limit, len(values))
+	}
+	page := worlds.Page[T]{Data: values[start:end], HasMore: end < len(values)}
+	if page.Data == nil {
+		page.Data = []T{}
+	}
+	// The last page's cursor resumes after it.
+	if end > start {
+		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
+	}
+	return page, nil
 }

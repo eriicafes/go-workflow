@@ -3,10 +3,14 @@
 // FatalError, a name, a message, other properties, and a cause.
 //
 // A Go error is recorded as an Error named after its Go type, with its JSON
-// encoding as its data property, and the errors it wraps as its causes. A Go
-// type registered with Register is recorded as the SDK's own type instead,
-// and one registered with RegisterNamed as an Error with the name of the
-// SDK's class, as the SDK records a class it has no type for.
+// encoding as its data property, and the errors it wraps as its causes. An
+// error with no type of its own, made by errors.New, fmt.Errorf or
+// errors.Join, is recorded as a plain Error without a name. A Go type
+// registered with Register is recorded as the SDK's own type instead, one
+// registered with RegisterNamed as an Error with the name of the SDK's class,
+// as the SDK records a class it has no type for, and an error value
+// registered with RegisterSentinel as an Error named after the SDK's class
+// for it, as is an error that wraps it.
 // Read back, the chain keeps errors.Is and errors.As working: Is matches a
 // target with the type and message of an error in the chain, which is how
 // sentinel errors are matched, and As decodes an error of the target's type
@@ -16,6 +20,7 @@ package sdkerror
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 )
@@ -56,6 +61,15 @@ func New(err error) *Error {
 	for index := len(nodes) - 2; index >= 0; index-- {
 		nodes[index].Cause = nodes[index+1]
 	}
+	// An error that wraps a registered sentinel is one of its class.
+	if nodes[0].Name == "" && nodes[0].Type == "" {
+		for _, sentinel := range sentinels {
+			if errors.Is(err, sentinel.err) {
+				nodes[0].Name = sentinel.name
+				break
+			}
+		}
+	}
 	return nodes[0]
 }
 
@@ -81,7 +95,9 @@ func appendChain(nodes []*Error, err error) []*Error {
 		} else {
 			node.Type = registered.typ
 		}
-	} else {
+	} else if name, ok := sentinelName(err); ok {
+		node.Name = name
+	} else if !plainTypes[goType] {
 		node.Name = typeName(goType)
 		if data, marshalErr := json.Marshal(err); marshalErr == nil {
 			node.Fields = []Field{{Name: dataField, Value: data}}
@@ -152,6 +168,10 @@ func (e *Error) goType() string {
 	if e.Name != "" {
 		return e.Name
 	}
+	if e.Type == "" || e.Type == "Error" {
+		// A plain Error is what errors.New records.
+		return plainTypeName
+	}
 	return e.Type
 }
 
@@ -163,6 +183,11 @@ func (e *Error) Is(target error) bool {
 	}
 	if e.goType() == typeName(reflect.TypeOf(target)) && e.Message == target.Error() {
 		return true
+	}
+	for _, sentinel := range sentinels {
+		if sentinel.name == e.Name && sentinel.err == target && (e.Type == "" || e.Type == "Error") {
+			return true
+		}
 	}
 	if registered, ok := e.registration(); ok {
 		value := reflect.New(registered.goType)
@@ -234,6 +259,8 @@ var (
 	byType   = map[string]*registration{}
 	byName   = map[string]*registration{}
 	byGoType = map[reflect.Type]*registration{}
+	// sentinels are the error values registered with RegisterSentinel.
+	sentinels []sentinel
 )
 
 // Register records errors of type T as the SDK's typ errors, so the SDK
@@ -257,6 +284,41 @@ func RegisterNamed[T error](name string, fields func(T) []Field, restore func(ta
 	registered.named = true
 	byName[name], byGoType[registered.goType] = registered, registered
 }
+
+// RegisterSentinel records the error value err, and an error that wraps it,
+// as an Error named name, the SDK's class for it. Read back, errors.Is
+// matches err. RegisterSentinel is called from init functions.
+func RegisterSentinel(name string, err error) {
+	sentinels = append(sentinels, sentinel{name: name, err: err})
+}
+
+type sentinel struct {
+	name string
+	err  error
+}
+
+// sentinelName returns the name err is registered under.
+func sentinelName(err error) (string, bool) {
+	for _, sentinel := range sentinels {
+		if sentinel.err == err {
+			return sentinel.name, true
+		}
+	}
+	return "", false
+}
+
+// plainTypes are the types of errors with no type of their own, which are
+// recorded as a plain Error.
+var plainTypes = map[reflect.Type]bool{
+	reflect.TypeOf(errors.New("")):                                     true,
+	reflect.TypeOf(fmt.Errorf("%w", errors.New(""))):                   true,
+	reflect.TypeOf(fmt.Errorf("%w%w", errors.New(""), errors.New(""))): true,
+	reflect.TypeOf(fmt.Errorf("")):                                     true,
+	reflect.TypeOf(errors.Join(errors.New(""))):                        true,
+}
+
+// plainTypeName is the type name a plain Error is matched as.
+var plainTypeName = typeName(reflect.TypeOf(errors.New("")))
 
 func newRegistration[T error](typ string, fields func(T) []Field, restore func(target *T, recorded *Error)) *registration {
 	goType := reflect.TypeFor[T]()

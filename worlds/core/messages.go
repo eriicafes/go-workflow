@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -17,13 +18,59 @@ const resendMaxAge = 23 * time.Hour
 
 // stepMessage returns the step delivery of attempt of the step stepID named
 // name, keyed by the step's identity, so every send of one step's message is
-// one message to a World that deduplicates.
-func stepMessage(stepID worlds.StepID, name string, attempt int, resent bool) worlds.QueueInput {
+// one message to a World that deduplicates. The message of a first attempt
+// carries createdAt, when the step was created, and a retry's does not.
+func stepMessage(stepID worlds.StepID, name string, attempt int, resent bool, createdAt time.Time) worlds.QueueInput {
 	input := worlds.QueueInput{StepID: &stepID, StepName: name, IdempotencyKey: StepMessageKey(stepID, name), StepResent: resent, Retention: worlds.StepRetention}
 	if attempt > 1 {
 		input.StepAttempt = attempt
+	} else {
+		input.StepCreatedAt = createdAt
 	}
 	return input
+}
+
+// stepDispatchBatchSize is the most step messages one QueueBatch carries.
+const stepDispatchBatchSize = 16
+
+// queueSteps queues step messages in batches of at most
+// stepDispatchBatchSize, sent at the same time. Every message must be
+// stored: when one is not, the replay ends once every batch has settled, so
+// the queue retries the delivery, whose flow sends the messages again under
+// their keys.
+func (e *Execution) queueSteps(messages []worlds.QueueInput) {
+	if len(messages) == 0 {
+		return
+	}
+	for index := range messages {
+		messages[index] = e.addressed(messages[index])
+	}
+	failures := make([]error, (len(messages)+stepDispatchBatchSize-1)/stepDispatchBatchSize)
+	var sending sync.WaitGroup
+	for batch := range failures {
+		start := batch * stepDispatchBatchSize
+		items := messages[start:min(start+stepDispatchBatchSize, len(messages))]
+		sending.Go(func() {
+			_, failures[batch] = worlds.QueueAll(e.ctx, e.world, items)
+		})
+	}
+	sending.Wait()
+	for _, err := range failures {
+		if err != nil {
+			panic(e.exit(deliveryError{cause: err}))
+		}
+	}
+}
+
+// stepCreatedAt returns when the step_created of step stepID among events
+// was stored, or the zero time when the step has none.
+func stepCreatedAt(events []worlds.Event, stepID worlds.StepID) time.Time {
+	for _, event := range events {
+		if event.EventType == worlds.EventTypeStepCreated && event.CorrelationID == string(stepID) {
+			return event.CreatedAt
+		}
+	}
+	return time.Time{}
 }
 
 // StepMessageKey returns the idempotency key of the message of step stepID
@@ -57,6 +104,7 @@ func (e *Execution) resendSteps() {
 	}
 	type state struct {
 		name      string
+		createdAt time.Time
 		inline    bool
 		started   bool
 		finished  bool
@@ -76,7 +124,7 @@ func (e *Execution) resendSteps() {
 			if step == nil {
 				var data worlds.DataStepCreated
 				_ = json.Unmarshal(event.Data, &data)
-				steps[id], order = &state{name: data.StepName, inline: data.Inline, sentAt: event.CreatedAt}, append(order, id)
+				steps[id], order = &state{name: data.StepName, createdAt: event.CreatedAt, inline: data.Inline, sentAt: event.CreatedAt}, append(order, id)
 			}
 		case worlds.EventTypeStepStarted:
 			if step == nil && worlds.StartCreatesStep(event.Data) {
@@ -102,6 +150,7 @@ func (e *Execution) resendSteps() {
 			}
 		}
 	}
+	var messages []worlds.QueueInput
 	for _, id := range order {
 		step := steps[id]
 		if step.finished {
@@ -114,10 +163,11 @@ func (e *Execution) resendSteps() {
 		} else if resend := !step.inline && !step.started || step.inline && step.handedOff; !resend || time.Since(step.sentAt) >= resendMaxAge {
 			continue
 		}
-		message := stepMessage(id, step.name, step.attempt+1, true)
+		message := stepMessage(id, step.name, step.attempt+1, true, step.createdAt)
 		message.NotBefore = step.retryAt
-		e.queue(message)
+		messages = append(messages, message)
 	}
+	e.queueSteps(messages)
 }
 
 // recovery reports whether the delivery is a flow a World queued after it
