@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"path"
 	"time"
+
+	"github.com/eriicafes/go-workflow/internal/devalue"
 )
 
 // A webhook's metadata says how it responds: 202 Accepted, a static Response,
@@ -40,9 +42,9 @@ type StreamRef struct {
 	BodyInit []byte
 }
 
-func (r StreamRef) reduced(typ string) PayloadReduced {
+func (r StreamRef) reduced(typ string) devalue.Reduced {
 	if typ == "ReadableStream" && r.Name == "" {
-		return PayloadReduced{Type: typ, Value: map[string]any{"bodyInit": r.BodyInit}}
+		return devalue.Reduced{Type: typ, Value: map[string]any{"bodyInit": r.BodyInit}}
 	}
 	value := map[string]any{"name": r.Name}
 	if r.Type != "" {
@@ -51,11 +53,11 @@ func (r StreamRef) reduced(typ string) PayloadReduced {
 	if r.Framing != "" {
 		value["framing"] = r.Framing
 	}
-	return PayloadReduced{Type: typ, Value: value}
+	return devalue.Reduced{Type: typ, Value: value}
 }
 
 func streamRefOf(value any) (*StreamRef, error) {
-	reduced, ok := value.(PayloadReduced)
+	reduced, ok := value.(devalue.Reduced)
 	if !ok {
 		if value == nil {
 			return nil, nil
@@ -102,12 +104,12 @@ func (r WebhookRequest) MarshalPayload() (any, error) {
 	if r.ResponseWritable != nil {
 		value["responseWritable"] = r.ResponseWritable.reduced("WritableStream")
 	}
-	return PayloadReduced{Type: "Request", Value: value}, nil
+	return devalue.Reduced{Type: "Request", Value: value}, nil
 }
 
 // UnmarshalPayload decodes a Request value.
 func (r *WebhookRequest) UnmarshalPayload(decode func(any) error) error {
-	var reduced PayloadReduced
+	var reduced devalue.Reduced
 	if err := decode(&reduced); err != nil {
 		return err
 	}
@@ -155,12 +157,12 @@ func (r WebhookResponse) MarshalPayload() (any, error) {
 	if r.Body != nil {
 		value["body"] = r.Body.reduced("ReadableStream")
 	}
-	return PayloadReduced{Type: "Response", Value: value}, nil
+	return devalue.Reduced{Type: "Response", Value: value}, nil
 }
 
 // UnmarshalPayload decodes a Response value.
 func (r *WebhookResponse) UnmarshalPayload(decode func(any) error) error {
-	var reduced PayloadReduced
+	var reduced devalue.Reduced
 	if err := decode(&reduced); err != nil {
 		return err
 	}
@@ -211,7 +213,7 @@ func (m *WebhookMetadata) UnmarshalPayload(decode func(any) error) error {
 			return fmt.Errorf("%w: respondWith %q", ErrPayloadInvalid, respondWith)
 		}
 		m.Manual = true
-	case PayloadReduced:
+	case devalue.Reduced:
 		m.Response = &WebhookResponse{}
 		return decode(&struct {
 			RespondWith *WebhookResponse `json:"respondWith"`
@@ -239,13 +241,13 @@ func WebhookHandler(world World) http.Handler {
 			token = path.Base(r.URL.Path)
 		}
 		if token == "" || token == "/" || token == "." {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
+			http.Error(w, (&HookNotFoundError{}).Error(), http.StatusNotFound)
 			return
 		}
 		ctx := r.Context()
 		hook, err := world.HooksGetByToken(ctx, HooksGetByTokenInput{Token: token})
-		if errors.Is(err, ErrHookNotFound) || err == nil && !hook.IsWebhook {
-			http.Error(w, ErrHookNotFound.Error(), http.StatusNotFound)
+		if is[*HookNotFoundError](err) || err == nil && !hook.IsWebhook {
+			http.Error(w, (&HookNotFoundError{}).Error(), http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -296,17 +298,17 @@ func WebhookHandler(world World) http.Handler {
 		if _, err := ResumeHook(ctx, world, hook, payload, ""); err != nil {
 			status := http.StatusInternalServerError
 			switch {
-			case errors.Is(err, ErrHookForceClaimed):
+			case is[*HookForceClaimedError](err):
 				status = http.StatusServiceUnavailable
-			case errors.Is(err, ErrRunTerminal), errors.Is(err, ErrHookNotFound), errors.Is(err, ErrHookNotActive):
+			case is[*RunExpiredError](err), is[*HookNotFoundError](err), errors.Is(err, ErrHookNotActive):
 				// Another run that took the token over is served by its own
 				// requests, so this one is refused rather than redirected.
-				status, err = http.StatusNotFound, ErrHookNotFound
+				status, err = http.StatusNotFound, &HookNotFoundError{Token: token}
 				owner, lookupErr := world.HooksGetByToken(ctx, HooksGetByTokenInput{Token: token})
 				switch {
 				case lookupErr == nil && owner.HookID != hook.HookID:
-					status, err = http.StatusServiceUnavailable, ErrHookForceClaimed
-				case lookupErr != nil && !errors.Is(lookupErr, ErrHookNotFound):
+					status, err = http.StatusServiceUnavailable, &HookForceClaimedError{Token: token, RunID: owner.RunID, HookID: owner.HookID}
+				case lookupErr != nil && !is[*HookNotFoundError](lookupErr):
 					status, err = http.StatusInternalServerError, lookupErr
 				}
 			}

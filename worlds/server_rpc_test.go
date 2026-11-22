@@ -468,7 +468,7 @@ func TestRPCCarriesThrottling(t *testing.T) {
 	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(throttledWorld{testworld.NewManual()}, "")))
 	_, err := client.RunsDeleteDataMany(context.Background(), worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_1"}})
 	var throttle *worlds.ThrottleError
-	if !errors.Is(err, worlds.ErrThrottled) || !errors.As(err, &throttle) || throttle.After != 3*time.Second {
+	if !errors.As(err, &throttle) || throttle.After != 3*time.Second {
 		t.Fatalf("throttled error = %v", err)
 	}
 }

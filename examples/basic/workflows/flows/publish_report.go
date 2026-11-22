@@ -10,6 +10,7 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows"
+	"github.com/eriicafes/go-workflow/worlds"
 )
 
 const (
@@ -41,7 +42,7 @@ func PublishReport(ctx context.Context, input workflows.PublishReport) (workflow
 		return workflows.PublishReportResult{}, err
 	}
 	if owner != nil {
-		return workflows.PublishReportResult{}, workflow.FatalError(workflow.ErrHookConflict)
+		return workflows.PublishReportResult{}, workflow.FatalError(&workflow.HookConflictError{Token: reviews.Token(), RunID: worlds.RunID(owner.ID())})
 	}
 
 	var history []workflows.Review

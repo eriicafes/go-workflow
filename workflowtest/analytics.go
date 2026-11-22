@@ -103,7 +103,7 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 		t.Fatalf("analytics hooks = %#v err=%v", hooks, err)
 	}
 	_, err = analytics.HooksGet(ctx, worlds.AnalyticsHooksGetInput{RunID: second, HookID: "hook_missing"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "analytics missing hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "analytics missing hook")
 
 	created, err := analytics.EventsList(ctx, worlds.AnalyticsEventsListInput{RunID: second, EventType: worlds.EventTypeStepCreated})
 	if err != nil || len(created.Data) != 1 || created.Data[0].StepName != "charge" || created.Data[0].WorkflowName != name || created.Data[0].RunCreatedAt.IsZero() {

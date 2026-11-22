@@ -140,7 +140,8 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if hook, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "Persist/Token"}); err != nil || hook.HookID != "hook_a" {
 		t.Fatalf("hook = %#v err=%v", hook, err)
 	}
-	if _, err := reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "persist/token"}); !errors.Is(err, worlds.ErrHookNotFound) {
+	_, err = reopened.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "persist/token"})
+	if _, ok := errors.AsType[*worlds.HookNotFoundError](err); !ok {
 		t.Fatalf("tokens differing only by case collided: %v", err)
 	}
 	chunks, err := reopened.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runPersist, Name: "out/1"})

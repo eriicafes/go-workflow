@@ -27,7 +27,7 @@ func (m *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
-		// A first flow's run_started creates a run whose run_created never
+		// A first delivery's run_started creates a run whose run_created never
 		// landed, and is stored without the creation it carries.
 		if err := worlds.CreateRunForStart(ctx, m, input.RunID, input.Event.Data); err != nil {
 			return worlds.EventResult{}, err
@@ -90,11 +90,11 @@ func createdAt(event worlds.EventsCreateEvent, inBand *int) time.Time {
 	return time.Now().UTC()
 }
 
-// fenceLocked returns ErrInBandSuperseded when an in-band write's count is
+// fenceLocked returns an *InBandSupersededError when an in-band write's count is
 // not the run's current InBandCount.
 func (m *World) fenceLocked(runID worlds.RunID, count *int) error {
 	if count != nil && *count != m.runs[runID].InBandCount {
-		return worlds.ErrInBandSuperseded
+		return &worlds.InBandSupersededError{}
 	}
 	return nil
 }
@@ -207,7 +207,7 @@ func (m *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		}
 		if _, duplicate, err := m.admitLocked(input.RunID, value); err != nil || duplicate {
 			if err == nil {
-				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, value.EventType, value.CorrelationID)
+				err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, value.EventType, value.CorrelationID)
 			}
 			result.Results[index].Err = err
 			refused[value.CorrelationID] = value.CorrelationID != ""
@@ -274,7 +274,7 @@ func (m *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 	}
 	// A hook is created once, as in the Workflow SDK's Worlds.
 	if _, disposed := m.disposals[worlds.HookID(input.Event.CorrelationID)]; disposed || m.hasEventLocked(input.RunID, worlds.EventTypeHookCreated, input.Event.CorrelationID) {
-		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, input.Event.CorrelationID)
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEntityConflict, input.Event.CorrelationID)
 	}
 	m.expireTokenLocked(created.Token, time.Now().UTC())
 	before := len(m.events[input.RunID])
@@ -359,27 +359,27 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		// the workflow is recorded once.
 		once := requested.EventType != worlds.EventTypeAttrSet || worlds.WorkflowAttrSet(requested.Data)
 		if once && requested.CorrelationID != "" && m.hasEventLocked(runID, requested.EventType, requested.CorrelationID) {
-			return worlds.EventResult{}, false, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEventConflict, requested.EventType, requested.CorrelationID)
+			return worlds.EventResult{}, false, fmt.Errorf("%w: %s %s already recorded", worlds.ErrEntityConflict, requested.EventType, requested.CorrelationID)
 		}
 	case worlds.EventTypeHookDisposed:
 		// A disposed hook is gone, so disposing it again finds no hook, as
 		// in the Workflow SDK's Worlds.
 		hook, exists := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if !exists || hook.RunID != runID {
-			return worlds.EventResult{}, false, worlds.ErrHookNotFound
+			return worlds.EventResult{}, false, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 	}
 
 	if requested.EventType == worlds.EventTypeHookReceived {
 		if disposal, disposed := m.disposals[worlds.HookID(requested.CorrelationID)]; disposed && disposal.runID == runID {
 			if disposal.forceClaimedBy != nil {
-				return worlds.EventResult{}, false, worlds.ErrHookForceClaimed
+				return worlds.EventResult{}, false, &worlds.HookForceClaimedError{RunID: disposal.forceClaimedBy.RunID, HookID: disposal.forceClaimedBy.HookID}
 			}
-			return worlds.EventResult{}, false, worlds.ErrHookNotFound
+			return worlds.EventResult{}, false, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 		hook := m.hooks[worlds.HookID(requested.CorrelationID)]
 		if hook.HookID == "" || hook.RunID != runID || m.tokens[hook.Token] != hook.HookID {
-			return worlds.EventResult{}, false, worlds.ErrHookNotFound
+			return worlds.EventResult{}, false, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
 		if err := worlds.FinishedRunHookRefusal(run.Status, requested); err != nil {
 			return worlds.EventResult{}, false, err
@@ -390,8 +390,8 @@ func (m *World) admitLocked(runID worlds.RunID, requested worlds.EventsCreateEve
 		var created worlds.DataHookCreated
 		if json.Unmarshal(requested.Data, &created) == nil {
 			m.expireTokenLocked(created.Token, time.Now().UTC())
-			if _, exists := m.tokens[created.Token]; exists {
-				return worlds.EventResult{}, false, worlds.ErrHookConflict
+			if owner, exists := m.tokens[created.Token]; exists {
+				return worlds.EventResult{}, false, &worlds.HookConflictError{Token: created.Token, RunID: m.hooks[owner].RunID}
 			}
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow"
+	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/core"
 )
@@ -72,7 +73,7 @@ func TestWorkflowsRunEndToEndEncrypted(t *testing.T) {
 	if err != nil || len(runs.Data) != 1 {
 		t.Fatalf("runs = %#v err=%v", runs, err)
 	}
-	if worlds.PayloadLabel(runs.Data[0].Output) != worlds.PayloadEncrypted || runs.Data[0].EncryptionPublicKey == "" {
+	if envelope.Peek(runs.Data[0].Output) != envelope.PrefixEncrypted || runs.Data[0].EncryptionPublicKey == "" {
 		t.Fatalf("run output %q is not encrypted", runs.Data[0].Output)
 	}
 }

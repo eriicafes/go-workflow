@@ -116,13 +116,13 @@ Every event carries the `specVersion` of its writer, 9.
 ## Writers
 
 A run has one orchestrator, its flow, which makes every decision. What a
-flow writes is **in-band**: `run_started` on the run's first flow,
+flow writes is **in-band**: `run_started` on the run's first delivery,
 `run_completed`, `run_failed`, `step_created`, every event of a step it runs
 inline, `wait_created`, `wait_completed`, `hook_created`, `hook_disposed`, and
 `attr_set` from workflow code. Each in-band write is fenced by the run's
 in-band count, which a flow reads from the snapshot of its log listing and
 which counts `run_created` too: the World refuses it with
-`ErrInBandSuperseded` when another flow has written in-band since. Everything
+`*InBandSupersededError` when another flow has written in-band since. Everything
 else is **out-of-band** and never refused by the fence: the events a step
 delivery writes, `hook_received` from `ResumeHook` and webhooks, cancellation,
 `run_cancelled` from a client, and `RunsSetAttributes`. See
@@ -136,33 +136,33 @@ when it occurred, which the World stores as its `CreatedAt`.
 ## Admission rules
 
 - A finished run refuses a transition or a new step, wait, hook, or
-  attribute with `ErrEventConflict` (also matching `ErrRunTerminal`), another
-  attempt or the result of a step that is not running with `ErrRunTerminal`,
+  attribute with `ErrEntityConflict` (also matching a `*RunExpiredError`), another
+  attempt or the result of a step that is not running with a `*RunExpiredError`,
   and a `wait_completed` with `ErrEventNotFound`, as the Workflow SDK's Worlds
   do. It still records a running step's result or retry.
 - A `wait_completed` needs its `wait_created` (`ErrEventNotFound`).
 - A step event needs its step (`ErrStepNotFound`), unfinished
-  (`ErrEventConflict`), except an inline step's first `step_started`, which
+  (`ErrEntityConflict`), except an inline step's first `step_started`, which
   creates it. A `step_started` before the step's retry is due is refused with
   a `*worlds.TooEarlyError`, which says how long to wait. Replay ignores any
   event of a step, hook, or wait after its final one.
 - A new run's ID must be `wrun_` and a ULID minted within `RunIDMaxAge`
   before and `RunIDMaxLead` after the World's clock (`ErrEventInvalid`, or
-  `ErrStartHookRejected` with a start hook), except for a run a first flow's
+  `ErrStartHookRejected` with a start hook), except for a run a first delivery's
   `run_started` creates. Its attributes, and an `attr_set`'s changes, must be
   within the attribute limits (`ErrAttributeInvalid`), with `$` keys only
   when `AllowReservedAttributes` is set.
 - A resume's `ResumePayloadDigest` must be its payload's (`ErrEventInvalid`).
-- `hook_disposed` only targets a hook of the same run (`ErrHookNotFound`), so
+- `hook_disposed` only targets a hook of the same run (`*HookNotFoundError`), so
   a repeated disposal is refused, as in the Workflow SDK's Worlds.
 - `hook_received` only targets an active hook of the same run that still owns
-  its token (`ErrHookNotFound`, or `ErrHookForceClaimed` after a forced claim).
+  its token (`*HookNotFoundError`, or `*HookForceClaimedError` after a forced claim).
   A hook, a webhook included, receives repeated payloads, consumed in order with `Next`.
 - `EventsCreate(hook_created)` atomically claims the token or records `hook_conflict` with its owning run. A forced claim disposes the previous owner and records `forceClaimedFrom` in its data and `ClaimedFrom` on the new hook.
 - An event that repeats a creation the log holds, a second `step_created`,
   `wait_created`, `wait_completed`, `hook_created`, inline step creation, or
   workflow `attr_set` of one correlation ID, is refused with
-  `ErrEventConflict`, as the Workflow SDK's Worlds refuse it. A `run_started`
+  `ErrEntityConflict`, as the Workflow SDK's Worlds refuse it. A `run_started`
   of a running run appends nothing, and a `run_cancelled` of a cancelled run
   is recorded and changes nothing.
 - A batch is fenced as one block, but not all-or-nothing: each event gets its

@@ -68,7 +68,7 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, wo
 | Field | Effect |
 | --- | --- |
 | `Deployment` | The deployment the run starts on and stays pinned to: `workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`, or `workflow.DeploymentWithID(id)`. It needs a World with deployment affinity. See [moving chains to the latest deployment](/guide/replay#moving-chains-to-the-latest-deployment). |
-| `Retention` | `workflow.RetainNone` deletes the run's data as soon as it finishes, recorded as `$retention: "0"`. `Run.Value` then returns `workflow.ErrRunExpired`, so return a result you need through storage you control. The zero value, `workflow.RetainDefault`, leaves it to the World. |
+| `Retention` | `workflow.RetainNone` deletes the run's data as soon as it finishes, recorded as `$retention: "0"`. `Run.Value` then returns a `*workflow.RunExpiredError`, so return a result you need through storage you control. The zero value, `workflow.RetainDefault`, leaves it to the World. |
 | `Attributes` | Plain-text attributes set on the run as it is created: at most 64, keys up to 256 characters, values up to 256 bytes. Otherwise `Start` returns `worlds.ErrAttributeInvalid`. |
 | `AllowReservedAttributes` | Permits keys starting with `$`, which are reserved for framework and library code. |
 | `Hook` | Creates a hook with the run, claiming its token, as the Workflow SDK's `experimental_hook`: `&workflow.StartHook{Token, MinRetention, Metadata}`. A second start with the token creates no run and returns a `*worlds.HookConflictError` naming the run that holds it, so the token makes the start idempotent. The hook takes payloads as soon as `Start` returns. The first `workflow.CreateHook` the workflow declares with the token opens it, and a later one with the token conflicts with it. The opening hook takes no `MinRetention` or `Force`, which return `workflow.ErrStartHookOptions`; set the retention on `StartHook`. It needs a World with `Capabilities().StartHook`. |
@@ -169,7 +169,7 @@ result, err := workflow.DeleteRuns(ctx, runA.ID(), runB.ID())
 
 The runs stay listed, with their steps, events and hooks, IDs, statuses,
 timestamps and attributes. Their `ExpiredAt` is set, the Workflow web UI shows
-their data as expired, and `Run.Value` returns `workflow.ErrRunExpired`. A run
+their data as expired, and `Run.Value` returns a `*workflow.RunExpiredError`. A run
 that has not finished is skipped; cancel it first. Called in a step,
 `DeleteRuns` sends retryable failures again once and then fails the step with a
 `RetryableError`, and a World's rate limit (`*worlds.ThrottleError`) retries the

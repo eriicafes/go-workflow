@@ -135,7 +135,7 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	before := eventCount()
 	for _, stale := range []int{zero, one} {
 		_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_stale"}, Options: worlds.EventsCreateOptions{InBandCount: &stale}})
-		conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band append")
+		conformExpectType[*worlds.InBandSupersededError](t, err, "stale in-band append")
 	}
 	if eventCount() != before || inBandCount() != 2 {
 		t.Fatalf("stale in-band append wrote events %d -> %d, InBandCount %d", before, eventCount(), inBandCount())
@@ -155,14 +155,14 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 
 	before = eventCount()
 	_, err = world.EventsCreateBatch(ctx, worlds.EventsCreateBatchInput{RunID: runID, InBandCount: &two, Events: []worlds.EventsCreateEvent{{EventType: worlds.EventTypeWaitCreated, CorrelationID: "wait_fence_d"}}})
-	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band batch")
+	conformExpectType[*worlds.InBandSupersededError](t, err, "stale in-band batch")
 	if eventCount() != before {
 		t.Fatalf("stale in-band batch wrote events %d -> %d", before, eventCount())
 	}
 
 	token := "fence:" + string(runID)
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &two}})
-	conformExpect(t, err, worlds.ErrInBandSuperseded, "stale in-band hook claim")
+	conformExpectType[*worlds.InBandSupersededError](t, err, "stale in-band hook claim")
 	claimed, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookCreated, "hook_fence", conformHookData(token, false, 0)), Options: worlds.EventsCreateOptions{InBandCount: &four}})
 	if err != nil || claimed.InBandCount != 5 || inBandCount() != 5 {
 		t.Fatalf("fenced hook claim = %#v err=%v, run InBandCount %d", claimed, err, inBandCount())
@@ -176,7 +176,7 @@ func conformInBandFence(t *testing.T, world worlds.World) {
 	// stays.
 	six := 6
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_fence", nil), Options: worlds.EventsCreateOptions{InBandCount: &six}})
-	conformExpect(t, err, worlds.ErrHookNotFound, "repeated fenced disposal")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "repeated fenced disposal")
 	if inBandCount() != 6 {
 		t.Fatalf("repeated fenced disposal moved run InBandCount to %d", inBandCount())
 	}
@@ -314,7 +314,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 	if err != nil || len(mixed.Results) != 4 || mixed.AllocatedEventCount != 2 {
 		t.Fatalf("mixed batch = %#v err=%v", mixed, err)
 	}
-	if mixed.Results[0].Err != nil || !errors.Is(mixed.Results[1].Err, worlds.ErrEventConflict) || mixed.Results[2].Err != nil || mixed.Results[3].Err == nil {
+	if mixed.Results[0].Err != nil || !errors.Is(mixed.Results[1].Err, worlds.ErrEntityConflict) || mixed.Results[2].Err != nil || mixed.Results[3].Err == nil {
 		t.Fatalf("mixed batch outcomes = %v, %v, %v, %v", mixed.Results[0].Err, mixed.Results[1].Err, mixed.Results[2].Err, mixed.Results[3].Err)
 	}
 
@@ -324,7 +324,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 		{EventType: worlds.EventTypeRunCompleted, Data: []byte(`{"output":"Im91dCI="}`)},
 		{EventType: worlds.EventTypeWaitCreated, CorrelationID: "late"},
 	}})
-	if err != nil || completed.Results[0].Err != nil || !errors.Is(completed.Results[1].Err, worlds.ErrRunTerminal) {
+	if err != nil || completed.Results[0].Err != nil || !is[*worlds.RunExpiredError](completed.Results[1].Err) {
 		t.Fatalf("batch appending after its own terminal event = %#v err=%v", completed, err)
 	}
 	// The finished run refuses another attempt, and so the failure behind
@@ -333,7 +333,7 @@ func conformBatch(t *testing.T, world worlds.World) {
 		conformEvent(t, worlds.EventTypeStepStarted, "step_x", worlds.DataStepStarted{StepName: "x", Attempt: 2}),
 		conformEvent(t, worlds.EventTypeStepFailed, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)}),
 	}})
-	if err != nil || !errors.Is(ordered.Results[0].Err, worlds.ErrRunTerminal) || ordered.Results[1].Err == nil || ordered.AllocatedEventCount != 0 {
+	if err != nil || !is[*worlds.RunExpiredError](ordered.Results[0].Err) || ordered.Results[1].Err == nil || ordered.AllocatedEventCount != 0 {
 		t.Fatalf("batch after a refused event of the same step = %#v err=%v", ordered, err)
 	}
 	conformAppend(t, world, runID, worlds.EventTypeStepFailed, "step_x", worlds.DataStepResult{StepName: "x", Attempt: 1, Error: []byte(`{"message":"x"}`)})
@@ -461,7 +461,7 @@ func conformWaits(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeWaitCompleted, "wait_a", nil)
 	// A wait completes once, as in the Workflow SDK's Worlds.
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeWaitCompleted, CorrelationID: "wait_a"}})
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated wait_completed")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated wait_completed")
 	if events := conformAllEvents(t, world, runID); len(events) != 4 {
 		t.Fatalf("events = %d, want 4", len(events))
 	}
@@ -579,20 +579,20 @@ func conformRepeats(t *testing.T, world worlds.World) {
 	resumeAt := time.Now().Add(time.Hour).UTC()
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeWaitCreated, "wait_a", worlds.DataWaitCreated{ResumeAt: resumeAt})})
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated wait_created")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated wait_created")
 
 	token := fmt.Sprintf("repeat-%d", time.Now().UnixNano())
 	if _, err := conformClaim(world, runID, "hook_a", token, false); err != nil {
 		t.Fatal(err)
 	}
 	_, err = conformClaim(world, runID, "hook_a", token, false)
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated hook_created")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated hook_created")
 
 	gold := "gold"
 	attributes := worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "tier", Value: &gold}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterWorkflow}}
 	conformAppend(t, world, runID, worlds.EventTypeAttrSet, "attr_a", attributes)
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeAttrSet, "attr_a", attributes)})
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated attr_set")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated attr_set")
 	if events := conformAllEvents(t, world, runID); len(events) != 5 {
 		t.Fatalf("events after refused repeats = %d, want 5", len(events))
 	}

@@ -40,7 +40,7 @@ type AnalyticsEvents interface {
 // AnalyticsHooks reads the hooks of a run, disposed ones included.
 type AnalyticsHooks interface {
 	// HooksGet returns the hook identified by HookID. It returns
-	// ErrHookNotFound when the run has no such hook.
+	// a *HookNotFoundError when the run has no such hook.
 	HooksGet(context.Context, AnalyticsHooksGetInput) (AnalyticsHook, error)
 	// HooksList returns the hooks of a run. It applies Pagination to the
 	// result.
@@ -382,7 +382,7 @@ func (a LogAnalytics) HooksGet(ctx context.Context, input AnalyticsHooksGetInput
 	}
 	hooks := analyticsHooks(events)
 	if len(hooks) == 0 {
-		return AnalyticsHook{}, ErrHookNotFound
+		return AnalyticsHook{}, &HookNotFoundError{}
 	}
 	return hooks[0], nil
 }

@@ -70,15 +70,15 @@ type StorageEvents interface {
 	// selected by EventsCreateOptions. For a step_created event, Step holds the
 	// step and StepCreated reports whether this call created it.
 	//
-	// It returns ErrEventInvalid for a malformed event, ErrRunTerminal when
+	// It returns ErrEventInvalid for a malformed event, a *RunExpiredError when
 	// the run is terminal and the event needs a running run, ErrHookNotActive
-	// when the target hook does not allow the event, and ErrHookConflict when
+	// when the target hook does not allow the event, and a *HookConflictError when
 	// a hook_created token is taken.
 	//
 	// A finished run refuses events as FinishedRunRefusal says, as the
 	// Workflow SDK's Worlds do: a transition from it or a creation on it with
-	// ErrEventConflict (which also matches ErrRunTerminal), another attempt
-	// or a result of a step that is not running with ErrRunTerminal, and a
+	// ErrEntityConflict (which also matches *RunExpiredError), another attempt
+	// or a result of a step that is not running with a *RunExpiredError, and a
 	// wait_completed with ErrEventNotFound, since its waits end with it. It
 	// still records a running step's step_completed, step_failed, and
 	// step_retrying. A wait_completed needs its wait_created
@@ -86,20 +86,20 @@ type StorageEvents interface {
 	//
 	// A step event is checked as CheckStepEvent says, as the Workflow SDK's
 	// Worlds check it: it needs its step (ErrStepNotFound), unfinished
-	// (ErrEventConflict), except an inline step's first step_started, whose
+	// (ErrEntityConflict), except an inline step's first step_started, whose
 	// DataStepStarted has Inline, StepName, and Input, and which creates the
 	// step. A step_started before the step's retry is due is refused with a
-	// *TooEarlyError. An attr_set's changes are checked as CheckAttrSet says
+	// A *TooEarlyError. An attr_set's changes are checked as CheckAttrSet says
 	// (ErrAttributeInvalid), and a hook_received's ResumePayloadDigest as
 	// CheckResumeDigest says (ErrEventInvalid).
 	//
 	// An event that repeats a creation the run's log holds, a second
 	// step_created, wait_created, wait_completed, hook_created, an inline
 	// step's creating step_started, or an attr_set of the workflow with the
-	// same correlation ID, is refused with ErrEventConflict, as the Workflow
+	// same correlation ID, is refused with ErrEntityConflict, as the Workflow
 	// SDK's Worlds refuse it with EntityConflictError. A run_started of a
 	// running run appends nothing and returns a result without an event (no
-	// EventID), or is refused with ErrEventConflict, as Vercel's backend
+	// EventID), or is refused with ErrEntityConflict, as Vercel's backend
 	// does. A run_cancelled of a cancelled run is appended and leaves the run
 	// as it was. A step_started for a step already started is not a repeat.
 	// It appends a new attempt.
@@ -110,7 +110,7 @@ type StorageEvents interface {
 	// exist, or the fence refuses the block. Otherwise each event has a
 	// result in EventBatchResult.Results, refused or appended as EventsCreate
 	// would refuse or append it alone, and a repeated run_started is refused
-	// with ErrEventConflict. A batch is not all-or-nothing, but it is ordered
+	// with ErrEntityConflict. A batch is not all-or-nothing, but it is ordered
 	// per correlation ID: once an event is refused, every later event of the
 	// batch with the same correlation ID is refused too, so a step's outcome
 	// never lands behind its refused creation.
@@ -131,13 +131,13 @@ type StorageEvents interface {
 
 // StorageHooks reads hooks and claims hook tokens.
 type StorageHooks interface {
-	// HooksGet returns the hook identified by HookID. It returns ErrHookNotFound
+	// HooksGet returns the hook identified by HookID. It returns a *HookNotFoundError
 	// when the hook does not exist, including once it is disposed or its
 	// run ended without retaining its token. It applies ResolveData to the
 	// returned hook.
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
 	// HooksGetByToken returns the hook that owns Token. It returns
-	// ErrHookNotFound when no hook owns the token, including after its
+	// a *HookNotFoundError when no hook owns the token, including after its
 	// retention has ended. It applies ResolveData to the returned hook.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 	// HooksList returns hooks that match the input filters, which never
@@ -276,7 +276,7 @@ type Run struct {
 	ExecutionContext map[string]any
 	// ExpiredAt is when the run's data was deleted, or is deleted for a
 	// World's retention. Once it has passed, the run's payloads are gone and
-	// Run.Value returns ErrRunExpired. See RunDataExpired.
+	// Run.Value returns a *RunExpiredError. See RunDataExpired.
 	ExpiredAt *time.Time
 	// StartHook is the run's start hook, with its HookID and without its
 	// metadata, when the run was created with one.
@@ -524,7 +524,7 @@ type (
 		// ReservedAttributePrefix, which framework code sets, such as a
 		// child run's lineage and a run's retention. run_created records it.
 		AllowReservedAttributes bool
-		// FromRunStarted reports that a first flow's run_started creates the
+		// FromRunStarted reports that a first delivery's run_started creates the
 		// run, because the start's run_created never landed. The World does
 		// not check the run ID's time then, as world-local does not.
 		FromRunStarted bool
@@ -559,7 +559,7 @@ type (
 		// orchestrator, which fences it with the run's InBandCount as the
 		// orchestrator last saw it. The World appends only when the run's
 		// InBandCount still equals it, and advances the count by the positions
-		// it allocates. Otherwise it returns ErrInBandSuperseded and appends
+		// it allocates. Otherwise it returns an *InBandSupersededError and appends
 		// nothing, because another orchestrator has written since. Nil makes
 		// the write out-of-band, which is never refused and leaves the count
 		// unchanged.

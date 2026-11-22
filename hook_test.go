@@ -45,7 +45,7 @@ func TestHookGetConflictClaimsWithoutWaitingForPayload(t *testing.T) {
 			if owner, err := hook.GetConflict(ctx); err != nil {
 				return hookResumeOutput{}, err
 			} else if owner != nil {
-				return hookResumeOutput{}, workflow.ErrHookConflict
+				return hookResumeOutput{}, &workflow.HookConflictError{}
 			}
 		}
 		if hook.ID() == "" {
@@ -453,7 +453,7 @@ func TestHookGetConflictPreventsWorkBeforeOwnership(t *testing.T) {
 				if err != nil || output.Value != owner.ID() {
 					t.Fatalf("owner output=%#v err=%v", output, err)
 				}
-			} else if !errors.Is(err, workflow.ErrHookConflict) {
+			} else if _, ok := errors.AsType[*workflow.HookConflictError](err); !ok {
 				t.Fatalf("payload wait error=%v", err)
 			}
 			events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(duplicate.ID())})
@@ -737,17 +737,19 @@ func TestResumeHookWithRetriesUsesFixedIntervalsAndHonorsCancellation(t *testing
 				world := testworld.NewManual()
 				defer world.Close()
 				ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
-				wantErr, wantElapsed := workflow.ErrHookNotFound, 30*time.Second
+				matches := func(err error) bool { _, ok := errors.AsType[*workflow.HookNotFoundError](err); return ok }
+				want, wantElapsed := "a hook not found", 30*time.Second
 				if cancelDuringWait {
 					var cancel context.CancelFunc
 					ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
 					defer cancel()
-					wantErr, wantElapsed = context.DeadlineExceeded, 15*time.Second
+					matches = func(err error) bool { return errors.Is(err, context.DeadlineExceeded) }
+					want, wantElapsed = "a deadline exceeded", 15*time.Second
 				}
 				start := time.Now()
 				err := workflow.ResumeHookWithRetries(ctx, "missing", "value", 4, 10*time.Second)
-				if !errors.Is(err, wantErr) || time.Since(start) != wantElapsed {
-					t.Fatalf("error=%v elapsed=%v, want %v after %v", err, time.Since(start), wantErr, wantElapsed)
+				if !matches(err) || time.Since(start) != wantElapsed {
+					t.Fatalf("error=%v elapsed=%v, want %s after %v", err, time.Since(start), want, wantElapsed)
 				}
 			})
 		})
@@ -755,7 +757,8 @@ func TestResumeHookWithRetriesUsesFixedIntervalsAndHonorsCancellation(t *testing
 }
 
 func TestResumeHookWithRetriesRejectsNonpositiveAttempts(t *testing.T) {
-	if err := workflow.ResumeHookWithRetries(context.Background(), "missing", "value", 0, time.Second); !errors.Is(err, workflow.ErrHookNotFound) {
+	err := workflow.ResumeHookWithRetries(context.Background(), "missing", "value", 0, time.Second)
+	if _, ok := errors.AsType[*workflow.HookNotFoundError](err); !ok {
 		t.Fatalf("retry error = %v", err)
 	}
 }

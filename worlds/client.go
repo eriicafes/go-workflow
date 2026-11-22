@@ -70,11 +70,11 @@ type Client interface {
 	// of the stream do not wait for.
 	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
 
-	// HooksGet returns hook metadata by ID. It returns ErrHookNotFound when
+	// HooksGet returns hook metadata by ID. It returns a *HookNotFoundError when
 	// the hook does not exist.
 	HooksGet(context.Context, HooksGetInput) (Hook, error)
 	// HooksGetByToken returns the active or retained hook with a hook token.
-	// It returns ErrHookNotFound when no hook owns the token.
+	// It returns a *HookNotFoundError when no hook owns the token.
 	HooksGetByToken(context.Context, HooksGetByTokenInput) (Hook, error)
 
 	// Analytics returns the World's analytics API. It may be nil when the
@@ -85,7 +85,7 @@ type Client interface {
 	// delivery. It generates a run ID when input.RunID is empty and returns
 	// the run ID.
 	RunsCreate(context.Context, ClientRunsCreateInput) (RunID, error)
-	// RunsCancel cancels a run. It returns ErrRunTerminal when the run
+	// RunsCancel cancels a run. It returns a *RunExpiredError when the run
 	// has already finished.
 	RunsCancel(context.Context, ClientRunsCancelInput) error
 	// RunsWake settles a run's pending waits early, as Run.WakeUp does, and
@@ -100,7 +100,7 @@ type Client interface {
 	// StreamsClose closes a stream for every writer.
 	StreamsClose(context.Context, StreamsCloseInput) error
 	// HooksResume resumes the hook with input.Token with the payload
-	// input.Data, as ResumeHook does. It returns ErrHookNotFound when no
+	// input.Data, as ResumeHook does. It returns a *HookNotFoundError when no
 	// active hook has the token.
 	HooksResume(context.Context, ClientHooksResumeInput) error
 	// Spec returns the RPC protocol version and capabilities of the World.
@@ -601,27 +601,18 @@ func (a httpAnalytics) WaitsList(ctx context.Context, input AnalyticsWaitsListIn
 	return output, err
 }
 
-// rpcClientError is a server's RPC failure. It wraps the sentinel error the
-// server named, so errors.Is matches it as it would in-process.
+// rpcClientError is a server's RPC failure. It wraps the error the server
+// named, so errors.Is and errors.As match it as they would in-process.
 type rpcClientError struct {
 	RPCError
-	sentinel error
+	named error
 }
 
 func newRPCClientError(failure RPCError) error {
-	if failure.Sentinel == "hook_conflict" && failure.ConflictingRunID != "" {
-		return &HookConflictError{RunID: failure.ConflictingRunID}
-	}
-	if failure.Sentinel == "throttled" {
-		return &ThrottleError{Cause: rpcClientError{RPCError: failure}, After: failure.RetryAfter}
-	}
-	if failure.Sentinel == "too_early" {
-		return &TooEarlyError{RetryAfter: failure.RetryAfter}
-	}
 	err := rpcClientError{RPCError: failure}
-	for _, sentinel := range rpcSentinels {
-		if sentinel.name == failure.Sentinel {
-			err.sentinel = sentinel.err
+	for _, kind := range rpcErrors {
+		if kind.name == failure.Sentinel {
+			err.named = kind.rebuild(failure.Details)
 			break
 		}
 	}
@@ -632,4 +623,4 @@ func (e rpcClientError) Error() string {
 	return fmt.Sprintf("workflow: RPC %s: %s", e.Code, e.Message)
 }
 
-func (e rpcClientError) Unwrap() error { return e.sentinel }
+func (e rpcClientError) Unwrap() error { return e.named }

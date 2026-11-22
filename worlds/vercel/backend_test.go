@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -64,24 +65,24 @@ func TestClassify(t *testing.T) {
 		eventType worlds.EventType
 		want      error
 	}{
-		{http.StatusPreconditionFailed, "in-band-superseded", worlds.EventTypeStepCreated, worlds.ErrInBandSuperseded},
+		{http.StatusPreconditionFailed, "in-band-superseded", worlds.EventTypeStepCreated, &worlds.InBandSupersededError{}},
 		{http.StatusNotFound, "run-not-found", worlds.EventTypeRunStarted, worlds.ErrRunNotFound},
-		{http.StatusNotFound, "hook-not-found", worlds.EventTypeHookReceived, worlds.ErrHookNotFound},
-		{http.StatusConflict, "hook-force-claimed", worlds.EventTypeHookReceived, worlds.ErrHookForceClaimed},
+		{http.StatusNotFound, "hook-not-found", worlds.EventTypeHookReceived, &worlds.HookNotFoundError{}},
+		{http.StatusConflict, "hook-force-claimed", worlds.EventTypeHookReceived, &worlds.HookForceClaimedError{}},
 		{http.StatusConflict, "", worlds.EventTypeRunCreated, worlds.ErrRunAlreadyExists},
-		{http.StatusConflict, "", worlds.EventTypeStepCompleted, worlds.ErrEventConflict},
-		{http.StatusConflict, "run-terminal", worlds.EventTypeStepStarted, worlds.ErrEventConflict},
-		{http.StatusGone, "run-expired", worlds.EventTypeStepStarted, worlds.ErrRunTerminal},
-		{http.StatusConflict, "", worlds.EventTypeRunCompleted, worlds.ErrEventConflict},
-		{http.StatusConflict, "run-terminal", worlds.EventTypeWaitCreated, worlds.ErrEventConflict},
-		{http.StatusGone, "", worlds.EventTypeRunFailed, worlds.ErrRunTerminal},
-		{http.StatusConflict, "", worlds.EventTypeHookCreated, worlds.ErrEventConflict},
-		{http.StatusConflict, "run-already-started", worlds.EventTypeRunStarted, worlds.ErrEventConflict},
-		{http.StatusConflict, "entity-conflict", worlds.EventTypeWaitCompleted, worlds.ErrEventConflict},
+		{http.StatusConflict, "", worlds.EventTypeStepCompleted, worlds.ErrEntityConflict},
+		{http.StatusConflict, "run-terminal", worlds.EventTypeStepStarted, worlds.ErrEntityConflict},
+		{http.StatusGone, "run-expired", worlds.EventTypeStepStarted, &worlds.RunExpiredError{}},
+		{http.StatusConflict, "", worlds.EventTypeRunCompleted, worlds.ErrEntityConflict},
+		{http.StatusConflict, "run-terminal", worlds.EventTypeWaitCreated, worlds.ErrEntityConflict},
+		{http.StatusGone, "", worlds.EventTypeRunFailed, &worlds.RunExpiredError{}},
+		{http.StatusConflict, "", worlds.EventTypeHookCreated, worlds.ErrEntityConflict},
+		{http.StatusConflict, "run-already-started", worlds.EventTypeRunStarted, worlds.ErrEntityConflict},
+		{http.StatusConflict, "entity-conflict", worlds.EventTypeWaitCompleted, worlds.ErrEntityConflict},
 		{http.StatusBadRequest, "validation-error", worlds.EventTypeAttrSet, worlds.ErrEventInvalid},
 	} {
 		err := classify(&apiError{Status: test.status, Code: test.code}, test.eventType)
-		if !errors.Is(err, test.want) {
+		if !matchesError(err, test.want) {
 			t.Errorf("%d %s on %s = %v, want %v", test.status, test.code, test.eventType, err, test.want)
 		}
 	}
@@ -160,7 +161,7 @@ func TestInBandRefusalCarriesTheCounters(t *testing.T) {
 	api := decodeAPIError(http.StatusPreconditionFailed, "application/json", []byte(`{"error":"in-band-superseded","message":"stale","seq":9,"seqInBand":4}`))
 	err := classify(api, worlds.EventTypeStepCreated)
 	var superseded *worlds.InBandSupersededError
-	if !errors.Is(err, worlds.ErrInBandSuperseded) || !errors.As(err, &superseded) || superseded.EventCount != 9 || superseded.InBandCount != 4 {
+	if !errors.As(err, &superseded) || superseded.EventCount != 9 || superseded.InBandCount != 4 {
 		t.Fatalf("classified 412 = %#v", err)
 	}
 }
@@ -489,4 +490,13 @@ func backendAssumptions(t *testing.T, live bool) {
 			t.Errorf("step_completed on a finished run err = %v, want it accepted", err)
 		}
 	})
+}
+
+// matchesError reports whether err matches want: a sentinel by errors.Is,
+// and an error type by having one of that type in its chain.
+func matchesError(err, want error) bool {
+	if reflect.TypeOf(want) == reflect.TypeOf(errors.New("")) {
+		return errors.Is(err, want)
+	}
+	return errors.As(err, reflect.New(reflect.TypeOf(want)).Interface())
 }

@@ -37,6 +37,7 @@ client := workflow.NewClient(world)
 | `Tag` | untagged | Scopes the runs, hooks, and streams this World writes, such as a test's. See [Tags](#tags). |
 | `BaseURL` | `http://localhost:3000/v1/workflow` | Public URL of `HTTP(world)`. Webhook URLs are built from it. |
 | `EncryptionKey` | none | 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionScope` | empty | The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `Concurrency` | `WORKFLOW_LOCAL_QUEUE_CONCURRENCY`, or 1000 | How many deliveries execute at once. |
 | `HookRetentionLimit` | `WORKFLOW_LOCAL_HOOK_RETENTION_LIMIT_DAYS`, or 30 days | The longest token retention a hook may ask for. A longer one is refused with `ErrEventInvalid`, or `ErrStartHookRejected` for a start hook. |
 | `SkipRecovery` | false | Leaves the active runs alone when the World is prepared. See [Restart recovery](#restart-recovery). |

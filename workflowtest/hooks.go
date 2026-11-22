@@ -45,9 +45,9 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 		t.Fatalf("hook by token = %#v err=%v", byToken, err)
 	}
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_missing"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "missing hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "missing hook")
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "token-missing"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "missing token")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "missing token")
 
 	conflict, err := conformClaim(world, other, "hook_b", token, false)
 	var data worlds.DataHookCreated
@@ -82,10 +82,10 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 
 	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
-	conformExpect(t, err, worlds.ErrHookNotFound, "disposed token")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "disposed token")
 	// A disposed hook is deleted, as the Workflow SDK's Worlds delete it.
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "disposed hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "disposed hook")
 	if hooks, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(hooks.Data) != 1 || hooks.Data[0].HookID != "hook_c" {
 		t.Fatalf("hooks of run after disposal = %#v err=%v", hooks, err)
 	}
@@ -96,9 +96,9 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
 	// The run's hooks without a retained token end with it.
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_c"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "hook of an ended run")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "hook of an ended run")
 	_, err = conformClaim(world, runID, "hook_e", token+"-terminal", false)
-	conformExpect(t, err, worlds.ErrRunTerminal, "claim from terminal run")
+	conformExpectType[*worlds.RunExpiredError](t, err, "claim from terminal run")
 }
 
 func conformHooksForce(t *testing.T, world worlds.World) {
@@ -207,11 +207,11 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, runID, worlds.EventTypeRunCompleted, "", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
-	conformExpect(t, err, worlds.ErrHookNotFound, "expired retained token")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "expired retained token")
 	// A finished run's hook is not read once its retention lapsed, by ID or
 	// in a list, as in the Workflow SDK's Worlds.
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_retained"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "hook of an expired retained token")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "hook of an expired retained token")
 	if page, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(page.Data) != 0 {
 		t.Fatalf("hooks of a finished run past their retention = %+v err = %v, want none", page.Data, err)
 	}
@@ -260,22 +260,22 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	}
 
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: other, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
-	conformExpect(t, err, worlds.ErrHookNotFound, "dispose another run's hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "dispose another run's hook")
 	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token}); err != nil || owner.HookID != "hook_a" {
 		t.Fatalf("token owner = %#v err=%v", owner, err)
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_missing", nil)})
-	conformExpect(t, err, worlds.ErrHookNotFound, "dispose a missing hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "dispose a missing hook")
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_missing"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "hook after disposing a missing hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "hook after disposing a missing hook")
 
 	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
 	// A disposed hook is gone, so a repeated disposal or a late delivery
 	// finds no hook, as in the Workflow SDK's Worlds.
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
-	conformExpect(t, err, worlds.ErrHookNotFound, "repeated hook_disposed")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "repeated hook_disposed")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_a", conformReceived(t, []byte("late")))})
-	conformExpect(t, err, worlds.ErrHookNotFound, "resume a disposed hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "resume a disposed hook")
 
 	// A forced claim disposes the hook it took the token from, in its run.
 	forced := token + "-forced"
@@ -286,14 +286,14 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 		t.Fatal(err)
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_f", nil)})
-	conformExpect(t, err, worlds.ErrHookNotFound, "dispose a force-claimed hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "dispose a force-claimed hook")
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_f"})
-	conformExpect(t, err, worlds.ErrHookNotFound, "force-claimed hook")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "force-claimed hook")
 	if owner, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: forced}); err != nil || owner.HookID != "hook_g" {
 		t.Fatalf("force-claimed token owner = %#v err=%v", owner, err)
 	}
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_f", conformReceived(t, []byte("late")))})
-	conformExpect(t, err, worlds.ErrHookForceClaimed, "resume a force-claimed hook")
+	conformExpectType[*worlds.HookForceClaimedError](t, err, "resume a force-claimed hook")
 }
 
 func conformStartHook(t *testing.T, world worlds.World) {
@@ -322,7 +322,7 @@ func conformStartHook(t *testing.T, world worlds.World) {
 	duplicate := conformRunID("start_hook_duplicate")
 	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: duplicate, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
 	var conflict *worlds.HookConflictError
-	if !errors.Is(err, worlds.ErrHookConflict) || !errors.As(err, &conflict) || conflict.RunID != owner {
+	if !errors.As(err, &conflict) || conflict.RunID != owner {
 		t.Fatalf("duplicate start error = %v", err)
 	}
 	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: duplicate}); !errors.Is(err, worlds.ErrRunNotFound) {
@@ -338,7 +338,7 @@ func conformStartHook(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, retained, worlds.EventTypeRunCancelled, "", nil)
 	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: conformRunID("start_hook_after_retention"), WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token}})
-	conformExpect(t, err, worlds.ErrHookConflict, "start during the token's retention")
+	conformExpectType[*worlds.HookConflictError](t, err, "start during the token's retention")
 }
 
 // conformResumeDedup checks a World that deduplicates resumes: a repeat of a
@@ -460,11 +460,11 @@ func conformStartHookDecisions(t *testing.T, world worlds.World) {
 }
 
 // conformExpectRefusedResume checks the refusal of a resume ID repeated with
-// another hook or payload: ErrEventConflict, as world-local refuses it, or
+// another hook or payload: ErrEntityConflict, as world-local refuses it, or
 // ErrEventInvalid, as world-postgres does.
 func conformExpectRefusedResume(t *testing.T, err error, label string) {
 	t.Helper()
-	if !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrEventInvalid) {
-		t.Fatalf("%s: error = %v, want %v or %v", label, err, worlds.ErrEventConflict, worlds.ErrEventInvalid)
+	if !errors.Is(err, worlds.ErrEntityConflict) && !errors.Is(err, worlds.ErrEventInvalid) {
+		t.Fatalf("%s: error = %v, want %v or %v", label, err, worlds.ErrEntityConflict, worlds.ErrEventInvalid)
 	}
 }

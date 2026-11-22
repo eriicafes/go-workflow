@@ -122,9 +122,9 @@ func conformSteps(t *testing.T, world worlds.World) {
 
 // conformTerminalSteps checks what a finished run admits, as the Workflow
 // SDK's Worlds do: a step, wait, or hook creation is a conflict
-// (ErrEventConflict, also ErrRunTerminal), a missing step or hook is
+// (ErrEntityConflict, also *RunExpiredError), a missing step or hook is
 // refused as on a running run, another attempt or a step_failed of a step
-// that is not running finds the run finished (ErrRunTerminal), a step's
+// that is not running finds the run finished (*RunExpiredError), a step's
 // step_completed and step_retrying are recorded, and its waits are gone.
 func conformTerminalSteps(t *testing.T, world worlds.World) {
 	ctx := context.Background()
@@ -145,22 +145,22 @@ func conformTerminalSteps(t *testing.T, world worlds.World) {
 		conformEvent(t, worlds.EventTypeRunCompleted, "", nil),
 	} {
 		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conflict})
-		conformExpect(t, err, worlds.ErrEventConflict, string(conflict.EventType)+" after the run finished")
-		conformExpect(t, err, worlds.ErrRunTerminal, string(conflict.EventType)+" after the run finished")
+		conformExpect(t, err, worlds.ErrEntityConflict, string(conflict.EventType)+" after the run finished")
+		conformExpectType[*worlds.RunExpiredError](t, err, string(conflict.EventType)+" after the run finished")
 	}
 	// A missing or finished step is refused as on a running run, before the
 	// run's end is checked, as in the Workflow SDK's Worlds.
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_missing", worlds.DataStepStarted{StepName: "m", Attempt: 1})})
 	conformExpect(t, err, worlds.ErrStepNotFound, "step_started of a missing step after the run finished")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_missing", conformReceived(t, "x"))})
-	conformExpect(t, err, worlds.ErrHookNotFound, "hook_received of a missing hook after the run finished")
+	conformExpectType[*worlds.HookNotFoundError](t, err, "hook_received of a missing hook after the run finished")
 	for _, expired := range []worlds.EventsCreateEvent{
 		conformEvent(t, worlds.EventTypeStepStarted, "step_b", worlds.DataStepStarted{StepName: "b", Attempt: 1}),
 		conformEvent(t, worlds.EventTypeStepFailed, "step_b", worlds.DataStepResult{StepName: "b", Error: []byte(`{"message":"x"}`)}),
 	} {
 		_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: expired})
-		conformExpect(t, err, worlds.ErrRunTerminal, string(expired.EventType)+" after the run finished")
-		if errors.Is(err, worlds.ErrEventConflict) {
+		conformExpectType[*worlds.RunExpiredError](t, err, string(expired.EventType)+" after the run finished")
+		if errors.Is(err, worlds.ErrEntityConflict) {
 			t.Fatalf("%s after the run finished: error = %v, want no conflict", expired.EventType, err)
 		}
 	}
@@ -192,7 +192,7 @@ func conformStepAdmission(t *testing.T, world worlds.World) {
 	// A repeated step_created is refused and keeps the step, as in the
 	// Workflow SDK's Worlds.
 	_, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepCreated, "step_a", worlds.DataStepCreated{StepName: "second"})})
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated step_created")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated step_created")
 	if step, err := world.StepsGet(ctx, worlds.StepsGetInput{RunID: runID, StepID: "step_a"}); err != nil || step.StepName != "first" {
 		t.Fatalf("step after a repeated step_created = %#v err=%v", step, err)
 	}
@@ -261,7 +261,7 @@ func conformInlineSteps(t *testing.T, world worlds.World) {
 	}
 	// An inline step is created once.
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeStepStarted, "step_inline", creation)})
-	conformExpect(t, err, worlds.ErrEventConflict, "repeated creating step_started")
+	conformExpect(t, err, worlds.ErrEntityConflict, "repeated creating step_started")
 
 	// A failed inline attempt retries as a step delivery, which starts and
 	// completes it.

@@ -347,7 +347,7 @@ func classify(err error, eventType worlds.EventType) error {
 	case api.Status == http.StatusNotFound && api.Code != "":
 		switch eventType {
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
-			return fmt.Errorf("%w: %v", worlds.ErrHookNotFound, err)
+			return fmt.Errorf("%w: %v", &worlds.HookNotFoundError{}, err)
 		case worlds.EventTypeWaitCompleted:
 			// A wait that was never created, as world-vercel's backend
 			// refuses it.
@@ -364,8 +364,9 @@ func classify(err error, eventType worlds.EventType) error {
 	case api.Status == http.StatusConflict && api.Code == "start-hook-conflict":
 		// Another run owns a start hook's token, which the backend names in
 		// details.conflictingRunId.
-		conflict := &worlds.HookConflictError{}
+		conflict := &worlds.HookConflictError{Start: true}
 		if details, ok := api.Fields["details"].(map[string]any); ok {
+			conflict.Token, _ = details["token"].(string)
 			id, _ := details["conflictingRunId"].(string)
 			conflict.RunID = worlds.RunID(id)
 		}
@@ -374,15 +375,25 @@ func classify(err error, eventType worlds.EventType) error {
 		// The candidate run is too old to admit a start hook.
 		return fmt.Errorf("%w: %v", worlds.ErrStartHookRejected, err)
 	case api.Status == http.StatusConflict && api.Code == "hook-force-claimed":
-		return fmt.Errorf("%w: %v", worlds.ErrHookForceClaimed, err)
+		// The backend names the hook that took the token in
+		// details.claimedBy.
+		claimed := &worlds.HookForceClaimedError{}
+		if details, ok := api.Fields["details"].(map[string]any); ok {
+			if by, ok := details["claimedBy"].(map[string]any); ok {
+				runID, _ := by["runId"].(string)
+				hookID, _ := by["hookId"].(string)
+				claimed.RunID, claimed.HookID = worlds.RunID(runID), worlds.HookID(hookID)
+			}
+		}
+		return fmt.Errorf("%w: %v", claimed, err)
 	case api.Status == http.StatusConflict && (api.Code == "run-already-started" || api.Code == "entity-conflict"):
 		// A repeat of an event the log holds, which world-vercel reports as
 		// an EntityConflictError: a run_started of a running run, or a
 		// second creation.
-		return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
+		return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 	case api.Status == http.StatusGone:
 		// world-vercel's RunExpiredError: the run finished.
-		return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+		return fmt.Errorf("%w: %v", &worlds.RunExpiredError{}, err)
 	case api.Status == http.StatusConflict:
 		if strings.Contains(api.Code, "run") {
 			if eventType == worlds.EventTypeRunCreated {
@@ -391,7 +402,7 @@ func classify(err error, eventType worlds.EventType) error {
 			// A transition from, or a creation on, a finished run: a 409,
 			// which world-vercel reports as an EntityConflictError, where a
 			// finished run's other refusals are a 410's RunExpiredError.
-			return fmt.Errorf("%w: %w: %v", worlds.ErrEventConflict, worlds.ErrRunTerminal, err)
+			return fmt.Errorf("%w: %w: %v", worlds.ErrEntityConflict, &worlds.RunExpiredError{}, err)
 		}
 		switch eventType {
 		case worlds.EventTypeRunCreated:
@@ -399,18 +410,18 @@ func classify(err error, eventType worlds.EventType) error {
 		case worlds.EventTypeRunCompleted, worlds.EventTypeRunFailed, worlds.EventTypeRunCancelled, worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted, worlds.EventTypeAttrSet, worlds.EventTypeHookCreated:
 			// The backend refuses a second creation, as world-vercel's
 			// EntityConflictError reports it.
-			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
+			return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 		case worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
 			// A step that finished, as world-vercel's EntityConflictError
 			// reports it.
-			return fmt.Errorf("%w: %v", worlds.ErrEventConflict, err)
+			return fmt.Errorf("%w: %v", worlds.ErrEntityConflict, err)
 		case worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed:
 			if strings.Contains(api.Code, "run") {
-				return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+				return fmt.Errorf("%w: %v", &worlds.RunExpiredError{}, err)
 			}
 			return fmt.Errorf("%w: %v", worlds.ErrHookNotActive, err)
 		}
-		return fmt.Errorf("%w: %v", worlds.ErrRunTerminal, err)
+		return fmt.Errorf("%w: %v", &worlds.RunExpiredError{}, err)
 	case api.Status == http.StatusBadRequest && api.Code == "validation-error" && (eventType == worlds.EventTypeRunCreated || eventType == worlds.EventTypeRunStarted || eventType == worlds.EventTypeAttrSet):
 		// The backend refuses a run's or an attr_set's attributes.
 		return fmt.Errorf("%w: %w: %v", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, err)

@@ -293,7 +293,7 @@ func (h *Hook[T]) Token() string
 
 | Method | Context | Description |
 | --- | --- | --- |
-| `Next` | W | Registers automatically when waiting, then consumes the next payload. Conflicts return `ErrHookConflict`. |
+| `Next` | W | Registers automatically when waiting, then consumes the next payload. Conflicts return `*HookConflictError`. |
 | `Values` | W | Iterates with the same receive cursor. Stops after an error. |
 | `Dispose` | W | Disposes durably and releases the token immediately. Panics on failure, including when deferred. |
 | `GetConflict` | W | Registers and claims the token. Returns the conflicting owner, or nil. Repeated calls use the recorded result. |
@@ -419,7 +419,9 @@ func Middleware(handler http.Handler, client Client) http.Handler
 
 ## Errors
 
-| Variable | Meaning |
+Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`.
+
+| Error | Meaning |
 | --- | --- |
 | `ErrNoClient` | No Client in the context, outside a run. |
 | `ErrNoWorkflow` | Workflow-context function called elsewhere, or stream function outside a run. |
@@ -427,10 +429,12 @@ func Middleware(handler http.Handler, client Client) http.Handler
 | `ErrRunCancelled` | Run was cancelled. |
 | `ErrRunNotFinished` | `Run.Value` in workflow context on an unfinished run. |
 | `ErrHookNotActive` | Hook was disposed and no longer receives. |
-| `ErrHookNotFound` | No active hook has the token. |
+| `*HookNotFoundError` | No active hook has the token. |
 | `ErrHookNotRegistered` | Receiving from a hook not created in this run. |
-| `ErrHookConflict` | Another active hook owns the token. |
-| `ErrHookForceClaimed` | Another run took the token with `Force`. |
+| `*HookConflictError` | Another active hook owns the token. |
+| `*HookForceClaimedError` | Another run took the token with `Force`. |
+| `*RunExpiredError` | `Run.Value` on a run whose data was deleted, such as one started with `RetainNone`. |
+| `*StreamExpiredError` | Reading a stream whose data the World deleted. |
 
 `Error` (alias of `worlds.Error`) is the type of failed step and run errors.
 See [Errors and Retries](/guide/errors).

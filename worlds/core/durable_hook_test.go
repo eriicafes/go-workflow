@@ -47,21 +47,22 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 		if owner, err := old.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
-			return durableHookOutput{}, workflow.ErrHookConflict
+			return durableHookOutput{}, &workflow.HookConflictError{}
 		}
 		oldID := old.ID()
 		current := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token, Force: true})
 		if owner, err := current.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
-			return durableHookOutput{}, workflow.ErrHookConflict
+			return durableHookOutput{}, &workflow.HookConflictError{}
 		}
 		current.ID()
 		defer current.Dispose(ctx)
 		if current.ClaimedFrom == nil || current.ClaimedFrom.HookID != worlds.HookID(oldID) {
 			return durableHookOutput{}, errors.New("missing takeover metadata")
 		}
-		if _, err := old.Next(ctx); !errors.Is(err, workflow.ErrHookForceClaimed) {
+		_, err := old.Next(ctx)
+		if _, ok := errors.AsType[*workflow.HookForceClaimedError](err); !ok {
 			return durableHookOutput{}, errors.New("old hook did not observe takeover")
 		}
 		payload, err := current.Next(ctx)
@@ -110,7 +111,7 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 				if owner, err := hook.GetConflict(ctx); err != nil {
 					return durableHookOutput{}, err
 				} else if owner != nil {
-					return durableHookOutput{}, workflow.ErrHookConflict
+					return durableHookOutput{}, &workflow.HookConflictError{}
 				}
 				if wrapped {
 					defer func() { hook.Dispose(ctx) }()
@@ -165,7 +166,7 @@ func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
-			return durableHookOutput{}, workflow.ErrHookConflict
+			return durableHookOutput{}, &workflow.HookConflictError{}
 		}
 		value, err := hook.Next(ctx)
 		return durableHookOutput{Value: value}, err
@@ -216,7 +217,7 @@ func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
 		} else if owner != nil {
-			return durableHookOutput{}, workflow.ErrHookConflict
+			return durableHookOutput{}, &workflow.HookConflictError{}
 		}
 		hook.Dispose(ctx)
 		_, err := hook.Next(ctx)
@@ -286,10 +287,11 @@ func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookForceOutput{}, err
 		} else if owner != nil {
-			return hookForceOutput{}, workflow.ErrHookConflict
+			return hookForceOutput{}, &workflow.HookConflictError{}
 		}
 		_, err := hook.Next(ctx)
-		return hookForceOutput{ForceClaimed: errors.Is(err, worlds.ErrHookForceClaimed)}, nil
+		_, claimed := errors.AsType[*worlds.HookForceClaimedError](err)
+		return hookForceOutput{ForceClaimed: claimed}, nil
 	}))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -339,7 +341,7 @@ func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookRetentionOutput{}, err
 		} else if owner != nil {
-			return hookRetentionOutput{}, workflow.ErrHookConflict
+			return hookRetentionOutput{}, &workflow.HookConflictError{}
 		}
 		value, err := hook.Next(ctx)
 		return hookRetentionOutput{Value: value}, err
@@ -368,7 +370,8 @@ func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {
 		t.Fatalf("retained token = %v", err)
 	}
 	time.Sleep(45 * time.Millisecond)
-	if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "retained-token"}); !errors.Is(err, worlds.ErrHookNotFound) {
+	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "retained-token"})
+	if _, ok := errors.AsType[*worlds.HookNotFoundError](err); !ok {
 		t.Fatalf("expired token error = %v", err)
 	}
 }

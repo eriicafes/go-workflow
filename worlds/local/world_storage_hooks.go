@@ -18,11 +18,11 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 			return err
 		}
 		if record == nil {
-			return worlds.ErrHookNotFound
+			return &worlds.HookNotFoundError{Token: string(input.HookID)}
 		}
 		if available, err := s.hookAvailable(*record, time.Now()); err != nil || !available {
 			if err == nil {
-				err = worlds.ErrHookNotFound
+				err = &worlds.HookNotFoundError{Token: string(input.HookID)}
 			}
 			return err
 		}
@@ -59,14 +59,14 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 			return err
 		}
 		if !owner.held(time.Now()) {
-			return worlds.ErrHookNotFound
+			return &worlds.HookNotFoundError{Token: input.Token}
 		}
 		record, err := s.getHook(owner.HookID)
 		if err != nil {
 			return err
 		}
 		if record == nil {
-			return worlds.ErrHookNotFound
+			return &worlds.HookNotFoundError{Token: input.Token}
 		}
 		hook, err = hookView(*record, s.committed(record.RunID), input.ResolveData)
 		return err
@@ -142,12 +142,12 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	if disposal, err := claimant.disposal(id); err != nil {
 		return worlds.EventResult{}, err
 	} else if disposal != nil {
-		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, id)
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEntityConflict, id)
 	}
 	if earlier, err := claimant.findEvent(worlds.EventTypeHookCreated, string(id)); err != nil {
 		return worlds.EventResult{}, err
 	} else if earlier != "" {
-		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEventConflict, id)
+		return worlds.EventResult{}, fmt.Errorf("%w: hook %s already created", worlds.ErrEntityConflict, id)
 	}
 	delta, err := s.delta(claimant.run, input.Options)
 	if err != nil {

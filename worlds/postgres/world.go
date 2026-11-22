@@ -66,6 +66,11 @@ type Config struct {
 	// key derived from it for the run. Empty leaves payloads unencrypted.
 	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
+	// EncryptionScope is the scope run keys are derived from EncryptionKey
+	// in. Worlds that share an EncryptionKey keep their runs' keys apart with
+	// different scopes. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionScope string
 	// SkipRecovery leaves the active runs alone when Worker starts, rather
 	// than queueing a flow for each of them again.
 	SkipRecovery bool
@@ -81,12 +86,14 @@ type World struct {
 	pool     *pgxpool.Pool
 	ownsPool bool
 	baseURL  string
-	// encryptionKey is Config.EncryptionKey.
-	encryptionKey []byte
-	interval      time.Duration
-	concurrency   int
-	lease         time.Duration
-	notifier      *notifier
+	// encryptionKey and encryptionScope are Config.EncryptionKey and
+	// Config.EncryptionScope.
+	encryptionKey   []byte
+	encryptionScope string
+	interval        time.Duration
+	concurrency     int
+	lease           time.Duration
+	notifier        *notifier
 	// announcing tracks the notifications sent after commits, which Close
 	// waits for.
 	announcing sync.WaitGroup
@@ -167,6 +174,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, config Config) (*World, error)
 		pool:               pool,
 		baseURL:            baseURL,
 		encryptionKey:      bytes.Clone(config.EncryptionKey),
+		encryptionScope:    config.EncryptionScope,
 		interval:           config.PollInterval,
 		concurrency:        config.Concurrency,
 		lease:              config.LeaseDuration,
@@ -284,9 +292,13 @@ func (w *World) recoverOnce(ctx context.Context) error {
 }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from
-// Config.EncryptionKey, or nil when the World has none.
+// Config.EncryptionKey in Config.EncryptionScope, or nil when the World has
+// no key.
 func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
-	return worlds.ConfiguredRunKey(w.encryptionKey, runID)
+	if len(w.encryptionKey) == 0 {
+		return nil, nil
+	}
+	return worlds.DeriveRunKey(w.encryptionKey, w.encryptionScope, runID)
 }
 
 // hookRetentionLimit returns the cap on a hook's token retention:

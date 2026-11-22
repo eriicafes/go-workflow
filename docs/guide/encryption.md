@@ -62,13 +62,15 @@ if err != nil {
 world, err := postgresworld.Open(ctx, postgresworld.Config{
 	BaseURL:       os.Getenv("WORKFLOW_BASE_URL"),
 	URL:           os.Getenv("DATABASE_URL"),
-	EncryptionKey: key,
+	EncryptionKey:   key,
+	EncryptionScope: "orders",
 })
 ```
 
-Each run's key is derived from it with HKDF-SHA256, as the SDK derives a run's
-key from a deployment key. Changing the key leaves earlier runs' payloads
-unreadable. The test World takes one with `SetEncryptionKey`.
+Each run's key is derived from it with HKDF-SHA256 in `EncryptionScope`. Worlds
+that share a key keep their runs' keys apart with different scopes. Changing the key
+or the scope leaves earlier runs' payloads unreadable. The test World takes a
+key and scope with `SetEncryptionKey`.
 
 The [Vercel World](/worlds/vercel#encryption) resolves keys as the SDK does on
 Vercel, from the deployment's key, so it needs no configuration.

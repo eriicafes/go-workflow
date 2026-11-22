@@ -10,27 +10,27 @@ leave the others appended, and once an event is refused, every later event of
 the batch with the same correlation ID is refused too.
 
 An event that repeats a creation the log holds is refused with
-`ErrEventConflict`, as the Workflow SDK's Worlds refuse it with
+`ErrEntityConflict`, as the Workflow SDK's Worlds refuse it with
 `EntityConflictError`: a second `step_created`, `wait_created`,
 `wait_completed`, or `hook_created`, an inline step's creating `step_started`
 (`worlds.StartCreatesStep`), or a workflow `attr_set`
 (`worlds.WorkflowAttrSet`) with a recorded correlation ID. A `run_started` of
-a running run appends nothing and returns no event (or `ErrEventConflict`), a
+a running run appends nothing and returns no event (or `ErrEntityConflict`), a
 `run_cancelled` of a cancelled run is appended without changing the run, and
 a `step_started` for a started step is a new attempt, not a repeat.
 A finished run refuses events as `worlds.FinishedRunRefusal` says: a
-transition or a new step, wait, hook, or attribute with `ErrEventConflict`
-(also matching `ErrRunTerminal`), another attempt or a result of a step that
-is not running with `ErrRunTerminal`, and a `wait_completed` with
+transition or a new step, wait, hook, or attribute with `ErrEntityConflict`
+(also matching a `*RunExpiredError`), another attempt or a result of a step that
+is not running with a `*RunExpiredError`, and a `wait_completed` with
 `ErrEventNotFound`. It records a running step's result or retry. A
 `wait_completed` needs its `wait_created` (`ErrEventNotFound`). Step events
-follow `worlds.CheckStepEvent` (`ErrStepNotFound`, `ErrEventConflict` for a
+follow `worlds.CheckStepEvent` (`ErrStepNotFound`, `ErrEntityConflict` for a
 finished step, `*worlds.TooEarlyError` before a retry is due). A new run
 follows `worlds.CheckRunCreation` (a ULID run ID minted within a day before
 and five minutes after now, and attribute limits), an `attr_set` follows
 `worlds.CheckAttrSet` (`ErrAttributeInvalid`), and a resume's digest
 `worlds.CheckResumeDigest`. `hook_disposed` and `hook_received` need
-a hook of the same run (`ErrHookNotFound`), so a repeated disposal is refused.
+a hook of the same run (`*HookNotFoundError`), so a repeated disposal is refused.
 
 Preserve event order, correlation IDs, timestamps, pagination, ResolveData,
 and catch-up results. `EventsCreateOptions.EventCount` takes precedence over
@@ -62,7 +62,7 @@ fields and keeps metadata.
 Each run has an InBandCount, 1 once `run_created` is written. A supplied
 expected count fences an orchestrator append or batch. Compare and append
 atomically, advance by the positions actually allocated, and return
-`ErrInBandSuperseded` without writing on mismatch. An out-of-band write has no
+`*InBandSupersededError` without writing on mismatch. An out-of-band write has no
 expected count and leaves the in-band count unchanged. It still must pass
 lifecycle admission checks. Every `EventsList` page carries the counters in
 `Snapshot`, read before the page. An in-band write with `EventCount` reports
@@ -85,7 +85,7 @@ uncoordinated read-then-write token lookup is insufficient.
 
 Disposal deletes the hook and releases its token immediately, but the World
 remembers a forced claim's disposal: a delivery to a force-claimed hook gets
-ErrHookForceClaimed, and one to another disposed hook ErrHookNotFound. A finished run's hooks are
+*HookForceClaimedError, and one to another disposed hook *HookNotFoundError. A finished run's hooks are
 deleted once their token retention ends.
 A hook's TokenRetentionUntil can preserve token ownership after run
 termination; it does not
@@ -138,7 +138,7 @@ it is first written), or refused with `ErrStreamClosed`, as Vercel's backend
 refuses it. Closing a closed stream does nothing. Lists take their defaults
 from `Pagination.WithDefaults`: newest first for runs and steps, oldest first
 for hooks and events, with each World's SDK counterpart's page sizes. Refuse
-events on a run of a newer spec version with `ErrRunNotSupported`
+events on a run of a newer spec version with a `*RunNotSupportedError`
 (`worlds.CheckRunSpecVersion`). A `StreamWriter` from `StreamsOpenWriter` keeps its
 writes in order; Release ends the writer without closing the stream, and
 CloseStream closes it for every writer.

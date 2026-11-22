@@ -152,7 +152,7 @@ type flowPass struct {
 	runAhead, lingered, first bool
 }
 
-// TurboFirstDeliveries turns on the turbo path of a run's first flow: the
+// TurboFirstDeliveries turns on the turbo path of a run's first delivery: the
 // first delivery of its first message replays without reading the log,
 // writes run_started without waiting for it, and starts its inline steps
 // before their writes commit, as the Workflow SDK's turbo mode does.
@@ -176,7 +176,7 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, pass
 	}
 	run, events, err := r.loadRun(ctx, input.RunID)
 	if errors.Is(err, worlds.ErrRunNotFound) && input.RunInput != nil {
-		// The start's run_created never landed: its first flow creates the
+		// The start's run_created never landed: its first delivery creates the
 		// run, or exits when its start hook is refused.
 		if err := r.createRunForStart(ctx, input); err != nil {
 			return err
@@ -215,12 +215,12 @@ func (r *Runtime) executeFlow(ctx context.Context, input worlds.QueueInput, pass
 	// has no compensations to run and no replay to check.
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
-		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName)))
+		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotRegistered, run.WorkflowName)))
 	}
 	return r.replayFlow(input, runner, run, execution)
 }
 
-// startRun records run_started as an in-band write of the run's first flow,
+// startRun records run_started as an in-band write of the run's first delivery,
 // carrying the run's creation when its message does.
 func (r *Runtime) startRun(execution *Execution) (err error) {
 	defer func() {
@@ -243,7 +243,7 @@ func runStartedData(input worlds.QueueInput) []byte {
 	return data
 }
 
-// createRunForStart creates the run of a first flow whose start's run_created
+// createRunForStart creates the run of a first delivery whose start's run_created
 // never landed. A start hook the World refuses ends the delivery.
 func (r *Runtime) createRunForStart(ctx context.Context, input worlds.QueueInput) error {
 	err := worlds.CreateRunForStart(ctx, r.world, input.RunID, runStartedData(input))
@@ -254,11 +254,11 @@ func (r *Runtime) createRunForStart(ctx context.Context, input worlds.QueueInput
 	return err
 }
 
-// errStartRefused ends a first flow whose start hook the World refused: it
+// errStartRefused ends a first delivery whose start hook the World refused: it
 // acknowledges its message without creating a run.
 var errStartRefused = errors.New("workflow: the run's start was refused")
 
-// executeTurbo runs the turbo pass of a run's first flow. The log is taken to
+// executeTurbo runs the turbo pass of a run's first delivery. The log is taken to
 // hold only run_created, as the run's creation in the message records it, and
 // run_started is written ahead of the replay, as a write ahead the flow's
 // other writes queue behind. When the run had already started, as on a
@@ -301,7 +301,7 @@ func (r *Runtime) executeTurbo(ctx context.Context, input worlds.QueueInput, pas
 	execution.writeStartAhead(created)
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
-		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName)))
+		return r.recordRunEnd(execution, worlds.EventTypeRunFailed, execution.runFailedData(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotRegistered, run.WorkflowName)))
 	}
 	return r.replayFlow(input, runner, run, execution)
 }
@@ -315,7 +315,7 @@ func replayExit(recovered any) error {
 	}
 	var delivery deliveryError
 	if errors.As(err, &delivery) {
-		if errors.Is(delivery.cause, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](delivery.cause); ok {
 			return nil
 		}
 		return delivery.cause
@@ -383,7 +383,7 @@ func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):
-		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](deliveryErr.cause); ok {
 			return nil
 		}
 		// A step started before its retry was due, by a clock behind the
@@ -520,7 +520,7 @@ func (r *Runtime) failRun(ctx context.Context, input worlds.QueueInput, executio
 				err = r.recoverDivergence(ctx, input, divergenceErr)
 			case errors.As(recoveredError, &deliveryErr):
 				err = deliveryErr.cause
-				if errors.Is(err, worlds.ErrRunTerminal) {
+				if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 					err = nil
 				}
 			default:
@@ -582,7 +582,7 @@ func (r *Runtime) executeStep(ctx context.Context, input worlds.QueueInput) erro
 	runner, ok := r.runners[run.WorkflowName]
 	if !ok {
 		execution.targetAttempt = 1
-		return r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotFound, run.WorkflowName))})
+		return r.completeStep(ctx, execution, stepID, worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("%w: %s", worlds.ErrWorkflowNotRegistered, run.WorkflowName))})
 	}
 	return r.replayStep(input, runner, run, execution, stepID)
 }
@@ -654,7 +654,7 @@ func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.
 	case errors.As(err, &divergenceErr):
 		return r.recoverDivergence(ctx, input, divergenceErr)
 	case errors.As(err, &deliveryErr):
-		if errors.Is(deliveryErr.cause, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](deliveryErr.cause); ok {
 			return nil
 		}
 		// A step started before its retry was due, by a clock behind the
@@ -711,7 +711,7 @@ func (r *Runtime) failStep(ctx context.Context, input worlds.QueueInput, executi
 				err = nil
 			case errors.As(recoveredError, &deliveryErr):
 				err = deliveryErr.cause
-				if errors.Is(err, worlds.ErrRunTerminal) {
+				if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 					err = nil
 				}
 			default:
@@ -765,7 +765,7 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input worlds.QueueInput
 			RunID: input.RunID,
 			Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data},
 		})
-		if errors.Is(err, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 			return nil
 		}
 		return err
@@ -813,7 +813,7 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 		RunID: run.RunID,
 		Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data},
 	})
-	if errors.Is(err, worlds.ErrRunTerminal) {
+	if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 		return nil
 	}
 	return err
@@ -914,7 +914,7 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 			return err
 		}
 		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}})
-		if errors.Is(err, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 			return nil
 		}
 		return err
@@ -942,10 +942,10 @@ func (r *Runtime) exceedDeliveries(ctx context.Context, input worlds.QueueInput)
 			return err
 		}
 		_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: input.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeStepFailed, CorrelationID: string(stepID), Data: data}})
-		if errors.Is(err, worlds.ErrRunTerminal) {
+		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 			return nil
 		}
-		if err != nil && !errors.Is(err, worlds.ErrEventConflict) && !errors.Is(err, worlds.ErrStepNotStartable) {
+		if err != nil && !errors.Is(err, worlds.ErrEntityConflict) && !errors.Is(err, worlds.ErrStepNotStartable) {
 			return err
 		}
 	}

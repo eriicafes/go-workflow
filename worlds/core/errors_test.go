@@ -19,7 +19,7 @@ func TestEncodeRunFailedSetsTheSDKErrorCode(t *testing.T) {
 		{corruptedEventLogError{CorrelationID: "step_x"}, "CORRUPTED_EVENT_LOG"},
 		{replayDivergenceError{CorrelationID: "step_x"}, "REPLAY_DIVERGENCE"},
 		{deploymentMismatchError{}, "DEPLOYMENT_MISMATCH"},
-		{fmt.Errorf("%w: wf", worlds.ErrWorkflowNotFound), "WORKFLOW_NOT_REGISTERED"},
+		{fmt.Errorf("%w: wf", worlds.ErrWorkflowNotRegistered), "WORKFLOW_NOT_REGISTERED"},
 		{DeliveryError(errors.New("backend 503")), "WORLD_CONTRACT_ERROR"},
 	} {
 		data, err := worlds.EncodeRunFailed(test.err, worlds.PayloadOptions{})

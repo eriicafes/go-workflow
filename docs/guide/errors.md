@@ -120,7 +120,10 @@ if errors.Is(err, ErrCardDeclined) {
 A runner may also handle a step's error and keep going, for example by
 retrying with different input or taking another branch.
 
-## Sentinel errors
+## Returned errors
+
+Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`,
+which also reads its fields.
 
 | Error | Returned when |
 | --- | --- |
@@ -131,10 +134,10 @@ retrying with different input or taking another branch.
 | `workflow.ErrResumeNotQueued` | `ResumeHook` recorded the payload but could not queue its run. Don't resend the payload. |
 | `workflow.ErrNilResult` | A nil `*Result` is returned from a `Then` callback or awaited. |
 | `workflow.ErrRunNotFinished` | `Run.Value` in workflow context, when the awaited run had not finished. |
-| `workflow.ErrHookNotFound` | Resuming a token that no active hook has. |
+| `*workflow.HookNotFoundError` | Resuming a token that no active hook has. |
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
-| `workflow.ErrHookConflict` | Receiving or selecting a hook whose token another active hook already has. The token is claimed on first use, not at creation. |
-| `workflow.ErrHookForceClaimed` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
+| `*workflow.HookConflictError` | Receiving or selecting a hook whose token another active hook already has. The token is claimed on first use, not at creation. |
+| `*workflow.HookForceClaimedError` | Receiving from a hook whose token another run took over with `HookOption.Force`. |
 | `worlds.ErrCorruptedEventLog` | `Run.Value` on a run whose replay kept diverging from its event log. See [Replay divergence](/guide/replay#replay-divergence). |
 
 The [`worlds` reference](/reference/worlds#errors) lists the errors Worlds

@@ -25,28 +25,33 @@ var (
 	// hook with HookOption.MinRetention or Force, which only
 	// StartOptions.Hook can set.
 	ErrStartHookOptions = worlds.ErrStartHookOptions
-	// ErrRunExpired is returned when awaiting a run whose data was deleted,
-	// such as a run started with RetainNone.
-	ErrRunExpired = worlds.ErrRunExpired
-	// ErrStreamExpired is returned when reading a stream whose data the World
-	// deleted.
-	ErrStreamExpired = worlds.ErrStreamExpired
 	// ErrResumeNotQueued reports that a hook payload was recorded but its run was not queued.
 	ErrResumeNotQueued = worlds.ErrResumeNotQueued
 	// ErrRunNotFinished reports that a run is still waiting or running.
 	ErrRunNotFinished = errors.New("workflow: run has not finished")
-	// ErrHookNotFound reports that no active hook owns the requested token.
-	ErrHookNotFound = worlds.ErrHookNotFound
 	// ErrHookNotActive reports that a hook can no longer receive payloads.
 	ErrHookNotActive = worlds.ErrHookNotActive
 	// ErrHookNotRegistered reports that a hook does not belong to the current
 	// workflow execution.
 	ErrHookNotRegistered = errors.New("workflow: hook is not registered")
-	// ErrHookConflict is returned when claiming a hook whose token another
+)
+
+type (
+	// HookNotFoundError reports that no active hook owns the requested
+	// token.
+	HookNotFoundError = worlds.HookNotFoundError
+	// HookConflictError is returned when claiming a hook whose token another
 	// active hook already has. Hook.GetConflict reports the run that owns it.
-	ErrHookConflict = worlds.ErrHookConflict
-	// ErrHookForceClaimed reports that another hook took over this hook's token.
-	ErrHookForceClaimed = worlds.ErrHookForceClaimed
+	HookConflictError = worlds.HookConflictError
+	// HookForceClaimedError reports that another hook took over this hook's
+	// token.
+	HookForceClaimedError = worlds.HookForceClaimedError
+	// RunExpiredError is returned when awaiting a run whose data was deleted,
+	// such as a run started with RetainNone.
+	RunExpiredError = worlds.RunExpiredError
+	// StreamExpiredError is returned when reading a stream whose data the
+	// World deleted.
+	StreamExpiredError = worlds.StreamExpiredError
 )
 
 // Error represents a recorded failure. It keeps the type, message, and exported

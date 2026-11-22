@@ -17,14 +17,14 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 		return worlds.Hook{}, err
 	}
 	if !found {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: string(input.HookID)}
 	}
 	live, err := w.liveHooks(ctx, []map[string]ddb.AttributeValue{item})
 	if err != nil {
 		return worlds.Hook{}, err
 	}
 	if len(live) == 0 {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: string(input.HookID)}
 	}
 	hooks, err := w.resolveHooks(ctx, live, input.ResolveData)
 	if err != nil {
@@ -80,25 +80,25 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 		return worlds.Hook{}, err
 	}
 	if !found {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	token := tokenFromItem(item)
 	if token.expired(time.Now()) {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	item, found, err = w.item(ctx, hookKey(string(token.hookID)))
 	if err != nil {
 		return worlds.Hook{}, err
 	}
 	if !found {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	live, err := w.liveHooks(ctx, []map[string]ddb.AttributeValue{item})
 	if err != nil {
 		return worlds.Hook{}, err
 	}
 	if len(live) == 0 {
-		return worlds.Hook{}, worlds.ErrHookNotFound
+		return worlds.Hook{}, &worlds.HookNotFoundError{Token: input.Token}
 	}
 	hooks, err := w.resolveHooks(ctx, live, input.ResolveData)
 	if err != nil {

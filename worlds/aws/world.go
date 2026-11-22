@@ -58,6 +58,11 @@ type Config struct {
 	// key derived from it for the run. Empty leaves payloads unencrypted.
 	// Changing it leaves earlier runs' payloads unreadable.
 	EncryptionKey []byte
+	// EncryptionScope is the scope run keys are derived from EncryptionKey
+	// in. Worlds that share an EncryptionKey keep their runs' keys apart with
+	// different scopes. Changing it leaves earlier runs' payloads
+	// unreadable.
+	EncryptionScope string
 }
 
 // QueueConfig is an SQS queue that deliveries can be routed to.
@@ -208,7 +213,11 @@ func Queue(world *World, runners core.RunnerSet) func(context.Context, events.SQ
 }
 
 // EncryptionKeyForRun returns the key of a run's payloads, derived from
-// Config.EncryptionKey, or nil when the World has none.
+// Config.EncryptionKey in Config.EncryptionScope, or nil when the World has
+// no key.
 func (w *World) EncryptionKeyForRun(_ context.Context, runID worlds.RunID, _ string) ([]byte, error) {
-	return worlds.ConfiguredRunKey(w.config.EncryptionKey, runID)
+	if len(w.config.EncryptionKey) == 0 {
+		return nil, nil
+	}
+	return worlds.DeriveRunKey(w.config.EncryptionKey, w.config.EncryptionScope, runID)
 }

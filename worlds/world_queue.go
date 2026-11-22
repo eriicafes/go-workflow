@@ -91,7 +91,7 @@ type (
 		// RunSpecVersion is the spec version of the run the delivery
 		// belongs to, SpecVersion.
 		RunSpecVersion int
-		// RunInput is set on a run's first flow: the run's creation, so its
+		// RunInput is set on a run's first delivery: the run's creation, so its
 		// first delivery replays without reading the log, and its
 		// run_started creates the run when run_created never landed.
 		RunInput *EventsCreateRunInput

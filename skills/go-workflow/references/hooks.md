@@ -21,7 +21,7 @@ if err != nil {
 	return Approval{}, err
 }
 if owner != nil {
-	return Approval{}, workflow.ErrHookConflict
+	return Approval{}, &workflow.HookConflictError{}
 }
 if _, err := workflow.Step(ctx, requestApproval, hook.Token()); err != nil {
 	return Approval{}, err
@@ -32,12 +32,12 @@ return hook.Next(ctx)
 `Approval` is the application's shared payload type; `requestApproval` is a
 named step that sends the token. A conflicting owner is a `*Run[any]`, with nil
 error from `GetConflict`; the workflow chooses whether to reject or inspect it.
-Waiting directly on a conflicting hook instead returns `ErrHookConflict`.
+Waiting directly on a conflicting hook instead returns a `*HookConflictError`.
 
 `Next(ctx) (T, error)` consumes one payload. Call it again for the next payload,
 or range over `Values(ctx)` and handle its error. Selecting or joining a hook
 checks readiness without consuming the payload; follow with Next. Payloads
-received before a forced takeover are delivered before `ErrHookForceClaimed`.
+received before a forced takeover are delivered before a `*HookForceClaimedError`.
 
 `HookOption{Force: true}` displaces the existing token owner atomically.
 `ClaimedFrom` records the previous run and hook IDs. Prefer that metadata over
@@ -65,7 +65,7 @@ registers a random public token. Webhooks expose `Request(ctx)`, not `Next` or
 `GetConflict`. Their absolute URL uses the World's public BaseURL.
 
 A webhook takes any number of requests, as in the Workflow SDK; call
-`Request(ctx)` again for the next. It returns `*WebhookRequest[T]`, the SDK's
+`Request(ctx)` again for the next. It returns a `*WebhookRequest[T]`, the SDK's
 `Request`, with `Method`, `URL`, and `Header`. Its body is a stream of the run,
 so `Body(ctx)` and `JSON(ctx)` are step-only: pass the request into a step,
 which is also where signature verification belongs. It is serializable as a

@@ -20,8 +20,8 @@ type HookOption struct {
 	// including after run completion. Explicit Dispose releases it immediately.
 	MinRetention time.Duration
 	// Force takes the token over from another run's active hook instead of
-	// failing with ErrHookConflict. Awaiting the displaced hook returns
-	// ErrHookForceClaimed.
+	// failing with a *HookConflictError. Awaiting the displaced hook returns
+	// a *HookForceClaimedError.
 	Force bool
 }
 
@@ -171,7 +171,7 @@ func (h *Hook[T]) done(ctx context.Context) (bool, error, error) {
 
 // Next waits for and consumes one payload. A disposed or displaced hook
 // returns an error; payloads received before takeover are delivered first.
-// It registers this hook on first use; a conflicting token returns ErrHookConflict.
+// It registers this hook on first use; a conflicting token returns a *HookConflictError.
 func (h *Hook[T]) Next(ctx context.Context) (T, error) {
 	var zero T
 	if _, err := Select(ctx, h); err != nil {
@@ -275,7 +275,7 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 	}
 	hook, err := client.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	if err != nil {
-		if errors.Is(err, worlds.ErrHookNotFound) {
+		if _, ok := errors.AsType[*worlds.HookNotFoundError](err); ok {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -287,7 +287,7 @@ func GetHook[T any](ctx context.Context, token string) (*Hook[T], bool, error) {
 // payload, and queues a delivery so its run resumes. The payload is sealed
 // to the run's public key when its payloads are encrypted, so the caller
 // cannot read the run back. It uses the Client in ctx and returns
-// ErrHookNotFound when no active hook has the token.
+// a *HookNotFoundError when no active hook has the token.
 // It is for steps and external callers; workflow context returns ErrNotInStep.
 func ResumeHook[T any](ctx context.Context, token string, value T) error {
 	return resumeHook(ctx, token, value, worlds.NewResumeID())
@@ -318,7 +318,7 @@ func resumeHook[T any](ctx context.Context, token string, value T, resumeID stri
 }
 
 // ResumeHookWithRetries attempts ResumeHook up to attempts times, waiting
-// interval between attempts while it returns ErrHookNotFound. The first attempt
+// interval between attempts while it returns a *HookNotFoundError. The first attempt
 // is immediate. Use it when a run may not have registered its hook yet, such as
 // right after Start. It stops when ctx is done and rejects workflow context
 // with ErrNotInStep.
@@ -327,14 +327,14 @@ func ResumeHookWithRetries[T any](ctx context.Context, token string, value T, at
 		return ErrNotInStep
 	}
 	if attempts <= 0 {
-		return ErrHookNotFound
+		return &HookNotFoundError{Token: token}
 	}
 	// Every attempt is the same resume, so one that recorded its payload
 	// without answering records nothing more.
 	resumeID := worlds.NewResumeID()
 	for attempt := range attempts {
 		err := resumeHook(ctx, token, value, resumeID)
-		if !errors.Is(err, ErrHookNotFound) {
+		if _, ok := errors.AsType[*HookNotFoundError](err); !ok {
 			return err
 		}
 		if attempt == attempts-1 {
@@ -347,7 +347,7 @@ func ResumeHookWithRetries[T any](ctx context.Context, token string, value T, at
 		case <-timer.C:
 		}
 	}
-	return ErrHookNotFound
+	return &HookNotFoundError{Token: token}
 }
 
 // NewHookToken returns a random 21-character hook token. DefineHook generates

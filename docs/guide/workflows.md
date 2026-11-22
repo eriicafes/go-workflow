@@ -82,7 +82,7 @@ Only processes that execute deliveries need runners. An application that only
 starts and reads runs needs the workflow types and a [Client](/guide/runs#clients).
 
 A run that names a workflow with no registered runner fails with
-`worlds.ErrWorkflowNotFound`.
+`worlds.ErrWorkflowNotRegistered`.
 
 ## Suggested layout
 

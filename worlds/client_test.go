@@ -70,7 +70,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 				if mode == "HTTP resume" {
 					client = worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 				}
-				if err := client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: "racing-token", Data: []byte(`42`)}); err == nil || !strings.Contains(err.Error(), worlds.ErrHookForceClaimed.Error()) {
+				if err := client.HooksResume(ctx, worlds.ClientHooksResumeInput{Token: "racing-token", Data: []byte(`42`)}); err == nil || !strings.Contains(err.Error(), "hook token was force claimed") {
 					t.Fatalf("resume race error=%v", err)
 				}
 			}
@@ -301,8 +301,9 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runResume, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookDisposed, CorrelationID: "hook_resumed"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := worlds.ResumeHook(ctx, world, hook, payload, ""); !errors.Is(err, worlds.ErrHookNotFound) {
-		t.Fatalf("error = %v, want ErrHookNotFound", err)
+	_, err = worlds.ResumeHook(ctx, world, hook, payload, "")
+	if _, ok := errors.AsType[*worlds.HookNotFoundError](err); !ok {
+		t.Fatalf("error = %v, want &HookNotFoundError{}", err)
 	}
 	if queued := world.QueuedMessages(); len(queued) != 2 || queued[1].Input.RunID != runResume || queued[1].Input.StepID != nil {
 		t.Fatalf("queued = %#v, want a flow of the run for each resume", queued)
@@ -325,7 +326,7 @@ func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
 	}
 }
 
-func TestHTTPClientReturnsSentinelErrors(t *testing.T) {
+func TestHTTPClientReturnsWorldErrors(t *testing.T) {
 	world := testworld.New()
 	defer world.Close()
 	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
@@ -335,8 +336,10 @@ func TestHTTPClientReturnsSentinelErrors(t *testing.T) {
 	if _, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: "wrun_missing"}); !errors.Is(err, worlds.ErrRunNotFound) {
 		t.Fatalf("RunsGet error = %v, want ErrRunNotFound", err)
 	}
-	if err := workflow.ResumeHook(ctx, "token-missing", "value"); !errors.Is(err, workflow.ErrHookNotFound) {
-		t.Fatalf("ResumeHook error = %v, want ErrHookNotFound", err)
+	// An error type crosses with its fields.
+	err := workflow.ResumeHook(ctx, "token-missing", "value")
+	if notFound, ok := errors.AsType[*workflow.HookNotFoundError](err); !ok || notFound.Token != "token-missing" {
+		t.Fatalf("ResumeHook error = %v, want a *HookNotFoundError for token-missing", err)
 	}
 	if hook, ok, err := workflow.GetHook[string](ctx, "token-missing"); hook != nil || ok || err != nil {
 		t.Fatalf("GetHook = %v, %v, %v, want not found", hook, ok, err)

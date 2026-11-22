@@ -28,7 +28,7 @@ type createResponse struct {
 }
 
 // runCreationMeta returns the frame meta of a run's creation, which
-// run_created carries, and a first flow's run_started too.
+// run_created carries, and a first delivery's run_started too.
 func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType worlds.EventType) map[string]any {
 	meta := map[string]any{
 		"eventType":         string(eventType),
@@ -101,7 +101,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 		return worlds.EventResult{}, err
 	}
 	if input.Event.EventType == worlds.EventTypeRunStarted {
-		// A first flow's run_started carries the run's creation, which the
+		// A first delivery's run_started carries the run's creation, which the
 		// backend creates the run from when run_created never landed.
 		var created worlds.DataRunCreated
 		if json.Unmarshal(input.Event.Data, &created) == nil && created.WorkflowName != "" {
@@ -304,14 +304,14 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		event := input.Events[index]
 		if item.Status != 0 && item.Status != http.StatusOK {
 			err := classify(&apiError{Status: item.Status, Code: item.Error, Message: item.Message}, event.EventType)
-			if errors.Is(err, worlds.ErrInBandSuperseded) {
+			if _, ok := errors.AsType[*worlds.InBandSupersededError](err); ok {
 				return worlds.EventBatchResult{}, err
 			}
 			result.Results[index].Err = err
 			continue
 		}
 		if item.Allocated != nil && *item.Allocated == 0 {
-			result.Results[index].Err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEventConflict, event.EventType, event.CorrelationID)
+			result.Results[index].Err = fmt.Errorf("%w: batch repeats %s %s", worlds.ErrEntityConflict, event.EventType, event.CorrelationID)
 			continue
 		}
 		appended, err := toEvent(input.RunID, wireEventFromMap(item.Event), worlds.EventsResolveDataAll)

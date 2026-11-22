@@ -158,13 +158,13 @@ in workflow context.
 
 `GetConflict` returns nil after a successful claim or the owning run on a
 conflict. Repeated calls use the recorded result. Receiving without a prior
-check registers automatically and returns `ErrHookConflict` if another hook
+check registers automatically and returns a `*HookConflictError` if another hook
 owns the token. Storage errors retry the delivery.
 
 Set `HookOption.Force` to take a token from its owner. The new hook's
 `ClaimedFrom` identifies the previous owner through `RunID` and `HookID`.
 The displaced hook yields its already-recorded payloads before returning
-`ErrHookForceClaimed`.
+`*HookForceClaimedError`.
 
 A resume resolves the current owner once. If ownership changes during the
 request, the caller receives an error and the payload is not redirected.

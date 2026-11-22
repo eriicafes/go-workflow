@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -43,9 +44,13 @@ type RPCError struct {
 	// cancelled, deadline_exceeded, or internal.
 	Code    string `cbor:"code"`
 	Message string `cbor:"message"`
-	// Sentinel names the sentinel error the failure matches, such as
-	// run_not_found, so a client can return that error.
+	// Sentinel names the error the failure matches, such as run_not_found,
+	// so a client can return that error.
 	Sentinel string `cbor:"sentinel,omitempty"`
+	// Details is the CBOR encoding of the error Sentinel names when it is an
+	// error type, such as a *HookNotFoundError, so a Go client returns one
+	// with the same fields.
+	Details cbor.RawMessage `cbor:"details,omitempty"`
 	// ConflictingRunID names the run holding a hook token, for a
 	// hook_conflict failure of a *HookConflictError.
 	ConflictingRunID RunID `cbor:"conflictingRunId,omitempty"`
@@ -62,43 +67,80 @@ const maxRPCWait = 30 * time.Second
 // errRPCInvalidInput reports a request the server cannot decode or route.
 var errRPCInvalidInput = errors.New("workflow: invalid RPC request")
 
-// rpcSentinels names the errors an RPC failure carries to clients, with the
+// rpcErrors names the errors an RPC failure carries to clients, with the
 // code each is reported under. A failure takes the first entry it matches.
-var rpcSentinels = []struct {
+var rpcErrors = []rpcErrorKind{
+	rpcSentinel("workflow_not_registered", "not_found", ErrWorkflowNotRegistered),
+	rpcSentinel("run_not_found", "not_found", ErrRunNotFound),
+	rpcSentinel("step_not_found", "not_found", ErrStepNotFound),
+	rpcSentinel("event_not_found", "not_found", ErrEventNotFound),
+	rpcType[*HookNotFoundError]("hook_not_found", "not_found"),
+	rpcSentinel("event_invalid", "invalid_argument", ErrEventInvalid),
+	rpcSentinel("entity_conflict", "conflict", ErrEntityConflict),
+	rpcType[*RunNotSupportedError]("run_not_supported", "invalid_argument"),
+	rpcSentinel("attribute_invalid", "invalid_argument", ErrAttributeInvalid),
+	rpcType[*TooEarlyError]("too_early", "too_early"),
+	rpcSentinel("run_already_exists", "conflict", ErrRunAlreadyExists),
+	rpcType[*RunExpiredError]("run_expired", "conflict"),
+	rpcSentinel("step_not_startable", "conflict", ErrStepNotStartable),
+	rpcSentinel("stream_closed", "conflict", ErrStreamClosed),
+	rpcType[*StreamExpiredError]("stream_expired", "not_found"),
+	rpcType[*HookConflictError]("hook_conflict", "conflict"),
+	rpcSentinel("start_hook_rejected", "invalid_argument", ErrStartHookRejected),
+	rpcSentinel("hook_not_active", "conflict", ErrHookNotActive),
+	rpcType[*HookForceClaimedError]("hook_force_claimed", "conflict"),
+	rpcType[*InBandSupersededError]("in_band_superseded", "conflict"),
+	rpcSentinel("run_cancelled", "conflict", ErrRunCancelled),
+	rpcSentinel("resume_not_queued", "internal", ErrResumeNotQueued),
+	rpcSentinel("webhook_request_too_large", "invalid_argument", ErrWebhookRequestTooLarge),
+	rpcSentinel("deployment_unavailable", "internal", ErrDeploymentUnavailable),
+	rpcSentinel("deployment_mismatch", "internal", ErrDeploymentMismatch),
+	rpcSentinel("corrupted_event_log", "internal", ErrCorruptedEventLog),
+	rpcSentinel("delete_data_invalid", "invalid_argument", ErrDeleteDataInvalid),
+	rpcSentinel("unsupported", "unimplemented", errors.ErrUnsupported),
+	rpcType[*ThrottleError]("throttled", "resource_exhausted"),
+	rpcSentinel("cancelled", "cancelled", context.Canceled),
+	rpcSentinel("deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded),
+}
+
+// rpcErrorKind is an error an RPC failure carries: a sentinel error, or an
+// error type whose fields travel as the failure's Details.
+type rpcErrorKind struct {
 	name, code string
-	err        error
-}{
-	{"workflow_not_found", "not_found", ErrWorkflowNotFound},
-	{"run_not_found", "not_found", ErrRunNotFound},
-	{"step_not_found", "not_found", ErrStepNotFound},
-	{"event_not_found", "not_found", ErrEventNotFound},
-	{"hook_not_found", "not_found", ErrHookNotFound},
-	{"event_invalid", "invalid_argument", ErrEventInvalid},
-	{"event_conflict", "conflict", ErrEventConflict},
-	{"run_not_supported", "invalid_argument", ErrRunNotSupported},
-	{"attribute_invalid", "invalid_argument", ErrAttributeInvalid},
-	{"too_early", "too_early", ErrTooEarly},
-	{"run_already_exists", "conflict", ErrRunAlreadyExists},
-	{"run_terminal", "conflict", ErrRunTerminal},
-	{"step_not_startable", "conflict", ErrStepNotStartable},
-	{"stream_closed", "conflict", ErrStreamClosed},
-	{"stream_expired", "not_found", ErrStreamExpired},
-	{"hook_conflict", "conflict", ErrHookConflict},
-	{"start_hook_rejected", "invalid_argument", ErrStartHookRejected},
-	{"hook_not_active", "conflict", ErrHookNotActive},
-	{"hook_force_claimed", "conflict", ErrHookForceClaimed},
-	{"in_band_superseded", "conflict", ErrInBandSuperseded},
-	{"run_cancelled", "conflict", ErrRunCancelled},
-	{"resume_not_queued", "internal", ErrResumeNotQueued},
-	{"webhook_request_too_large", "invalid_argument", ErrWebhookRequestTooLarge},
-	{"deployment_unavailable", "internal", ErrDeploymentUnavailable},
-	{"deployment_mismatch", "internal", ErrDeploymentMismatch},
-	{"corrupted_event_log", "internal", ErrCorruptedEventLog},
-	{"delete_data_invalid", "invalid_argument", ErrDeleteDataInvalid},
-	{"unsupported", "unimplemented", errors.ErrUnsupported},
-	{"throttled", "resource_exhausted", ErrThrottled},
-	{"cancelled", "cancelled", context.Canceled},
-	{"deadline_exceeded", "deadline_exceeded", context.DeadlineExceeded},
+	// find returns the error of the kind in err's chain, and its Details.
+	find func(err error) (cbor.RawMessage, bool)
+	// rebuild returns the error of the kind a failure carries.
+	rebuild func(details cbor.RawMessage) error
+}
+
+func rpcSentinel(name, code string, sentinel error) rpcErrorKind {
+	return rpcErrorKind{
+		name: name, code: code,
+		find:    func(err error) (cbor.RawMessage, bool) { return nil, errors.Is(err, sentinel) },
+		rebuild: func(cbor.RawMessage) error { return sentinel },
+	}
+}
+
+// rpcType is an rpcErrorKind of the error type E, a pointer to a struct.
+func rpcType[E error](name, code string) rpcErrorKind {
+	return rpcErrorKind{
+		name: name, code: code,
+		find: func(err error) (cbor.RawMessage, bool) {
+			found, ok := errors.AsType[E](err)
+			if !ok {
+				return nil, false
+			}
+			details, _ := rpcEncoding.Marshal(found)
+			return details, true
+		},
+		rebuild: func(details cbor.RawMessage) error {
+			value := reflect.New(reflect.TypeFor[E]().Elem())
+			if len(details) > 0 {
+				_ = cbor.Unmarshal(details, value.Interface())
+			}
+			return value.Interface().(E)
+		},
+	}
 }
 
 // rpcVersionMismatchError reports incompatible RPC protocol versions.
@@ -799,23 +841,22 @@ func rpcErrorStatus(code string) int {
 }
 
 func newRPCError(err error) *RPCError {
-	for _, sentinel := range rpcSentinels {
-		if errors.Is(err, sentinel.err) {
-			failure := &RPCError{Code: sentinel.code, Message: err.Error(), Sentinel: sentinel.name}
-			var conflict *HookConflictError
-			if errors.As(err, &conflict) {
-				failure.ConflictingRunID = conflict.RunID
-			}
-			var throttle *ThrottleError
-			if errors.As(err, &throttle) {
-				failure.RetryAfter = throttle.After
-			}
-			var early *TooEarlyError
-			if errors.As(err, &early) {
-				failure.RetryAfter = early.RetryAfter
-			}
-			return failure
+	for _, kind := range rpcErrors {
+		details, ok := kind.find(err)
+		if !ok {
+			continue
 		}
+		failure := &RPCError{Code: kind.code, Message: err.Error(), Sentinel: kind.name, Details: details}
+		if conflict, ok := errors.AsType[*HookConflictError](err); ok {
+			failure.ConflictingRunID = conflict.RunID
+		}
+		if throttle, ok := errors.AsType[*ThrottleError](err); ok {
+			failure.RetryAfter = throttle.After
+		}
+		if early, ok := errors.AsType[*TooEarlyError](err); ok {
+			failure.RetryAfter = early.RetryAfter
+		}
+		return failure
 	}
 	var rpcVersionMismatch rpcVersionMismatchError
 	if errors.Is(err, errRPCInvalidInput) || errors.As(err, &rpcVersionMismatch) {
