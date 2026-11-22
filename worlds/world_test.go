@@ -274,6 +274,15 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 	if response := serve(http.MethodGet, "internal", nil); response.Code != http.StatusNotFound {
 		t.Fatalf("regular hook response = %d", response.Code)
 	}
+	// Mounted without a {token} wildcard, the handler reads the last path
+	// segment, which a trailing slash leaves empty.
+	for path, code := range map[string]int{"/hooks/static": http.StatusCreated, "/hooks/static/": http.StatusNotFound} {
+		response := httptest.NewRecorder()
+		worlds.WebhookHandler(world).ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != code {
+			t.Fatalf("POST %s = %d, want %d", path, response.Code, code)
+		}
+	}
 
 	// Each request resumed the hook with a Request, its body written to a
 	// byte stream of the run.
@@ -287,7 +296,8 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 			continue
 		}
 		var request worlds.WebhookRequest
-		if err := worlds.DecodePayload(worlds.DecodeHookReceived(event.Data), nil, &request); err != nil || request.Method != http.MethodPatch || request.Body == nil {
+		// The URL is absolute, as a Request's is.
+		if err := worlds.DecodePayload(worlds.DecodeHookReceived(event.Data), nil, &request); err != nil || request.Method != http.MethodPatch || request.Body == nil || request.URL != "http://example.com"+httpPrefix+"/webhooks/public" {
 			t.Fatalf("request = %+v err=%v", request, err)
 		}
 		body, err := worlds.ReadByteStream(ctx, world, runWebhook, *request.Body)

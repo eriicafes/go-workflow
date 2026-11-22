@@ -31,6 +31,10 @@ const prefixSize = 4
 // maxFrame bounds a stream frame.
 const maxFrame = 100_000_000
 
+// maxLayers bounds the layers Unwrap removes: encryption, compression, and
+// devalue text.
+const maxLayers = 3
+
 // ErrInvalid reports data that cannot be decoded. It is devalue's, so one
 // sentinel covers every layer of a payload.
 var ErrInvalid = devalue.ErrInvalid
@@ -94,7 +98,10 @@ func Wrap(text []byte, options Options) ([]byte, error) {
 // Unwrap removes data's encryption and compression and returns its devalue
 // text, opening it with keys when it is encrypted or sealed.
 func Unwrap(data []byte, keys *RunKeys) ([]byte, error) {
-	for {
+	for layer := 0; ; layer++ {
+		if layer == maxLayers {
+			return nil, fmt.Errorf("%w: payload nests more than %d layers", ErrInvalid, maxLayers)
+		}
 		prefix, body, err := Decode(data)
 		if err != nil {
 			return nil, err

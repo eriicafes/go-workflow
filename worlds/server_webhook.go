@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/eriicafes/go-workflow/internal/devalue"
@@ -237,9 +238,10 @@ func WebhookHandler(world World) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")
 		if token == "" {
-			token = path.Base(r.URL.Path)
+			// The last path segment, which a trailing slash leaves empty.
+			_, token = path.Split(r.URL.Path)
 		}
-		if token == "" || token == "/" || token == "." {
+		if token == "" || token == "." || token == ".." {
 			http.Error(w, (&HookNotFoundError{}).Error(), http.StatusNotFound)
 			return
 		}
@@ -273,7 +275,10 @@ func WebhookHandler(world World) http.Handler {
 			http.Error(w, fmt.Errorf("workflow: read webhook body: %w", err).Error(), http.StatusBadRequest)
 			return
 		}
-		request := WebhookRequest{Method: r.Method, URL: r.URL.String(), Header: r.Header.Clone()}
+		request := WebhookRequest{Method: r.Method, URL: requestURL(r), Header: r.Header.Clone()}
+		// The body is written before the resume, so a step never waits on a
+		// body that is not coming. A resume that is refused leaves the
+		// stream unreferenced in the run.
 		if len(body) > 0 {
 			request.Body = &StreamRef{Name: NewStreamName(), Type: "bytes", Framing: byteStreamFraming}
 			if err := writeByteStream(ctx, world, hook.RunID, request.Body.Name, body); err != nil {
@@ -332,6 +337,25 @@ func WebhookHandler(world World) http.Handler {
 			w.WriteHeader(http.StatusAccepted)
 		}
 	})
+}
+
+// requestURL returns the absolute URL of a request a server received, whose
+// URL holds only its path and query: the scheme of its connection, or of
+// X-Forwarded-Proto behind a proxy, and its Host.
+func requestURL(r *http.Request) string {
+	if r.URL.IsAbs() {
+		return r.URL.String()
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if forwarded, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ","); forwarded == "http" || forwarded == "https" {
+		scheme = forwarded
+	}
+	absolute := *r.URL
+	absolute.Scheme, absolute.Host = scheme, r.Host
+	return absolute.String()
 }
 
 // writeByteStream writes data to a new byte stream of runID in one framed

@@ -3,6 +3,7 @@ package envelope
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 
 	"github.com/klauspost/compress/zstd"
@@ -24,6 +25,8 @@ const (
 	// compressSavings is the share of its size compressed data must save to
 	// be kept.
 	compressSavings = 0.05
+	// maxDecompressed bounds the data one compressed layer expands to.
+	maxDecompressed = maxFrame
 )
 
 // Compress compresses prefixed data with codec: data of at least 1 KiB,
@@ -64,10 +67,10 @@ func newZstdEncoder() *zstd.Encoder {
 	return encoder
 }
 
-// unzstd decompresses zstd data. Its decoder is made for the call, so no
-// goroutine outlives it.
+// unzstd decompresses zstd data of at most maxDecompressed bytes. Its
+// decoder is made for the call, so no goroutine outlives it.
 func unzstd(data []byte) ([]byte, error) {
-	decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxDecompressed))
 	if err != nil {
 		return nil, err
 	}
@@ -75,10 +78,15 @@ func unzstd(data []byte) ([]byte, error) {
 	return decoder.DecodeAll(data, nil)
 }
 
+// gunzip decompresses gzip data of at most maxDecompressed bytes.
 func gunzip(data []byte) ([]byte, error) {
 	reader, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	return io.ReadAll(reader)
+	out, err := io.ReadAll(io.LimitReader(reader, maxDecompressed+1))
+	if err == nil && len(out) > maxDecompressed {
+		err = fmt.Errorf("decompressed data exceeds %d bytes", maxDecompressed)
+	}
+	return out, err
 }

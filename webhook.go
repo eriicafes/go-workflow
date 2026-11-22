@@ -102,6 +102,8 @@ func (w *Webhook[T]) Dispose(ctx context.Context) {
 // read it or respond.
 type WebhookRequest[T any] struct {
 	Method string
+	// URL is the request's absolute URL, with the scheme of its connection,
+	// or of X-Forwarded-Proto behind a proxy, and its Host.
 	URL    string
 	Header http.Header
 	value  worlds.WebhookRequest

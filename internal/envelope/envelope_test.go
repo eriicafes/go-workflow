@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"testing"
 )
@@ -77,4 +78,31 @@ func TestFramesSplitAsAppended(t *testing.T) {
 	if _, err := SplitFrames(chunk[:len(chunk)-1]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("truncated frame err = %v", err)
 	}
+}
+
+func TestUnwrapBoundsNestedLayers(t *testing.T) {
+	data := Encode(PrefixDevalue, []byte("[1]"))
+	for range maxLayers - 1 {
+		data = Encode(PrefixGzip, gzipped(t, data))
+	}
+	if _, err := Unwrap(data, nil); err != nil {
+		t.Fatalf("Unwrap of %d layers = %v", maxLayers, err)
+	}
+	data = Encode(PrefixGzip, gzipped(t, data))
+	if _, err := Unwrap(data, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Unwrap of %d layers = %v, want ErrInvalid", maxLayers+1, err)
+	}
+}
+
+func gzipped(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := gzip.NewWriter(&buffer)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }

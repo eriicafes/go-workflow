@@ -58,6 +58,16 @@ type RPCError struct {
 	// too_early failure of a *TooEarlyError, asks the caller to wait, or
 	// zero when the World did not say.
 	RetryAfter time.Duration `cbor:"retryAfter,omitempty"`
+	// Also names the other errors in the failure's chain, after the one
+	// Sentinel names, so a Go client matches each of them too.
+	Also []RPCErrorKind `cbor:"also,omitempty"`
+}
+
+// RPCErrorKind names one error of an RPC failure's chain, with the CBOR
+// encoding of its fields when it is an error type.
+type RPCErrorKind struct {
+	Sentinel string          `cbor:"sentinel"`
+	Details  cbor.RawMessage `cbor:"details,omitempty"`
 }
 
 // maxRPCWait caps how long one RPC request may block in a World wait, so a
@@ -68,7 +78,8 @@ const maxRPCWait = 30 * time.Second
 var errRPCInvalidInput = errors.New("workflow: invalid RPC request")
 
 // rpcErrors names the errors an RPC failure carries to clients, with the
-// code each is reported under. A failure takes the first entry it matches.
+// code each is reported under. A failure takes the code and Sentinel of the
+// first entry it matches, and lists the others it matches in Also.
 var rpcErrors = []rpcErrorKind{
 	// A start whose outcome is not known comes first: its cause is the
 	// failure of one of the kinds below.
@@ -869,12 +880,17 @@ func rpcErrorStatus(code string) int {
 }
 
 func newRPCError(err error) *RPCError {
-	for _, kind := range rpcErrors {
+	for index, kind := range rpcErrors {
 		details, ok := kind.find(err)
 		if !ok {
 			continue
 		}
 		failure := &RPCError{Code: kind.code, Message: err.Error(), Sentinel: kind.name, Details: details}
+		for _, other := range rpcErrors[index+1:] {
+			if details, ok := other.find(err); ok {
+				failure.Also = append(failure.Also, RPCErrorKind{Sentinel: other.name, Details: details})
+			}
+		}
 		if conflict, ok := errors.AsType[*HookConflictError](err); ok {
 			failure.ConflictingRunID = conflict.RunID
 		}

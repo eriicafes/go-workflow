@@ -54,14 +54,17 @@ and the [`world-http` adapter](/tooling/world-http) use it.
 
   ```
   { output?: <cbor>, error?: { code: string, message: string, sentinel?: string,
-    conflictingRunId?: string, retryAfter?: int } }
+    details?: <cbor>, conflictingRunId?: string, retryAfter?: int,
+    also?: [{ sentinel: string, details?: <cbor> }] } }
   ```
 
   Error codes are `not_found`, `invalid_argument`, `conflict`, `cancelled`,
   `deadline_exceeded`, `unimplemented`, `resource_exhausted`, and `internal`.
-  `sentinel` names the `worlds` sentinel error the failure matches, such as
-  `run_not_found`, so `workflow.NewHTTPClient` returns errors that match
-  `errors.Is` as they would in process. A `hook_conflict` failure names the run
+  `sentinel` names the `worlds` error the failure matches, such as
+  `run_not_found`, with an error type's fields in `details`. `also` names the
+  other `worlds` errors in the failure's chain, so `workflow.NewHTTPClient`
+  returns errors that match `errors.Is` and `errors.As` as they would in
+  process. A `hook_conflict` failure names the run
   holding the token in `conflictingRunId`, and a `throttled` failure, a World's
   rate limit, the nanoseconds to wait in `retryAfter`, which the client returns
   as `*worlds.HookConflictError` and `*worlds.ThrottleError`.
