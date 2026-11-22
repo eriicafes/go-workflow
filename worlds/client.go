@@ -3,6 +3,7 @@ package worlds
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -606,19 +607,30 @@ func (a httpAnalytics) WaitsList(ctx context.Context, input AnalyticsWaitsListIn
 	return output, err
 }
 
-// rpcClientError is a server's RPC failure. It wraps the error the server
-// named, so errors.Is and errors.As match it as they would in-process.
+// rpcClientError is a server's RPC failure. It wraps the errors the server
+// named, so errors.Is and errors.As match them as they would in-process.
 type rpcClientError struct {
 	RPCError
-	named error
+	named []error
 }
 
 func newRPCClientError(failure RPCError) error {
 	err := rpcClientError{RPCError: failure}
-	for _, kind := range rpcErrors {
-		if kind.name == failure.Sentinel {
-			err.named = kind.rebuild(failure.Details)
-			break
+	kinds := append([]RPCErrorKind{{Sentinel: failure.Sentinel, Details: failure.Details}}, failure.Also...)
+	for _, named := range kinds {
+		for _, kind := range rpcErrors {
+			if kind.name == named.Sentinel {
+				err.named = append(err.named, kind.rebuild(named.Details))
+				break
+			}
+		}
+	}
+	// A start whose outcome is not known wraps the failure that left it
+	// unknown, as it does in-process.
+	if len(err.named) > 1 {
+		if start, ok := err.named[0].(*StartError); ok {
+			start.Cause = errors.Join(err.named[1:]...)
+			err.named = err.named[:1]
 		}
 	}
 	return err
@@ -628,4 +640,4 @@ func (e rpcClientError) Error() string {
 	return fmt.Sprintf("workflow: RPC %s: %s", e.Code, e.Message)
 }
 
-func (e rpcClientError) Unwrap() error { return e.named }
+func (e rpcClientError) Unwrap() []error { return e.named }

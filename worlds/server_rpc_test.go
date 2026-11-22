@@ -540,3 +540,34 @@ func TestRPCCarriesAnUnconfirmedStart(t *testing.T) {
 		t.Fatalf("start error = %v, want a *StartError for the run's admission", err)
 	}
 }
+
+// refusingWorld refuses every event with err.
+type refusingWorld struct {
+	worlds.World
+	err error
+}
+
+func (w refusingWorld) EventsCreate(context.Context, worlds.EventsCreateInput) (worlds.EventResult, error) {
+	return worlds.EventResult{}, w.err
+}
+
+func TestRPCFailuresCarryEveryErrorOfTheirChain(t *testing.T) {
+	world := testworld.New()
+	defer world.Close()
+	cancel := func(refusal error) error {
+		handler := worlds.HTTPHandler(refusingWorld{World: world, err: refusal}, "")
+		client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(handler))
+		return client.RunsCancel(context.Background(), worlds.ClientRunsCancelInput{RunID: "wrun_x"})
+	}
+
+	err := cancel(worlds.FinishedRunRefusal(worlds.StatusCompleted, worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}))
+	if expired, ok := errors.AsType[*worlds.RunExpiredError](err); !ok || expired.RunStatus != worlds.StatusCompleted || !errors.Is(err, worlds.ErrEntityConflict) {
+		t.Fatalf("finished run refusal = %v, want ErrEntityConflict and a *RunExpiredError", err)
+	}
+
+	err = cancel(&worlds.StartError{RunID: "wrun_x", Stage: worlds.StartStageAdmission, Cause: worlds.ErrStartHookDisabled})
+	start, ok := errors.AsType[*worlds.StartError](err)
+	if !ok || start.Stage != worlds.StartStageAdmission || !errors.Is(start.Cause, worlds.ErrStartHookDisabled) {
+		t.Fatalf("start refusal = %v, want a *StartError wrapping ErrStartHookDisabled", err)
+	}
+}
