@@ -80,8 +80,8 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 	if err != nil || run.Status != worlds.StatusRunning || run.StartedAt == nil {
 		t.Fatalf("running run = %#v err=%v", run, err)
 	}
-	// A run is updated by its own events only, as in the Workflow SDK's
-	// Worlds: a wait of the run leaves it as it was.
+	// A run is updated by its own events only: a wait of the run leaves it
+	// as it was.
 	time.Sleep(2 * time.Millisecond)
 	conformAppend(t, world, runID, worlds.EventTypeWaitCreated, "wait_lifecycle", worlds.DataWaitCreated{ResumeAt: time.Now().Add(time.Hour)})
 	if waited, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID}); err != nil || !waited.UpdatedAt.Equal(run.UpdatedAt) {
@@ -113,8 +113,8 @@ func conformRunLifecycle(t *testing.T, world worlds.World) {
 
 	cancelled := conformCreateRun(t, world, "cancelled")
 	cancel := conformAppend(t, world, cancelled, worlds.EventTypeRunCancelled, "", nil)
-	// Cancelling a cancelled run records the request, as in the Workflow
-	// SDK's Worlds, and leaves the run as it was.
+	// Cancelling a cancelled run records the request and leaves the run as
+	// it was.
 	again, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: cancelled, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunCancelled}})
 	if err != nil || again.EventID == cancel.EventID || again.AllocatedEventCount != 1 {
 		t.Fatalf("repeated run_cancelled = %#v err=%v", again, err)
@@ -164,8 +164,7 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	}
 	conformAppend(t, world, ids[1], worlds.EventTypeRunStarted, "", nil)
 
-	// Runs list newest first unless asked otherwise, as in the Workflow
-	// SDK's Worlds.
+	// Runs list newest first unless asked otherwise.
 	all, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name})
 	if err != nil || len(all.Data) != 3 || all.Data[0].RunID != ids[2] || all.Data[2].RunID != ids[0] {
 		t.Fatalf("runs in the default order = %#v err=%v", all, err)
@@ -178,7 +177,7 @@ func conformRunsList(t *testing.T, world worlds.World) {
 	if err != nil || len(running.Data) != 1 || running.Data[0].RunID != ids[1] {
 		t.Fatalf("running runs = %#v err=%v", running, err)
 	}
-	// An empty status filter matches no runs, as the SDK's status: [] does.
+	// An empty status filter matches no runs.
 	if none, err := world.RunsList(ctx, worlds.RunsListInput{WorkflowName: name, Status: []worlds.Status{}}); err != nil || len(none.Data) != 0 || none.HasMore {
 		t.Fatalf("runs of no status = %#v err=%v", none, err)
 	}
@@ -419,7 +418,7 @@ func conformResilientStart(t *testing.T, world worlds.World) {
 }
 
 // conformStartedAgain checks the answer to a run_started of a run that
-// started before. It is not started again: world-local and world-postgres
+// started before. It is not started again: the local and Postgres Worlds
 // accept it and append nothing, so the answer holds no event, and Vercel's
 // backend refuses it as a conflict (ErrEntityConflict).
 func conformStartedAgain(t *testing.T, result worlds.EventResult, err error) {
@@ -432,9 +431,8 @@ func conformStartedAgain(t *testing.T, result worlds.EventResult, err error) {
 	}
 }
 
-// conformValidation checks what a World validates as the Workflow SDK's
-// Worlds do: a new run's ID and attributes, an attr_set's changes, and the
-// step a step event names.
+// conformValidation checks what a World validates: a new run's ID and
+// attributes, an attr_set's changes, and the step a step event names.
 func conformValidation(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	minted := func(at time.Time) worlds.RunID {

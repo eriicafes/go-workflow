@@ -33,8 +33,8 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 }
 
 // hookAvailable is the condition on hooks h under which a hook is readable
-// at the time the argument at names, as world-postgres reads it: while its
-// token retention lasts or its run is unfinished.
+// at the time the argument at names: while its token retention lasts or its
+// run is unfinished.
 func hookAvailable(at string) string {
 	return "(h.token_retention_until > " + at + " OR EXISTS (SELECT 1 FROM workflow.workflow_runs ar WHERE ar.id = h.run_id AND ar.status IN ('pending', 'running')))"
 }
@@ -51,7 +51,6 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
-	// The list's defaults are world-postgres's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 100)
 	var q query
 	q.where(hookAvailable(q.arg(now())))
@@ -139,8 +138,7 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 		if err := claimant.fence(input.Options.InBandCount); err != nil {
 			return err
 		}
-		// A hook is created once, as world-postgres's unique index on a
-		// run's creations keeps it.
+		// A hook is created once.
 		if earlier, err := claimant.replay(ctx, worlds.EventTypeHookCreated, input.Event.CorrelationID, false); err != nil {
 			return err
 		} else if earlier.EventID != "" {
@@ -165,8 +163,8 @@ func (w *World) claimToken(ctx context.Context, input worlds.EventsCreateInput, 
 					return errClaimRetry
 				}
 				// The claim names a live owner's workflow, which the runtime
-				// wakes to read its disposal, as world-postgres names it. A
-				// finished owner has nothing to read or wake.
+				// wakes to read its disposal. A finished owner has nothing to
+				// read or wake.
 				created.ForceClaimedFrom = &worlds.HookForceClaim{RunID: holder.runID, HookID: holder.hookID}
 				if owner.run.Status.Terminal() {
 					// A finished owner's hook goes with its token.
@@ -294,7 +292,7 @@ func (w *World) tokenOwner(ctx context.Context, tx pgx.Tx, token string) (worlds
 // and its retention expired at at, and returns the remaining
 // holder. A token nobody claims is not locked: the claimant's insert detects
 // a concurrent claim instead. A token is held while its run is live or its
-// retention lasts (world-postgres storage.js).
+// retention lasts.
 func (w *World) lockToken(ctx context.Context, tx pgx.Tx, token string, at time.Time) (tokenHolder, error) {
 	var holder tokenHolder
 	var retainUntil *time.Time
@@ -311,16 +309,13 @@ func (w *World) lockToken(ctx context.Context, tx pgx.Tx, token string, at time.
 	if !status.Terminal() || retainUntil != nil && retainUntil.After(at) {
 		return holder, nil
 	}
-	// The lapsed holder's hook goes with its token, as world-postgres
-	// deletes it.
+	// The lapsed holder's hook goes with its token.
 	_, err = tx.Exec(ctx, w.q(`DELETE FROM workflow.workflow_hooks WHERE hook_id = $1`), holder.hookID)
 	return tokenHolder{}, err
 }
 
 // resumeContext is a hook's resume_context: the part of its run that
-// addresses the deliveries its payloads queue, in the SDK's
-// HookResumeContext shape, as CBOR. world-postgres declares the column but
-// never writes it, so the SDK's runtime reads the run on every resume.
+// addresses the deliveries its payloads queue, as CBOR.
 type resumeContext struct {
 	DeploymentID        string `cbor:"deploymentId"`
 	WorkflowName        string `cbor:"workflowName"`

@@ -78,8 +78,7 @@ func streamRefOf(value any) (*StreamRef, error) {
 	return ref, nil
 }
 
-// WebhookRequest is the Workflow SDK's Request value that resumes a
-// webhook's hook.
+// WebhookRequest is the Request value that resumes a webhook's hook.
 type WebhookRequest struct {
 	Method string
 	URL    string
@@ -128,8 +127,8 @@ func (r *WebhookRequest) UnmarshalPayload(decode func(any) error) error {
 	return err
 }
 
-// WebhookResponse is the Workflow SDK's Response value a webhook answers
-// with. A zero Status is sent as 200.
+// WebhookResponse is the Response value a webhook answers with. A zero
+// Status is sent as 200.
 type WebhookResponse struct {
 	Status     int
 	StatusText string

@@ -9,12 +9,11 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// Run IDs carry the region a run's data lives in, as world-vercel's tagged
-// run IDs do: a ULID with the most significant timestamp bit set, a 6-bit
-// region ID at the top of byte 6, and a 5-bit encoding version below it,
-// spanning the bottom of byte 6 and the top of byte 7. Untagged IDs, and
-// tagged IDs of a region this package does not know, live in iad1, as on the
-// backend.
+// Run IDs carry the region a run's data lives in: a ULID with the most
+// significant timestamp bit set, a 6-bit region ID at the top of byte 6, and
+// a 5-bit encoding version below it, spanning the bottom of byte 6 and the
+// top of byte 7. Untagged IDs, and tagged IDs of a region this package does
+// not know, live in iad1, as on the backend.
 
 const (
 	runIDTagBit        = 0x80

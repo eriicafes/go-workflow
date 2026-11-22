@@ -40,9 +40,9 @@ A failed store is reported by a later `Write`, `Flush`, `Close`, or
 the step's result is recorded, so a completed step's chunks are stored and a
 failed store fails the step.
 
-As in the Workflow SDK, writers **do not wait for each other**. Several steps,
-or retries of one, can write the same stream at once: each writer's chunks stay
-in order, and different writers' chunks interleave. Call `CloseStream` once the
+Writers **do not wait for each other**. Several steps, or retries of one, can
+write the same stream at once: each writer's chunks stay in order, and
+different writers' chunks interleave. Call `CloseStream` once the
 stream is complete, from the writer that finishes it.
 
 Omit `WriterOption` to write the run's default stream.
@@ -78,9 +78,8 @@ reader, err := run.Reader(ctx, workflow.ReaderOption{Name: "progress"})
 reader, err = run.Reader(ctx, workflow.ReaderOption{Name: "progress", StartIndex: -3})
 ```
 
-Each write is one **chunk**, numbered from zero. As in the Workflow SDK,
-`StartIndex` picks the chunk to start at, and a negative index counts back from
-the end of the stream.
+Each write is one **chunk**, numbered from zero. `StartIndex` picks the chunk
+to start at, and a negative index counts back from the end of the stream.
 
 A `StreamReader` is an `io.Reader` that joins chunks into bytes. `Next`
 returns one chunk at a time with its `Index`, so a reader can relay whole writes

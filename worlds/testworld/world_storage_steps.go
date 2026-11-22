@@ -22,7 +22,6 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	w.mu.RLock()
 	defer w.mu.RUnlock()

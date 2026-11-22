@@ -388,8 +388,7 @@ func TestRunsCreatedInARegionAreRoutedThere(t *testing.T) {
 }
 
 // The backend filters runs by one status, so RunsList and the analytics
-// refuse several, and analytics refuse a window with one bound, as
-// world-vercel does.
+// refuse several, and analytics refuse a window with one bound.
 func TestRunFilterRefusals(t *testing.T) {
 	worldsList, _, _ := newWorlds(t, 1)
 	world, ctx := worldsList[0], context.Background()

@@ -32,9 +32,9 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	return hook, err
 }
 
-// hookAvailable reports whether a hook's row is readable at now, as
-// world-local's isAvailable decides: one that is not disposed, while its
-// run is unfinished or its token retention lasts.
+// hookAvailable reports whether a hook's row is readable at now: one that
+// is not disposed, while its run is unfinished or its token retention
+// lasts.
 func (s *store) hookAvailable(record hookRecord, now time.Time) (bool, error) {
 	if disposal, err := s.getDisposal(record.HookID); err != nil || disposal != nil {
 		return false, err
@@ -75,7 +75,6 @@ func (w *World) HooksGetByToken(ctx context.Context, input worlds.HooksGetByToke
 }
 
 func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (worlds.Page[worlds.Hook], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Hook]
 	err := w.read(ctx, func(s *store) error {
@@ -137,7 +136,7 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 	if err := claimant.fence(input.Options.InBandCount); err != nil {
 		return worlds.EventResult{}, err
 	}
-	// A hook is created once, as in world-local.
+	// A hook is created once.
 	id := worlds.HookID(input.Event.CorrelationID)
 	if disposal, err := claimant.disposal(id); err != nil {
 		return worlds.EventResult{}, err
@@ -192,10 +191,9 @@ func claimHook(s *store, input worlds.EventsCreateInput, created worlds.DataHook
 }
 
 // forceRelease releases hook, whose token the claimant's claimantHook takes
-// by force, as world-local releases it, and returns the claim's
-// ForceClaimedFrom. A live owner's run records hook_disposed naming
-// claimantHook in ForceClaimedBy, and ForceClaimedFrom names its workflow so
-// the runtime wakes it. A finished or missing owner's hook is disposed of
+// by force, and returns the claim's ForceClaimedFrom. A live owner's run
+// records hook_disposed naming claimantHook in ForceClaimedBy, and
+// ForceClaimedFrom names its workflow so the runtime wakes it. A finished or missing owner's hook is disposed of
 // without an event or a wake. An owner in the claimant's own run is recorded
 // in the claimant's txn so both events commit together.
 func forceRelease(claimant *txn, hook *hookRecord, token string, claimantHook worlds.HookID, now time.Time) (*worlds.HookForceClaim, error) {

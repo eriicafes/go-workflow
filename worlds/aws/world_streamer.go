@@ -111,9 +111,8 @@ func (w *World) StreamsWrite(ctx context.Context, input worlds.StreamsWriteInput
 func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWriteMultiInput) error {
 	// Concurrent writers race on count and retry. The write's transaction
 	// also requires the run's data not to be deleted, so a deleted run's
-	// streams, including new ones, take no more data: a new one is closed,
-	// as world-local closes it. A closed stream drops the write, as
-	// world-local does.
+	// streams, including new ones, take no more data: a new one is closed.
+	// A closed stream drops the write.
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err

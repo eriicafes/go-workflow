@@ -25,15 +25,14 @@ const (
 	// streamCursorCacheSize bounds the backend cursors a World remembers.
 	streamCursorCacheSize = 1024
 	// streamCloseMaxRetries is how many times a stream's close is sent
-	// again, and streamCloseMaxBackoff caps the wait before each, as the
-	// Workflow SDK's stream close dispatcher, an undici RetryAgent with its
-	// defaults, retries it.
+	// again after a transient failure, and streamCloseMaxBackoff caps the
+	// wait before each retry, a Retry-After included.
 	streamCloseMaxRetries = 5
 	streamCloseMaxBackoff = 30 * time.Second
 )
 
 // streamCloseMinBackoff is the wait before a stream close's first retry,
-// doubling with each retry, undici's RetryAgent default.
+// doubling with each retry.
 var streamCloseMinBackoff = 500 * time.Millisecond
 
 // Streams are stored by the backend. Read cursors are chunk indexes, so any
@@ -113,9 +112,8 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 }
 
 // StreamsClose closes a stream, sending the close again after a transient
-// failure, as the Workflow SDK's stream close dispatcher does: a close is
-// idempotent, and the backend answers a 503 while it reconciles a closing
-// stream, expecting the writer to close it again.
+// failure: a close is idempotent, and the backend answers a 503 while it
+// reconciles a closing stream, expecting the writer to close it again.
 func (w *World) StreamsClose(ctx context.Context, input worlds.StreamsCloseInput) error {
 	header := http.Header{}
 	header.Set("X-Stream-Done", "true")
@@ -147,9 +145,9 @@ func streamCloseRetryDelay(ctx context.Context, err error, retry int) (time.Dura
 	return min(backoff, streamCloseMaxBackoff), true
 }
 
-// streamReadError maps a stream read's 410 as the Workflow SDK's World does:
-// the backend's stream-expired to a *worlds.StreamExpiredError, with the
-// stream its details name, and any other to a *worlds.RunExpiredError.
+// streamReadError maps a stream read's 410: the backend's stream-expired to
+// a *worlds.StreamExpiredError, with the stream its details name, and any
+// other to a *worlds.RunExpiredError.
 func streamReadError(err error) error {
 	var api *apiError
 	if !errors.As(err, &api) || api.Status != http.StatusGone {
@@ -240,7 +238,7 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	}
 	if input.Cursor != "" {
 		// A cursor that is not a chunk index reads from the beginning, as
-		// world-local and world-postgres read one.
+		// the local and Postgres Worlds read one.
 		if start, err = strconv.Atoi(input.Cursor); err != nil || start < 0 {
 			start = 0
 		}

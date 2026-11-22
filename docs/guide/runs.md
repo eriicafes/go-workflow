@@ -55,8 +55,7 @@ belong to a run. In workflow context, `Start` starts a
 
 ### Start options
 
-`workflow.StartOptions` sets how a run is created, as the Workflow SDK's start
-options do. Its zero value is the same as passing none.
+`workflow.StartOptions` sets how a run is created. Its zero value is the same as passing none.
 
 ```go
 run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, workflow.StartOptions{
@@ -67,11 +66,11 @@ run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "workflows"}, wo
 
 | Field | Effect |
 | --- | --- |
-| `Deployment` | The deployment the run starts on and stays pinned to: `workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`, or `workflow.DeploymentWithID(id)`. It needs a World with deployment affinity. See [moving chains to the latest deployment](/guide/replay#moving-chains-to-the-latest-deployment). |
+| `Deployment` | The deployment the run starts on and stays pinned to: `workflow.LatestDeployment` or `workflow.DeploymentWithID(id)`. It needs a World with deployment affinity. See [moving chains to the latest deployment](/guide/replay#moving-chains-to-the-latest-deployment). |
 | `Retention` | `workflow.RetainNone` deletes the run's data as soon as it finishes, recorded as `$retention: "0"`. `Run.Value` then returns a `*workflow.RunExpiredError`, so return a result you need through storage you control. The zero value, `workflow.RetainDefault`, leaves it to the World. |
 | `Attributes` | Plain-text attributes set on the run as it is created: at most 64, keys up to 256 characters, values up to 256 bytes. Otherwise `Start` returns `worlds.ErrAttributeInvalid`. |
 | `AllowReservedAttributes` | Permits keys starting with `$`, which are reserved for framework and library code. |
-| `Hook` | Creates a hook with the run, claiming its token, as the Workflow SDK's `experimental_hook`: `&workflow.StartHook{Token, MinRetention, Metadata}`. A second start with the token creates no run and returns a `*worlds.HookConflictError` naming the run that holds it, so the token makes the start idempotent. The hook takes payloads as soon as `Start` returns. The first `workflow.CreateHook` the workflow declares with the token opens it, and a later one with the token conflicts with it. The opening hook takes no `MinRetention` or `Force`, which return `workflow.ErrStartHookOptions`; set the retention on `StartHook`. It needs a World with `Capabilities().StartHook`. |
+| `Hook` | Creates a hook with the run, claiming its token: `&workflow.StartHook{Token, MinRetention, Metadata}`. A second start with the token creates no run and returns a `*worlds.HookConflictError` naming the run that holds it, so the token makes the start idempotent. The hook takes payloads as soon as `Start` returns. The first `workflow.CreateHook` the workflow declares with the token opens it, and a later one with the token conflicts with it. The opening hook takes no `MinRetention` or `Force`, which return `workflow.ErrStartHookOptions`; set the retention on `StartHook`. It needs a World with `Capabilities().StartHook`. |
 | `Region` | The region the run's data lives in and its deliveries go to, one of the World's regions. Only a World that implements `worlds.RegionalRunIDs` uses it; others ignore it. |
 | `ReplayedFromRunID` | The run this run replays, `wrun_` and a ULID. It is recorded in the run's `ExecutionContext`, so the Workflow web UI links the replay to its source. Otherwise `Start` returns `workflow.ErrInvalidStartOptions`. |
 | `NoArgumentCompression` | Stores the run's input uncompressed, for input that does not compress, such as media or encrypted bytes. |
@@ -157,10 +156,9 @@ cancellation behavior.
 
 ## Deleting run data
 
-`workflow.DeleteRuns` deletes the data of up to 100 finished runs, as the
-Workflow SDK's `deleteRuns` does: their inputs, outputs and errors, the
-payloads of their steps, events and hooks, and their streams' chunks. It
-cannot be undone.
+`workflow.DeleteRuns` deletes the data of up to 100 finished runs: their
+inputs, outputs and errors, the payloads of their steps, events and hooks, and
+their streams' chunks. It cannot be undone.
 
 ```go
 result, err := workflow.DeleteRuns(ctx, runA.ID(), runB.ID())

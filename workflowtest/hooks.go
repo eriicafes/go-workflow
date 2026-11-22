@@ -83,7 +83,7 @@ func conformHookTokens(t *testing.T, world worlds.World) {
 	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: token})
 	conformExpectType[*worlds.HookNotFoundError](t, err, "disposed token")
-	// A disposed hook is deleted, as the Workflow SDK's Worlds delete it.
+	// A disposed hook is deleted.
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_a"})
 	conformExpectType[*worlds.HookNotFoundError](t, err, "disposed hook")
 	if hooks, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(hooks.Data) != 1 || hooks.Data[0].HookID != "hook_c" {
@@ -150,8 +150,7 @@ func conformHooksForce(t *testing.T, world worlds.World) {
 	}
 
 	// A claim of a token a finished run retains names that run without its
-	// workflow, so nothing wakes it, and records nothing in its log, as in
-	// the Workflow SDK's Worlds.
+	// workflow, so nothing wakes it, and records nothing in its log.
 	retained := fmt.Sprintf("force-retained-%d", time.Now().UnixNano())
 	finished := conformCreateRun(t, world, "force_finished")
 	conformAppend(t, world, finished, worlds.EventTypeHookCreated, "hook_finished", conformHookData(retained, false, time.Hour))
@@ -209,7 +208,7 @@ func conformHooksRetention(t *testing.T, world worlds.World) {
 	_, err = world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: retained})
 	conformExpectType[*worlds.HookNotFoundError](t, err, "expired retained token")
 	// A finished run's hook is not read once its retention lapsed, by ID or
-	// in a list, as in the Workflow SDK's Worlds.
+	// in a list.
 	_, err = world.HooksGet(ctx, worlds.HooksGetInput{HookID: "hook_retained"})
 	conformExpectType[*worlds.HookNotFoundError](t, err, "hook of an expired retained token")
 	if page, err := world.HooksList(ctx, worlds.HooksListInput{RunID: runID}); err != nil || len(page.Data) != 0 {
@@ -271,7 +270,7 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 
 	conformAppend(t, world, runID, worlds.EventTypeHookDisposed, "hook_a", nil)
 	// A disposed hook is gone, so a repeated disposal or a late delivery
-	// finds no hook, as in the Workflow SDK's Worlds.
+	// finds no hook.
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookDisposed, "hook_a", nil)})
 	conformExpectType[*worlds.HookNotFoundError](t, err, "repeated hook_disposed")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: conformEvent(t, worlds.EventTypeHookReceived, "hook_a", conformReceived(t, []byte("late")))})
@@ -366,8 +365,8 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 	if err != nil || repeat.AllocatedEventCount != 0 || repeat.EventID != first.EventID {
 		t.Fatalf("repeated resume = %+v err = %v, want the first resume's event", repeat, err)
 	}
-	// A resume ID names one resume of one hook: world-local refuses another
-	// with EntityConflictError, and world-postgres as invalid.
+	// A resume ID names one resume of one hook: the local World refuses
+	// another as a conflict, and the Postgres World as invalid.
 	_, err = resume("resume_a", `"two"`)
 	conformExpectRefusedResume(t, err, "a resume repeated with another payload")
 	conformAppend(t, world, runID, worlds.EventTypeHookCreated, "hook_other", conformHookData("other:"+string(runID), false, 0))
@@ -375,7 +374,7 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_other", Data: other},
 		Options: worlds.EventsCreateOptions{ResumeID: "resume_a", ResumePayloadDigest: worlds.ResumeDigest([]byte(`"one"`))}})
 	conformExpectRefusedResume(t, err, "a resume repeated for another hook")
-	// A resume's digest is its payload's, as world-postgres checks it.
+	// A resume's digest must be its payload's.
 	mismatched, _ := worlds.EncodeHookReceived([]byte(`"three"`), "conformance")
 	_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeHookReceived, CorrelationID: "hook_resume", Data: mismatched},
 		Options: worlds.EventsCreateOptions{ResumeID: "resume_c", ResumePayloadDigest: worlds.ResumeDigest([]byte(`"four"`))}})
@@ -444,8 +443,7 @@ func conformStartHookDecisions(t *testing.T, world worlds.World) {
 		t.Fatalf("refused candidate has a run: %v", err)
 	}
 	// A refused candidate's ID with another token, and an ordinary run's ID
-	// with a start hook, are refused for good, as the Workflow SDK's Worlds
-	// refuse them.
+	// with a start hook, are refused for good.
 	_, err = world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: refused, WorkflowName: "conformance", StartHook: &worlds.StartHook{Token: token + "-other"}})
 	conformExpect(t, err, worlds.ErrStartHookRejected, "a refused candidate with another token")
 	ordinary := conformCreateRun(t, world, "start_hook_ordinary")
@@ -460,8 +458,8 @@ func conformStartHookDecisions(t *testing.T, world worlds.World) {
 }
 
 // conformExpectRefusedResume checks the refusal of a resume ID repeated with
-// another hook or payload: ErrEntityConflict, as world-local refuses it, or
-// ErrEventInvalid, as world-postgres does.
+// another hook or payload: ErrEntityConflict, as the local World refuses
+// it, or ErrEventInvalid, as the Postgres World does.
 func conformExpectRefusedResume(t *testing.T, err error, label string) {
 	t.Helper()
 	if !errors.Is(err, worlds.ErrEntityConflict) && !errors.Is(err, worlds.ErrEventInvalid) {

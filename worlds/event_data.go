@@ -11,8 +11,8 @@ import (
 )
 
 // The local and Postgres Worlds store an event's Data as CBOR rather than
-// JSON: payload fields become raw byte strings instead of base64, and the
-// SDK's serialized payload bytes are kept as they are. The encoding is this
+// JSON: payload fields become raw byte strings instead of base64, and
+// serialized payload bytes are kept as they are. The encoding is this
 // package's own, and no JavaScript World reads it.
 //
 // Data that decodes strictly into its event type's Data struct is stored as

@@ -130,7 +130,7 @@ func decodeCursor(cursor string) (time.Time, string, error) {
 }
 
 // keysetPage trims the extra row fetched by query.limit and sets the cursor
-// from the last returned row, on the last page too, as world-postgres does.
+// from the last returned row, on the last page too.
 func keysetPage[T any](values []T, limit int, key func(T) (time.Time, string)) worlds.Page[T] {
 	page := worlds.Page[T]{Data: values}
 	if limit > 0 && len(values) > limit {

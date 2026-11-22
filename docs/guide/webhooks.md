@@ -1,8 +1,7 @@
 # Webhooks
 
-A webhook lets a workflow wait for HTTP requests, as the Workflow SDK's
-`createWebhook` does. Create it, share its URL with the producer, and wait for
-a request:
+A webhook lets a workflow wait for HTTP requests. Create it, share its URL with
+the producer, and wait for a request:
 
 ```go
 webhook, err := workflow.CreateWebhook[Payment](ctx)
@@ -28,9 +27,8 @@ if err != nil {
 return Output{PaymentID: payment.ID}, nil
 ```
 
-`Request` returns the next request as a `WebhookRequest`, the SDK's
-`Request`: its `Method`, `URL`, and `Header` are recorded with it, and its
-body is a stream of the run. Reading the body is I/O, so `Body` and `JSON` are
+`Request` returns the next request as a `WebhookRequest`: its `Method`, `URL`,
+and `Header` are recorded with it, and its body is a stream of the run. Reading the body is I/O, so `Body` and `JSON` are
 step-only. Pass the request to a step, which can also verify a signature:
 
 ```go

@@ -15,8 +15,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// The Vercel World pushes a run's events over the backend's events socket,
-// as world-vercel's live feed does. On the run's socket the client sends
+// The Vercel World pushes a run's events over the backend's events socket.
+// On the run's socket the client sends
 //
 //	{reqId, type: "subscribe", afterSlot}
 //

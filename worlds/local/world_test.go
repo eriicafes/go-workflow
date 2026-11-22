@@ -257,8 +257,8 @@ func TestZeroRetentionPurgesWithTheRunsEnd(t *testing.T) {
 	if err != nil || len(chunks.Data) != 0 || !chunks.Done {
 		t.Fatalf("chunks = %+v, err=%v", chunks, err)
 	}
-	// A purged run's new stream is closed as it is first written, as
-	// world-local closes it, and holds nothing.
+	// A purged run's new stream is closed as it is first written, and holds
+	// nothing.
 	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: "new", Chunk: []byte("x")}); err != nil {
 		t.Fatalf("write to a purged run = %v", err)
 	}
@@ -303,7 +303,7 @@ func TestTagIsolation(t *testing.T) {
 		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: id, WorkflowName: "tags"}); err != nil {
 			t.Fatal(err)
 		}
-		// A stream name carries its run, as the Workflow SDK names streams.
+		// A stream name carries its run.
 		if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: id, Name: worlds.UserStreamName(id, "out"), Chunk: []byte("x")}); err != nil {
 			t.Fatal(err)
 		}
@@ -328,7 +328,7 @@ func TestTagIsolation(t *testing.T) {
 			if _, err := check.world.RunsGet(ctx, worlds.RunsGetInput{RunID: id}); !errors.Is(err, worlds.ErrRunNotFound) {
 				t.Fatalf("hidden run %s = %v", id, err)
 			}
-			// A run's events are read whatever its tag, as in world-local.
+			// A run's events are read whatever its tag.
 			if page, err := check.world.EventsList(ctx, worlds.EventsListInput{RunID: id}); err != nil || len(page.Data) != 1 {
 				t.Fatalf("hidden run %s events = %+v err=%v", id, page, err)
 			}
@@ -437,7 +437,7 @@ func TestClear(t *testing.T) {
 	if count := queryInt(t, dir, "SELECT count(*) FROM runs") + queryInt(t, dir, "SELECT count(*) FROM events"); count != 0 {
 		t.Fatalf("Clear left %d rows", count)
 	}
-	// The World stays open, as world-local's clear() leaves it.
+	// The World stays open.
 	if _, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: runClear}); !errors.Is(err, worlds.ErrRunNotFound) {
 		t.Fatalf("run after Clear = %v", err)
 	}

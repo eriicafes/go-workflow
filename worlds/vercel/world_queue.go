@@ -31,8 +31,7 @@ func setRequestID(ctx context.Context, meta map[string]any) {
 // World keeps no record of queued work.
 type queueMessage struct {
 	// ID marks the payload as one this World published. A delivery's
-	// MessageID is Vercel Queues' own message ID, as the Workflow SDK's
-	// World delivers it, not this.
+	// MessageID is Vercel Queues' own message ID, not this.
 	ID                           string                 `json:"id"`
 	QueueName                    string                 `json:"queueName,omitempty"`
 	RunID                        worlds.RunID           `json:"runId"`
@@ -56,7 +55,7 @@ type queueMessage struct {
 }
 
 // queueRunInput is a first delivery's RunInput in a queueMessage: the run's
-// creation, as the Workflow SDK's runInput carries it.
+// creation.
 type queueRunInput struct {
 	WorkflowName        string            `json:"workflowName"`
 	DeploymentID        string            `json:"deploymentId,omitempty"`
@@ -144,7 +143,7 @@ func (message queueMessage) input() worlds.QueueInput {
 // Vercel cannot find that deployment's consumer. Its result carries the
 // message ID Vercel Queues gave the message, which a delivery of it carries
 // too, and is empty when Vercel Queues failed over to another region that
-// cannot name it, as the Workflow SDK's World returns null.
+// cannot name it.
 func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.QueueResult, error) {
 	if err := ctx.Err(); err != nil {
 		return worlds.QueueResult{}, err

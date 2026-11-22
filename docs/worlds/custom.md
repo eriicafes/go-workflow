@@ -36,32 +36,28 @@ type World interface {
 
 - **Atomic admission.** `EventsCreate` must check the transition rules and
   append in one atomic operation. A finished run refuses events as
-  `worlds.FinishedRunRefusal` says, as the Workflow SDK's Worlds do: a
-  transition or a new step, wait, hook, or attribute with `ErrEntityConflict`
-  (also matching a `*RunExpiredError`), another attempt or the result of a step
-  that is not running with a `*RunExpiredError`, and a `wait_completed` with
-  `ErrEventNotFound`. It still records a running step's result or retry. A
-  `wait_completed` needs its `wait_created`. Check step events with
-  `worlds.CheckStepEvent`: a step event needs its unfinished step, except an
-  inline step's first `step_started` (`worlds.StartCreatesStep`), and a
-  `step_started` before its retry is due gets a `*worlds.TooEarlyError`.
-  Check a new run with `worlds.CheckRunCreation` (its ID's ULID and time, and
-  its attributes), an `attr_set` with `worlds.CheckAttrSet`, and a resume's
-  digest with `worlds.CheckResumeDigest`, as the Workflow SDK's Worlds check
-  them.
+  `worlds.FinishedRunRefusal` says: a transition or a new step, wait, hook, or
+  attribute with `ErrEntityConflict` (also matching a `*RunExpiredError`),
+  another attempt or the result of a step that is not running with a
+  `*RunExpiredError`, and a `wait_completed` with `ErrEventNotFound`. It still
+  records a running step's result or retry. A `wait_completed` needs its
+  `wait_created`. Check step events with `worlds.CheckStepEvent`: a step event
+  needs its unfinished step, except an inline step's first `step_started`
+  (`worlds.StartCreatesStep`), and a `step_started` before its retry is due gets
+  a `*worlds.TooEarlyError`. Check a new run with `worlds.CheckRunCreation` (its
+  ID's ULID and time, and its attributes), an `attr_set` with
+  `worlds.CheckAttrSet`, and a resume's digest with `worlds.CheckResumeDigest`.
 - **Batches.** `EventsCreateBatch` refuses the whole batch only for an
   invalid event, a missing run, or a stale fence. Otherwise each event gets
   its own outcome in `Results`, and once one is refused, every later event
   of the batch with the same correlation ID is refused too.
-- **Refused repeats.** Refuse an event that repeats a creation the log holds,
-  a second `step_created`, `wait_created`, `wait_completed`, `hook_created`,
+- **Refused repeats.** Refuse an event that repeats a creation the log holds, a
+  second `step_created`, `wait_created`, `wait_completed`, `hook_created`,
   inline step creation, or workflow `attr_set` of one correlation ID, with
-  `ErrEntityConflict`, as the Workflow SDK's Worlds refuse it with
-  `EntityConflictError`. The runtime then reads the log. Answer a
-  `run_started` of a running run with no event and nothing appended (or
-  `ErrEntityConflict`), and append a `run_cancelled` of a cancelled run
-  without changing it. A `step_started` for a started step is not a repeat:
-  it appends a new attempt.
+  `ErrEntityConflict`. The runtime then reads the log. Answer a `run_started` of
+  a running run with no event and nothing appended (or `ErrEntityConflict`), and
+  append a `run_cancelled` of a cancelled run without changing it. A
+  `step_started` for a started step is not a repeat: it appends a new attempt.
 - **One copy of each payload.** The built-in Worlds keep run, step, and hook
   payloads only in their events. Their views store the slot of the event that
   holds each one, and reads decode it with `worlds.EventPayload`. A payload
@@ -70,12 +66,11 @@ type World interface {
   active hook, and with `Force` take it over and append `hook_disposed` with
   `ForceClaimedBy` to the previous owner's run. `hook_disposed` and
   `hook_received` need a hook of the same run (`*HookNotFoundError`).
-- **Hooks end.** A disposed hook is deleted, as the Workflow SDK's Worlds
-  delete it, and so is a finished run's hook once its token retention ends:
-  `HooksGet` returns a `*HookNotFoundError` and `HooksList` leaves it out, and a
-  repeated `hook_disposed` returns a `*HookNotFoundError`. Remember a forced
-  claim's disposal, so a `hook_received` for a force-claimed hook returns
-  `*HookForceClaimedError`.
+- **Hooks end.** A disposed hook is deleted, and so is a finished run's hook
+  once its token retention ends: `HooksGet` returns a `*HookNotFoundError` and
+  `HooksList` leaves it out, and a repeated `hook_disposed` returns a
+  `*HookNotFoundError`. Remember a forced claim's disposal, so a `hook_received`
+  for a force-claimed hook returns `*HookForceClaimedError`.
 - **Start hooks.** With `Capabilities().StartHook`, `EventsCreateRun`
   creates `EventsCreateRunInput.StartHook` with the run, as hook
   `worlds.StartHookID(runID)`, or creates nothing and returns a

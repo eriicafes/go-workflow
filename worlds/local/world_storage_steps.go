@@ -6,8 +6,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// StepsGet and StepsList read a run's steps whatever its tag, as world-local
-// scopes only runs by tag.
+// StepsGet and StepsList read a run's steps whatever its tag: only runs are
+// scoped by tag.
 func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (worlds.Step, error) {
 	var step worlds.Step
 	err := w.read(ctx, func(s *store) error {
@@ -25,7 +25,6 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 }
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderDescending, 20)
 	var page worlds.Page[worlds.Step]
 	err := w.read(ctx, func(s *store) error {

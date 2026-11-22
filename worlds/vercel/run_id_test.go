@@ -7,7 +7,7 @@ import (
 )
 
 func TestRunIDsMatchWorldVercel(t *testing.T) {
-	// Expected IDs are from world-vercel's run-id encode.
+	// The expected IDs are what the Workflow SDK's Vercel World encodes.
 	for _, test := range []struct {
 		ulid   string
 		region worlds.Region

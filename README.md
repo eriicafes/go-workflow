@@ -1,6 +1,6 @@
 # go-workflow
 
-go-workflow is a durable workflow library for Go, inspired by the
+go-workflow is the Go implementation of the
 [Workflow SDK](https://workflow-sdk.dev). Workflows are Go functions whose
 progress is persisted step by step. A run can suspend on a timer or a hook
 without holding a process and resumes when it can continue. Runs can be

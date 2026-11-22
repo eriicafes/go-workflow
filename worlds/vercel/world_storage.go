@@ -19,8 +19,8 @@ type listResponse struct {
 	HasMore bool             `cbor:"hasMore" json:"hasMore"`
 }
 
-// cursor returns the backend's cursor, which the Workflow SDK's World passes
-// on even on the last page, or "" when it sent none.
+// cursor returns the backend's cursor, passed on even on the last page, or
+// "" when it sent none.
 func (page listResponse) cursor() string {
 	if page.Cursor == nil {
 		return ""
@@ -29,8 +29,7 @@ func (page listResponse) cursor() string {
 }
 
 // entityQuery maps a Pagination and ResolveData to entity list parameters.
-// An unset limit or order is left to the backend's defaults, as world-vercel
-// leaves them.
+// An unset limit or order is left to the backend's defaults.
 func entityQuery(pagination worlds.Pagination, resolve worlds.ResolveData) url.Values {
 	query := url.Values{}
 	if pagination.Limit > 0 {
@@ -144,8 +143,7 @@ func toWait(values map[string]any) *worlds.Wait {
 }
 
 // hookResumeDedupVersion is the version of the backend's resume
-// deduplication this World sends resume IDs for (@workflow/world
-// HOOK_RESUME_DEDUP_VERSION).
+// deduplication this World sends resume IDs for.
 const hookResumeDedupVersion = 1
 
 // toHook returns the go-workflow view of a backend hook.
@@ -202,13 +200,13 @@ func (w *World) getRun(ctx context.Context, runID worlds.RunID, resolve worlds.R
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
-	// An empty status filter matches no runs, as in the Workflow SDK's
-	// Worlds (status: []). A nil one matches every status.
+	// An empty status filter matches no runs. A nil one matches every
+	// status.
 	if input.Status != nil && len(input.Status) == 0 {
 		return worlds.Page[worlds.Run]{Data: []worlds.Run{}}, nil
 	}
 	if len(input.Status) > 1 {
-		// The backend filters by one status, so world-vercel refuses more.
+		// The backend filters by one status, so more are refused.
 		return worlds.Page[worlds.Run]{}, fmt.Errorf("%w: the Vercel backend filters runs by one status", worlds.ErrEventInvalid)
 	}
 	var status worlds.Status
@@ -312,8 +310,7 @@ func (w *World) StepsGet(ctx context.Context, input worlds.StepsGetInput) (world
 
 func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (worlds.Page[worlds.Step], error) {
 	var page listResponse
-	// A 404 is returned as it is, as the Workflow SDK's World lets it
-	// through.
+	// A 404 is returned as it is.
 	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(input.RunID))+"/steps", entityQuery(input.Pagination, input.ResolveData), nil, &page); err != nil {
 		return worlds.Page[worlds.Step]{}, err
 	}

@@ -74,15 +74,14 @@ When a flow replays past a step's declaration, it queues the step's delivery
 again if the step hasn't started since it was declared or last scheduled for a
 retry, in case a crash or queue error lost the first one. This covers steps
 started with `Background` that nothing awaits. The re-queue uses the step ID as
-its idempotency key, or the retry's key for a step scheduled for a retry. A step waiting for a retry that isn't due yet is
-left alone until its queued retry is due. Once that time has passed
-without a start, it is re-queued like any unstarted step. Steps declared in the
-same replay are skipped, and inline steps never need it. If the re-queue fails,
-the flow delivery fails so the queue retries it. Local and Postgres drop the
-duplicate while the original delivery is still queued. AWS and Vercel don't
-deduplicate, so a step waiting to start may be delivered twice, which its
-at-least-once contract already allows. The Workflow SDK re-ensures pending
-steps on replay the same way.
+its idempotency key, or the retry's key for a step scheduled for a retry. A step
+waiting for a retry that isn't due yet is left alone until its queued retry is
+due. Once that time has passed without a start, it is re-queued like any
+unstarted step. Steps declared in the same replay are skipped, and inline steps
+never need it. If the re-queue fails, the flow delivery fails so the queue
+retries it. Local and Postgres drop the duplicate while the original delivery is
+still queued. AWS and Vercel don't deduplicate, so a step waiting to start may
+be delivered twice, which its at-least-once contract already allows.
 
 Timers settle the same way: a flow that replays past a timer's declaration
 once it is due completes it. `WithTimeout` and `WithDeadline` use normal timers
@@ -161,7 +160,7 @@ runID)` returns a delivery addressed that way.
 | `RunsList` | Runs filtered by `WorkflowName` and `Status`, paginated. |
 | `RunsWaitForTerminalStatus` | Blocks until the run is terminal, `Timeout` elapses, or `ctx` is done. |
 | `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
-| `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs, as the Workflow SDK's `runs.deleteDataMany`: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
+| `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
 | `StepsGet`, `StepsList` | Step views of a run. |
 | `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. The run ID and attributes are checked as `CheckRunCreation` says. `ErrRunAlreadyExists` if it exists, except a repeat of a start whose start hook was accepted, which returns its `run_created`. A start hook's decision is permanent for the run ID: a refused candidate keeps returning the same `*HookConflictError`, and one older than `StartHookCandidateMaxAge` gets `ErrStartHookRejected`. |
 | `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
@@ -191,15 +190,14 @@ attempts. A repeat with a different payload is refused with `ErrEventInvalid`.
 
 Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
 
-Lists take a `Pagination` with `Cursor`, `Limit`, and `SortOrder`, and return
-a `Page` with `Data`, `Cursor`, and `HasMore`. Unset fields take the list's
-defaults, as the Workflow SDK's Worlds do: runs and steps list newest first,
-hooks and events oldest first, and a zero `Limit` is the World's default page
-size (the local, AWS, and test Worlds use world-local's, 200 runs and 20
-steps or hooks, and the Postgres World world-postgres's, 20 runs and steps and
-100 hooks; an event list holds up to `MaxEventsPerRun`). A negative `Limit`
-reads every remaining item. `ResolveData` selects whether payloads
-(inputs, outputs, hook metadata) are returned.
+Lists take a `Pagination` with `Cursor`, `Limit`, and `SortOrder`, and return a
+`Page` with `Data`, `Cursor`, and `HasMore`. Unset fields take the list's
+defaults: runs and steps list newest first, hooks and events oldest first, and a
+zero `Limit` is the World's default page size (200 runs and 20 steps or hooks in
+the local, AWS, and test Worlds, and 20 runs and steps and 100 hooks in the
+Postgres World; an event list holds up to `MaxEventsPerRun`). A negative `Limit`
+reads every remaining item. `ResolveData` selects whether payloads (inputs,
+outputs, hook metadata) are returned.
 
 ### Views
 
@@ -323,18 +321,19 @@ type QueueInput struct {
 ```
 
 Delivery is at least once, and a queued delivery cannot be cancelled: one that
-is no longer needed only replays its run. A message with an `IdempotencyKey`
-is stored once while it lives, for at least `MinDeduplicationWindow`.
+is no longer needed only replays its run. A message with an `IdempotencyKey` is
+stored once while it lives, for at least `MinDeduplicationWindow`.
 `Runtime.Execute` returns a `*Redelivery` to ask for the same message again
 after `After`: zero is a handoff, which does not count as an attempt. A World
 delivers one flow of a run at a time (`QueueInput.SerializedFlow`), and
-`Capabilities().MaxQueueDelay` is the furthest `NotBefore` its queue accepts: the runtime reaches a later timer in
-hops anchored on its deadline, keyed `wait:<id>:<resumeAtMs>:<hopAtMs>`. A World sets `Attempt` from its
-backend's delivery count, and the Runtime gives up on a delivery past
-`MaxDeliveries` (48) attempts, as the Workflow SDK does: a flow delivery fails
-its run, and a step delivery fails its step, both with
-`ErrMaxDeliveriesExceeded`. A World with deployment affinity returns an error wrapping
-`ErrDeploymentUnavailable` when the addressed deployment no longer exists.
+`Capabilities().MaxQueueDelay` is the furthest `NotBefore` its queue accepts:
+the runtime reaches a later timer in hops anchored on its deadline, keyed
+`wait:<id>:<resumeAtMs>:<hopAtMs>`. A World sets `Attempt` from its backend's
+delivery count, and the Runtime gives up on a delivery past `MaxDeliveries` (48)
+attempts: a flow delivery fails its run, and a step delivery fails its step,
+both with `ErrMaxDeliveriesExceeded`. A World with deployment affinity returns
+an error wrapping `ErrDeploymentUnavailable` when the addressed deployment no
+longer exists.
 
 ### Routing
 
@@ -375,17 +374,17 @@ is negative, for validating a configuration.
 
 | Method | Description |
 | --- | --- |
-| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. A closed stream, or one of a run whose data was deleted, drops them, as world-local does, or refuses them with `ErrStreamClosed`, as Vercel's backend does. |
+| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. A closed stream, or one of a run whose data was deleted, drops them, or, in the Vercel World, refuses them with `ErrStreamClosed`. |
 | `StreamsClose` | Marks a stream done for every writer. Closing it again does nothing. |
 | `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
 | `StreamsGetInfo` | Tail index and whether the stream is done. |
 | `StreamsList` | Stream names of a run. |
 
-Streams have no exclusive writers, as in the Workflow SDK: any number of
-writers append to a stream at once and their chunks interleave.
-`OpenStreamWriter` returns a `StreamWriter` for one writer, through the
-optional `StreamWriterOpener` interface when the World implements it, and otherwise
-through `StreamsWriteMulti` and `StreamsClose`:
+Streams have no exclusive writers: any number of writers append to a stream at
+once and their chunks interleave. `OpenStreamWriter` returns a `StreamWriter`
+for one writer, through the optional `StreamWriterOpener` interface when the
+World implements it, and otherwise through `StreamsWriteMulti` and
+`StreamsClose`:
 
 ```go
 type StreamWriterOpener interface {
@@ -430,7 +429,7 @@ own without their payloads:
 A World returns it only when `Capabilities().Analytics` is true.
 `worlds.LogAnalytics` implements the steps, events, hooks, and waits from a
 World's storage reads, for a World to embed. A time window takes both
-`StartTime` and `EndTime` or neither, as the Workflow SDK's analytics do.
+`StartTime` and `EndTime` or neither.
 
 ## Client
 
@@ -510,17 +509,16 @@ func NewRunKeys(runKey []byte) (*RunKeys, error)
 func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error)
 ```
 
-Payloads use the Workflow SDK's format: devalue text labelled `devl`,
-optionally compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
+Payloads use the Workflow SDK's format: devalue text labelled `devl`, optionally
+compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
 [Data Format and Encryption](/guide/encryption). `EncryptionKeys` is the
-optional World interface the SDK calls `getEncryptionKeyForRun`. A World that
-takes a `Config.EncryptionKey` returns `DeriveRunKey(key, scope, runID)`, with
-its `Config.EncryptionScope` as the scope.
-`RunKeysFor` resolves and caches a run's keys. `EncodeStreamFrame` and
-`SplitStreamFrames` write and read stream frames, and `PayloadMarshaler` and
-`PayloadUnmarshaler` let a type choose its encoding, as `WebhookRequest`,
-`WebhookResponse`, and `WebhookMetadata` do to be the SDK's `Request`,
-`Response`, and `{respondWith}`.
+optional World interface that returns a run's encryption key. A World that takes
+a `Config.EncryptionKey` returns `DeriveRunKey(key, scope, runID)`, with its
+`Config.EncryptionScope` as the scope. `RunKeysFor` resolves and caches a run's
+keys. `EncodeStreamFrame` and `SplitStreamFrames` write and read stream frames,
+and `PayloadMarshaler` and `PayloadUnmarshaler` let a type choose its encoding,
+as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata` do to be the SDK's
+`Request`, `Response`, and `{respondWith}`.
 
 ## Durable primitives
 

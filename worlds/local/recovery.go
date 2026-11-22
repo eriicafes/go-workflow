@@ -19,12 +19,12 @@ var bootedAt = time.Now()
 const orphanedStepMessage = "The process running this step exited before it finished."
 
 // maxBackstopDelay is the furthest wait a recovered run's backstop wake is
-// queued for, as world-local's longest timer. A later wait is re-armed by
-// the run's recovery flow alone.
+// queued for, the longest timer delay. A later wait is re-armed by the run's
+// recovery flow alone.
 const maxBackstopDelay = 2147483647 * time.Millisecond
 
-// recoverActiveRuns queues every active run of the World's own tag again,
-// as world-local's start() does: the queue is in memory, so a restart lost
+// recoverActiveRuns queues every active run of the World's own tag again:
+// the queue is in memory, so a restart lost
 // every message a run had queued. A run's steps that were running inline in
 // a previous process are released first, its recovery flow sends again its
 // step messages and wait timers, and each of its open waits due within the
@@ -84,11 +84,11 @@ type stepOwnership struct {
 }
 
 // releaseOrphanedSteps hands every step that a previous process was running
-// inline back to the queue by recording step_retrying for it, as
-// world-local's orphaned-steps.js does: the flow that owned it is gone, and
-// a recovery flow sends a step delivery only for a step that was retried. A
-// step is released only while it is running, was created inline, has no
-// step_retrying or result, and was last started before this process loaded.
+// inline back to the queue by recording step_retrying for it: the flow that
+// owned it is gone, and a recovery flow sends a step delivery only for a
+// step that was retried. A step is released only while it is running, was
+// created inline, has no step_retrying or result, and was last started
+// before this process loaded.
 func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) error {
 	var run runRecord
 	var running []worlds.StepID

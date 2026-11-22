@@ -64,9 +64,8 @@ disposal releases the token immediately. Use an intentional lifecycle instead.
 registers a random public token. Webhooks expose `Request(ctx)`, not `Next` or
 `GetConflict`. Their absolute URL uses the World's public BaseURL.
 
-A webhook takes any number of requests, as in the Workflow SDK; call
-`Request(ctx)` again for the next. It returns a `*WebhookRequest[T]`, the SDK's
-`Request`, with `Method`, `URL`, and `Header`. Its body is a stream of the run,
+A webhook takes any number of requests; call `Request(ctx)` again for the
+next. It returns a `*WebhookRequest[T]` with `Method`, `URL`, and `Header`. Its body is a stream of the run,
 so `Body(ctx)` and `JSON(ctx)` are step-only: pass the request into a step,
 which is also where signature verification belongs. It is serializable as a
 step input, including as a struct field.

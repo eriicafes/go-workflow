@@ -22,7 +22,7 @@ recorded results instead of running again. The run resumes where it left off.
 
 ## Two contexts
 
-A run executes in one of two contexts, as in the Workflow SDK.
+A run executes in one of two contexts.
 
 - In **workflow context**, the runner's own code executes as a *flow*. The flow
   replays the runner from the beginning, records the operations it starts

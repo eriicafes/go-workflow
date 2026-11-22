@@ -254,22 +254,22 @@ type (
 		// first item.
 		Cursor string
 		// Limit is the maximum number of items to return. Zero uses the
-		// list's default page size, as the Workflow SDK's Worlds do, and a
-		// negative Limit requests every remaining item, though a World may
-		// still return fewer and set HasMore.
+		// list's default page size, and a negative Limit requests every
+		// remaining item, though a World may still return fewer and set
+		// HasMore.
 		Limit int
 		// SortOrder is the order of the list. Empty uses the list's
 		// default: newest first for runs and steps, oldest first for hooks
-		// and events, as the Workflow SDK's Worlds order them.
+		// and events.
 		SortOrder SortOrder
 	}
 	// Page is one page of a list.
 	Page[T any] struct {
 		Data []T
 		// Cursor continues the list after this page when passed back in
-		// Pagination. The last page has one too, as in the Workflow SDK's
-		// Worlds, so a reader that reached the end can later read what was
-		// added after it; an empty page may have none.
+		// Pagination. The last page has one too, so a reader that reached
+		// the end can later read what was added after it; an empty page may
+		// have none.
 		Cursor string
 		// HasMore reports whether items remain after this page.
 		HasMore bool
@@ -319,11 +319,11 @@ func StartQueueInput(input EventsCreateRunInput) QueueInput {
 	return QueueInput{RunID: input.RunID, WorkflowName: input.WorkflowName, IdempotencyKey: string(input.RunID), DeploymentID: input.DeploymentID, RunSpecVersion: SpecVersion, RunInput: &run}
 }
 
-// StartRun creates the run input describes and queues its first delivery at the
-// same time, as the Workflow SDK's start does. A failure to queue fails the
-// start. A creation that fails retryably does not: the queued flow's
-// run_started creates the run. Nor does a run that exists already, which the
-// queued flow's run_started may have created first.
+// StartRun creates the run input describes and queues its first delivery at
+// the same time. A failure to queue fails the start. A creation that fails
+// retryably does not: the queued flow's run_started creates the run. Nor does
+// a run that exists already, which the queued flow's run_started may have
+// created first.
 func StartRun(ctx context.Context, world World, input EventsCreateRunInput) error {
 	created := make(chan error, 1)
 	go func() {
@@ -604,8 +604,7 @@ func RunIDTime(id RunID) (time.Time, bool) {
 	return time.UnixMilli(int64(value.Time())).UTC(), true
 }
 
-// MaxEventsPerRun is the default page size of a run's event list, as the
-// Workflow SDK's getMaxEventsPerRun.
+// MaxEventsPerRun is the default page size of a run's event list.
 const MaxEventsPerRun = 25_000
 
 // WithDefaults returns pagination with a list's defaults where it leaves

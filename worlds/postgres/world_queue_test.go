@@ -314,11 +314,11 @@ func queueRows(t *testing.T, world *World) int {
 }
 
 // TestRedeliveryCountsAttemptsAsWorldPostgres checks Attempt across
-// redeliveries and failures, as world-postgres counts it: a spec 9 handoff
-// keeps it, a spec 9 flow's delayed redelivery counts, a failure counts, and
-// any other redelivery, as a step's in-place retry, starts it over from where
-// the message's job started it (after a handoff, the attempt it carried).
-// DeliveryCount counts every delivery.
+// redeliveries and failures: a spec 9 handoff keeps it, a spec 9 flow's
+// delayed redelivery counts, a failure counts, and any other redelivery, as a
+// step's in-place retry, starts it over from where the message's job started
+// it (after a handoff, the attempt it carried). DeliveryCount counts every
+// delivery.
 func TestRedeliveryCountsAttemptsAsWorldPostgres(t *testing.T) {
 	t.Parallel()
 	failed := errors.New("failed")
@@ -375,9 +375,8 @@ func TestRedeliveryCountsAttemptsAsWorldPostgres(t *testing.T) {
 }
 
 // TestFailedDeliveryIsDroppedAfterTheJobsAttempts checks a message whose job
-// failed maxJobAttempts deliveries is deleted, as Graphile Worker stops
-// retrying a job past its max_attempts, that a crashed delivery counts, and
-// that a Redelivery starts a new job with its own attempts.
+// failed maxJobAttempts deliveries is deleted, that a crashed delivery
+// counts, and that a Redelivery starts a new job with its own attempts.
 func TestFailedDeliveryIsDroppedAfterTheJobsAttempts(t *testing.T) {
 	t.Parallel()
 	failed := errors.New("failed")

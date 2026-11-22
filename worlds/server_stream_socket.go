@@ -18,7 +18,7 @@ import (
 )
 
 // Stream writes can travel over a WebSocket held for a writer's lifetime, in
-// the Workflow SDK's v1 stream socket protocol. Every message is a frame:
+// the v1 stream socket protocol. Every message is a frame:
 //
 //	frame := u32_be(meta_len) || cbor(meta) || u32_be(body_len) || body
 //

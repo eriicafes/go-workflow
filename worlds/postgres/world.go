@@ -31,7 +31,7 @@ type Config struct {
 	// New. Empty uses WORKFLOW_POSTGRES_URL, or DATABASE_URL.
 	URL string
 	// Schema is the schema the World's tables live in, created when missing.
-	// Empty uses workflow, as world-postgres does.
+	// Empty uses workflow.
 	Schema string
 	// HookRetentionLimit caps a hook's token retention. Zero uses
 	// WORKFLOW_POSTGRES_HOOK_RETENTION_LIMIT_DAYS, or 30 days.
@@ -246,11 +246,10 @@ type WorkerOptions struct {
 // last options apply.
 //
 // The World's first Worker queues a flow for every active run first, unless
-// Config.SkipRecovery, as world-postgres's start() does when it runs
-// workers: a run whose process exited before it queued the run's delivery
-// resumes. Runs parked on a hook or a wait are left alone, and a run's
-// recovery flow is queued once while it lives, however many processes start.
-// A process that runs no Worker recovers nothing.
+// Config.SkipRecovery: a run whose process exited before it queued the run's
+// delivery resumes. Runs parked on a hook or a wait are left alone, and a
+// run's recovery flow is queued once while it lives, however many processes
+// start. A process that runs no Worker recovers nothing.
 func Worker(ctx context.Context, world *World, runners core.RunnerSet, options ...WorkerOptions) error {
 	var option WorkerOptions
 	if len(options) > 0 {

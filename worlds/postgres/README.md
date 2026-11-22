@@ -41,14 +41,13 @@ worker model, retention, and notifications.
 
 Go never shares a database with a JavaScript World, so the World keeps
 world-postgres's tables, columns, and channels except where they exist only
-for JavaScript, for its graphile-worker queue, or for data written by older
-releases:
+for JavaScript, for its queue, or for data written by older releases:
 
 - **Payloads are stored once, in the events.** The run, step, and hook rows
   name the slot of the event holding each payload, where world-postgres keeps
   CBOR copies in them. `payload_cbor` is Go's own CBOR with payloads as raw
   bytes, not cbor-x, and the deprecated `jsonb` columns are gone.
-- **The queue is Go's own `workflow_queue`.** There is no graphile-worker,
+- **The queue is Go's own `workflow_queue`.** There is no
   `workflow_run_delivery_leases`, `workflow_job_lock_holders`, `wake_pending`,
   or `job_prefix`. There are no invocation or snapshot tables and no
   `dynamic_workflow_code_cbor` column, since Go has no request/response
@@ -64,29 +63,26 @@ releases:
   writes, so a resume queues its delivery without reading the run. The empty
   `owner_id`, `project_id`, and `environment` columns, which world-postgres
   keeps for Vercel's accounts, are gone.
-- **Steps are keyed by run** as well as by step, as world-local keys them,
-  since a step ID is unique only within its run. Streams are keyed by name
-  alone, as in world-postgres: the run is stored with each chunk for
-  `StreamsList`.
+- **Steps are keyed by run** as well as by step, since a step ID is unique
+  only within its run. Streams are keyed by name alone, and the run is stored
+  with each chunk for `StreamsList`.
 - **A purge removes the payloads from each event's CBOR** and keeps the rest
   of its data, where world-postgres clears the whole column. It cuts each
-  stream to an `eof` row, as world-local does, where world-postgres keeps the
-  chunk rows with their data emptied.
+  stream to an `eof` row, where world-postgres keeps the chunk rows with their
+  data emptied.
 - **A `workflow_event_chunk` notification names its stream by a hash** of its
   name. Postgres refuses a notification of 8000 bytes or more, and a
   stream name has no length limit.
 - **A queue row counts its job's attempts** in its payload and its
-  `deliveries` and `handoffs` columns, where world-postgres adds a Graphile job
-  per redelivery with `attemptOffset` and `deliveryOffset`. `Attempt`,
-  `DeliveryCount`, and the 73 attempts of a job come out the same.
+  `deliveries` and `handoffs` columns, for `Attempt`, `DeliveryCount`, and the
+  73 attempts of a job.
 - **Startup recovery reads parked runs from the queue.** A due or leased flow
   of the run stands in for world-postgres's `wake_pending` and locked
   orchestrator jobs, and every run is recovered, as there is no `job_prefix`.
-  A recovery flow is deduplicated while its message lives, where Graphile
-  replaces an unlocked job with the same key.
+  A recovery flow is deduplicated while its message lives.
 - **It appends batches** (`EventsCreateBatch`), which world-postgres does
-  not: the SDK's `createBatch` is optional, but Go's runtime records a flow's
-  steps and timers in one fenced write.
+  not, since Go's runtime records a flow's steps and timers in one fenced
+  write.
 - **It serves analytics,** which world-postgres does not: runs and
   attributes from its tables, and steps, events, hooks, and waits from the
   event log.

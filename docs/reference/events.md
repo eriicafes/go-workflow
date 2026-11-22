@@ -135,11 +135,11 @@ when it occurred, which the World stores as its `CreatedAt`.
 
 ## Admission rules
 
-- A finished run refuses a transition or a new step, wait, hook, or
-  attribute with `ErrEntityConflict` (also matching a `*RunExpiredError`), another
-  attempt or the result of a step that is not running with a `*RunExpiredError`,
-  and a `wait_completed` with `ErrEventNotFound`, as the Workflow SDK's Worlds
-  do. It still records a running step's result or retry.
+- A finished run refuses a transition or a new step, wait, hook, or attribute
+  with `ErrEntityConflict` (also matching a `*RunExpiredError`), another attempt
+  or the result of a step that is not running with a `*RunExpiredError`, and a
+  `wait_completed` with `ErrEventNotFound`. It still records a running step's
+  result or retry.
 - A `wait_completed` needs its `wait_created` (`ErrEventNotFound`).
 - A step event needs its step (`ErrStepNotFound`), unfinished
   (`ErrEntityConflict`), except an inline step's first `step_started`, which
@@ -154,7 +154,7 @@ when it occurred, which the World stores as its `CreatedAt`.
   when `AllowReservedAttributes` is set.
 - A resume's `ResumePayloadDigest` must be its payload's (`ErrEventInvalid`).
 - `hook_disposed` only targets a hook of the same run (`*HookNotFoundError`), so
-  a repeated disposal is refused, as in the Workflow SDK's Worlds.
+  a repeated disposal is refused.
 - `hook_received` only targets an active hook of the same run that still owns
   its token (`*HookNotFoundError`, or `*HookForceClaimedError` after a forced claim).
   A hook, a webhook included, receives repeated payloads, consumed in order with `Next`.
@@ -162,9 +162,8 @@ when it occurred, which the World stores as its `CreatedAt`.
 - An event that repeats a creation the log holds, a second `step_created`,
   `wait_created`, `wait_completed`, `hook_created`, inline step creation, or
   workflow `attr_set` of one correlation ID, is refused with
-  `ErrEntityConflict`, as the Workflow SDK's Worlds refuse it. A `run_started`
-  of a running run appends nothing, and a `run_cancelled` of a cancelled run
-  is recorded and changes nothing.
+  `ErrEntityConflict`. A `run_started` of a running run appends nothing, and a
+  `run_cancelled` of a cancelled run is recorded and changes nothing.
 - A batch is fenced as one block, but not all-or-nothing: each event gets its
   own outcome, and once one is refused, every later event of the batch with
   the same correlation ID is refused too.

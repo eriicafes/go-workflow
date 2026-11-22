@@ -15,9 +15,8 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// The queue is a port of world-local's queue.js. It is in memory, as
-// world-local's is: a restart loses its messages, and Prepare queues the
-// active runs again.
+// The queue is in memory: a restart loses its messages, and Prepare queues
+// the active runs again.
 const (
 	// defaultConcurrency is how many deliveries execute at once.
 	defaultConcurrency = 1000

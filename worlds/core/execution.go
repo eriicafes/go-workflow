@@ -535,8 +535,7 @@ func (e *Execution) CreateEvent(event worlds.EventsCreateEvent, mapError func(er
 		case is[*worlds.InBandSupersededError](err):
 			e.supersede()
 		case errors.Is(err, worlds.ErrEntityConflict):
-			// Another writer recorded it, as the Workflow SDK's runtime
-			// takes an EntityConflictError: the log holds it now.
+			// Another writer recorded it: the log holds it now.
 			e.reload()
 			return worlds.EventResult{}
 		default:
@@ -1085,11 +1084,11 @@ type stepArgs[In any] struct {
 }
 
 // unserializableStepInputMarker is the argument the input placeholder of a
-// step whose input did not encode holds, as the Workflow SDK writes it.
+// step whose input did not encode holds.
 const unserializableStepInputMarker = "[input unavailable: step argument serialization failed]"
 
 // unserializableStepInputPlaceholder is the input a step whose input did not
-// encode is created with: the SDK's {args, closureVars} shape with its flag.
+// encode is created with: the {args, closureVars} shape with its flag.
 type unserializableStepInputPlaceholder struct {
 	Args        []string `json:"args"`
 	ClosureVars []any    `json:"closureVars"`

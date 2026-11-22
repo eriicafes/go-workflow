@@ -10,8 +10,8 @@ import (
 )
 
 // TestStreamsAreKeyedByName checks a stream is read, appended to, and
-// described by its name alone, as world-local keys it, while StreamsList
-// still lists a run's own streams.
+// described by its name alone, while StreamsList still lists a run's own
+// streams.
 func TestStreamsAreKeyedByName(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -108,8 +108,7 @@ func (t *txn) setHook(value *hookRecord) {
 	t.hooks[value.HookID], t.dirty[hookKey(value.HookID)] = value, true
 }
 
-// deleteHook deletes the hook, as world-local deletes a hook once disposed or
-// done with its token.
+// deleteHook deletes the hook, once it is disposed or done with its token.
 func (t *txn) deleteHook(id worlds.HookID) {
 	t.hooks[id], t.dirty[hookKey(id)] = nil, true
 }
@@ -136,12 +135,11 @@ func (t *txn) releaseToken(token string, hookID worlds.HookID) error {
 // anything: a run_started for a run that started before.
 const noEvent worlds.EventID = "-"
 
-// admit applies the transition rules to the staged state, as world-local's
-// events-storage does. An event that repeats a creation the log holds is
-// refused with ErrEntityConflict. A non-empty event ID is noEvent.
+// admit applies the transition rules to the staged state. An event that
+// repeats a creation the log holds is refused with ErrEntityConflict. A
+// non-empty event ID is noEvent.
 func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.EventID, error) {
-	// A run of a newer spec version is a newer release's, as the Workflow
-	// SDK's Worlds refuse it.
+	// A run of a newer spec version is a newer release's, and is refused.
 	if err := worlds.CheckRunSpecVersion(t.run.RunID, t.run.SpecVersion); err != nil {
 		return "", err
 	}
@@ -157,9 +155,9 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 			return noEvent, nil
 		}
 	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying:
-		// A step is created once, and its other events need it unfinished,
-		// as in world-local. A started step can be started again, as a new
-		// attempt, after its worker dies.
+		// A step is created once, and its other events need it unfinished.
+		// A started step can be started again, as a new attempt, after its
+		// worker dies.
 		step, err := t.step(worlds.StepID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -202,8 +200,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 		}
 
 	case worlds.EventTypeHookDisposed:
-		// A disposed hook is gone, so disposing it again finds no hook, as
-		// in world-local.
+		// A disposed hook is gone, so disposing it again finds no hook.
 		hook, err := t.hook(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -214,7 +211,7 @@ func (t *txn) admit(event worlds.EventsCreateEvent, now time.Time) (worlds.Event
 
 	case worlds.EventTypeHookReceived:
 		// A disposed hook refuses deliveries, redirecting them when another
-		// run took its token, as world-local's refuseDisposedHookDelivery.
+		// run took its token.
 		disposal, err := t.disposal(worlds.HookID(event.CorrelationID))
 		if err != nil {
 			return "", err
@@ -316,8 +313,7 @@ func (t *txn) append(value worlds.EventsCreateEvent, now time.Time) (worlds.Even
 func (t *txn) materialize(event worlds.Event) error {
 	run := &t.run
 	now := event.CreatedAt
-	// The run itself changes, and is updated, only on its own events, as
-	// the Workflow SDK's Worlds update it.
+	// The run itself changes, and is updated, only on its own events.
 	switch event.EventType {
 	case worlds.EventTypeRunStarted:
 		run.UpdatedAt = now
@@ -416,7 +412,7 @@ func (t *txn) materialize(event worlds.Event) error {
 	if event.EventType == worlds.EventTypeRunCompleted || event.EventType == worlds.EventTypeRunFailed || event.EventType == worlds.EventTypeRunCancelled {
 		// A hook whose token is retained stays until its retention ends,
 		// holding the token; every other hook of the run is deleted and its
-		// token released, as world-local's releaseRunResources.
+		// token released.
 		hooks, err := t.s.runHooks(run.RunID)
 		if err != nil {
 			return err
@@ -466,8 +462,7 @@ func (t *txn) updateStep(event worlds.Event, status worlds.Status) error {
 		step.CompletedAt = &at
 	}
 	// A result keeps the rest of the step, so a completed step keeps the
-	// error of its last retry, as world-local's steps do. A start ends the
-	// wait for a retry.
+	// error of its last retry. A start ends the wait for a retry.
 	switch event.EventType {
 	case worlds.EventTypeStepStarted:
 		step.RetryAfter = nil
@@ -694,13 +689,12 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 // start hook candidate the World refuses returns a *refused, which commits
 // the refusal.
 func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.Time) (worlds.EventResult, error) {
-	// The run ID and attributes are checked as world-local checks them.
+	// The run ID and attributes are checked.
 	if err := worlds.CheckRunCreation(input, now); err != nil {
 		return worlds.EventResult{}, err
 	}
 	if input.StartHook != nil {
-		// A refused candidate stays refused, as world-local's
-		// admitStartHook answers it.
+		// A refused candidate stays refused.
 		if decision, err := s.getRejection(input.RunID); err != nil {
 			return worlds.EventResult{}, err
 		} else if decision != nil {
@@ -784,7 +778,7 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !validAppend(input.Event.EventType) {
 		return worlds.EventResult{}, worlds.ErrEventInvalid
 	}
-	// A resume's digest must be its payload's, as world-postgres checks it.
+	// A resume's digest must be its payload's.
 	if err := worlds.CheckResumeDigest(input.Event, input.Options.ResumePayloadDigest); err != nil {
 		return worlds.EventResult{}, err
 	}
@@ -956,8 +950,8 @@ func appendBatch(s *store, input worlds.EventsCreateBatchInput) (worlds.EventBat
 func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (worlds.Event, error) {
 	var event worlds.Event
 	err := w.read(ctx, func(s *store) error {
-		// A run's events are read whatever its tag, as world-local scopes
-		// only runs by tag.
+		// A run's events are read whatever its tag: only runs are scoped by
+		// tag.
 		run, err := s.getRunAnyTag(input.RunID)
 		if err != nil {
 			return err
@@ -980,14 +974,13 @@ func (w *World) EventsGet(ctx context.Context, input worlds.EventsGetInput) (wor
 }
 
 func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (worlds.EventsPage, error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, worlds.MaxEventsPerRun)
 	// Pages are by slot. The cursor is the last returned event ID, in either
 	// order.
 	var page worlds.EventsPage
 	err := w.read(ctx, func(s *store) error {
 		// A run's events are read whatever its tag, and a missing run has
-		// none, as in world-local.
+		// none.
 		run, err := s.getRunAnyTag(input.RunID)
 		if errors.Is(err, worlds.ErrRunNotFound) {
 			page = worlds.EventsPage{Page: worlds.Page[worlds.Event]{Data: []worlds.Event{}}, Snapshot: worlds.EventsSnapshot{InBandCount: 1}}
@@ -1035,11 +1028,10 @@ func (w *World) EventsList(ctx context.Context, input worlds.EventsListInput) (w
 }
 
 func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.EventsListByCorrelationIDInput) (worlds.Page[worlds.Event], error) {
-	// The list's defaults are world-local's.
 	input.Pagination = input.Pagination.WithDefaults(worlds.SortOrderAscending, 20)
 	var page worlds.Page[worlds.Event]
 	err := w.read(ctx, func(s *store) error {
-		// A missing run has no events, as in world-local.
+		// A missing run has no events.
 		cursor, err := eventCursor(input.Pagination.Cursor)
 		if err != nil {
 			return err
@@ -1068,7 +1060,7 @@ func validAppend(eventType worlds.EventType) bool {
 
 func eventsPage(events []worlds.Event, hasMore bool) worlds.Page[worlds.Event] {
 	page := worlds.Page[worlds.Event]{Data: events, HasMore: hasMore && len(events) > 0}
-	// The last page's cursor resumes after it, as world-local's does.
+	// The last page's cursor resumes after it.
 	if len(events) > 0 {
 		page.Cursor = string(events[len(events)-1].EventID)
 	}

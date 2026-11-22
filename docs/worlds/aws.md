@@ -66,7 +66,7 @@ lambdaurl.Start(awsworld.HTTP(world))
 | Field | Meaning |
 | --- | --- |
 | `BaseURL` | Required. Public URL of `HTTP(world)` including `/v1/workflow`. |
-| `EncryptionKey` | Optional. 32 random bytes. Encrypts every run's payloads with a key derived from it, as in the Workflow SDK. See [Data Format and Encryption](/guide/encryption). |
+| `EncryptionKey` | Optional. 32 random bytes. Encrypts every run's payloads with a key derived from it. See [Data Format and Encryption](/guide/encryption). |
 | `EncryptionScope` | Optional. The scope run keys are derived from `EncryptionKey` in. Changing it leaves earlier runs' payloads unreadable. |
 | `TableName` | Required. DynamoDB table, laid out as `CreateTable` creates it. |
 | `QueueURL` | Required. SQS standard queue that carries deliveries of unrouted workflows. |
@@ -218,12 +218,11 @@ returns a `*worlds.HookConflictError` naming that run.
 
 ## Retention
 
-A run's data is deleted as the Workflow SDK deletes it: the run, step, event,
-hook and token items stay with their IDs, statuses, timestamps and attributes,
-the payloads in the run's `EVENT#` items are removed, and its streams' chunk
-items are deleted, leaving each `STREAM#` item empty and closed. The run's
-`expiredAt` is set first, so its payloads read as gone before they are
-deleted, and `dataPurged` is set last.
+When a run's data is deleted, the run, step, event, hook and token items stay
+with their IDs, statuses, timestamps and attributes, the payloads in the run's
+`EVENT#` items are removed, and its streams' chunk items are deleted, leaving
+each `STREAM#` item empty and closed. The run's `expiredAt` is set first, so its
+payloads read as gone before they are deleted, and `dataPurged` is set last.
 
 - **`$retention: "0"`.** The commit that finishes the run sets `expiredAt`,
   and the process that appended it deletes the data right after. If that
@@ -273,8 +272,7 @@ consistent reads of the base table.
 
 A disposed hook's item is replaced by a record of its disposal, which no
 index lists. A finished run's hooks are hidden once their token retention
-ends, as the Workflow SDK deletes them, and their items are replaced when
-their token is next claimed.
+ends, and their items are replaced when their token is next claimed.
 
 Claims and leases carry a `ttl` attribute (epoch seconds) after which they are
 no longer needed. The World checks their expiry itself, so enabling the table's

@@ -209,8 +209,7 @@ not overlap.
 
 A disposed hook's item is replaced by a record of its disposal, which no
 index lists. A finished run's hooks are hidden once their token retention
-ends, as the Workflow SDK deletes them, and their items are replaced when
-their token is next claimed.
+ends, and their items are replaced when their token is next claimed.
 
 Claims and leases carry a `ttl` attribute (epoch seconds) after which they
 are no longer needed. The World checks their expiry itself, so enabling the

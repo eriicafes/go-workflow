@@ -104,10 +104,10 @@ Never expose them publicly unless `worlds.WithClientToken` or
 ## Webhooks
 
 `<prefix>/webhooks/{token}` resumes the webhook that owns `token` with the
-request, as the Workflow SDK's webhook handler does: it writes the body to a
-byte stream of the run, resumes the hook with the SDK's `Request`, sealed to
-the run's public key when its payloads are encrypted, and queues a delivery so
-the run resumes. A webhook takes any number of requests.
+request: it writes the body to a byte stream of the run, resumes the hook with
+the SDK's `Request`, sealed to the run's public key when its payloads are
+encrypted, and queues a delivery so the run resumes. A webhook takes any number
+of requests.
 
 | Situation | Response |
 | --- | --- |

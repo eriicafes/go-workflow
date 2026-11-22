@@ -13,17 +13,15 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
-// The backend's analytics page limits (@workflow/world analytics.js): a
-// larger Pagination.Limit is sent as the limit, and the page reports
-// HasMore.
+// The backend's analytics page limits: a larger Pagination.Limit is sent
+// as the limit, and the page reports HasMore.
 const (
 	analyticsPageLimit          = 100
 	analyticsRunScopedPageLimit = 1000
 	analyticsGetManyLimit       = 100
 )
 
-// analytics reads the backend's analytics endpoints, /v2/analytics, as
-// world-vercel's createAnalytics does.
+// analytics reads the backend's analytics endpoints, /v2/analytics.
 type analytics struct{ world *World }
 
 func (a analytics) get(ctx context.Context, path string, query url.Values, out any) error {
@@ -48,9 +46,8 @@ func analyticsQuery(pagination worlds.Pagination, limit int) url.Values {
 	return query
 }
 
-// setWindow sets the creation time window. Like world-vercel's
-// assertDateWindow, it refuses one bound without the other, which the
-// backend does not take, and a start after the end.
+// setWindow sets the creation time window. It refuses one bound without
+// the other, which the backend does not take, and a start after the end.
 func setWindow(query url.Values, start, end *time.Time) error {
 	switch {
 	case start == nil && end == nil:

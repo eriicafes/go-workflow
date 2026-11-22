@@ -21,9 +21,8 @@ const (
 	streamRetryAfter  = 50 * time.Millisecond
 )
 
-// A stream's chunks are rows ordered by their chnk_<ULID> id, as
-// world-postgres stores them. A stream is keyed by its name alone, as
-// world-postgres keys it: each chunk stores its run, for StreamsList and
+// A stream's chunks are rows ordered by their chnk_<ULID> id. A stream is
+// keyed by its name alone: each chunk stores its run, for StreamsList and
 // purges, but appends, reads, and infos name the stream only. An eof row with
 // empty data closes the stream. A chunk's index is its position among the stream's other chunks.
 // Writers of one stream take its advisory lock, so each new id follows the
@@ -50,13 +49,11 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 			return err
 		}
 		if closed {
-			// A closed stream takes no more data, as world-postgres drops
-			// it.
+			// A closed stream takes no more data: the write is dropped.
 			return nil
 		}
 		if expired {
-			// A deleted run's new stream is closed as it is first written,
-			// as world-local closes it.
+			// A deleted run's new stream is closed as it is first written.
 			id := chunkIDs(last, 1)[0]
 			if _, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_stream_chunks (id, stream_id, run_id, data, eof) VALUES ($1, $2, $3, '', true)`), id, input.Name, input.RunID); err != nil {
 				return err
@@ -145,8 +142,7 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 	if err != nil {
 		return worlds.StreamChunksResult{}, err
 	}
-	// A cursor that does not decode reads from the start, as world-postgres
-	// reads it.
+	// A cursor that does not decode reads from the start.
 	if value, err := strconv.Atoi(input.Cursor); input.Cursor != "" && err == nil && value >= 0 {
 		start = value
 	}
@@ -273,8 +269,7 @@ func streamKey(name string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// notifyChunk sends workflow_event_chunk for the stream's chunk, as
-// world-postgres does.
+// notifyChunk sends workflow_event_chunk for the stream's chunk.
 func notifyChunk(tx pgx.Tx, name, chunkID string) error {
 	payload, err := json.Marshal(chunkNotification{StreamID: streamKey(name), ChunkID: chunkID})
 	if err != nil {

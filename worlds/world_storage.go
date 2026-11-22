@@ -75,34 +75,32 @@ type StorageEvents interface {
 	// when the target hook does not allow the event, and a *HookConflictError when
 	// a hook_created token is taken.
 	//
-	// A finished run refuses events as FinishedRunRefusal says, as the
-	// Workflow SDK's Worlds do: a transition from it or a creation on it with
-	// ErrEntityConflict (which also matches *RunExpiredError), another attempt
-	// or a result of a step that is not running with a *RunExpiredError, and a
-	// wait_completed with ErrEventNotFound, since its waits end with it. It
-	// still records a running step's step_completed, step_failed, and
-	// step_retrying. A wait_completed needs its wait_created
-	// (ErrEventNotFound).
+	// A finished run refuses events as FinishedRunRefusal says: a transition
+	// from it or a creation on it with ErrEntityConflict (which also matches
+	// *RunExpiredError), another attempt or a result of a step that is not
+	// running with a *RunExpiredError, and a wait_completed with
+	// ErrEventNotFound, since its waits end with it. It still records a
+	// running step's step_completed, step_failed, and step_retrying. A
+	// wait_completed needs its wait_created (ErrEventNotFound).
 	//
-	// A step event is checked as CheckStepEvent says, as the Workflow SDK's
-	// Worlds check it: it needs its step (ErrStepNotFound), unfinished
-	// (ErrEntityConflict), except an inline step's first step_started, whose
-	// DataStepStarted has Inline, StepName, and Input, and which creates the
-	// step. A step_started before the step's retry is due is refused with a
-	// A *TooEarlyError. An attr_set's changes are checked as CheckAttrSet says
-	// (ErrAttributeInvalid), and a hook_received's ResumePayloadDigest as
-	// CheckResumeDigest says (ErrEventInvalid).
+	// A step event is checked as CheckStepEvent says: it needs its step
+	// (ErrStepNotFound), unfinished (ErrEntityConflict), except an inline
+	// step's first step_started, whose DataStepStarted has Inline, StepName,
+	// and Input, and which creates the step. A step_started before the
+	// step's retry is due is refused with a *TooEarlyError. An attr_set's
+	// changes are checked as CheckAttrSet says (ErrAttributeInvalid), and a
+	// hook_received's ResumePayloadDigest as CheckResumeDigest says
+	// (ErrEventInvalid).
 	//
 	// An event that repeats a creation the run's log holds, a second
 	// step_created, wait_created, wait_completed, hook_created, an inline
 	// step's creating step_started, or an attr_set of the workflow with the
-	// same correlation ID, is refused with ErrEntityConflict, as the Workflow
-	// SDK's Worlds refuse it with EntityConflictError. A run_started of a
-	// running run appends nothing and returns a result without an event (no
-	// EventID), or is refused with ErrEntityConflict, as Vercel's backend
-	// does. A run_cancelled of a cancelled run is appended and leaves the run
-	// as it was. A step_started for a step already started is not a repeat.
-	// It appends a new attempt.
+	// same correlation ID, is refused with ErrEntityConflict. A run_started
+	// of a running run appends nothing and returns a result without an
+	// event (no EventID), or is refused with ErrEntityConflict, as Vercel's
+	// backend does. A run_cancelled of a cancelled run is appended and leaves
+	// the run as it was. A step_started for a step already started is not a
+	// repeat. It appends a new attempt.
 	EventsCreate(context.Context, EventsCreateInput) (EventResult, error)
 	// EventsCreateBatch appends Events to a run in order, as one in-band
 	// write when InBandCount is set, fenced as one block. It appends none of
@@ -158,8 +156,7 @@ type (
 		// workflow.
 		WorkflowName string
 		// Status selects runs in any of the listed statuses. Nil selects
-		// every status, and an empty, non-nil Status selects none, as the
-		// Workflow SDK's status: [] does.
+		// every status, and an empty, non-nil Status selects none.
 		Status      []Status
 		Pagination  Pagination
 		ResolveData ResolveData
@@ -374,8 +371,7 @@ type HookResumeContext struct {
 
 // Hook is the view of one hook derived from its run's event log. A hook
 // exists from its hook_created until its hook_disposed, a forced claim of its
-// token, or the end of its run once its token retention ends, as the Workflow
-// SDK's Worlds keep it.
+// token, or the end of its run once its token retention ends.
 type Hook struct {
 	RunID RunID
 	// ResumeContext is copied from the hook's run when the hook is created, so
@@ -526,7 +522,7 @@ type (
 		AllowReservedAttributes bool
 		// FromRunStarted reports that a first delivery's run_started creates the
 		// run, because the start's run_created never landed. The World does
-		// not check the run ID's time then, as world-local does not.
+		// not check the run ID's time then.
 		FromRunStarted bool
 	}
 	// EventsCreateInput holds the arguments to EventsCreate.
@@ -686,8 +682,8 @@ type (
 	}
 )
 
-// SpecVersion is the version of the Workflow SDK's specification every run
-// follows. A World records it on each run it creates.
+// SpecVersion is the version of the specification every run follows. A
+// World records it on each run it creates.
 const SpecVersion = 9
 
 // Event is one entry in a run's event log.

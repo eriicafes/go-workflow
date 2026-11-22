@@ -43,7 +43,7 @@ func conformAnalytics(t *testing.T, world worlds.World) {
 		t.Fatalf("analytics runs by status = %#v err=%v", running, err)
 	}
 	future := time.Now().Add(time.Hour)
-	// The Workflow SDK's analytics take both bounds of a window or neither.
+	// Analytics take both bounds of a window or neither.
 	later := future.Add(time.Hour)
 	none, err := analytics.RunsList(ctx, worlds.AnalyticsRunsListInput{WorkflowName: name, StartTime: &future, EndTime: &later})
 	if err != nil || len(none.Data) != 0 {

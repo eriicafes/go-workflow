@@ -1,8 +1,8 @@
 // Package localworld implements a World on a SQLite database in a local
-// directory, for development and single-machine deployments: a port of the
-// Workflow SDK's world-local. It delivers queued work in-process from an
-// in-memory queue, and keeps every run across restarts. Several processes may
-// share a directory: the database serializes their writes.
+// directory, for development and single-machine deployments. It delivers
+// queued work in-process from an in-memory queue, and keeps every run across
+// restarts. Several processes may share a directory: the database serializes
+// their writes.
 package localworld
 
 import (
@@ -44,8 +44,8 @@ type Config struct {
 	// Tag scopes the runs, hooks, and streams this World writes, such as a
 	// test's. A tagged World sees its tag's runs and untagged ones, recovers
 	// only its tag's runs, and Clear deletes only its tag's data. Steps,
-	// events, hooks, and streams are read whatever their tag, as in
-	// world-local. Empty is untagged.
+	// events, hooks, and streams are read whatever their tag. Empty is
+	// untagged.
 	Tag string
 	// BaseURL is the absolute public URL of HTTP(world), including
 	// /v1/workflow. Webhooks created by this World use it as their URL base.
@@ -188,8 +188,7 @@ func (w *World) Close() error {
 // Clear deletes the World's data: a tagged World's runs, everything they
 // own, and its hooks and streams, and an untagged World's whole database.
 // Deliveries in flight are cancelled first, and the World stays open for
-// new work, as world-local's clear(). It returns ErrNotPrepared unless the
-// World is prepared.
+// new work. It returns ErrNotPrepared unless the World is prepared.
 func (w *World) Clear(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

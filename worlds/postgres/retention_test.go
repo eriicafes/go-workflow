@@ -55,7 +55,7 @@ func TestExpireRuns(t *testing.T) {
 	if !purgedData(t, world, done) {
 		t.Fatal("expireRuns left the run's data")
 	}
-	// Its rows stay, as in the Workflow SDK, and the chunks go.
+	// Its rows stay, and the chunks go.
 	counts := rowCounts(t, world, done)
 	for _, table := range []string{"workflow_runs", "workflow_events", "workflow_steps", "workflow_hooks", "workflow_stream_chunks"} {
 		if counts[table] == 0 {

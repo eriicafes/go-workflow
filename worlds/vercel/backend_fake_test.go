@@ -530,8 +530,7 @@ func (f *fakeBackend) apply(ctx context.Context, runID worlds.RunID, in frame, f
 		return refuse(err)
 	}
 	// The backend refuses a run_started of a running run as a conflict
-	// (@workflow/errors RUN_ALREADY_STARTED_CODE), where world-local appends
-	// nothing.
+	// (run-already-started), where the local World appends nothing.
 	if eventType == worlds.EventTypeRunStarted && result.EventID == "" {
 		return outcome{status: http.StatusConflict, code: "run-already-started", message: "run already started"}
 	}
@@ -889,8 +888,8 @@ func goErrorStatus(err error) (int, string) {
 	case errors.Is(err, worlds.ErrRunAlreadyExists):
 		return http.StatusConflict, "run-exists"
 	case is[*worlds.RunExpiredError](err):
-		// The backend answers a write to a finished run 410, which
-		// world-vercel reports as RunExpiredError.
+		// The backend answers a write to a finished run 410, which the
+		// World reports as a RunExpiredError.
 		return http.StatusGone, "run-expired"
 	case errors.Is(err, worlds.ErrStepNotStartable):
 		return http.StatusConflict, "step-not-startable"

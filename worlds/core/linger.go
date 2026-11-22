@@ -10,7 +10,7 @@ import (
 
 // A flow delivery whose pass suspended with nothing left to run lingers while
 // the run waits on work done elsewhere, a background step or an open hook, or
-// on a wait due soon, as the Workflow SDK's orchestrator does: every event
+// on a wait due soon: every event
 // another writer appends meanwhile, and a wait falling due, starts another
 // pass in the same delivery, so a burst of step results or hook payloads is
 // handled by one delivery instead of one queued flow each. It lingers only on

@@ -163,8 +163,8 @@ type AnalyticsHook struct {
 }
 
 // LogAnalytics implements AnalyticsSteps, AnalyticsEvents, AnalyticsHooks,
-// and AnalyticsWaits from a World's storage reads, as the Workflow SDK's
-// analytics report them. A World embeds it in its Analytics.
+// and AnalyticsWaits from a World's storage reads. A World embeds it in its
+// Analytics.
 type LogAnalytics struct{ World World }
 
 func (a LogAnalytics) StepsGet(ctx context.Context, input AnalyticsStepsGetInput) (AnalyticsStep, error) {
@@ -470,8 +470,7 @@ func keyPage[T any](values []T, pagination Pagination, key func(T) string) (Page
 	if page.Data == nil {
 		page.Data = []T{}
 	}
-	// The last page's cursor resumes after it, as the Workflow SDK's Worlds'
-	// lists do.
+	// The last page has a cursor too, which resumes after it.
 	if end > start {
 		page.Cursor = base64.RawURLEncoding.EncodeToString([]byte(key(values[end-1])))
 	}

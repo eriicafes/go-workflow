@@ -102,9 +102,9 @@ final one, so the first writer of a step's result wins.
 The first delivery of a run's first message knows the whole log already: the
 run's creation, which the message carries. So it replays without reading the
 log, writes `run_started` without waiting for it, and starts its inline steps
-before their writes commit, as the Workflow SDK's turbo mode does
-(`core.TurboFirstDeliveries`). When the run had already started, as on a
-platform's replay of a first delivery, it starts again from a read of the log.
+before their writes commit (`core.TurboFirstDeliveries`). When the run had
+already started, as on a platform's replay of a first delivery, it starts again
+from a read of the log.
 
 ### Running ahead
 
@@ -172,9 +172,6 @@ promise. So:
 
 `GetConflict` is the exception: it returns a hook conflict as soon as it is
 called, but `Next` and `Select` see it only when the walk reaches it.
-
-This matches how the Workflow SDK consumes its event log, where a promise
-resolves when the walk reaches its result.
 
 ## Replay divergence
 
@@ -308,9 +305,8 @@ which brings their pinned runs back.
 A workflow that never ends, such as a daily job that starts tomorrow's run
 before it finishes, would otherwise stay on the deployment its first run
 started on until that deployment is deleted. Start its next run with
-`workflow.LatestDeployment`, as the Workflow SDK's `deploymentId: 'latest'`
-does, and it starts on the World's latest deployment instead of the one that
-starts it:
+`workflow.LatestDeployment`, and it starts on the World's latest deployment
+instead of the one that starts it:
 
 ```go
 next, err := workflow.Start(ctx, DailyDigest{UserID: input.UserID}, workflow.StartOptions{

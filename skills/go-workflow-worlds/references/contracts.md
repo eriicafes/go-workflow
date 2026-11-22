@@ -10,8 +10,7 @@ leave the others appended, and once an event is refused, every later event of
 the batch with the same correlation ID is refused too.
 
 An event that repeats a creation the log holds is refused with
-`ErrEntityConflict`, as the Workflow SDK's Worlds refuse it with
-`EntityConflictError`: a second `step_created`, `wait_created`,
+`ErrEntityConflict`: a second `step_created`, `wait_created`,
 `wait_completed`, or `hook_created`, an inline step's creating `step_started`
 (`worlds.StartCreatesStep`), or a workflow `attr_set`
 (`worlds.WorkflowAttrSet`) with a recorded correlation ID. A `run_started` of
@@ -133,11 +132,10 @@ the run's deployment and workflow name onto the hooks it creates
 Maintain ordered chunks and cursor continuation. Streams have no exclusive
 writers: concurrent writes interleave, each writer's chunks staying in order.
 A write to a closed stream, or to a stream of a run whose data was deleted,
-is dropped as world-local drops it (a deleted run's new stream is closed as
-it is first written), or refused with `ErrStreamClosed`, as Vercel's backend
-refuses it. Closing a closed stream does nothing. Lists take their defaults
+is dropped (a deleted run's new stream is closed as it is first written), or
+refused with `ErrStreamClosed` where the backend refuses it, as Vercel's does. Closing a closed stream does nothing. Lists take their defaults
 from `Pagination.WithDefaults`: newest first for runs and steps, oldest first
-for hooks and events, with each World's SDK counterpart's page sizes. Refuse
+for hooks and events, with each World's own default page size. Refuse
 events on a run of a newer spec version with a `*RunNotSupportedError`
 (`worlds.CheckRunSpecVersion`). A `StreamWriter` from `StreamsOpenWriter` keeps its
 writes in order; Release ends the writer without closing the stream, and

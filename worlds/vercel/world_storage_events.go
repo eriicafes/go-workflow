@@ -91,8 +91,8 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if !input.Event.EventType.Valid() || input.Event.EventType == worlds.EventTypeRunCreated || input.Event.EventType == worlds.EventTypeHookConflict {
 		return worlds.EventResult{}, fmt.Errorf("%w: %s cannot be appended", worlds.ErrEventInvalid, input.Event.EventType)
 	}
-	// world-vercel refuses an attr_set whose data is over the backend's
-	// limit before sending it.
+	// An attr_set whose data is over the backend's limit is refused before
+	// it is sent.
 	if input.Event.EventType == worlds.EventTypeAttrSet && len(input.Event.Data) > worlds.MaxAttrSetDataBytes {
 		return worlds.EventResult{}, fmt.Errorf("%w: %w: attr_set data is %d bytes, over %d", worlds.ErrAttributeInvalid, worlds.ErrEventInvalid, len(input.Event.Data), worlds.MaxAttrSetDataBytes)
 	}
@@ -446,8 +446,8 @@ func (w *World) eventsPage(ctx context.Context, runID worlds.RunID, path string,
 		}
 		result.Data = append(result.Data, event)
 	}
-	// The backend's cursor is kept on the last page too, as the Workflow
-	// SDK's World keeps it: it is where an incremental read resumes.
+	// The backend's cursor is kept on the last page too: it is where an
+	// incremental read resumes.
 	return result, nil
 }
 

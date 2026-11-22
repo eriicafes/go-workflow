@@ -170,17 +170,17 @@ resume time.
 | Contract | On Vercel |
 | --- | --- |
 | Batches | One request and one fenced allocation. As the contract allows, the backend keeps the events it admitted when another is refused, and the runtime replays whatever the log holds. |
-| Repeated transitions | The backend refuses them as conflicts, which the World returns as `ErrEntityConflict`, as world-vercel returns `EntityConflictError`. A `run_started` of a running run is one of them (`run-already-started`). |
-| Event feed | `EventsSubscribe` opens the run's events socket (`wss://…/websockets/v1/runs/{run}`), as world-vercel's live feed does: it subscribes after a slot, takes the backend's pushed events and heartbeats, reads from the log the events a heartbeat says it missed, and ends when the backend ends the feed, closes the socket, or goes silent for three heartbeat intervals. A flow waiting on an inline step, or lingering, takes events from it. Through the API proxy (`Token`) the feed is unavailable and the flow polls. |
-| Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background, as the Workflow SDK does, and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. A close is sent again after a transport failure or a 429, 500, 502, 503, or 504, up to five times, after the `Retry-After` or a backoff from 500ms doubling to at most 30 seconds, as the Workflow SDK's close dispatcher does. |
+| Repeated transitions | The backend refuses them as conflicts, which the World returns as `ErrEntityConflict`. A `run_started` of a running run is one of them (`run-already-started`). |
+| Event feed | `EventsSubscribe` opens the run's events socket (`wss://…/websockets/v1/runs/{run}`): it subscribes after a slot, takes the backend's pushed events and heartbeats, reads from the log the events a heartbeat says it missed, and ends when the backend ends the feed, closes the socket, or goes silent for three heartbeat intervals. A flow waiting on an inline step, or lingering, takes events from it. Through the API proxy (`Token`) the feed is unavailable and the flow polls. |
+| Stream writes | Each writer opens the backend's stream socket (`wss://…/websockets/v1/runs/{run}/streams/{name}`) in the background and writes through HTTP until it is open. A declined socket keeps the World's writers on HTTP for five minutes. Through the API proxy (`Token`), or with `WORKFLOW_STREAMS_TRANSPORT=http`, writers use HTTP only. A close is sent again after a transport failure or a 429, 500, 502, 503, or 504, up to five times, after the `Retry-After` or a backoff from 500ms doubling to at most 30 seconds. |
 | Stream reads | Cursors are chunk indexes, and a cursor that is not one reads from the beginning. The World remembers the backend's cursor for the last index each stream was read to, so polling a stream continues where it stopped. A `410` is a `*RunExpiredError`, and the backend's `stream-expired` is a `*StreamExpiredError`. |
-| List cursors | A page carries the backend's cursor, the last page included, as world-vercel returns it: it is where an incremental read resumes. `HasMore` tells whether more follow. |
-| `RunsList` by several statuses | The backend filters by one status, so `RunsList` with several is refused with `ErrEventInvalid`, as world-vercel refuses it. |
+| List cursors | A page carries the backend's cursor, the last page included: it is where an incremental read resumes. `HasMore` tells whether more follow. |
+| `RunsList` by several statuses | The backend filters by one status, so `RunsList` with several is refused with `ErrEventInvalid`. |
 | Hooks | `HooksGet` reads the hook and its `hook_created` event, for its metadata, webhook flag, and forced claim. |
-| Analytics | `Analytics()` reads the backend's `/v2/analytics` endpoints, as world-vercel does. The backend filters analytics runs by one status, so `RunsList` with several is refused with `ErrEventInvalid`, and a time window needs both `StartTime` and `EndTime` or neither, as world-vercel's `assertDateWindow` requires. Larger pages than the backend allows (100, or 1000 for a run's steps, events, and waits) come back with `HasMore`. |
-| Retention | `Config.Retention` and `Config.Retentions`, built with `vercelworld.Retentions(vercelworld.Retain[W](...))`, take `worlds.RetainDefault`, which leaves runs to Vercel's plan, or `worlds.RetainNone`, which creates runs with the Workflow SDK's `$retention: "0"` attribute so the backend deletes their data when they finish. The backend supports no other retention. A run created with its own `$retention` attribute keeps it. |
-| Start hooks | `run_created` carries the `startHook`, which the backend creates with the run, as world-vercel sends it. A `409 start-hook-conflict` becomes a `*worlds.HookConflictError` naming the token's owner. |
-| Deleting run data | `RunsDeleteDataMany` calls the backend's `/v4/runs/purge`, as world-vercel does, and maps its `purged` and `already_purged` outcomes to `deleted` and `already_deleted`. The backend deletes a `$retention: "0"` run's data when it finishes and reports `expiredAt` on runs. |
+| Analytics | `Analytics()` reads the backend's `/v2/analytics` endpoints. The backend filters analytics runs by one status, so `RunsList` with several is refused with `ErrEventInvalid`, and a time window needs both `StartTime` and `EndTime` or neither. Larger pages than the backend allows (100, or 1000 for a run's steps, events, and waits) come back with `HasMore`. |
+| Retention | `Config.Retention` and `Config.Retentions`, built with `vercelworld.Retentions(vercelworld.Retain[W](...))`, take `worlds.RetainDefault`, which leaves runs to Vercel's plan, or `worlds.RetainNone`, which creates runs with the `$retention: "0"` attribute so the backend deletes their data when they finish. The backend supports no other retention. A run created with its own `$retention` attribute keeps it. |
+| Start hooks | `run_created` carries the `startHook`, which the backend creates with the run. A `409 start-hook-conflict` becomes a `*worlds.HookConflictError` naming the token's owner. |
+| Deleting run data | `RunsDeleteDataMany` calls the backend's `/v4/runs/purge` and maps its `purged` and `already_purged` outcomes to `deleted` and `already_deleted`. The backend deletes a `$retention: "0"` run's data when it finishes and reports `expiredAt` on runs. |
 
 ### Backend contract
 
@@ -259,8 +259,8 @@ deployment that starts them.
 
 ## Regions
 
-Run IDs carry the region a run's data lives in, as world-vercel's tagged run
-IDs do, and each run's queue messages go to that region:
+Run IDs carry the region a run's data lives in, and each run's queue messages go
+to that region:
 
 - **Run IDs.** The World implements `worlds.RegionalRunIDs`: a new run's ID is
   a ULID with its region in the top bits of its randomness, from
@@ -274,14 +274,13 @@ IDs do, and each run's queue messages go to that region:
 ## Queue delivery
 
 `Queue` publishes the whole delivery as the message, `POST
-{QueueURL}/topic/{Topic}`, and stores nothing for it. Its result is the
-message ID Vercel Queues answers with, or none when it answers `202` after
-failing over to another region. A send that fails with a transport error, its
-30-second request deadline (`WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS`), a 5xx, or a
-429 whose `Retry-After` is at most 5 seconds is sent again, up to three
-attempts, after 100ms and then 500ms plus up to 100ms of jitter, as the
-Workflow SDK's `withQueueSendRetry` does. Other 4xx answers are final. The
-request carries:
+{QueueURL}/topic/{Topic}`, and stores nothing for it. Its result is the message
+ID Vercel Queues answers with, or none when it answers `202` after failing over
+to another region. A send that fails with a transport error, its 30-second
+request deadline (`WORKFLOW_VERCEL_QUEUE_TIMEOUT_MS`), a 5xx, or a 429 whose
+`Retry-After` is at most 5 seconds is sent again, up to three attempts, after
+100ms and then 500ms plus up to 100ms of jitter. Other 4xx answers are final.
+The request carries:
 
 | Header | Value |
 | --- | --- |
