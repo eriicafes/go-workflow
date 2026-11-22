@@ -366,6 +366,10 @@ func (w *World) createHook(ctx context.Context, input worlds.EventsCreateInput) 
 		if err := fence(claimant, input.Options.InBandCount); err != nil {
 			return err
 		}
+		// A hook is created once, before its token is looked at.
+		if err := tx.refuseRepeat(ctx, claimant, input.Event); err != nil {
+			return err
+		}
 		token, err := tx.token(ctx, created.Token)
 		if err != nil {
 			return err
@@ -1062,11 +1066,13 @@ func (tx *appendTx) append(ctx context.Context, run *runEntry, requested worlds.
 	}
 	if finishes(event.EventType) && run.view.ExpiredAt == nil {
 		// The run's data expires with the commit that finishes it under
-		// $retention "0", or at its workflow's retention after it.
+		// $retention "0", or at its workflow's retention after it, measured
+		// from when the run finished.
+		finished := event.CreatedAt
 		if worlds.ReadRunRetention(run.view.Attributes) == worlds.RetainNone {
-			run.view.ExpiredAt = &now
+			run.view.ExpiredAt = &finished
 		} else if retention := worlds.RetentionFor(tx.world.config.Retention, tx.world.config.Retentions, run.view.WorkflowName); retention > 0 {
-			expires := now.Add(retention)
+			expires := finished.Add(retention)
 			run.view.ExpiredAt = &expires
 		}
 	}
