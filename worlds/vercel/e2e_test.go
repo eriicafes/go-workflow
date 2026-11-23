@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -105,6 +106,50 @@ func TestWorkflowsRunEndToEndLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	runEndToEnd(t, world, queue)
+}
+
+type mailboxInput struct{ ChatID int }
+
+func (mailboxInput) Workflow(string) {}
+
+// TestRunInputSurvivesReplay runs a workflow whose hook token comes from its
+// input, so a replay that reads the run's input back wrong reaches a
+// different token than the first execution recorded.
+func TestRunInputSurvivesReplay(t *testing.T) {
+	all, queue, _ := newWorlds(t, 1)
+	world := all[0]
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input mailboxInput) (string, error) {
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: fmt.Sprintf("mailbox:%d", input.ChatID)})
+		return hook.Next(ctx)
+	}))
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 20*time.Second)
+	defer cancel()
+	go deliverAll(ctx, t, queue, Queue(world, runners))
+
+	run, err := workflow.Start(ctx, mailboxInput{ChatID: 948721655})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "mailbox:948721655"}); err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("hook was not created: %v", ctx.Err())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := workflow.ResumeHook(ctx, "mailbox:948721655", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(ctx)
+	if err != nil || output != "hello" {
+		events, _ := world.EventsList(context.Background(), worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+		for _, event := range events.Data {
+			t.Logf("%s %s %s %s", event.EventID, event.EventType, event.CorrelationID, event.Data)
+		}
+		t.Fatalf("output = %q err=%v", output, err)
+	}
 }
 
 func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {

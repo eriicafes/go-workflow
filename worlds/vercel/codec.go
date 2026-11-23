@@ -303,17 +303,35 @@ func toEvent(runID worlds.RunID, wire wireEvent, resolve worlds.EventsResolveDat
 // eventData rebuilds the Data of a backend event.
 func eventData(wire wireEvent) ([]byte, error) {
 	d := wire.Data
+	// A payload that is not bytes is kept in payloadErr, which eventData
+	// returns in place of the Data.
+	var payloadErr error
 	payload := func(field string) json.RawMessage {
-		value, _ := d[field].([]byte)
-		if len(value) == 0 {
-			return nil
+		value, err := payloadBytes(d[field])
+		if err != nil && payloadErr == nil {
+			payloadErr = fmt.Errorf("%w: %s", err, field)
 		}
 		return value
 	}
+	data, err := eventDataFields(wire, payload)
+	if payloadErr != nil {
+		return nil, payloadErr
+	}
+	return data, err
+}
+
+// eventDataFields rebuilds the Data of a backend event, reading its payload
+// fields with payload.
+func eventDataFields(wire wireEvent, payload func(field string) json.RawMessage) ([]byte, error) {
+	d := wire.Data
 	switch worlds.EventType(wire.EventType) {
 	case worlds.EventTypeRunCreated:
 		executionContext, _ := d["executionContext"].(map[string]any)
-		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey"), ExecutionContext: executionContext, StartHook: startHook(d["startHook"]), AllowReservedAttributes: d["allowReservedAttributes"] == true})
+		hook, err := startHook(d["startHook"])
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(worlds.DataRunCreated{WorkflowName: str(d, "workflowName"), Input: payload("input"), Attributes: stringMap(d["attributes"]), DeploymentID: str(d, "deploymentId"), EncryptionPublicKey: str(d, "encryptionPublicKey"), ExecutionContext: executionContext, StartHook: hook, AllowReservedAttributes: d["allowReservedAttributes"] == true})
 	case worlds.EventTypeRunCompleted:
 		return json.Marshal(worlds.DataRunCompleted{Output: payload("output")})
 	case worlds.EventTypeRunFailed:
@@ -481,15 +499,19 @@ func hookClaim(value any) *worlds.HookForceClaim {
 }
 
 // startHook reads a run_created's startHook, or nil.
-func startHook(value any) *worlds.StartHook {
+func startHook(value any) (*worlds.StartHook, error) {
 	fields, ok := value.(map[string]any)
 	if !ok || str(fields, "token") == "" {
-		return nil
+		return nil, nil
 	}
 	hook := &worlds.StartHook{Token: str(fields, "token"), HookID: worlds.HookID(str(fields, "hookId"))}
 	if until, ok := asTime(fields["tokenRetentionUntil"]); ok {
 		hook.TokenRetentionUntil = &until
 	}
-	hook.Metadata, _ = fields["metadata"].([]byte)
-	return hook
+	metadata, err := payloadBytes(fields["metadata"])
+	if err != nil {
+		return nil, fmt.Errorf("%w: startHook.metadata", err)
+	}
+	hook.Metadata = metadata
+	return hook, nil
 }

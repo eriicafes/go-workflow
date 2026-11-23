@@ -27,6 +27,7 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"RunCreate", conformRunCreate},
 		{"Validation", conformValidation},
 		{"ResilientStart", conformResilientStart},
+		{"RunInputInLog", conformRunInputInLog},
 		{"EventDeltas", conformEventDeltas},
 		{"RunDeployment", conformRunDeployment},
 		{"InBandFence", conformInBandFence},

@@ -417,6 +417,37 @@ func conformResilientStart(t *testing.T, world worlds.World) {
 	conformStartedAgain(t, again, err)
 }
 
+// conformRunInputInLog checks that the first event of a run's log is its
+// run_created and holds the run's input, which the runtime replays the run
+// with, whether the run was created by run_created or by a first delivery's
+// run_started.
+func conformRunInputInLog(t *testing.T, world worlds.World) {
+	ctx := context.Background()
+	input := []byte(`"input from the log"`)
+	created := conformRunID("input_created")
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: created, WorkflowName: "conformance", Input: input}); err != nil {
+		t.Fatal(err)
+	}
+	started := conformRunID("input_started")
+	data, err := worlds.RunCreatedData(worlds.EventsCreateRunInput{RunID: started, WorkflowName: "conformance", Input: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := 1
+	if _, err := world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: started, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunStarted, Data: data}, Options: worlds.EventsCreateOptions{InBandCount: &one}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []worlds.RunID{created, started} {
+		page, err := world.EventsList(ctx, worlds.EventsListInput{RunID: runID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Data) == 0 || page.Data[0].EventType != worlds.EventTypeRunCreated || string(worlds.EventPayload(page.Data[0])) != string(input) {
+			t.Fatalf("first event of %s = %+v, want a run_created holding the run's input", runID, page.Data)
+		}
+	}
+}
+
 // conformStartedAgain checks the answer to a run_started of a run that
 // started before. It is not started again: the local and Postgres Worlds
 // accept it and append nothing, so the answer holds no event, and Vercel's

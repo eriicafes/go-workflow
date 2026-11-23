@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/fxamacker/cbor/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 	"github.com/eriicafes/go-workflow/worlds/testworld"
@@ -684,7 +685,9 @@ func (f *fakeBackend) eventFrame(event worlds.Event) []byte {
 	var body []byte
 	if field, ok := payloadFields[event.EventType]; ok {
 		if data, ok := meta["eventData"].(map[string]any); ok {
-			body, _ = data[field].([]byte)
+			if tag, ok := data[field].(cbor.Tag); ok {
+				body, _ = tag.Content.([]byte)
+			}
 			delete(data, field)
 		}
 	}
@@ -704,7 +707,7 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 		_ = json.Unmarshal(event.Data, &created)
 		stored["workflowName"], stored["deploymentId"], stored["attributes"] = created.WorkflowName, created.DeploymentID, created.Attributes
 		if len(created.Input) > 0 {
-			stored["input"] = []byte(created.Input)
+			stored["input"] = uint8Array(created.Input)
 		}
 		if len(created.ExecutionContext) > 0 {
 			stored["executionContext"] = created.ExecutionContext
@@ -715,7 +718,7 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 				wire["tokenRetentionUntil"] = *hook.TokenRetentionUntil
 			}
 			if len(hook.Metadata) > 0 {
-				wire["metadata"] = hook.Metadata
+				wire["metadata"] = uint8Array(hook.Metadata)
 			}
 			stored["startHook"] = wire
 		}
@@ -744,7 +747,7 @@ func (f *fakeBackend) wireEvent(event worlds.Event, _ bool) map[string]any {
 			}
 		}
 		if field, ok := payloadFields[event.EventType]; ok && len(payload) > 0 {
-			stored[field] = payload
+			stored[field] = uint8Array(payload)
 		}
 		if event.EventType == worlds.EventTypeHookCreated {
 			var created worlds.DataHookCreated
@@ -792,14 +795,14 @@ func (f *fakeBackend) wireRun(run worlds.Run, query map[string][]string) map[str
 		wire["startHook"] = hook
 	}
 	if len(run.Error) > 0 {
-		wire["error"] = run.Error
+		wire["error"] = uint8Array(run.Error)
 	}
 	if !lazy(query) {
 		if len(run.Input) > 0 {
-			wire["input"] = run.Input
+			wire["input"] = uint8Array(run.Input)
 		}
 		if len(run.Output) > 0 {
-			wire["output"] = run.Output
+			wire["output"] = uint8Array(run.Output)
 		}
 	}
 	return wire
@@ -813,14 +816,14 @@ func (f *fakeBackend) wireStep(ctx context.Context, step worlds.Step, query map[
 		}
 	}
 	if len(step.Error) > 0 {
-		wire["error"] = step.Error
+		wire["error"] = uint8Array(step.Error)
 	}
 	if !lazy(query) {
 		if len(step.Input) > 0 {
-			wire["input"] = step.Input
+			wire["input"] = uint8Array(step.Input)
 		}
 		if len(step.Output) > 0 {
-			wire["output"] = step.Output
+			wire["output"] = uint8Array(step.Output)
 		}
 	}
 	return wire
@@ -844,7 +847,7 @@ func (f *fakeBackend) wireHook(ctx context.Context, hook worlds.Hook) map[string
 		wire["claimedFrom"] = wireClaim(hook.ClaimedFrom)
 	}
 	if len(hook.Metadata) > 0 {
-		wire["metadata"] = hook.Metadata
+		wire["metadata"] = uint8Array(hook.Metadata)
 	}
 	return wire
 }
@@ -872,6 +875,10 @@ func (f *fakeBackend) writeStream(ctx context.Context, writer http.ResponseWrite
 	}
 	writer.WriteHeader(http.StatusOK)
 }
+
+// uint8Array is a payload as the backend's CBOR encoder, cbor-x, writes a
+// Uint8Array: the bytes under tag 64.
+func uint8Array(data []byte) cbor.Tag { return cbor.Tag{Number: 64, Content: data} }
 
 func writeCBOR(writer http.ResponseWriter, value any) {
 	data, err := cborEncode.Marshal(value)

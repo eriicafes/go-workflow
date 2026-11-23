@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/eriicafes/go-workflow/internal/envelope"
@@ -59,12 +60,32 @@ func entityRefs(resolve worlds.ResolveData) string {
 	return "resolve"
 }
 
-func payloadBytes(value any) []byte {
-	data, _ := value.([]byte)
-	if len(data) == 0 {
-		return nil
+// tagUint8Array is the CBOR tag of a typed array of uint8 (RFC 8746), under
+// which the backend's encoder writes a Uint8Array payload.
+const tagUint8Array = 64
+
+// payloadBytes returns the bytes of a payload the backend sent, plain or
+// tagged as a Uint8Array, or nil when it sent none. Any other value is an
+// error, so a payload is never read as absent.
+func payloadBytes(value any) ([]byte, error) {
+	switch value := value.(type) {
+	case nil:
+		return nil, nil
+	case []byte:
+		if len(value) == 0 {
+			return nil, nil
+		}
+		return value, nil
+	case cbor.Tag:
+		if data, ok := value.Content.([]byte); ok && value.Number == tagUint8Array {
+			if len(data) == 0 {
+				return nil, nil
+			}
+			return data, nil
+		}
+		return nil, fmt.Errorf("workflow/vercel: payload is CBOR tag %d, not bytes", value.Number)
 	}
-	return data
+	return nil, fmt.Errorf("workflow/vercel: payload is %T, not bytes", value)
 }
 
 // entityPayload is the payload of a run, step, or hook view, without the
@@ -72,8 +93,17 @@ func payloadBytes(value any) []byte {
 // returned as the payload inside it. An encrypted payload, whose compression
 // is inside the encryption, and one that does not decompress, are returned
 // as stored.
-func entityPayload(value any) []byte {
-	data := payloadBytes(value)
+func entityPayload(values map[string]any, field string) ([]byte, error) {
+	data, err := payloadBytes(values[field])
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, field)
+	}
+	return decompressPayload(data), nil
+}
+
+// decompressPayload returns data without the compression it was stored
+// under.
+func decompressPayload(data []byte) []byte {
 	prefix, body, err := envelope.Decode(data)
 	if err != nil {
 		return data
@@ -117,12 +147,16 @@ func requiredTime(values map[string]any, key string) time.Time {
 }
 
 // toRun returns the go-workflow view of a backend run.
-func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
+func toRun(values map[string]any, resolve worlds.ResolveData) (worlds.Run, error) {
+	runError, err := entityPayload(values, "error")
+	if err != nil {
+		return worlds.Run{}, err
+	}
 	run := worlds.Run{
 		RunID:               worlds.RunID(str(values, "runId")),
 		WorkflowName:        str(values, "workflowName"),
 		Status:              worlds.Status(str(values, "status")),
-		Error:               entityPayload(values["error"]),
+		Error:               runError,
 		ErrorCode:           str(values, "errorCode"),
 		Attributes:          stringMap(values["attributes"]),
 		DeploymentID:        str(values, "deploymentId"),
@@ -139,21 +173,30 @@ func toRun(values map[string]any, resolve worlds.ResolveData) worlds.Run {
 		run.StartHook = &worlds.StartHook{Token: str(hook, "token"), HookID: worlds.HookID(str(hook, "hookId")), TokenRetentionUntil: timeField(hook, "tokenRetentionUntil")}
 	}
 	if resolve != worlds.ResolveDataNone {
-		run.Input, run.Output = entityPayload(values["input"]), entityPayload(values["output"])
+		if run.Input, err = entityPayload(values, "input"); err != nil {
+			return worlds.Run{}, err
+		}
+		if run.Output, err = entityPayload(values, "output"); err != nil {
+			return worlds.Run{}, err
+		}
 	}
-	return run
+	return run, nil
 }
 
 // toStep returns the go-workflow view of a backend step. Its input is the
 // step_created Data the World stores as the step's payload.
 func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, error) {
 	attempt, _ := asInt(values["attempt"])
+	stepError, err := entityPayload(values, "error")
+	if err != nil {
+		return worlds.Step{}, err
+	}
 	step := worlds.Step{
 		RunID:       worlds.RunID(str(values, "runId")),
 		StepID:      worlds.StepID(str(values, "stepId")),
 		StepName:    str(values, "stepName"),
 		Status:      worlds.Status(str(values, "status")),
-		Error:       entityPayload(values["error"]),
+		Error:       stepError,
 		Attempt:     attempt,
 		CreatedAt:   requiredTime(values, "createdAt"),
 		UpdatedAt:   requiredTime(values, "updatedAt"),
@@ -163,8 +206,12 @@ func toStep(values map[string]any, resolve worlds.ResolveData) (worlds.Step, err
 	}
 	step.SpecVersion, _ = asInt(values["specVersion"])
 	if resolve != worlds.ResolveDataNone {
-		step.Input = entityPayload(values["input"])
-		step.Output = entityPayload(values["output"])
+		if step.Input, err = entityPayload(values, "input"); err != nil {
+			return worlds.Step{}, err
+		}
+		if step.Output, err = entityPayload(values, "output"); err != nil {
+			return worlds.Step{}, err
+		}
 	}
 	return step, nil
 }
@@ -207,7 +254,11 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 		version, _ := asInt(capabilities["hookResumeDedupVersion"])
 		hook.ResumeDedup = version >= hookResumeDedupVersion
 	}
-	hook.Metadata = entityPayload(values["metadata"])
+	metadata, err := entityPayload(values, "metadata")
+	if err != nil {
+		return worlds.Hook{}, err
+	}
+	hook.Metadata = metadata
 	hook.IsWebhook, _ = values["isWebhook"].(bool)
 	hook.IsSystem, _ = values["isSystem"].(bool)
 	return hook, nil
@@ -240,7 +291,7 @@ func (w *World) getRun(ctx context.Context, runID worlds.RunID, resolve worlds.R
 	if err := w.api.do(ctx, http.MethodGet, "/v2/runs/"+pathEscape(string(runID))+suffix, query, nil, &values); err != nil {
 		return worlds.Run{}, notFound(err, worlds.ErrRunNotFound)
 	}
-	return toRun(values, resolve), nil
+	return toRun(values, resolve)
 }
 
 func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (worlds.Page[worlds.Run], error) {
@@ -263,7 +314,11 @@ func (w *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 	}
 	result := worlds.Page[worlds.Run]{Cursor: page.cursor(), HasMore: page.HasMore}
 	for _, values := range page.Data {
-		result.Data = append(result.Data, toRun(values, input.ResolveData))
+		run, err := toRun(values, input.ResolveData)
+		if err != nil {
+			return worlds.Page[worlds.Run]{}, err
+		}
+		result.Data = append(result.Data, run)
 	}
 	return result, nil
 }

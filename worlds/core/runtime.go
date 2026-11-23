@@ -582,11 +582,14 @@ func (r *Runtime) loadRun(ctx context.Context, runID worlds.RunID) (worlds.Run, 
 	return loaded.run, loaded.events, err
 }
 
-// loadLog reads the run and its event log as loadRun does. With stopAtLimit,
-// a flow's read, it stops once it holds the most events the run may, when
-// more follow: the run fails on what was read, so the rest is not.
+// loadLog reads the run and its event log as loadRun does, taking the run's
+// input from the log. With stopAtLimit, a flow's read, it stops once it holds
+// the most events the run may, when more follow: the run fails on what was
+// read, so the rest is not.
 func (r *Runtime) loadLog(ctx context.Context, runID worlds.RunID, stopAtLimit bool) (loadedRun, error) {
-	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	// The run's input is read from its run_created, the log's first event,
+	// so the run itself is read without payloads.
+	run, err := r.world.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if err != nil {
 		return loadedRun{}, err
 	}
@@ -594,6 +597,10 @@ func (r *Runtime) loadLog(ctx context.Context, runID worlds.RunID, stopAtLimit b
 	if err != nil {
 		return loadedRun{}, err
 	}
+	if len(page.Data) == 0 || page.Data[0].EventType != worlds.EventTypeRunCreated {
+		return loadedRun{}, fmt.Errorf("workflow: event log of run %s does not start with run_created", runID)
+	}
+	run.Input = worlds.EventPayload(page.Data[0])
 	// The flow fences its writes with the in-band count of the snapshot the
 	// listing was read under, which covers every event it returns.
 	run.InBandCount = page.Snapshot.InBandCount

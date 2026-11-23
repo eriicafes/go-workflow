@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -150,7 +152,37 @@ func TestEntityViewsReturnPayloadsUncompressed(t *testing.T) {
 		}
 	}
 	// A payload that only looks compressed is returned as stored.
-	if broken := append([]byte("gzip"), "not gzip"...); !bytes.Equal(entityPayload(broken), broken) {
+	if broken := append([]byte("gzip"), "not gzip"...); !bytes.Equal(decompressPayload(broken), broken) {
 		t.Fatal("a payload that does not decompress was changed")
+	}
+}
+
+// The backend's encoder writes a Uint8Array payload under CBOR tag 64.
+func TestEntityViewsReadTaggedPayloads(t *testing.T) {
+	input := []byte(`devl[{"ChatID":1},948721655]`)
+	world := newBackendWorld(t, func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasSuffix(request.URL.Path, "/events") {
+			writer.Header().Set("Content-Type", frameContentType)
+			_, _ = writer.Write(eventFrames(t, true))
+			return
+		}
+		writeCBOR(writer, map[string]any{"runId": "wrun_1", "status": "running", "input": uint8Array(input), "createdAt": time.Now(), "updatedAt": time.Now()})
+	})
+	run, err := world.RunsGet(context.Background(), worlds.RunsGetInput{RunID: "wrun_1"})
+	if err != nil || !bytes.Equal(run.Input, input) {
+		t.Fatalf("run input = %q err=%v, want %q", run.Input, err, input)
+	}
+}
+
+func TestPayloadBytesRefusesWhatIsNotBytes(t *testing.T) {
+	for _, value := range []any{nil, []byte{}, cbor.Tag{Number: tagUint8Array, Content: []byte{}}} {
+		if data, err := payloadBytes(value); data != nil || err != nil {
+			t.Errorf("payloadBytes(%#v) = %q, %v, want no payload", value, data, err)
+		}
+	}
+	for _, value := range []any{"devl[1]", map[string]any{"_type": "RemoteRef", "key": "k"}, cbor.Tag{Number: 24, Content: []byte("x")}, cbor.Tag{Number: tagUint8Array, Content: "x"}} {
+		if data, err := payloadBytes(value); err == nil {
+			t.Errorf("payloadBytes(%#v) = %q, want an error", value, data)
+		}
 	}
 }
