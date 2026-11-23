@@ -88,7 +88,7 @@ func (w *runAheadWorld) RunsGet(ctx context.Context, input worlds.RunsGetInput) 
 // runAheadRunner chains four steps, each on the previous result. With Timer
 // set it first declares an hour's timer it never waits for, and with Hook set
 // it takes one payload of its hook before the steps and one after.
-func runAheadRunner(world *runAheadWorld) core.Runner {
+func runAheadRunner(world *runAheadWorld) worlds.Runner {
 	return workflow.Use(func(ctx context.Context, input runAheadInput) (runAheadOutput, error) {
 		var output runAheadOutput
 		if input.Timer {
@@ -149,7 +149,7 @@ func startRunAhead(t *testing.T, world *runAheadWorld, input runAheadInput) *run
 	if _, err := world.World.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[runAheadInput](), Input: encoded}); err != nil {
 		t.Fatal(err)
 	}
-	return &runAheadRun{t: t, world: world, runtime: core.NewRuntime(world, core.Runners(runAheadRunner(world))), runID: runID}
+	return &runAheadRun{t: t, world: world, runtime: core.NewRuntime(world, worlds.Runners(runAheadRunner(world))), runID: runID}
 }
 
 // deliver executes one delivery of the run's flow message and returns how

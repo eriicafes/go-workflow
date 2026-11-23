@@ -21,7 +21,7 @@ import (
 	"github.com/eriicafes/go-workflow/examples/durable-agent/workflows"
 	"github.com/eriicafes/go-workflow/examples/durable-agent/workflows/flows"
 	"github.com/eriicafes/go-workflow/workflowai"
-	"github.com/eriicafes/go-workflow/worlds/core"
+	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
@@ -39,7 +39,7 @@ func main() {
 	world, err := localworld.Open(localworld.Config{
 		Dir:     ".workflows",
 		BaseURL: cmp.Or(os.Getenv("WORKFLOW_BASE_URL"), "http://localhost:"+port+"/v1/workflow"),
-	}, core.Runners(workflow.Use(flows.Chat)))
+	}, worlds.Runners(workflow.Use(flows.Chat)))
 	if err != nil {
 		log.Fatal(err)
 	}

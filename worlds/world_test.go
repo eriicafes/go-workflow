@@ -312,7 +312,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 }
 
 func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
-	world := testworld.New(core.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
+	world := testworld.New(worlds.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
 		execution, ok := core.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, nil

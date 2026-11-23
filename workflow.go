@@ -414,13 +414,13 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 }
 
 // Use registers fn as the runner of workflow In. Pass the returned Runner to
-// core.Runners so the runtime can execute the workflow. The workflow name is
+// worlds.Runners so the runtime can execute the workflow. The workflow name is
 // the package path and type name of In. fn replays on every delivery, so it
 // must be deterministic. It does side effects only through steps and reads
 // time only through Now.
-func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) core.Runner {
+func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
 	name := worlds.WorkflowName[In]()
-	return core.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
+	return worlds.NewRunner(name, func(ctx context.Context, raw []byte) ([]byte, error) {
 		execution, ok := core.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, ErrNoWorkflow

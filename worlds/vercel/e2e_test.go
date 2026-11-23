@@ -14,7 +14,6 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/internal/envelope"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 type e2eInput struct{ N int }
@@ -109,7 +108,7 @@ func TestWorkflowsRunEndToEndLive(t *testing.T) {
 }
 
 func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
-	runners := core.Runners(workflow.Use(func(ctx context.Context, input e2eInput) (e2eOutput, error) {
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input e2eInput) (e2eOutput, error) {
 		first, err := workflow.Step(ctx, double, input.N)
 		if err != nil {
 			return e2eOutput{}, err

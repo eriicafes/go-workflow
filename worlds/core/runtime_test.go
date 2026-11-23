@@ -127,7 +127,7 @@ func TestCompensationDeliveryErrors(t *testing.T) {
 				}, struct{}{})
 				return versionedOutput{}, failure
 			})
-			runtime := core.NewRuntime(world, core.Runners(runner))
+			runtime := core.NewRuntime(world, worlds.Runners(runner))
 			// The compensation is created as a step delivery.
 			ctx, cancel := context.WithTimeout(workflow.NewContext(queuedSteps(), workflow.NewClient(world)), time.Second)
 			defer cancel()
@@ -313,8 +313,8 @@ func TestReplayDivergenceFailsRunWithoutReachingRunnerCode(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 
-	v1 := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
-	v2 := core.NewRuntime(world, core.Runners(workflow.Use(betaSwallowingErrors)))
+	v1 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaThenBeta)))
+	v2 := core.NewRuntime(world, worlds.Runners(workflow.Use(betaSwallowingErrors)))
 	run := startVersioned(t, ctx, world)
 
 	// v1 records alpha at position 0 and completes it.
@@ -356,8 +356,8 @@ func TestReplayDivergenceRequeuesTheDivergedStepDelivery(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 
-	v1 := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
-	v2 := core.NewRuntime(world, core.Runners(workflow.Use(betaSwallowingErrors)))
+	v1 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaThenBeta)))
+	v2 := core.NewRuntime(world, worlds.Runners(workflow.Use(betaSwallowingErrors)))
 	run := startVersioned(t, ctx, world)
 
 	// v1 records alpha at position 0 and queues its step delivery.
@@ -388,8 +388,8 @@ func TestReplayDivergenceCatchesUnreachedOperations(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 
-	v1 := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
-	v2 := core.NewRuntime(world, core.Runners(workflow.Use(alphaOnly)))
+	v1 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaThenBeta)))
+	v2 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaOnly)))
 	run := startVersioned(t, ctx, world)
 
 	// v1 records and completes alpha and beta, leaving the final flow queued.
@@ -459,8 +459,8 @@ func TestDeploymentAffinityReroutesDeliveriesToTheRunsDeployment(t *testing.T) {
 
 	d1 := deployedWorld{World: world, id: "dpl_1"}
 	d2 := deployedWorld{World: world, id: "dpl_2"}
-	v1 := core.NewRuntime(d1, core.Runners(workflow.Use(alphaThenBeta)))
-	v2 := core.NewRuntime(d2, core.Runners(workflow.Use(betaSwallowingErrors)))
+	v1 := core.NewRuntime(d1, worlds.Runners(workflow.Use(alphaThenBeta)))
+	v2 := core.NewRuntime(d2, worlds.Runners(workflow.Use(betaSwallowingErrors)))
 
 	// A run started through dpl_1's client is pinned to dpl_1.
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1)), versionedInput{})
@@ -521,7 +521,7 @@ func TestDeploymentAffinityFailsRunAfterRerouteBudget(t *testing.T) {
 
 	d1 := deployedWorld{World: world, id: "dpl_1"}
 	d2 := deployedWorld{World: world, id: "dpl_2"}
-	v2 := core.NewRuntime(d2, core.Runners(workflow.Use(betaSwallowingErrors)))
+	v2 := core.NewRuntime(d2, worlds.Runners(workflow.Use(betaSwallowingErrors)))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1)), versionedInput{})
 	if err != nil {
 		t.Fatal(err)
@@ -550,7 +550,7 @@ func TestDeploymentAffinityFailsRunWhenDeploymentIsUnavailable(t *testing.T) {
 
 	d1 := deployedWorld{World: world, id: "dpl_1"}
 	d2 := deployedWorld{World: world, id: "dpl_2", gone: "dpl_1"}
-	v2 := core.NewRuntime(d2, core.Runners(workflow.Use(betaSwallowingErrors)))
+	v2 := core.NewRuntime(d2, worlds.Runners(workflow.Use(betaSwallowingErrors)))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1)), versionedInput{})
 	if err != nil {
 		t.Fatal(err)
@@ -578,7 +578,7 @@ func TestDeploymentAffinityAddressesHookResumesToTheRunsDeployment(t *testing.T)
 
 	d1 := deployedWorld{World: world, id: "dpl_1"}
 	d2 := deployedWorld{World: world, id: "dpl_2"}
-	v1 := core.NewRuntime(d1, core.Runners(workflow.Use(awaitHook)))
+	v1 := core.NewRuntime(d1, worlds.Runners(workflow.Use(awaitHook)))
 	hook := workflow.NewHookToken()
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1)), hookedInput{Token: hook}); err != nil {
 		t.Fatal(err)
@@ -667,7 +667,7 @@ func TestSelectKeepsTheFirstPromiseToSettleAcrossReplays(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(race)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(race)))
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
 	run, err := workflow.Start(client, raceInput{})
 	if err != nil {
@@ -742,7 +742,7 @@ func TestDoneGivesTheSameAnswerOnEveryReplay(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(awaitWithNudge)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(awaitWithNudge)))
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
 	token := workflow.NewHookToken()
 	run, err := workflow.Start(client, nudgeInput{Token: token})
@@ -808,7 +808,7 @@ func TestSupersededFlowReplaysInsteadOfDuplicatingDeclarations(t *testing.T) {
 	defer world.Close()
 
 	racing := &racingWorld{World: world}
-	runtime := core.NewRuntime(racing, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(racing, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
 	drain(t, ctx, world, runtime)
 
@@ -870,7 +870,7 @@ func TestRedeliveredFlowQueuesAStepItFailedToQueue(t *testing.T) {
 	defer world.Close()
 
 	lossy := &lossyWorld{World: world}
-	runtime := core.NewRuntime(lossy, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(lossy, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
 	delivery := world.QueuedMessages()[0]
 
@@ -909,7 +909,7 @@ func TestSupersededFlowAsksForItsMessageAgain(t *testing.T) {
 	defer world.Close()
 
 	racing := &racingWorld{World: world}
-	runtime := core.NewRuntime(racing, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(racing, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
 	delivery := world.QueuedMessages()[0]
 
@@ -990,7 +990,7 @@ func TestRuntimeRecordsARetryAfterRunCancellationAndStartsNoAttempt(t *testing.T
 	world := testworld.NewManual()
 	defer world.Close()
 	ctx := workflow.NewContext(queuedSteps(), workflow.NewClient(world))
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	run, err := workflow.Start(ctx, backoffInput{})
 	if err != nil {
 		t.Fatal(err)
@@ -1031,7 +1031,7 @@ func TestSuspendingFlowLeavesARetryThatIsNotDueQueuedOnce(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(awaitBackoff)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(awaitBackoff)))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), backoffInput{})
 	if err != nil {
 		t.Fatal(err)
@@ -1067,7 +1067,7 @@ func TestEarlyTimerDeliveryQueuesItsReplacement(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(sleepAnHour)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(sleepAnHour)))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), sleeperInput{})
 	if err != nil {
 		t.Fatal(err)
@@ -1122,7 +1122,7 @@ func TestRedeliveredStepQueuesTheFlowItFailedToQueue(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 	failing := &flowQueueFailure{World: world}
-	runtime := core.NewRuntime(failing, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(failing, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
 	deliverNext(t, ctx, world, runtime)
 
@@ -1157,7 +1157,7 @@ func TestReturnedRunCancelledErrorFailsTheRun(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
 	run, err := workflow.Start(client, backoffInput{})
 	if err != nil {
@@ -1186,7 +1186,7 @@ func TestEarlyStepDeliveryWaitsForItsRetry(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), backoffInput{}); err != nil {
 		t.Fatal(err)
 	}
@@ -1227,7 +1227,7 @@ func TestHookNextSkipsAPayloadThatFailsToDecode(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
 	token := workflow.NewHookToken()
 	run, err := workflow.Start(client, hookedInput{Token: token})
@@ -1260,7 +1260,7 @@ func TestResumeHookReportsARecordedPayloadItCouldNotQueue(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(awaitHook)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(awaitHook)))
 	token := workflow.NewHookToken()
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), hookedInput{Token: token})
 	if err != nil {
@@ -1341,7 +1341,7 @@ func TestThenSettlesANilCallbackResultWithAnError(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	client := workflow.NewContext(ctx, workflow.NewClient(world))
 	run, err := workflow.Start(client, backoffInput{})
 	if err != nil {
@@ -1377,7 +1377,7 @@ func fanOut(ctx context.Context, input inlineInput) (inlineOutput, error) {
 
 // startInline starts a run of runner on a manual World and returns the World,
 // a Runtime for runner, the run's ID, and its first delivery.
-func startInline(t *testing.T, ctx context.Context, runner core.Runner, input inlineInput) (*testworld.World, *core.Runtime, worlds.RunID, testworld.QueueMessage) {
+func startInline(t *testing.T, ctx context.Context, runner worlds.Runner, input inlineInput) (*testworld.World, *core.Runtime, worlds.RunID, testworld.QueueMessage) {
 	t.Helper()
 	world := testworld.NewManual()
 	t.Cleanup(world.Close)
@@ -1385,7 +1385,7 @@ func startInline(t *testing.T, ctx context.Context, runner core.Runner, input in
 	if err != nil {
 		t.Fatal(err)
 	}
-	return world, core.NewRuntime(world, core.Runners(runner)), worlds.RunID(run.ID()), world.QueuedMessages()[0]
+	return world, core.NewRuntime(world, worlds.Runners(runner)), worlds.RunID(run.ID()), world.QueuedMessages()[0]
 }
 
 // inlineSteps returns the number of steps the run's flows created inline.
@@ -1495,7 +1495,7 @@ func TestPromotedStepQueuesItsRetryAsAStepDelivery(t *testing.T) {
 
 // crashingStepRunner returns a runner whose step's first attempt runs until
 // its context ends, and the channel closed when it starts.
-func crashingStepRunner(attempts *atomic.Int32) (core.Runner, chan struct{}) {
+func crashingStepRunner(attempts *atomic.Int32) (worlds.Runner, chan struct{}) {
 	started := make(chan struct{})
 	return workflow.Use(func(ctx context.Context, _ inlineInput) (inlineOutput, error) {
 		value, err := workflow.Step(ctx, func(ctx context.Context, value int) (int, error) {
@@ -1579,7 +1579,7 @@ func TestMaxInlineStepsSetsTheLimit(t *testing.T) {
 }
 
 // chainSteps runs two steps one after the other, the first taking slow.
-func chainSteps(slow time.Duration) core.Runner {
+func chainSteps(slow time.Duration) worlds.Runner {
 	return workflow.Use(func(ctx context.Context, _ inlineInput) (inlineOutput, error) {
 		first, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
 			time.Sleep(slow)
@@ -1718,7 +1718,7 @@ func TestPromotedStepTakesTwoWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(fanOut)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(fanOut)))
 	drain(t, ctx, base, runtime)
 	if _, err := run.Value(workflow.NewContext(ctx, workflow.NewClient(world))); err != nil {
 		t.Fatal(err)
@@ -1770,7 +1770,7 @@ func TestFlowThatRecordsAnInlineResultIsStillSupersededByAnotherFlow(t *testing.
 	world, _, runID, delivery := startInline(t, ctx, runner, inlineInput{})
 	// A flow that runs ahead may start the next step before its result's
 	// write is refused, as at-least-once steps allow.
-	runtime := core.NewRuntime(world, core.Runners(runner), core.WithRunAheadDepth(0))
+	runtime := core.NewRuntime(world, worlds.Runners(runner), core.WithRunAheadDepth(0))
 	done := make(chan error, 1)
 	go func() { done <- runtime.Execute(ctx, delivery.Input) }()
 
@@ -1822,7 +1822,7 @@ func TestFailedStartReleasesTheStepForTheNextDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	delivery := base.QueuedMessages()[0]
 	crash(t, ctx, runtime, delivery.Input, started)
 
@@ -1936,7 +1936,7 @@ func TestStartDeploymentPinsChildRuns(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
 	d1 := latestWorld{deployedWorld: deployedWorld{World: world, id: "dpl_1"}, latest: "dpl_2"}
-	runtime := core.NewRuntime(d1, core.Runners(workflow.Use(startsChildren)))
+	runtime := core.NewRuntime(d1, worlds.Runners(workflow.Use(startsChildren)))
 
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(d1.deployedWorld)), startsChildrenInput{})
 	if err != nil {
@@ -1975,7 +1975,7 @@ func TestDeliveriesPastTheCapFailTheirRunOrStep(t *testing.T) {
 	ctx := context.Background()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners())
+	runtime := core.NewRuntime(world, worlds.Runners())
 
 	// A flow past the cap fails its run without replaying it.
 	flowCap, flowAtCap := worlds.NewRunID(), worlds.NewRunID()
@@ -2041,7 +2041,7 @@ func TestStepDeliveryPastTheCapFailsAStepWithNoActivityForAnHour(t *testing.T) {
 		ctx := context.Background()
 		world := testworld.NewManual()
 		defer world.Close()
-		runtime := core.NewRuntime(world, core.Runners())
+		runtime := core.NewRuntime(world, worlds.Runners())
 		// Minted in the bubble, whose clock the World checks it against.
 		runStalled := worlds.NewRunID()
 		if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStalled, WorkflowName: "w"}); err != nil {
@@ -2098,7 +2098,7 @@ func TestStepRedeliveryWaitsForAPendingRetryFromTheStepsLatestEvent(t *testing.T
 	base := testworld.NewManual()
 	defer base.Close()
 	world := &runReads{World: base}
-	runtime := core.NewRuntime(world, core.Runners())
+	runtime := core.NewRuntime(world, worlds.Runners())
 	if _, err := base.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runRetry, WorkflowName: "w"}); err != nil {
 		t.Fatal(err)
 	}
@@ -2157,7 +2157,7 @@ func TestFirstDeliveryOfARunReplaysWithoutReadingTheLog(t *testing.T) {
 	if first.RunInput == nil {
 		t.Fatal("the first delivery carries no run input")
 	}
-	runtime := core.NewRuntime(world, core.Runners(turboRunner))
+	runtime := core.NewRuntime(world, worlds.Runners(turboRunner))
 	if err := runtime.Execute(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -2191,7 +2191,7 @@ func TestStartQueueInputCreatesARunWhoseCreationNeverLanded(t *testing.T) {
 	// Only the first delivery was queued.
 	first := worlds.StartQueueInput(worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[turboInput](), Input: input})
 	first.DeliveryCount, first.Attempt = 1, 1
-	if err := core.NewRuntime(world, core.Runners(turboRunner)).Execute(ctx, first); err != nil {
+	if err := core.NewRuntime(world, worlds.Runners(turboRunner)).Execute(ctx, first); err != nil {
 		t.Fatal(err)
 	}
 	if output, err := turboResult(t, ctx, world, runID); err != nil || output.Value != 7 {
@@ -2237,7 +2237,7 @@ func TestFlowThatReplaysPastItsBudgetIsRetriedAndThenFailsItsRun(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaOnly)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaOnly)))
 	run := startVersioned(t, ctx, world)
 	runID := worlds.RunID(run.ID())
 	message := world.QueuedMessages()[0].Input
@@ -2276,7 +2276,7 @@ func TestRunWhoseLogIsFullFails(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, world)
 	drain(t, ctx, world, runtime)
 
@@ -2314,7 +2314,7 @@ func TestFlowStopsReadingALogThatIsPastTheLimitTheWorldReports(t *testing.T) {
 	defer base.Close()
 	// The World's limit for the run applies, not the default.
 	world := pagedWorld{World: base, pageSize: 3, maxEvents: 3}
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(alphaThenBeta)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaThenBeta)))
 	run := startVersioned(t, ctx, base)
 	drain(t, ctx, base, runtime)
 
@@ -2343,8 +2343,8 @@ func TestReplayDivergenceCatchesAnOperationASuspendedReplayNeverDeclared(t *test
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	v1 := core.NewRuntime(world, core.Runners(workflow.Use(alphaAndBeta)))
-	v2 := core.NewRuntime(world, core.Runners(workflow.Use(alphaOnly)))
+	v1 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaAndBeta)))
+	v2 := core.NewRuntime(world, worlds.Runners(workflow.Use(alphaOnly)))
 	run := startVersioned(t, ctx, world)
 	runID := worlds.RunID(run.ID())
 
@@ -2383,7 +2383,7 @@ func TestRunRecordsTheStepsAndTimersItNeverWaitedForAsItEnds(t *testing.T) {
 			defer cancel()
 			world := testworld.NewManual()
 			defer world.Close()
-			runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
+			runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
 				workflow.Background(ctx, alpha, struct{}{})
 				workflow.Timer(ctx, time.Hour)
 				if fail {
@@ -2442,7 +2442,7 @@ func TestStepDeliveryThatRecordsARetryQueuesAFlow(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ unawaitedInput) (unawaitedOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			return struct{}{}, errors.New("not yet")
 		}, struct{}{})
@@ -2487,7 +2487,7 @@ func TestFirstDeliveryOfAnOldMessageReadsTheLog(t *testing.T) {
 	// running a crashed delivery again, so it decides from the log.
 	first := base.QueuedMessages()[0].Input
 	first.CreatedAt = time.Now().Add(-core.TurboFirstDeliveryMaxAge - time.Second)
-	runtime := core.NewRuntime(world, core.Runners(turboRunner))
+	runtime := core.NewRuntime(world, worlds.Runners(turboRunner))
 	if err := runtime.Execute(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -2537,7 +2537,7 @@ func TestFirstDeliveryOfAStartHookCandidateTheWorldDidNotAdmit(t *testing.T) {
 	delivery := worlds.StartQueueInput(worlds.EventsCreateRunInput{RunID: worlds.NewRunID(), WorkflowName: worlds.WorkflowName[versionedInput](), StartHook: &worlds.StartHook{Token: "candidate"}})
 	delivery.DeliveryCount, delivery.Attempt = 1, 1
 	execute := func(refusal error) error {
-		return core.NewRuntime(candidateWorld{World: manual, refusal: refusal}, core.Runners(workflow.Use(alphaThenBeta))).Execute(ctx, delivery)
+		return core.NewRuntime(candidateWorld{World: manual, refusal: refusal}, worlds.Runners(workflow.Use(alphaThenBeta))).Execute(ctx, delivery)
 	}
 	// A candidate refused for good never becomes a run: its message is
 	// acknowledged.

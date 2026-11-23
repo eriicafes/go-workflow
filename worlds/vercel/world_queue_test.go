@@ -10,7 +10,6 @@ import (
 
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 type routedWorkflow struct {
@@ -111,7 +110,7 @@ func (namedStepInput) Workflow(namedStepOutput) {}
 func TestFlowDeliveryNamesTheInlineStepTheRuntimeRan(t *testing.T) {
 	all, queue, _ := newWorlds(t, 1)
 	world := all[0]
-	consumer := Queue(world, core.Runners(workflow.Use(func(ctx context.Context, _ namedStepInput) (namedStepOutput, error) {
+	consumer := Queue(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ namedStepInput) (namedStepOutput, error) {
 		_, err := workflow.InlineStep(ctx, func(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }, struct{}{})
 		return namedStepOutput{}, err
 	})))

@@ -189,7 +189,7 @@ acknowledges them one at a time:
 
 ```go
 world := testworld.NewManual(workflow.Use(flows.GenerateReport))
-runtime := core.NewRuntime(world, core.Runners(workflow.Use(flows.GenerateReport)))
+runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(flows.GenerateReport)))
 
 // ... start a run ...
 

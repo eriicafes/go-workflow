@@ -24,7 +24,7 @@ const (
 	maxRerouteDelay = 8 * time.Second
 )
 
-// Runtime executes deliveries. It replays the runners in its RunnerSet
+// Runtime executes deliveries. It replays the runners in its worlds.RunnerSet
 // against a World as flows and steps and records their results as events.
 //
 // A flow is the run's orchestrator: it makes every decision, and its writes
@@ -48,7 +48,7 @@ const (
 // deploymentMismatchError.
 type Runtime struct {
 	world   worlds.World
-	runners RunnerSet
+	runners worlds.RunnerSet
 	// runAheadDepth is how many inline steps' results a flow hands to the
 	// runner ahead of their writes.
 	runAheadDepth int
@@ -61,7 +61,7 @@ const fenceRefusalRedelivery = time.Second
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
 // world using runners. It copies runners.
-func NewRuntime(world worlds.World, runners RunnerSet, options ...RuntimeOption) *Runtime {
+func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...RuntimeOption) *Runtime {
 	runtime := &Runtime{world: world, runners: maps.Clone(runners), runAheadDepth: DefaultRunAheadDepth}
 	for _, option := range options {
 		option(runtime)
@@ -387,7 +387,7 @@ func replayExit(recovered any) error {
 // outcome when the runner returns. Steps the flow still runs inline record
 // their results before the delivery ends. A replay that diverges from the
 // event log is handed to recoverDivergence.
-func (r *Runtime) replayFlow(input worlds.QueueInput, runner Runner, run worlds.Run, execution *Execution) (err error) {
+func (r *Runtime) replayFlow(input worlds.QueueInput, runner worlds.Runner, run worlds.Run, execution *Execution) (err error) {
 	ctx := execution.Context()
 	var output []byte
 	if err = r.checkLimits(execution); err == nil {
@@ -796,7 +796,7 @@ func (r *Runtime) wake(ctx context.Context, run worlds.Run) error {
 // replayStep replays the runner once up to the target step and records the
 // step's result. A replay that diverges from the event log is handed to
 // recoverDivergence.
-func (r *Runtime) replayStep(input worlds.QueueInput, runner Runner, run worlds.Run, execution *Execution, stepID worlds.StepID) error {
+func (r *Runtime) replayStep(input worlds.QueueInput, runner worlds.Runner, run worlds.Run, execution *Execution, stepID worlds.StepID) error {
 	ctx := execution.Context()
 	_, err := r.run(runner, ctx, run.Input)
 
@@ -917,7 +917,7 @@ func (r *Runtime) failStep(ctx context.Context, input worlds.QueueInput, executi
 
 // run preserves error panics, including replay control, and converts other
 // application panic values into workflow errors.
-func (r *Runtime) run(runner Runner, ctx context.Context, input []byte) (output []byte, err error) {
+func (r *Runtime) run(runner worlds.Runner, ctx context.Context, input []byte) (output []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if recoveredError, ok := recovered.(error); ok {

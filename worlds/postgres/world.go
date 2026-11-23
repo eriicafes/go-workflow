@@ -271,7 +271,7 @@ type WorkerOptions struct {
 // delivery resumes. Runs parked on a hook or a wait are left alone, and a
 // run's recovery flow is queued once while it lives, however many processes
 // start. A process that runs no Worker recovers nothing.
-func Worker(ctx context.Context, world *World, runners core.RunnerSet, options ...WorkerOptions) error {
+func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options ...WorkerOptions) error {
 	var option WorkerOptions
 	if len(options) > 0 {
 		option = options[len(options)-1]

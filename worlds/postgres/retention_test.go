@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // retentionTables are the tables that hold rows of a run.
@@ -110,7 +109,7 @@ func TestWorkerExpiresRuns(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
-	go func() { stopped <- Worker(ctx, world, core.Runners()) }()
+	go func() { stopped <- Worker(ctx, world, worlds.Runners()) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for !purgedData(t, world, done) {
 		if time.Now().After(deadline) {

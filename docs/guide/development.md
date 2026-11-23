@@ -54,7 +54,7 @@ func main() {
 	}
 	defer world.Close()
 
-	runners := core.Runners(workflow.Use(flows.GenerateReport))
+	runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 	go func() {
 		if err := postgresworld.Worker(ctx, world, runners); err != nil {
 			log.Printf("workflow worker stopped: %v", err)

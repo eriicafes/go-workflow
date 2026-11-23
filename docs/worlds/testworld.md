@@ -46,9 +46,9 @@ it before starting runs.
 executes them with a `core.Runtime` and acknowledges each with `Acknowledge`.
 
 ```go
-runners := []core.Runner{workflow.Use(flows.GenerateReport)}
+runners := []worlds.Runner{workflow.Use(flows.GenerateReport)}
 world := testworld.NewManual(runners...)
-runtime := core.NewRuntime(world, core.Runners(runners...))
+runtime := core.NewRuntime(world, worlds.Runners(runners...))
 
 for len(world.QueuedMessages()) > 0 {
 	message := world.QueuedMessages()[0]

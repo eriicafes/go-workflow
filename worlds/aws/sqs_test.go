@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 func TestDelaySeconds(t *testing.T) {
@@ -36,7 +35,7 @@ func TestConsumer(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	world := testWorld(t, dynamo, queue, nil)
-	handler := Queue(world, core.Runners())
+	handler := Queue(world, worlds.Runners())
 
 	now := time.Now().UTC()
 	done := runView{Run: worlds.Run{RunID: "wrun_done", WorkflowName: "flow", Status: worlds.StatusCompleted, Attributes: map[string]string{}, CreatedAt: now, UpdatedAt: now, CompletedAt: &now}, eventCount: 2}
@@ -119,7 +118,7 @@ func TestConsumerLeavesRecordsToAnotherInvocationNearTheDeadline(t *testing.T) {
 		dynamo.getDelay = 6 * time.Second
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
-		response, err := Queue(world, core.Runners())(ctx, events.SQSEvent{Records: records})
+		response, err := Queue(world, worlds.Runners())(ctx, events.SQSEvent{Records: records})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,7 +141,7 @@ func TestConsumerStoreError(t *testing.T) {
 	dynamo := newFakeDynamo()
 	dynamo.getErr = errors.New("throttled")
 	world := testWorld(t, dynamo, &fakeSQS{}, nil)
-	response, err := Queue(world, core.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, "id", worlds.QueueInput{RunID: "wrun"})}})
+	response, err := Queue(world, worlds.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, "id", worlds.QueueInput{RunID: "wrun"})}})
 	if err != nil || len(response.BatchItemFailures) != 1 || response.BatchItemFailures[0].ItemIdentifier != "msg-id" {
 		t.Fatalf("response = %#v err=%v", response, err)
 	}
@@ -169,7 +168,7 @@ func TestConsumerWaitsForAThrottle(t *testing.T) {
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
 	dynamo.getErr = &worlds.ThrottleError{After: 2 * time.Minute}
 	world := testWorld(t, dynamo, queue, nil)
-	if _, err := Queue(world, core.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, "id", worlds.QueueInput{RunID: "wrun"})}}); err != nil {
+	if _, err := Queue(world, worlds.Runners())(context.Background(), events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, "id", worlds.QueueInput{RunID: "wrun"})}}); err != nil {
 		t.Fatal(err)
 	}
 	// The third receive would back off 4s; the throttle asked for 2m.

@@ -17,7 +17,7 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows/flows"
-	"github.com/eriicafes/go-workflow/worlds/core"
+	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 )
 
@@ -54,7 +54,7 @@ func workflowClient(mux *http.ServeMux, baseURL string) (workflow.Client, func()
 		return client, func() error { return nil }, nil
 	}
 
-	runners := core.Runners(
+	runners := worlds.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)

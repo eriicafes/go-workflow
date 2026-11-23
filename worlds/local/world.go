@@ -108,7 +108,7 @@ type World struct {
 // Open returns a World on config.Dir that executes deliveries for the
 // workflows of runners. Open reads no state, so call Prepare before using the
 // World.
-func Open(config Config, runners core.RunnerSet) (*World, error) {
+func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
 		return nil, err
 	}

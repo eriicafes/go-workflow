@@ -63,21 +63,21 @@ func (w *World) Capabilities() worlds.Capabilities {
 
 // New returns a World that executes deliveries for the workflows of runners
 // in-process, each in its own goroutine once it is due.
-func New(runners ...core.Runner) *World {
+func New(runners ...worlds.Runner) *World {
 	return newWorld(true, runners...)
 }
 
 // NewManual returns a World that records deliveries without executing them.
 // Tests execute them through QueuedMessages and acknowledge each with
 // Acknowledge.
-func NewManual(runners ...core.Runner) *World {
+func NewManual(runners ...worlds.Runner) *World {
 	return newWorld(false, runners...)
 }
 
-func newWorld(autoRun bool, runners ...core.Runner) *World {
+func newWorld(autoRun bool, runners ...worlds.Runner) *World {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), disposals: make(map[worlds.HookID]hookDisposal), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), resumes: make(map[string]resumeClaim), startDecisions: make(map[worlds.RunID]worlds.StartHookDecision), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
-	w.runtime = core.NewRuntime(w, core.Runners(runners...))
+	w.runtime = core.NewRuntime(w, worlds.Runners(runners...))
 	return w
 }
 

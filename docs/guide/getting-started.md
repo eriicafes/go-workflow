@@ -79,11 +79,11 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 
 ## 3. Register runners
 
-`workflow.Use` pairs a runner with its workflow, and `core.Runners` collects
+`workflow.Use` pairs a runner with its workflow, and `worlds.Runners` collects
 them into a set the runtime executes.
 
 ```go
-runners := core.Runners(
+runners := worlds.Runners(
 	workflow.Use(flows.GenerateReport),
 )
 ```
@@ -99,7 +99,7 @@ import (
 	"log"
 
 	"github.com/eriicafes/go-workflow"
-	"github.com/eriicafes/go-workflow/worlds/core"
+	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 
 	"example.com/app/workflows"
@@ -109,7 +109,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	runners := core.Runners(workflow.Use(flows.GenerateReport))
+	runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 
 	world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 	if err != nil {

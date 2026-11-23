@@ -5,33 +5,35 @@ import "github.com/eriicafes/go-workflow/worlds"
 ```
 
 Package `worlds` defines the World contract that runs are recorded in, the
-Client, and the HTTP server that exposes a World to clients. Package
-`worlds/core` holds the runtime that executes deliveries against a World, the
-runners it replays, and the durable primitives workflow code is built on. Full
+runners a World executes, the Client, and the HTTP server that exposes a World
+to clients. Package `worlds/core` holds the runtime that executes deliveries
+against a World and the durable primitives workflow code is built on. Full
 godoc is on
 [pkg.go.dev](https://pkg.go.dev/github.com/eriicafes/go-workflow/worlds).
 
-Most applications only touch `core.Runners`. This page is for operators,
+Most applications only touch `worlds.Runners`. This page is for operators,
 tool builders, and people [implementing a World](/worlds/custom).
 
 ## Runners and runtime
 
-These live in package `core` (`github.com/eriicafes/go-workflow/worlds/core`).
+`Runners` and `NewRunner` are in package `worlds`. The runtime is in package
+`core` (`github.com/eriicafes/go-workflow/worlds/core`).
 
 ```go
 func Runners(values ...Runner) RunnerSet
 func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner
 
-func NewRuntime(world World, runners RunnerSet, options ...RuntimeOption) *Runtime
+// package core
+func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...RuntimeOption) *Runtime
 func WithRunAheadDepth(depth int) RuntimeOption
-func (*Runtime) Execute(ctx context.Context, input QueueInput) error
+func (*Runtime) Execute(ctx context.Context, input worlds.QueueInput) error
 ```
 
 `workflow.Use` builds a `Runner` from a typed runner function. `NewRunner`
 builds one from a function of payloads, for runners written without the
 `workflow` package: it receives the run's input payload and returns its output
 payload, read and written with the `DecodePayload` and `EncodePayload` methods
-of the run's `Execution`, which encrypt as the run does.
+of the run's `core.Execution`, which encrypt as the run does.
 
 `WithRunAheadDepth` sets how many inline steps' results a flow hands to the
 runner before their writes commit: 10 by default, 0 for none, at most 16. See

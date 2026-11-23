@@ -1,14 +1,14 @@
-package core
+package worlds
 
 import (
 	"context"
 )
 
 // Runner is the function that executes a workflow, paired with the workflow
-// name so the Runtime can replay it. The workflow name is derived from the
+// name so core.Runtime can replay it. The workflow name is derived from the
 // workflow type, its package path and type name, and runs record it to select
-// their Runner. The function receives and returns payloads, and the Runtime
-// passes it the run's Execution through its context, whose EncodePayload and
+// their Runner. The function receives and returns payloads, and core.Runtime
+// passes it the run's core.Execution through its context, whose EncodePayload and
 // DecodePayload read and write them.
 type Runner struct {
 	name string

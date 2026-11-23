@@ -6,7 +6,7 @@ waits, hooks, and stream chunks in a SQLite database, `world.db` in its data
 directory, and delivers queued work in-process from an in-memory queue.
 
 ```go
-runners := core.Runners(workflow.Use(flows.GenerateReport))
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {

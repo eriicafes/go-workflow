@@ -155,7 +155,7 @@ func TestCancelledDeadlinesDoNotFireOnReplayAfterExpiry(t *testing.T) {
 					}
 					return durableWaitOutput{}, workflow.Sleep(ctx, 2*time.Hour)
 				})
-				runtime := core.NewRuntime(world, core.Runners(runner))
+				runtime := core.NewRuntime(world, worlds.Runners(runner))
 				ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 				run, err := workflow.Start(ctx, durableWaitInput{})
 				if err != nil {
@@ -195,7 +195,7 @@ func TestWaitCompletedForAnotherTimeThanItsWaitDiverges(t *testing.T) {
 	defer cancel()
 	world := testworld.NewManual()
 	defer world.Close()
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ durableWaitInput) (durableWaitOutput, error) {
 		return durableWaitOutput{}, workflow.Sleep(ctx, time.Hour)
 	})))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(world)), durableWaitInput{})

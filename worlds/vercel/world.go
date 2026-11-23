@@ -286,7 +286,7 @@ func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 // Deploy it only as a function with a queue/v2beta trigger for Config.Topic.
 // Vercel does not expose such functions publicly, so the handler does not
 // authenticate requests.
-func Queue(world *World, runners core.RunnerSet) http.Handler {
+func Queue(world *World, runners worlds.RunnerSet) http.Handler {
 	return &consumer{world: world, execute: core.NewRuntime(world, runners).Execute}
 }
 

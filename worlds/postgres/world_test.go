@@ -14,7 +14,6 @@ import (
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/workflowtest"
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -114,7 +113,7 @@ func TestStartWorkersExecuteOnce(t *testing.T) {
 		mu.Unlock()
 		return n * 2, nil
 	}
-	runners := core.Runners(workflow.Use(func(ctx context.Context, input countInput) (countOutput, error) {
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input countInput) (countOutput, error) {
 		value, err := workflow.Step(ctx, step, input.N)
 		return countOutput{N: value}, err
 	}))
@@ -182,7 +181,7 @@ func TestStartBacksOffFailedDelivery(t *testing.T) {
 	}
 	workerCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- Worker(workerCtx, world, core.Runners()) }()
+	go func() { done <- Worker(workerCtx, world, worlds.Runners()) }()
 	deadline := time.Now().Add(10 * time.Second)
 	var attempts int
 	var notBefore time.Time

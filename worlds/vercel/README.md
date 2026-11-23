@@ -27,7 +27,7 @@ Deploy two functions:
 
 ```go
 // The queue consumer function.
-runners := core.Runners(workflow.Use(flows.GenerateReport))
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 log.Fatal(http.ListenAndServe(":8081", vercelworld.Queue(world, runners)))
 ```
 

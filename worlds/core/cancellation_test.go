@@ -78,7 +78,7 @@ func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 		b := workflow.Background(cancelCtx, step, "second contender")
 		return versionedOutput{}, workflow.Join(ctx, a, b)
 	})
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
 	run, err := workflow.Start(clientCtx, versionedInput{})
 	if err != nil {
@@ -193,7 +193,7 @@ func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 				}
 				return versionedOutput{Version: context.Cause(cancelCtx).Error()}, nil
 			})
-			runtime := core.NewRuntime(world, core.Runners(runner))
+			runtime := core.NewRuntime(world, worlds.Runners(runner))
 			clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
 			run, err := workflow.Start(clientCtx, versionedInput{})
 			if err != nil {

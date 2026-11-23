@@ -58,10 +58,10 @@ func findSources(ctx context.Context, topic string) ([]string, error) {
 }
 ```
 
-Register runners with `workflow.Use` and collect them with `core.Runners`.
+Register runners with `workflow.Use` and collect them with `worlds.Runners`.
 
 ```go
-runners := core.Runners(
+runners := worlds.Runners(
 	workflow.Use(flows.GenerateReport),
 )
 ```

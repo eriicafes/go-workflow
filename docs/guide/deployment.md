@@ -16,7 +16,7 @@ The simplest setup opens the World in the application and uses
 used, and it also works with Postgres.
 
 ```go
-runners := core.Runners(workflow.Use(flows.GenerateReport))
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
 
 world, err := localworld.Open(localworld.Config{Dir: ".workflows"}, runners)
 if err != nil {
@@ -48,7 +48,7 @@ if err != nil {
 }
 defer world.Close()
 
-runners := core.Runners(
+runners := worlds.Runners(
 	workflow.Use(flows.GenerateReport),
 	workflow.Use(flows.PublishReport),
 )

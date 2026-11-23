@@ -359,7 +359,7 @@ func (w flakyDeleteWorld) RunsDeleteDataMany(ctx context.Context, input worlds.R
 func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	runners := core.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input deleteStepInput) (string, error) {
 		return workflow.Step(ctx, func(ctx context.Context, target worlds.RunID) (string, error) {
 			result, err := workflow.DeleteRuns(ctx, string(target))
 			if err != nil {
@@ -549,7 +549,7 @@ type regionParentInput struct{}
 func (regionParentInput) Workflow(string) {}
 
 func TestStartRegion(t *testing.T) {
-	runners := core.Runners(
+	runners := worlds.Runners(
 		workflow.Use(func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }),
 		workflow.Use(func(ctx context.Context, _ regionParentInput) (string, error) {
 			run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Region: worlds.Region("syd1")})
@@ -614,7 +614,7 @@ func (startHookInput) Workflow(string) {}
 func TestStartHook(t *testing.T) {
 	world := testworld.NewManual()
 	defer world.Close()
-	runners := core.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
+	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
 		return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
 	}))
 	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
@@ -889,7 +889,7 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	for range 10 {
 		executed := false
 		for _, message := range world.QueuedMessages() {
@@ -1370,7 +1370,7 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 	world := testworld.NewManual(runner)
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 
 	run, err := workflow.Start(ctx, routedInput{})
 	if err != nil {

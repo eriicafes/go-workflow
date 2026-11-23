@@ -176,7 +176,7 @@ func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	if err := runtime.Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func retryDelayStep(_ context.Context, after time.Duration) (struct{}, error) {
 	return struct{}{}, errors.New("again")
 }
 
-func retryDelayRunner() core.Runner {
+func retryDelayRunner() worlds.Runner {
 	return workflow.Use(func(ctx context.Context, input retryDelayInput) (retryDelayOutput, error) {
 		_, err := workflow.Background(ctx, retryDelayStep, input.After, workflow.StepOptions{MaxRetries: 1}).Value(ctx)
 		return retryDelayOutput{}, err
@@ -369,7 +369,7 @@ func TestFailedStepRetriesAfterASecondByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, core.Runners(runner))
+	runtime := core.NewRuntime(world, worlds.Runners(runner))
 	for range 2 {
 		// The flow creates the step, and the step's delivery runs its
 		// first attempt, which asks for the message again when the retry
@@ -552,7 +552,7 @@ func TestStepDeliveryTellsTheWorldWhenItsStepWasCreatedAndThatItRan(t *testing.T
 	manual := testworld.NewManual()
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestStepDeliveryReadsItsStepsCreationFromTheLogWhenItsMessageHasNone(t *tes
 	manual := testworld.NewManual()
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{}); err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +621,7 @@ func TestStepFailedWithoutRunningIsNotMarkedAsAfterItsFunction(t *testing.T) {
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
 	var calls atomic.Int32
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(func(ctx context.Context, _ signalInput) (signalOutput, error) {
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ signalInput) (signalOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			calls.Add(1)
 			return struct{}{}, nil
@@ -657,7 +657,7 @@ func TestInlineStepTellsTheWorldItRanAndMarksItsFailure(t *testing.T) {
 	manual := testworld.NewManual()
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, core.Runners(workflow.Use(signalRunner)))
+	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true})
 	if err != nil {
 		t.Fatal(err)

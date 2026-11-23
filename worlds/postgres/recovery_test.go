@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 // recoveryFixture inserts runs in every state recovery tells apart and
@@ -152,7 +151,7 @@ func TestWorkerRecoversActiveRuns(t *testing.T) {
 		workerCtx, stop := context.WithCancel(ctx)
 		stopped := make(chan error, 1)
 		go func() {
-			stopped <- Worker(workerCtx, world, core.Runners(), WorkerOptions{Queues: []string{"none"}})
+			stopped <- Worker(workerCtx, world, worlds.Runners(), WorkerOptions{Queues: []string{"none"}})
 		}()
 		deadline := time.Now().Add(5 * time.Second)
 		for len(recoveryFlows(t, world)) == 0 && !skip && time.Now().Before(deadline) {

@@ -19,7 +19,7 @@ func (feedInput) Workflow(feedOutput) {}
 
 // feedRunner waits for its hook's payload while a step it runs inline waits
 // for the runner to have it.
-func feedRunner() core.Runner {
+func feedRunner() worlds.Runner {
 	release := make(chan struct{})
 	var once sync.Once
 	return workflow.Use(func(ctx context.Context, input feedInput) (feedOutput, error) {
@@ -87,7 +87,7 @@ func TestFlowWaitingOnAnInlineStepPollsTheLogWithoutAPush(t *testing.T) {
 	go func() { resumed <- workflow.ResumeHookWithRetries(ctx, "poll", "polled", 100, 20*time.Millisecond) }()
 	// The flow's delivery waits on its inline step until the poll brings
 	// it the payload.
-	if err := core.NewRuntime(pollOnly{base}, core.Runners(runner)).Execute(ctx, base.QueuedMessages()[0].Input); err != nil {
+	if err := core.NewRuntime(pollOnly{base}, worlds.Runners(runner)).Execute(ctx, base.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-resumed; err != nil {

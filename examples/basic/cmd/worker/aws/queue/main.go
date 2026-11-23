@@ -13,8 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/examples/basic/workflows/flows"
+	"github.com/eriicafes/go-workflow/worlds"
 	awsworld "github.com/eriicafes/go-workflow/worlds/aws"
-	"github.com/eriicafes/go-workflow/worlds/core"
 )
 
 func main() {
@@ -43,7 +43,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runners := core.Runners(
+	runners := worlds.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
 	)

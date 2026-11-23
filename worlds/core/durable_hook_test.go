@@ -75,7 +75,7 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 		}
 		return durableHookOutput{Value: payload["response"].(map[string]any)["message"].(string)}, nil
 	})
-	runtime := core.NewRuntime(base, core.Runners(runner))
+	runtime := core.NewRuntime(base, worlds.Runners(runner))
 	ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(base)), 3*time.Second)
 	defer stop()
 	run, err := workflow.Start(ctx, durableHookInput{Token: "same-run-token"})

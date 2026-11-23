@@ -205,7 +205,7 @@ func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 // workflows of runners. Attach it through an SQS event source mapping with
 // ReportBatchItemFailures enabled. It reports each failed delivery
 // individually, so SQS redelivers only those.
-func Queue(world *World, runners core.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
+func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
 	runtime := core.NewRuntime(world, runners)
 	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
 		return world.consume(ctx, runtime, event), nil
