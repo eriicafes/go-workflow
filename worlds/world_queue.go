@@ -128,6 +128,12 @@ type (
 		// before Runtime.Execute when its queue reports it, and Queue
 		// ignores. Zero means the queue does not report it.
 		CreatedAt time.Time
+		// SDKMessage is set on a delivery a Workflow SDK runtime queued
+		// through world-http: the SDK's queue name and message, encoded as
+		// the CBOR map {queueName, message}. A World stores it with the
+		// delivery, and a RemoteExecutor sends both back to the SDK app
+		// unchanged. The Go Runtime ignores it.
+		SDKMessage []byte `json:",omitempty"`
 	}
 	// WaitContinuation marks a timer of the wait CorrelationID. A wait
 	// further away than the World's MaxQueueDelay is reached in hops,

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/eriicafes/go-workflow/worlds/core"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/oklog/ulid/v2"
@@ -108,12 +107,12 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 	return worlds.QueueEach(ctx, w.Queue, input.Items), nil
 }
 
-// executor executes deliveries, as core.Runtime does.
+// executor executes deliveries, as worlds.BoundExecutor does.
 type executor interface {
 	Execute(context.Context, worlds.QueueInput) error
 }
 
-var _ executor = (*core.Runtime)(nil)
+var _ executor = worlds.BoundExecutor{}
 
 type delivery struct {
 	id         string

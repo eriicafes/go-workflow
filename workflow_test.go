@@ -106,7 +106,7 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 		value, err := hook.Next(ctx)
 		return parentRunOutput{Value: value, ValueErr: fmt.Sprint(valueErr), ChildID: run.ID()}, err
 	}
-	world := testworld.New(workflow.Use(child), workflow.Use(parent))
+	world := testworld.New(worlds.Runners(workflow.Use(child), workflow.Use(parent)))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -146,9 +146,9 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 }
 
 func TestStructDeclaresWorkflowOutput(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input structWorkflowInput) (structWorkflowOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input structWorkflowInput) (structWorkflowOutput, error) {
 		return structWorkflowOutput{Value: input.Value + 1}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -171,9 +171,9 @@ func TestStructDeclaresWorkflowOutput(t *testing.T) {
 }
 
 func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		return pointerWorkflowOutput{Value: input.Value + 1}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -195,10 +195,10 @@ func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 }
 
 func TestRunWakeCompletesPendingDurableWaits(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
 		_, err := workflow.Timer(ctx, time.Hour).Value(ctx)
 		return timerOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -233,9 +233,9 @@ ready:
 }
 
 func TestStartAndGetCoverRunLifecycle(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		return pointerWorkflowOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -272,9 +272,9 @@ func TestStartAndGetCoverRunLifecycle(t *testing.T) {
 }
 
 func TestRunValueReportsDeletedData(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		return pointerWorkflowOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -296,9 +296,9 @@ func TestRunValueReportsDeletedData(t *testing.T) {
 }
 
 func TestDeleteRuns(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		return pointerWorkflowOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -369,7 +369,7 @@ func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 		}, input.Target, workflow.StepOptions{MaxRetries: 1})
 	}))
 	for _, throttle := range []bool{false, true} {
-		inner := testworld.NewManual()
+		inner := testworld.NewManual(nil)
 		calls := 0
 		world := flakyDeleteWorld{World: inner, calls: &calls, throttle: throttle}
 		if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTarget, WorkflowName: "target"}); err != nil {
@@ -383,7 +383,7 @@ func TestDeleteRunsInAStepRetriesFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime := core.NewRuntime(world, runners)
+		runtime := worlds.BoundExecutor{Executor: runners, Runtime: core.NewRuntime(world)}
 		for delivered := 0; delivered < 3 && len(inner.QueuedMessages()) > 0; delivered++ {
 			message := inner.QueuedMessages()[0]
 			err := runtime.Execute(ctx, message.Input)
@@ -436,7 +436,7 @@ func TestStartOptions(t *testing.T) {
 		}
 		return worlds.RunID(run.ID()), nil
 	}
-	world := testworld.New(workflow.Use(child), workflow.Use(parent))
+	world := testworld.New(worlds.Runners(workflow.Use(child), workflow.Use(parent)))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -560,7 +560,7 @@ func TestStartRegion(t *testing.T) {
 		}),
 	)
 	// The runtime runs on the regional World, so child starts see it.
-	inner := testworld.NewManual()
+	inner := testworld.NewManual(nil)
 	defer inner.Close()
 	world := regionalWorld{inner, &sync.Map{}}
 	server := httptest.NewServer(worlds.HTTPHandler(world, "/v1/workflow"))
@@ -588,7 +588,7 @@ func TestStartRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, runners)
+	runtime := worlds.BoundExecutor{Executor: runners, Runtime: core.NewRuntime(world)}
 	for _, message := range inner.QueuedMessages() {
 		if message.Input.RunID != worlds.RunID(parent.ID()) {
 			continue
@@ -612,7 +612,7 @@ type startHookInput struct{ Token string }
 func (startHookInput) Workflow(string) {}
 
 func TestStartHook(t *testing.T) {
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
 		return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
@@ -638,7 +638,7 @@ func TestStartHook(t *testing.T) {
 		if !errors.As(err, &conflict) || conflict.RunID != worlds.RunID(run.ID()) {
 			t.Fatalf("%s: duplicate start error = %v", name, err)
 		}
-		runtime := core.NewRuntime(world, runners)
+		runtime := worlds.BoundExecutor{Executor: runners, Runtime: core.NewRuntime(world)}
 		for len(world.QueuedMessages()) != 0 {
 			message := world.QueuedMessages()[0]
 			if err := runtime.Execute(ctx, message.Input); err != nil {
@@ -661,7 +661,7 @@ type startHookParentInput struct{ Token string }
 func (startHookParentInput) Workflow(string) {}
 
 func TestStartInAWorkflowReadsAStartHookConflictOnItsFirstAttempt(t *testing.T) {
-	world := testworld.New(
+	world := testworld.New(worlds.Runners(
 		workflow.Use(func(ctx context.Context, input startHookInput) (string, error) {
 			return workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token}).Next(ctx)
 		}),
@@ -674,7 +674,7 @@ func TestStartInAWorkflowReadsAStartHookConflictOnItsFirstAttempt(t *testing.T) 
 			}
 			return string(conflict.RunID), nil
 		}),
-	)
+	))
 	defer world.Close()
 	// A refused start is decided, so the step does not wait out a retry: the
 	// run finishes well inside the default one-second retry delay.
@@ -698,7 +698,7 @@ func TestStartRejectsMissingClientAndUnencodableInput(t *testing.T) {
 	if _, err := workflow.Start(context.Background(), unencodableInput{}); !errors.Is(err, workflow.ErrNoClient) {
 		t.Fatalf("Start without client = %v", err)
 	}
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 	if _, err := workflow.Start(ctx, unencodableInput{Values: make(chan int)}); err == nil {
@@ -719,10 +719,10 @@ func TestUseRejectsInvalidInputAndUnencodableOutput(t *testing.T) {
 }
 
 func TestRunCancelMakesPendingRunsTerminalAndIsIdempotent(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
 		_, err := workflow.Timer(ctx, time.Hour).Value(ctx)
 		return wakeOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -748,10 +748,10 @@ func TestRunCancelMakesPendingRunsTerminalAndIsIdempotent(t *testing.T) {
 }
 
 func TestRunWakeUpFiltersWaitCorrelationIDs(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ wakeInput) (wakeOutput, error) {
 		err := workflow.Join(ctx, workflow.Timer(ctx, time.Hour), workflow.Timer(ctx, time.Hour))
 		return wakeOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -815,7 +815,7 @@ func writeOwnStream(ctx context.Context, runID string) (struct{}, error) {
 }
 
 func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ streamAccessInput) (streamAccessOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ streamAccessInput) (streamAccessOutput, error) {
 		runID := workflow.GetWorkflowMetadata(ctx).RunID
 		run, err := workflow.Get[streamAccessOutput](ctx, runID)
 		if err != nil {
@@ -824,7 +824,7 @@ func TestRunStreamsWorkInStepsNotWorkflowCode(t *testing.T) {
 		_, workflowErr := run.Writer(ctx)
 		_, err = workflow.Step(ctx, writeOwnStream, runID)
 		return streamAccessOutput{WorkflowErr: fmt.Sprint(workflowErr)}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -873,14 +873,14 @@ func startChildren(ctx context.Context, _ struct{}) (struct{}, error) {
 }
 
 func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
-	other := testworld.NewManual()
+	other := testworld.NewManual(nil)
 	defer other.Close()
 	clientChoice.explicit = workflow.NewClient(other)
 	runner := workflow.Use(func(ctx context.Context, _ clientChoiceInput) (clientChoiceOutput, error) {
 		_, err := workflow.Step(ctx, startChildren, struct{}{})
 		return clientChoiceOutput{}, err
 	})
-	world := testworld.NewManual(runner)
+	world := testworld.NewManual(worlds.Runners(runner))
 	defer world.Close()
 	// The delivery runs in a context that carries a client for another
 	// World, as a queue consumer behind Middleware would.
@@ -889,7 +889,7 @@ func TestStepsIgnoreInheritedClientsButUseExplicitOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 	for range 10 {
 		executed := false
 		for _, message := range world.QueuedMessages() {
@@ -975,7 +975,7 @@ func monthly(ctx context.Context, _ monthlyInput) (monthlyOutput, error) {
 // clock in small increments and time out on a 30-day sleep.
 func TestSleepUnderSynctest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(monthly))
+		world := testworld.New(worlds.Runners(workflow.Use(monthly)))
 		defer world.Close()
 
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -1023,7 +1023,7 @@ type wakeParentOutput struct {
 func (wakeParentInput) Workflow(wakeParentOutput) {}
 
 func TestRunWakeUpInWorkflowWakesAChildTimer(t *testing.T) {
-	world := testworld.New(
+	world := testworld.New(worlds.Runners(
 		workflow.Use(func(ctx context.Context, _ wakeChildInput) (wakeChildOutput, error) {
 			return wakeChildOutput{}, workflow.Sleep(ctx, time.Hour)
 		}),
@@ -1045,7 +1045,7 @@ func TestRunWakeUpInWorkflowWakesAChildTimer(t *testing.T) {
 			}
 			return wakeParentOutput{}, errors.New("child never created its timer")
 		}),
-	)
+	))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -1074,7 +1074,7 @@ func TestRunCancellationLetsRunningStepFinish(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				started, release := make(chan struct{}), make(chan struct{})
-				world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
+				world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
 					step := workflow.Step[struct{}, struct{}]
 					if test.inline {
 						step = workflow.InlineStep[struct{}, struct{}]
@@ -1089,7 +1089,7 @@ func TestRunCancellationLetsRunningStepFinish(t *testing.T) {
 						}
 					}, struct{}{})
 					return timerOutput{}, err
-				}))
+				})))
 				defer world.Close()
 				ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 				defer cancel()
@@ -1146,13 +1146,13 @@ func TestRunCancellationLetsRunningStepFinish(t *testing.T) {
 }
 
 func TestRunCanCancelItselfThroughAnInlineStep(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ timerInput) (timerOutput, error) {
 		run, err := workflow.Get[timerOutput](ctx, workflow.GetWorkflowMetadata(ctx).RunID)
 		if err != nil {
 			return timerOutput{}, err
 		}
 		return timerOutput{}, run.Cancel(ctx)
-	}))
+	})))
 	defer world.Close()
 	ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
 	defer stop()
@@ -1216,7 +1216,7 @@ func TestEncryptedRunsKeepPayloadsOpaque(t *testing.T) {
 }
 
 func testEncryptedRun(t *testing.T, overHTTP bool) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input encryptedInput) (encryptedOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input encryptedInput) (encryptedOutput, error) {
 		secret, err := workflow.Step(ctx, shout, input.Secret)
 		if err != nil {
 			return encryptedOutput{}, err
@@ -1230,7 +1230,7 @@ func testEncryptedRun(t *testing.T, overHTTP bool) {
 			return encryptedOutput{}, err
 		}
 		return encryptedOutput{Secret: secret, Resumed: resumed}, nil
-	}))
+	})))
 	defer world.Close()
 	if err := world.SetEncryptionKey(bytes.Repeat([]byte{3}, 32), "test"); err != nil {
 		t.Fatal(err)
@@ -1334,9 +1334,9 @@ type routedInput struct {
 type routedOutput struct{ Value string }
 
 func TestWorkflowNameIsTheRecordedName(t *testing.T) {
-	world := testworld.NewManual(workflow.Use(func(context.Context, structWorkflowInput) (structWorkflowOutput, error) {
+	world := testworld.NewManual(worlds.Runners(workflow.Use(func(context.Context, structWorkflowInput) (structWorkflowOutput, error) {
 		return structWorkflowOutput{}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, structWorkflowInput{})
@@ -1367,10 +1367,10 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 		resumed, err := hook.Next(ctx)
 		return routedOutput{Value: value + ":" + resumed}, err
 	})
-	world := testworld.NewManual(runner)
+	world := testworld.NewManual(worlds.Runners(runner))
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
-	runtime := core.NewRuntime(world, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 
 	run, err := workflow.Start(ctx, routedInput{})
 	if err != nil {
@@ -1415,7 +1415,7 @@ func TestDeliveriesCarryTheWorkflowName(t *testing.T) {
 }
 
 func TestRunCancelRecordsItsReason(t *testing.T) {
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()

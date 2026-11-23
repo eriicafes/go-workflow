@@ -25,6 +25,7 @@ import type {
 	WorkflowRunWithoutData,
 	World,
 } from "@workflow/world";
+import { decode, encode } from "cbor-x";
 import { HOOK_RESUME_DEDUP_VERSION, START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
 import { SPEC_VERSION_SINGLE_ORCHESTRATOR } from "@workflow/world/spec-version";
 import { HTTPWorldError, RPCClient, devkitName, goName, type RPC } from "./rpc.js";
@@ -80,7 +81,7 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 	// server fails it instead of answering.
 	client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 	const spec = await client.call<RPC.Spec>("client.spec", {});
-	return new HTTPWorld(client, spec);
+	return new HTTPWorld(client, spec, { token });
 }
 
 export class HTTPWorld implements World {
@@ -123,12 +124,22 @@ export class HTTPWorld implements World {
 	 */
 	readonly getDeploymentId: World["getDeploymentId"];
 	/**
-	 * HTTP worlds cannot receive queue deliveries in JavaScript: queue handling
-	 * belongs to the RPC server, not the client-side SDK adapter.
+	 * Deliveries reach the app's flow route from the Go World's
+	 * worlds.RemoteExecutor, which authenticates them with the World's bearer
+	 * token. The handler checks it, so the SDK runtime does not check them
+	 * itself.
 	 */
-	readonly createQueueHandler: World["createQueueHandler"] = () => {
-		throw new HTTPWorldError("unsupported", "workflow: HTTP worlds do not create queue handlers");
-	};
+	readonly queueAuthMode = "skip" as const;
+	/**
+	 * Returns the handler of the app's flow route for deliveries a Go World
+	 * sends with worlds.RemoteExecutor: a POST of the CBOR map {queueName,
+	 * message, messageId, attempt, deliveryCount, createdAt}. It answers with
+	 * the CBOR result {timeoutSeconds} when `handler` asks for the message
+	 * again, and {} when the message is done. A delivery without the World's
+	 * token is refused with 401, and a handler that throws fails it with 500,
+	 * which the Go World retries.
+	 */
+	readonly createQueueHandler: World["createQueueHandler"];
 	/**
 	 * The key of a run's payloads, which the Go World resolves, or undefined
 	 * when they are not encrypted. Go runs' payloads are in the Workflow
@@ -136,8 +147,9 @@ export class HTTPWorld implements World {
 	 */
 	readonly getEncryptionKeyForRun: NonNullable<World["getEncryptionKeyForRun"]>;
 
-	constructor(client: RPCClient, spec: RPC.Spec) {
+	constructor(client: RPCClient, spec: RPC.Spec, options: { token?: string } = {}) {
 		client.rpcVersion = HTTP_WORLD_RPC_VERSION;
+		this.createQueueHandler = (prefix, handler) => queueHandler(prefix, handler, options.token);
 		this._spec = spec;
 		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
 		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});
@@ -342,12 +354,6 @@ export class HTTPWorld implements World {
 
 	private static createQueue(client: RPCClient): World["queue"] {
 		return (queueName, message, options) => {
-			// A health check probes a queue consumer in JavaScript, and an HTTP
-			// world's deliveries are consumed by the RPC server instead, so the
-			// probe is not queued.
-			if ("__healthCheck" in message) {
-				return Promise.resolve({ messageId: null });
-			}
 			return client.call<{ messageId: MessageId | null }>("queue.queue", queueInput(queueName, message, options));
 		};
 	}
@@ -763,6 +769,9 @@ function queueInput(queueName: string, message: Parameters<World["queue"]>[1], o
 	return {
 		...(sdk ? (sdk.workflowName ? { workflowName: sdk.workflowName } : {}) : { queueName }),
 		runId: fields.runId,
+		// The whole message and its queue name, which the Go World stores and
+		// a worlds.RemoteExecutor delivers back to the app unchanged.
+		sdkMessage: encodeBytes({ queueName, message }),
 		...(fields.stepId ? { stepId: fields.stepId } : {}),
 		...(fields.stepName ? { stepName: fields.stepName } : {}),
 		...(fields.stepAttempt ? { stepAttempt: fields.stepAttempt } : {}),
@@ -779,6 +788,81 @@ function queueInput(queueName: string, message: Parameters<World["queue"]>[1], o
 		...(options?.delaySeconds ? { notBefore: new Date(Date.now() + options.delaySeconds * 1_000) } : {}),
 		...(options?.retentionSeconds ? { retention: durationNanoseconds(options.retentionSeconds * 1_000) } : {}),
 	};
+}
+
+// encodeBytes returns value encoded as CBOR in a Uint8Array of its own.
+function encodeBytes(value: unknown): Uint8Array<ArrayBuffer> {
+	const encoded = encode(value);
+	const bytes = new Uint8Array(new ArrayBuffer(encoded.byteLength));
+	bytes.set(encoded);
+	return bytes;
+}
+
+// QueueDelivery is the body a Go World's worlds.RemoteExecutor posts.
+type QueueDelivery = {
+	queueName?: string;
+	message?: unknown;
+	messageId?: string;
+	attempt?: number;
+	deliveryCount?: number;
+	createdAt?: Date;
+};
+
+// queueHandler returns the route handler createQueueHandler returns.
+function queueHandler(prefix: string, handler: Parameters<World["createQueueHandler"]>[1], token: string | undefined): (request: Request) => Promise<Response> {
+	const expected = token ? `Bearer ${token}` : undefined;
+	return async (request) => {
+		if (request.method !== "POST") {
+			return cborResponse({ error: "world-http: deliveries are POST requests" }, 405);
+		}
+		if (expected !== undefined && !sameSecret(request.headers.get("Authorization") ?? "", expected)) {
+			return cborResponse({ error: "world-http: the delivery's token is not the World's" }, 401);
+		}
+		let delivery: QueueDelivery;
+		try {
+			delivery = decode(new Uint8Array(await request.arrayBuffer())) as QueueDelivery;
+		} catch (error) {
+			return cborResponse({ error: `world-http: could not decode the delivery: ${error instanceof Error ? error.message : String(error)}` }, 400);
+		}
+		const { queueName, message, messageId } = delivery ?? {};
+		if (typeof queueName !== "string" || typeof messageId !== "string" || messageId === "") {
+			return cborResponse({ error: "world-http: the delivery has no queueName or messageId" }, 400);
+		}
+		if (!queueName.startsWith(prefix)) {
+			return cborResponse({ error: `world-http: queue ${queueName} is not served by this route, which serves ${prefix}` }, 400);
+		}
+		const attempt = typeof delivery.attempt === "number" && delivery.attempt > 0 ? delivery.attempt : 1;
+		let result: unknown;
+		try {
+			result = await handler(message, {
+				attempt,
+				...(typeof delivery.deliveryCount === "number" && delivery.deliveryCount > 0 ? { deliveryCount: delivery.deliveryCount } : {}),
+				...(delivery.createdAt instanceof Date ? { createdAt: delivery.createdAt } : {}),
+				queueName: queueName as Parameters<typeof handler>[1]["queueName"],
+				messageId: messageId as MessageId,
+			});
+		} catch (error) {
+			return cborResponse({ error: error instanceof Error ? error.message : String(error) }, 500);
+		}
+		const timeoutSeconds = result && typeof result === "object" ? (result as { timeoutSeconds?: unknown }).timeoutSeconds : undefined;
+		return cborResponse(typeof timeoutSeconds === "number" ? { timeoutSeconds } : {}, 200);
+	};
+}
+
+function cborResponse(value: unknown, status: number): Response {
+	return new Response(encodeBytes(value), { status, headers: { "Content-Type": "application/cbor" } });
+}
+
+// sameSecret compares two strings in time that depends only on their lengths.
+function sameSecret(actual: string, expected: string): boolean {
+	if (actual.length !== expected.length) {
+		return false;
+	}
+	let difference = 0;
+	for (let index = 0; index < actual.length; index++) {
+		difference |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
+	}
+	return difference === 0;
 }
 
 // terminalWaitMs is how long one runs.waitForTerminalStatus request waits.

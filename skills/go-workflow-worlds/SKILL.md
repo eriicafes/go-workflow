@@ -47,7 +47,9 @@ invariants rather than exactly-once callback execution.
 Exercise runtime integration with `testworld.NewManual` when precise delivery
 control is needed. A consumer sets `input.MessageID` to the message's ID,
 `input.DeliveryCount` and `input.Attempt` to its 1-based delivery counts,
-calls `Runtime.Execute(ctx, input)`, acknowledges on nil, delivers the same
+calls `executor.Execute(ctx, runtime, input)` with the World's
+`worlds.Executor` and its one `core.NewRuntime(world)` (`worlds.BoundExecutor`
+pairs them), acknowledges on nil, delivers the same
 message again on a `*worlds.Redelivery` (`World.Redeliver` on a manual
 testworld), and retries on any other error.
 Persist and redeliver the original QueueInput including its recovery counters

@@ -11,7 +11,7 @@ import (
 
 func TestSinceCursorPastTheLogDoesNotPanic(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	runID := runCursors
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
@@ -24,7 +24,7 @@ func TestSinceCursorPastTheLogDoesNotPanic(t *testing.T) {
 
 func TestEventsByCorrelationIDHonourDescendingOrder(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	runID := runCorrelation
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {
@@ -54,7 +54,7 @@ func TestEventsByCorrelationIDHonourDescendingOrder(t *testing.T) {
 
 func TestRolledBackBatchKeepsAPurgedRunsStreams(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	runID := runRollback
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "wf", Attributes: map[string]string{worlds.RetentionAttribute: worlds.RetainNone.String()}, AllowReservedAttributes: true}); err != nil {

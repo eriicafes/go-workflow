@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/eriicafes/go-workflow/worlds"
 	"io"
 	"slices"
 	"strings"
@@ -249,7 +250,7 @@ func user(content string) workflowai.ModelMessage {
 // chat runs one turn and returns its result and the UI chunks of its stream.
 func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []ai.UIMessageChunk, error) {
 	t.Helper()
-	world := testworld.New(workflow.Use(ChatRunner))
+	world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
 	defer world.Close()
 	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, Chat{Messages: messages})
@@ -589,7 +590,7 @@ func TestStreamRejectsInvalidSystemMessages(t *testing.T) {
 func TestGenerate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("21 degrees."))
-		world := testworld.New(workflow.Use(GenerateRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})

@@ -1,4 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -188,19 +190,24 @@ test("raises structured RPC errors", async () => {
 	});
 });
 
-test("does not queue health checks", async () => {
-	const methods: unknown[] = [];
+test("queues health checks with the SDK message for the app to answer", async () => {
+	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
 			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
-			methods.push(envelope.method);
-			return rpcResponse({ RPCVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ RPCVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+			}
+			calls.push({ method: envelope.method, input: envelope.input as Record<string, unknown> });
+			return rpcResponse({ MessageID: "msg_probe" });
 		},
 	});
 
-	await expect(world.queue("__wkf_workflow_report" as never, { __healthCheck: true, correlationId: "probe_01" })).resolves.toEqual({ messageId: null });
-	expect(methods).toEqual(["client.spec"]);
+	await expect(world.queue("__wkf_workflow_report" as never, { __healthCheck: true, correlationId: "probe_01" })).resolves.toEqual({ messageId: "msg_probe" });
+	const queued = calls.find((call) => call.method === "queue.queue")?.input;
+	expect(queued?.RunID).toBeUndefined();
+	expect(decode(queued?.SdkMessage as Uint8Array)).toEqual({ queueName: "__wkf_workflow_report", message: { __healthCheck: true, correlationId: "probe_01" } });
 });
 
 test("maps Go workflow and step names to Workflow SDK names and back", async () => {
@@ -792,10 +799,13 @@ test("forwards a run's creation on its first message, keyed by the run", async (
 	expect(results).toEqual([{ messageId: "msg_01" }, { messageId: "msg_02" }]);
 	expect(calls.find((call) => call.method === "queue.queueBatch")?.input).toEqual({
 		Items: [
-			{ WorkflowName: "example.com/app.Report", RunID: "wrun_01", RunSpecVersion: 9 },
-			{ WorkflowName: "example.com/app.Report", RunID: "wrun_02", RunSpecVersion: 9, IdempotencyKey: "key" },
+			{ WorkflowName: "example.com/app.Report", RunID: "wrun_01", RunSpecVersion: 9, SdkMessage: expect.any(Uint8Array) },
+			{ WorkflowName: "example.com/app.Report", RunID: "wrun_02", RunSpecVersion: 9, IdempotencyKey: "key", SdkMessage: expect.any(Uint8Array) },
 		],
 	});
+	// Each item carries the SDK's queue name and message, unchanged.
+	const items = calls.find((call) => call.method === "queue.queueBatch")?.input.Items as Record<string, unknown>[];
+	expect(decode(items[1]?.SdkMessage as Uint8Array)).toEqual({ queueName: "__wkf_workflow_workflow//example.com/app//Report", message: { runId: "wrun_02", runSpecVersion: 9 } });
 });
 
 test("reports a hook's resume deduplication, event times as Dates, and stores Go names", async () => {
@@ -1049,6 +1059,128 @@ describe("against a Go RPC server", () => {
 		expect(results).toHaveLength(2);
 		expect(results.every((result) => typeof result.messageId === "string" && result.error === undefined)).toBe(true);
 	}, 60_000);
+});
+
+describe("against a Go World that delivers with worlds.RemoteExecutor", () => {
+	const token = "delivery-token";
+	let directory: string;
+	let server: ChildProcess | undefined;
+	let app: Server | undefined;
+	let world: HTTPWorld;
+	let route: (request: Request) => Promise<Response> = async () => new Response(null, { status: 503 });
+	const deliveries: { message: Record<string, unknown>; meta: Record<string, unknown> }[] = [];
+	// answer returns the queue handler's result for a delivery of message.
+	let answer: (message: Record<string, unknown>) => unknown = () => undefined;
+
+	beforeAll(async () => {
+		// The app serves the SDK's flow route with the World's queue handler.
+		app = createServer(async (incoming, outgoing) => {
+			const chunks: Buffer[] = [];
+			for await (const chunk of incoming) chunks.push(chunk as Buffer);
+			const headers = new Headers();
+			for (const [name, value] of Object.entries(incoming.headers)) {
+				if (typeof value === "string") headers.set(name, value);
+			}
+			const response = await route(new Request(`http://app${incoming.url}`, { method: incoming.method, headers, body: Buffer.concat(chunks) }));
+			const responseHeaders: Record<string, string> = {};
+			response.headers.forEach((value, name) => {
+				responseHeaders[name] = value;
+			});
+			outgoing.writeHead(response.status, responseHeaders);
+			outgoing.end(Buffer.from(await response.arrayBuffer()));
+		});
+		await new Promise<void>((resolve) => app!.listen(0, "127.0.0.1", resolve));
+		const flowURL = `http://127.0.0.1:${(app.address() as AddressInfo).port}/.well-known/workflow/v1/flow`;
+
+		const root = fileURLToPath(new URL("..", import.meta.url));
+		directory = mkdtempSync(join(tmpdir(), "world-http-remote-"));
+		const binary = join(directory, "server");
+		execFileSync("go", ["build", "-o", binary, "./world-http/testdata/server"], { cwd: root, stdio: "inherit" });
+		server = spawn(binary, { env: { ...process.env, WORKFLOW_REMOTE_URL: flowURL, WORKFLOW_HTTP_TOKEN: token }, stdio: ["ignore", "pipe", "inherit"] });
+		const line = await new Promise<string>((resolve, reject) => {
+			createInterface({ input: server!.stdout! }).once("line", resolve);
+			server!.once("exit", (code) => reject(new Error(`server exited with ${code}`)));
+			server!.once("error", reject);
+		});
+		world = await createWorld({ baseURL: (JSON.parse(line) as { baseURL: string }).baseURL, token });
+		route = world.createQueueHandler("__wkf_workflow_", async (message, meta) => {
+			deliveries.push({ message: message as Record<string, unknown>, meta: meta as Record<string, unknown> });
+			return answer(message as Record<string, unknown>);
+		});
+	}, 300_000);
+
+	afterAll(async () => {
+		server?.kill();
+		await new Promise((resolve) => app?.close(resolve));
+		rmSync(directory, { recursive: true, force: true });
+	});
+
+	const deliveriesOf = (runId: string) => deliveries.filter((delivery) => delivery.message.runId === runId);
+
+	test("declares that its queue handler authenticates deliveries", () => {
+		expect(world.queueAuthMode).toBe("skip");
+	});
+
+	test("delivers the SDK message unchanged, and hands it off again for timeoutSeconds 0", async () => {
+		const runId = `wrun_${ulid()}`;
+		const message = { runId, traceCarrier: { traceparent: "00-abc" }, stepInput: new Uint8Array([1, 2, 3]), waitContinuation: { correlationId: "wait_1" } };
+		let handedOff = false;
+		answer = (delivered) => {
+			if (delivered.runId !== runId || handedOff) return undefined;
+			handedOff = true;
+			return { timeoutSeconds: 0 };
+		};
+		const { messageId } = await world.queue("__wkf_workflow_workflow//./workflows/a//a" as never, message as never);
+		await eventually(async () => {
+			if (deliveriesOf(runId).length < 2) throw new Error("waiting for the redelivery");
+		});
+		const [first, second] = deliveriesOf(runId);
+		expect(first?.message).toEqual(message);
+		expect(second?.message).toEqual(message);
+		expect(first?.meta).toMatchObject({ queueName: "__wkf_workflow_workflow//./workflows/a//a", messageId, attempt: 1, deliveryCount: 1 });
+		expect(first?.meta.createdAt).toBeInstanceOf(Date);
+		// A handoff is not an attempt.
+		expect(second?.meta).toMatchObject({ messageId, attempt: 1, deliveryCount: 2 });
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(deliveriesOf(runId)).toHaveLength(2);
+	});
+
+	test("retries a delivery whose handler throws", async () => {
+		const runId = `wrun_${ulid()}`;
+		let failed = false;
+		answer = (delivered) => {
+			if (delivered.runId !== runId || failed) return undefined;
+			failed = true;
+			throw new Error("not yet");
+		};
+		await world.queue("__wkf_workflow_workflow//./workflows/a//a" as never, { runId } as never);
+		await eventually(async () => {
+			if (deliveriesOf(runId).length < 2) throw new Error("waiting for the retry");
+		});
+		expect(deliveriesOf(runId)[1]?.meta).toMatchObject({ attempt: 2, deliveryCount: 2 });
+	});
+
+	test("delivers health checks to the app", async () => {
+		answer = () => undefined;
+		const correlationId = `probe_${ulid()}`;
+		await world.queue("__wkf_workflow_health" as never, { __healthCheck: true, correlationId } as never);
+		await eventually(async () => {
+			if (!deliveries.some((delivery) => delivery.message.correlationId === correlationId)) throw new Error("waiting for the probe");
+		});
+		const probe = deliveries.find((delivery) => delivery.message.correlationId === correlationId);
+		expect(probe?.message).toEqual({ __healthCheck: true, correlationId });
+		expect(probe?.meta.queueName).toBe("__wkf_workflow_health");
+	});
+
+	test("refuses a delivery without the World's token or for another prefix", async () => {
+		const body = encode({ queueName: "__wkf_workflow_x", message: { runId: "wrun_x" }, messageId: "msg_x", attempt: 1 });
+		const unauthorized = await route(new Request("http://app/.well-known/workflow/v1/flow", { method: "POST", body: new Uint8Array(body) }));
+		expect(unauthorized.status).toBe(401);
+		const other = await world.createQueueHandler("__other_", async () => undefined)(
+			new Request("http://app/flow", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: new Uint8Array(body) }),
+		);
+		expect(other.status).toBe(400);
+	});
 });
 
 function text(value: string): Uint8Array {

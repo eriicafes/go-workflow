@@ -2,6 +2,7 @@ package workflowai_test
 
 import (
 	"encoding/json"
+	"github.com/eriicafes/go-workflow/worlds"
 	"slices"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestUIMessageChunksResume(t *testing.T) {
 		}
 
 		testModel = &fakeModel{responses: []func() ([]provider.StreamChunk, error){text("Hello!")}}
-		world := testworld.New(workflow.Use(ChatRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Chat{Messages: []workflowai.ModelMessage{user("hi")}})

@@ -32,7 +32,7 @@ func TestMapResultsPreservesHandlesAndOrder(t *testing.T) {
 
 func TestWaitGroupTracksMixedResultsHooksAndGroups(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group, nested workflow.WaitGroup
 			first := workflow.Go(ctx, &group, increment, 1)
 			text := workflow.Go(ctx, &group, func(_ context.Context, value string) (string, error) {
@@ -62,7 +62,7 @@ func TestWaitGroupTracksMixedResultsHooksAndGroups(t *testing.T) {
 				return groupOutput{}, errors.New("wrong string result")
 			}
 			return groupOutput{Value: first.Unwrap(ctx) + results[0].Unwrap(ctx) + results[1].Unwrap(ctx) + value}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -79,7 +79,7 @@ func TestWaitGroupTracksMixedResultsHooksAndGroups(t *testing.T) {
 func TestErrGroupWaitsForAllAndReturnsFirstRecordedFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		firstFailure, laterFailure := errors.New("first failure"), errors.New("later failure")
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.ErrGroup
 			start := workflow.Now(ctx)
 			// Declaration order differs from failure order.
@@ -100,7 +100,7 @@ func TestErrGroupWaitsForAllAndReturnsFirstRecordedFailure(t *testing.T) {
 				return groupOutput{}, errors.New("group returned before every member settled")
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -119,7 +119,7 @@ func TestErrGroupCancelsAfterObservationAndStillWaitsForAll(t *testing.T) {
 		failure := errors.New("failed work")
 		started := make(chan struct{}, 1)
 		var cancelled atomic.Bool
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
 			if err != nil {
 				return groupOutput{}, err
@@ -165,7 +165,7 @@ func TestErrGroupCancelsAfterObservationAndStillWaitsForAll(t *testing.T) {
 				return groupOutput{}, err
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -181,7 +181,7 @@ func TestErrGroupCancelsAfterObservationAndStillWaitsForAll(t *testing.T) {
 
 func TestGroupsSelectByFinalMemberSettlement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.WaitGroup
 			group.Add(workflow.Timer(ctx, 2*time.Hour), workflow.Timer(ctx, time.Hour))
 			timer := workflow.Timer(ctx, 90*time.Minute)
@@ -198,7 +198,7 @@ func TestGroupsSelectByFinalMemberSettlement(t *testing.T) {
 				return groupOutput{}, fmt.Errorf("recorded winner = %T, %v", winner, err)
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -214,7 +214,7 @@ func TestGroupsSelectByFinalMemberSettlement(t *testing.T) {
 
 func TestErrGroupWaitCancelsOnSuccess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
 			if err != nil {
 				return groupOutput{}, err
@@ -227,7 +227,7 @@ func TestErrGroupWaitCancelsOnSuccess(t *testing.T) {
 				return groupOutput{}, fmt.Errorf("context cause = %v", context.Cause(groupCtx))
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -244,7 +244,7 @@ func TestErrGroupWaitCancelsOnSuccess(t *testing.T) {
 func TestErrGroupSelectionWaitsForEveryMember(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		failure := errors.New("failed member")
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.ErrGroup
 			group.Add(workflow.NewResult(0, failure), workflow.Timer(ctx, 2*time.Hour))
 			timer := workflow.Timer(ctx, time.Hour)
@@ -261,7 +261,7 @@ func TestErrGroupSelectionWaitsForEveryMember(t *testing.T) {
 				return groupOutput{}, err
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -277,7 +277,7 @@ func TestErrGroupSelectionWaitsForEveryMember(t *testing.T) {
 
 func TestGroupIncludesWorkAddedByContinuation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var group workflow.WaitGroup
 			start := workflow.Now(ctx)
 			chain := workflow.Then(ctx, workflow.Timer(ctx, time.Hour), func(_ struct{}, err error) *workflow.Result[int] {
@@ -293,7 +293,7 @@ func TestGroupIncludesWorkAddedByContinuation(t *testing.T) {
 				return groupOutput{}, errors.New("work added by continuation did not settle")
 			}
 			return groupOutput{Value: chain.Unwrap(ctx)}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -310,7 +310,7 @@ func TestGroupIncludesWorkAddedByContinuation(t *testing.T) {
 func TestGroupObservesFailuresOnlyAfterFirstWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		failure := errors.New("unobserved failure")
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
 			if err != nil {
 				return groupOutput{}, err
@@ -326,7 +326,7 @@ func TestGroupObservesFailuresOnlyAfterFirstWait(t *testing.T) {
 				return groupOutput{}, fmt.Errorf("group error = %v", err)
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -343,7 +343,7 @@ func TestGroupObservesFailuresOnlyAfterFirstWait(t *testing.T) {
 func TestSettledGroupsIgnoreNewWorkWithoutCreatingSteps(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		failure := errors.New("failed group")
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			var wait workflow.WaitGroup
 			var group workflow.ErrGroup
 			if err := wait.Wait(ctx); err != nil {
@@ -373,7 +373,7 @@ func TestSettledGroupsIgnoreNewWorkWithoutCreatingSteps(t *testing.T) {
 				return groupOutput{}, fmt.Errorf("settled group error changed: %v", err)
 			}
 			return groupOutput{Value: 1}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})
@@ -402,7 +402,7 @@ func TestSettledGroupsIgnoreNewWorkWithoutCreatingSteps(t *testing.T) {
 
 func TestSettledErrGroupKeepsItsOutcomeAfterHookDisposal(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
+		world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ groupInput) (groupOutput, error) {
 			group, groupCtx, err := workflow.ErrGroupWithContext(ctx)
 			if err != nil {
 				return groupOutput{}, err
@@ -428,7 +428,7 @@ func TestSettledErrGroupKeepsItsOutcomeAfterHookDisposal(t *testing.T) {
 				return groupOutput{}, err
 			}
 			return groupOutput{Value: value}, nil
-		}))
+		})))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, groupInput{})

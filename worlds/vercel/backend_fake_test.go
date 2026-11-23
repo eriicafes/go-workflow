@@ -51,7 +51,7 @@ type fakeBackend struct {
 }
 
 func newFakeBackend(t testing.TB) *fakeBackend {
-	fake := &fakeBackend{t: t, store: testworld.NewManual(), requests: map[string]int{}, specs: map[worlds.RunID]int{}}
+	fake := &fakeBackend{t: t, store: testworld.NewManual(nil), requests: map[string]int{}, specs: map[worlds.RunID]int{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(func() {
 		fake.server.Close()

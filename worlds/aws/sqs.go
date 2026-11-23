@@ -45,7 +45,7 @@ type queueMessage struct {
 	Publish string            `json:"publish,omitempty"`
 }
 
-// executor executes deliveries, as *core.Runtime does.
+// executor executes deliveries, as worlds.BoundExecutor does.
 type executor interface {
 	Execute(context.Context, worlds.QueueInput) error
 }

@@ -133,7 +133,7 @@ func runAheadRunner(world *runAheadWorld) worlds.Runner {
 type runAheadRun struct {
 	t       *testing.T
 	world   *runAheadWorld
-	runtime *core.Runtime
+	runtime worlds.BoundExecutor
 	runID   worlds.RunID
 	count   int
 }
@@ -149,7 +149,7 @@ func startRunAhead(t *testing.T, world *runAheadWorld, input runAheadInput) *run
 	if _, err := world.World.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runID, WorkflowName: worlds.WorkflowName[runAheadInput](), Input: encoded}); err != nil {
 		t.Fatal(err)
 	}
-	return &runAheadRun{t: t, world: world, runtime: core.NewRuntime(world, worlds.Runners(runAheadRunner(world))), runID: runID}
+	return &runAheadRun{t: t, world: world, runtime: worlds.BoundExecutor{Executor: worlds.Runners(runAheadRunner(world)), Runtime: core.NewRuntime(world)}, runID: runID}
 }
 
 // deliver executes one delivery of the run's flow message and returns how

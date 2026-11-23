@@ -95,10 +95,39 @@ Loaded this way, the adapter is created without options and reads
 `WORKFLOW_HTTP_BASE_URL` and `WORKFLOW_HTTP_TOKEN`, so it cannot send other
 custom headers.
 
+## Backing a Workflow SDK app
+
+A Go World can also run the workflows of a JavaScript app. Give the World a
+`worlds.RemoteExecutor` instead of runners, pointed at the app's flow route, and
+serve it with the same token the app's adapter sends:
+
+```go
+world, err := localworld.Open(localworld.Config{Dir: ".workflow-data"}, worlds.RemoteExecutor{
+	URL:   "https://app.example.com/.well-known/workflow/v1/flow",
+	Token: token,
+})
+if err != nil {
+	log.Fatal(err)
+}
+log.Fatal(http.ListenAndServe(":8080", worlds.HTTPHandler(world, "", worlds.WithClientToken(token))))
+```
+
+In the app, set `WORKFLOW_TARGET_WORLD=go-workflow/world-http` with
+`WORKFLOW_HTTP_BASE_URL` and `WORKFLOW_HTTP_TOKEN`. The SDK queues its messages
+through the adapter, the Go World stores them and serializes each run's flow,
+and the `RemoteExecutor` posts each delivery to the flow route, which the
+adapter's `createQueueHandler` serves. Step deliveries go to the same route.
+
+The handler refuses a delivery without the token with 401, and declares
+`queueAuthMode: "skip"`, so the SDK runtime does not check deliveries again. A
+result of `{ timeoutSeconds: n }` asks the Go World for the message again after
+`n` seconds, where `0` is a handoff, and a handler that throws fails the
+delivery, which the World retries.
+
 ## Limits
 
-The adapter is a client only. Deliveries are executed by your Go process, so it
-cannot create queue handlers. Its deployment ID is the Go World's.
+Without a `RemoteExecutor`, deliveries are executed by your Go process, and the
+app's flow route receives none. The adapter's deployment ID is the Go World's.
 
 The Workflow SDK's client operations work against it: `start`, `resumeHook`,
 cancelling and waking a run, and its reads. Every run is a spec version 9 run,

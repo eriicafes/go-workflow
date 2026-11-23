@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -24,7 +23,7 @@ const (
 	maxRerouteDelay = 8 * time.Second
 )
 
-// Runtime executes deliveries. It replays the runners in its worlds.RunnerSet
+// Runtime executes deliveries. It replays the runners each delivery is given
 // against a World as flows and steps and records their results as events.
 //
 // A flow is the run's orchestrator: it makes every decision, and its writes
@@ -47,7 +46,8 @@ const (
 // or when that deployment is unavailable, the run fails with a
 // deploymentMismatchError.
 type Runtime struct {
-	world   worlds.World
+	world worlds.World
+	// runners is the delivery's RunnerSet, set on the copy Execute makes.
 	runners worlds.RunnerSet
 	// runAheadDepth is how many inline steps' results a flow hands to the
 	// runner ahead of their writes.
@@ -60,16 +60,18 @@ type Runtime struct {
 const fenceRefusalRedelivery = time.Second
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
-// world using runners. It copies runners.
-func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...RuntimeOption) *Runtime {
-	runtime := &Runtime{world: world, runners: maps.Clone(runners), runAheadDepth: DefaultRunAheadDepth}
+// world. It implements worlds.Runtime.
+func NewRuntime(world worlds.World, options ...RuntimeOption) *Runtime {
+	runtime := &Runtime{world: world, runAheadDepth: DefaultRunAheadDepth}
 	for _, option := range options {
 		option(runtime)
 	}
 	return runtime
 }
 
-// Execute handles one delivery. With a nil StepID it executes a flow, which
+// Execute handles one delivery with the Runner runners holds for the run's
+// workflow. A run whose workflow runners does not hold fails with
+// worlds.ErrWorkflowNotRegistered. With a nil StepID it executes a flow, which
 // replays the run's runner and, when the runner returns instead of suspending,
 // appends run_completed or run_failed. With StepID set it executes a step,
 // which replays the runner up to that step, executes the step function, and
@@ -83,7 +85,14 @@ func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...Runtime
 //
 // Execute removes any Client NewClientContext put in ctx, so a run never uses a
 // Client it inherited from the context its delivery runs in.
-func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
+func (r *Runtime) Execute(ctx context.Context, runners worlds.RunnerSet, input worlds.QueueInput) error {
+	with := *r
+	with.runners = runners
+	return with.execute(ctx, input)
+}
+
+// execute handles one delivery with r's runners.
+func (r *Runtime) execute(ctx context.Context, input worlds.QueueInput) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	ctx = worlds.NewClientContext(ctx, nil)

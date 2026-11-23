@@ -104,6 +104,8 @@ type queueMessage struct {
 	// StepCreatedAt is the delivery's StepCreatedAt in milliseconds since
 	// the epoch.
 	StepCreatedAt int64 `json:"stepCreatedAt,omitempty"`
+	// SDKMessage is the delivery's SDKMessage.
+	SDKMessage []byte `json:"sdkMessage,omitempty"`
 }
 
 // queueRunInput is a first delivery's RunInput in a queueMessage: the run's
@@ -150,6 +152,7 @@ func newQueueMessage(id string, input worlds.QueueInput) queueMessage {
 		Recovery:                     input.Recovery,
 		RunInput:                     toQueueRunInput(input.RunInput),
 		RetentionMs:                  input.Retention.Milliseconds(),
+		SDKMessage:                   input.SDKMessage,
 	}
 	if wait := input.WaitContinuation; wait != nil {
 		message.WaitContinuation = &queueWaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
@@ -179,6 +182,7 @@ func (message queueMessage) input() worlds.QueueInput {
 		Recovery:                     message.Recovery,
 		RunInput:                     message.RunInput.input(message.RunID),
 		Retention:                    time.Duration(message.RetentionMs) * time.Millisecond,
+		SDKMessage:                   message.SDKMessage,
 	}
 	if wait := message.WaitContinuation; wait != nil {
 		input.WaitContinuation = &worlds.WaitContinuation{CorrelationID: wait.CorrelationID, Attempt: wait.Attempt, ResumeAt: wait.ResumeAt, HopAt: wait.HopAt}
@@ -304,7 +308,7 @@ func (w *World) QueueBatch(ctx context.Context, input worlds.QueueBatchInput) ([
 
 type consumer struct {
 	world *World
-	// execute executes a delivery: the runtime's Execute.
+	// execute executes a delivery with the consumer's executor.
 	execute func(context.Context, worlds.QueueInput) error
 }
 

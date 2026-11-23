@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"github.com/eriicafes/go-workflow/worlds"
 	"io"
 	"testing"
 	"time"
@@ -19,9 +20,9 @@ func (streamInput) Workflow(streamOutput)         {}
 func (streamStepInput) Workflow(streamStepOutput) {}
 
 func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
 		return streamOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -79,9 +80,9 @@ func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
 }
 
 func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
 		return streamOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -122,7 +123,7 @@ func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 }
 
 func TestStepStreamReaderAndWriterUseTheActiveStep(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ streamStepInput) (streamStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ streamStepInput) (streamStepOutput, error) {
 		return workflow.Step(ctx, func(ctx context.Context, _ struct{}) (streamStepOutput, error) {
 			writer, err := workflow.Writer(ctx)
 			if err != nil {
@@ -141,7 +142,7 @@ func TestStepStreamReaderAndWriterUseTheActiveStep(t *testing.T) {
 			data, err := io.ReadAll(reader)
 			return streamStepOutput{Data: string(data)}, err
 		}, struct{}{})
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -164,7 +165,7 @@ func (interleaveInput) Workflow(interleaveOutput) {}
 // once, that Close leaves the stream open for the others, and that a step
 // stores what it wrote when it returns without closing its writer.
 func TestWritersDoNotWaitForEachOther(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ interleaveInput) (interleaveOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ interleaveInput) (interleaveOutput, error) {
 		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
 			first, err := workflow.Writer(ctx)
 			if err != nil {
@@ -190,7 +191,7 @@ func TestWritersDoNotWaitForEachOther(t *testing.T) {
 			return struct{}{}, nil
 		}, struct{}{})
 		return interleaveOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()

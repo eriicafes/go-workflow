@@ -26,7 +26,7 @@ func tagFromStep(ctx context.Context, value string) (struct{}, error) {
 }
 
 func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
 		if err := workflow.SetAttributes(ctx, map[string]*string{"phase": ptrTo("init"), "order": ptrTo("ord_1")}); err != nil {
 			return attributesOutput{}, err
 		}
@@ -38,7 +38,7 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 		}
 		err := workflow.SetAttributes(ctx, map[string]*string{"$internal": ptrTo("x")})
 		return attributesOutput{Reserved: errors.Is(err, worlds.ErrAttributeInvalid)}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -106,14 +106,14 @@ func TestSetAttributesPastTheRunLimitFailsTheRun(t *testing.T) {
 		}
 		return attributes
 	}
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
 		if err := workflow.SetAttributes(ctx, batch("a")); err != nil {
 			return attributesOutput{}, err
 		}
 		// Each write is within the limit, and only the World can tell that
 		// together they pass it.
 		return attributesOutput{}, workflow.SetAttributes(ctx, batch("b"))
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()

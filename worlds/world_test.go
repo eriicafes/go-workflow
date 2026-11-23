@@ -47,7 +47,7 @@ type rpcResponse struct {
 }
 
 func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	created, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{
 		RunID:        runTest,
@@ -98,7 +98,7 @@ func TestEventAppendMaterializesAndReportsSkippedEvents(t *testing.T) {
 }
 
 func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStream, WorkflowName: "test"})
 	if err != nil {
@@ -118,7 +118,7 @@ func TestStreamsDoNotConsumeEventSlots(t *testing.T) {
 }
 
 func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStreamWriter, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestOpenStreamWriterWritesThroughTheStreamer(t *testing.T) {
 }
 
 func TestEventResultReportsMaterializedStep(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStepResult, WorkflowName: "test"})
 	if err != nil {
@@ -184,7 +184,7 @@ func TestEventResultReportsMaterializedStep(t *testing.T) {
 }
 
 func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runWaitAnalytics, WorkflowName: "test"})
 	if err != nil {
@@ -215,7 +215,7 @@ func TestEventsGetAndAnalyticsWaitsUseDedicatedInterfaces(t *testing.T) {
 }
 
 func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStepCancel, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func TestRemovedStepCancelledEventIsRejected(t *testing.T) {
 }
 
 func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	ctx := context.Background()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runWebhook, WorkflowName: "webhook"})
@@ -312,7 +312,7 @@ func TestWebhookHandlerOnlyResumesWebhooks(t *testing.T) {
 }
 
 func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
-	world := testworld.New(worlds.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
+	world := testworld.New(worlds.Runners(worlds.NewRunner("manual", func(ctx context.Context, _ []byte) ([]byte, error) {
 		execution, ok := core.ExecutionFromContext(ctx)
 		if !ok {
 			return nil, nil
@@ -335,7 +335,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 			}
 		}
 		return nil, nil
-	}))
+	})))
 	ctx := context.Background()
 	runID := worlds.NewRunID()
 	_, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "manual"})
@@ -363,7 +363,7 @@ func TestWebhookHandlerWaitsForManualResponse(t *testing.T) {
 }
 
 func TestCBORRPCAndDefaultPrefix(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	handler := worlds.HTTPHandler(world, "")
 	input, err := cbor.Marshal(worlds.EventsCreateRunInput{RunID: runRpc, WorkflowName: "rpc"})
 	if err != nil {
@@ -427,7 +427,7 @@ func TestCBORRPCAndDefaultPrefix(t *testing.T) {
 	}
 }
 
-func ptr(value int) *int { return &value }
+func ptr[T any](value T) *T { return &value }
 
 func TestHookTokensUseNanoIDsAlphabet(t *testing.T) {
 	const alphabet = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
@@ -494,7 +494,7 @@ func TestStartRunDecidesAStartHookCandidateBeforeItReturns(t *testing.T) {
 	disabled := fmt.Errorf("%w: off", worlds.ErrStartHookDisabled)
 	throttled := &worlds.ThrottleError{}
 	start := func(create, queue []error) (*scriptedStartWorld, worlds.RunID, error) {
-		manual := testworld.NewManual()
+		manual := testworld.NewManual(nil)
 		t.Cleanup(manual.Close)
 		world := &scriptedStartWorld{World: manual, create: create, queue: queue}
 		runID := worlds.NewRunID()

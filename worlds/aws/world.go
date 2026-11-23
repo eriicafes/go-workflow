@@ -201,14 +201,15 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
-// Queue returns the SQS Lambda handler, which executes deliveries for the
-// workflows of runners. Attach it through an SQS event source mapping with
+// Queue returns the SQS Lambda handler, which executes deliveries with
+// executor: a worlds.RunnerSet runs them with Go workflows, and a
+// worlds.RemoteExecutor sends them to a Workflow SDK app. Attach it through an SQS event source mapping with
 // ReportBatchItemFailures enabled. It reports each failed delivery
 // individually, so SQS redelivers only those.
-func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
-	runtime := core.NewRuntime(world, runners)
+func Queue(world *World, executor worlds.Executor) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
+	bound := worlds.BoundExecutor{Executor: executor, Runtime: core.NewRuntime(world)}
 	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
-		return world.consume(ctx, runtime, event), nil
+		return world.consume(ctx, bound, event), nil
 	}
 }
 

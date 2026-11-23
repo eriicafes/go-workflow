@@ -32,7 +32,7 @@ func TestCancellationConstructorsReturnErrorsOutsideWorkflowContext(t *testing.T
 }
 
 func TestCancellationConstructorsReturnErrorsInStepContext(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 		return workflow.Step(ctx, func(ctx context.Context, _ struct{}) (cancellationOutput, error) {
 			cancelCtx, cancel, err := workflow.WithCancel(ctx)
 			if cancelCtx != nil || cancel != nil || !errors.Is(err, workflow.ErrNoWorkflow) {
@@ -44,7 +44,7 @@ func TestCancellationConstructorsReturnErrorsInStepContext(t *testing.T) {
 			}
 			return cancellationOutput{}, nil
 		}, struct{}{})
-	}))
+	})))
 	defer world.Close()
 	ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer stop()
@@ -58,7 +58,7 @@ func TestCancellationConstructorsReturnErrorsInStepContext(t *testing.T) {
 }
 
 func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 		cancelCtx, cancel, err := workflow.WithCancelCause(ctx)
 		if err != nil {
 			return cancellationOutput{}, err
@@ -75,7 +75,7 @@ func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
 		}
 		_, err = result.Value(ctx)
 		return cancellationOutput{Cause: context.Cause(cancelCtx).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()
@@ -101,7 +101,7 @@ func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
 }
 
 func TestStepCanCancelItsDurableContext(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 		cancelCtx, _, err := workflow.WithCancel(ctx)
 		if err != nil {
 			return cancellationOutput{}, err
@@ -118,7 +118,7 @@ func TestStepCanCancelItsDurableContext(t *testing.T) {
 			return struct{}{}, ctx.Err()
 		}, struct{}{})
 		return cancellationOutput{Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()
@@ -137,7 +137,7 @@ func TestCancelAnyPreservesBaseValuesAndObservesEverySource(t *testing.T) {
 		t.Run([]string{"base", "left", "right"}[sourceIndex], func(t *testing.T) {
 			type valueKey struct{}
 			observed := make(chan bool, 1)
-			world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 				base, cancelBase, err := workflow.WithCancelCause(context.WithValue(ctx, valueKey{}, "base value"))
 				if err != nil {
 					return cancellationOutput{}, err
@@ -171,7 +171,7 @@ func TestCancelAnyPreservesBaseValuesAndObservesEverySource(t *testing.T) {
 					return struct{}{}, nil
 				}, struct{}{})
 				return cancellationOutput{Cause: context.Cause(combined).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
-			}))
+			})))
 			defer world.Close()
 			ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
 			defer stop()
@@ -250,7 +250,7 @@ func TestDeadlineCancellationStopsWorkWithoutCancellingRun(t *testing.T) {
 				wantCause = context.Canceled
 			}
 			synctest.Test(t, func(t *testing.T) {
-				world := testworld.New(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
+				world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 					var cancelCtx context.Context
 					var cancel func() error
 					var err error
@@ -293,7 +293,7 @@ func TestDeadlineCancellationStopsWorkWithoutCancellingRun(t *testing.T) {
 						Cancelled: errors.Is(err, workflow.FatalError(context.Canceled)) &&
 							errors.Is(context.Cause(cancelCtx), wantCause),
 					}, nil
-				}))
+				})))
 				defer world.Close()
 				ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 				run, err := workflow.Start(ctx, cancellationInput{})

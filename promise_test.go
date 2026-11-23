@@ -23,7 +23,7 @@ func (composedInput) Workflow(composedOutput) {}
 
 func TestThenRecoversAndRunsDependentStepsAcrossReplay(t *testing.T) {
 	var sourceCalls, dependentCalls atomic.Int32
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
 		source := workflow.Background(ctx, func(context.Context, struct{}) (string, error) {
 			sourceCalls.Add(1)
 			return "", workflow.FatalError(errors.New("missing"))
@@ -59,7 +59,7 @@ func TestThenRecoversAndRunsDependentStepsAcrossReplay(t *testing.T) {
 			return composedOutput{}, errors.New("completed callback ran again")
 		}
 		return composedOutput{Value: value, Name: recovered.Unwrap(ctx)}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()
@@ -75,7 +75,7 @@ func TestThenRecoversAndRunsDependentStepsAcrossReplay(t *testing.T) {
 
 func TestThenAllowsOtherSelectWinnerWhileReturnedStepIsPending(t *testing.T) {
 	started := make(chan struct{})
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
 		source := workflow.Background(ctx, increment, 1)
 		chained := workflow.Then(ctx, source, func(value int, err error) *workflow.Result[int] {
 			if err != nil {
@@ -103,7 +103,7 @@ func TestThenAllowsOtherSelectWinnerWhileReturnedStepIsPending(t *testing.T) {
 			return composedOutput{}, errors.New("chain settled before its returned step")
 		}
 		return composedOutput{Name: other.Unwrap(ctx)}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()
@@ -118,7 +118,7 @@ func TestThenAllowsOtherSelectWinnerWhileReturnedStepIsPending(t *testing.T) {
 }
 
 func TestThenFollowsNestedChainWithoutAnotherEvent(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
 		source := workflow.Background(ctx, increment, 1)
 		outer := workflow.Then(ctx, source, func(value int, err error) *workflow.Result[int] {
 			if err != nil {
@@ -134,7 +134,7 @@ func TestThenFollowsNestedChainWithoutAnotherEvent(t *testing.T) {
 		})
 		value, err := dependent.Value(ctx)
 		return composedOutput{Value: value}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 	defer cancel()
@@ -152,7 +152,7 @@ func TestThenAdoptsReturnedResultFailure(t *testing.T) {
 	for _, background := range []bool{false, true} {
 		t.Run(map[bool]string{false: "immediate", true: "background"}[background], func(t *testing.T) {
 			failure := errors.New("returned result failed")
-			world := testworld.New(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
 				chained := workflow.Then(ctx, workflow.NewResult(1, nil), func(value int, err error) *workflow.Result[int] {
 					if background {
 						return workflow.Background(ctx, func(context.Context, int) (int, error) {
@@ -169,7 +169,7 @@ func TestThenAdoptsReturnedResultFailure(t *testing.T) {
 					return composedOutput{}, errors.New("chain lost its returned result's failure")
 				}
 				return composedOutput{Name: "failed"}, nil
-			}))
+			})))
 			defer world.Close()
 			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
 			defer cancel()
@@ -196,7 +196,7 @@ func TestThenPreservesRecordedSettlementOrder(t *testing.T) {
 		{name: "immediate failure", failure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			world := testworld.NewManual()
+			world := testworld.NewManual(nil)
 			defer world.Close()
 			runner := workflow.Use(func(ctx context.Context, _ composedInput) (composedOutput, error) {
 				first := workflow.Background(ctx, increment, 0)
@@ -232,7 +232,7 @@ func TestThenPreservesRecordedSettlementOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtime := core.NewRuntime(world, worlds.Runners(runner))
+			runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 			// The manual queue executes first, middle, then last before replaying
 			// the flow, so every result is visible when Select compares them.
 			for len(world.QueuedMessages()) != 0 {

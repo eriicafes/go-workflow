@@ -40,7 +40,7 @@ func (hookForceInput) Workflow(hookForceOutput)         {}
 func (hookRetentionInput) Workflow(hookRetentionOutput) {}
 
 func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedValues(t *testing.T) {
-	base := testworld.NewManual()
+	base := testworld.NewManual(nil)
 	defer base.Close()
 	runner := workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
 		old := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token})
@@ -75,7 +75,7 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 		}
 		return durableHookOutput{Value: payload["response"].(map[string]any)["message"].(string)}, nil
 	})
-	runtime := core.NewRuntime(base, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(base)}
 	ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(base)), 3*time.Second)
 	defer stop()
 	run, err := workflow.Start(ctx, durableHookInput{Token: "same-run-token"})
@@ -106,7 +106,7 @@ func TestSameRunTakeoverPreservesPayloadShapeAndExplicitDisposalStopsBufferedVal
 func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.T) {
 	for _, wrapped := range []bool{false, true} {
 		t.Run(map[bool]string{false: "direct defer", true: "wrapped defer"}[wrapped], func(t *testing.T) {
-			world := testworld.New(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
 				hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
 				if owner, err := hook.GetConflict(ctx); err != nil {
 					return durableHookOutput{}, err
@@ -126,7 +126,7 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 					return durableHookOutput{}, err
 				}
 				panic(errors.New("application failure"))
-			}))
+			})))
 			defer world.Close()
 			ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
 			defer stop()
@@ -166,7 +166,7 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 }
 
 func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input durableHookInput) (durableHookOutput, error) {
 		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
@@ -175,7 +175,7 @@ func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
 		}
 		value, err := hook.Next(ctx)
 		return durableHookOutput{Value: value}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -217,7 +217,7 @@ func TestDurableHookResumesAndRecordsDelivery(t *testing.T) {
 }
 
 func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ durableHookInput) (durableHookOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ durableHookInput) (durableHookOutput, error) {
 		hook := workflow.CreateHook[string](ctx)
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return durableHookOutput{}, err
@@ -227,7 +227,7 @@ func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
 		hook.Dispose(ctx)
 		_, err := hook.Next(ctx)
 		return durableHookOutput{Cancelled: errors.Is(err, worlds.ErrHookNotActive)}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -242,14 +242,14 @@ func TestDurableHookCancellationIsReturnedToTheWorkflow(t *testing.T) {
 }
 
 func TestDurableHookConflictRecordsTheOwningRun(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input hookConflictInput) (hookConflictOutput, error) {
 		hook := workflow.CreateHook[struct{}](ctx, workflow.HookOption{Token: input.Token, MinRetention: time.Hour})
 		owner, err := hook.GetConflict(ctx)
 		if owner == nil {
 			return hookConflictOutput{}, err
 		}
 		return hookConflictOutput{Owner: owner.ID(), Conflict: true}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -287,7 +287,7 @@ func TestDurableHookConflictRecordsTheOwningRun(t *testing.T) {
 }
 
 func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input hookForceInput) (hookForceOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input hookForceInput) (hookForceOutput, error) {
 		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, Force: input.Force})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookForceOutput{}, err
@@ -297,7 +297,7 @@ func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 		_, err := hook.Next(ctx)
 		_, claimed := errors.AsType[*worlds.HookForceClaimedError](err)
 		return hookForceOutput{ForceClaimed: claimed}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -341,7 +341,7 @@ func TestDurableHookForceClaimWakesTheDisplacedRun(t *testing.T) {
 }
 
 func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input hookRetentionInput) (hookRetentionOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input hookRetentionInput) (hookRetentionOutput, error) {
 		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, MinRetention: input.Retention})
 		if owner, err := hook.GetConflict(ctx); err != nil {
 			return hookRetentionOutput{}, err
@@ -350,7 +350,7 @@ func TestDurableHookRetentionKeepsAndThenReleasesTheToken(t *testing.T) {
 		}
 		value, err := hook.Next(ctx)
 		return hookRetentionOutput{Value: value}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()

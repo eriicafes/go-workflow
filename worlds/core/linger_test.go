@@ -46,7 +46,7 @@ var lingerRunner = workflow.Use(func(ctx context.Context, input lingerInput) (li
 
 func TestSuspendedFlowLingersAndTakesTheNextPayloadInTheSameDelivery(t *testing.T) {
 	withLinger(t)
-	world := testworld.NewManual(lingerRunner)
+	world := testworld.NewManual(worlds.Runners(lingerRunner))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
@@ -64,7 +64,7 @@ func TestSuspendedFlowLingersAndTakesTheNextPayloadInTheSameDelivery(t *testing.
 	}()
 	// One delivery takes both payloads: it lingers on the open hook after
 	// each pass, and each payload starts another.
-	if err := core.NewRuntime(world, worlds.Runners(lingerRunner)).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+	if err := (worlds.BoundExecutor{Executor: worlds.Runners(lingerRunner), Runtime: core.NewRuntime(world)}).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-resumed; err != nil {
@@ -79,7 +79,7 @@ func TestSuspendedFlowStopsLingeringWhenNothingArrives(t *testing.T) {
 	withLinger(t)
 	core.HookLingerDuration = 50 * time.Millisecond
 	defer func() { core.HookLingerDuration = 5 * time.Second }()
-	world := testworld.NewManual(lingerRunner)
+	world := testworld.NewManual(worlds.Runners(lingerRunner))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
@@ -87,7 +87,7 @@ func TestSuspendedFlowStopsLingeringWhenNothingArrives(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if err := core.NewRuntime(world, worlds.Runners(lingerRunner)).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+	if err := (worlds.BoundExecutor{Executor: worlds.Runners(lingerRunner), Runtime: core.NewRuntime(world)}).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed < 50*time.Millisecond || elapsed > 2*time.Second {
@@ -100,7 +100,7 @@ type pollOnlyWorld struct{ worlds.World }
 
 func TestSuspendedFlowDoesNotLingerWithoutAPush(t *testing.T) {
 	withLinger(t)
-	world := testworld.NewManual(lingerRunner)
+	world := testworld.NewManual(worlds.Runners(lingerRunner))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
@@ -108,7 +108,7 @@ func TestSuspendedFlowDoesNotLingerWithoutAPush(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	if err := core.NewRuntime(pollOnlyWorld{world}, worlds.Runners(lingerRunner)).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
+	if err := (worlds.BoundExecutor{Executor: worlds.Runners(lingerRunner), Runtime: core.NewRuntime(pollOnlyWorld{world})}).Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {

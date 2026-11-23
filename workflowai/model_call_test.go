@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/eriicafes/go-workflow/worlds"
 	"reflect"
 	"slices"
 	"strings"
@@ -396,7 +397,7 @@ func TestGenerateInclude(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(text("21 degrees."))
 		testCallOptions.Include = &ai.IncludeOptions{RequestBody: true, ResponseBody: true, RequestMessages: true}
-		world := testworld.New(workflow.Use(GenerateRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})

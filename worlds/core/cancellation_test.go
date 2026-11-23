@@ -62,7 +62,7 @@ func (w *cancelRaceWorld) StreamsWrite(ctx context.Context, input worlds.Streams
 func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 	ctx, stop := context.WithTimeout(queuedSteps(), 3*time.Second)
 	defer stop()
-	base := testworld.NewManual()
+	base := testworld.NewManual(nil)
 	defer base.Close()
 	world := &cancelRaceWorld{World: base, ready: make(chan struct{})}
 	runner := workflow.Use(func(ctx context.Context, _ versionedInput) (versionedOutput, error) {
@@ -78,7 +78,7 @@ func TestConcurrentCancellationPublishesFirstCommittedCause(t *testing.T) {
 		b := workflow.Background(cancelCtx, step, "second contender")
 		return versionedOutput{}, workflow.Join(ctx, a, b)
 	})
-	runtime := core.NewRuntime(world, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 	clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
 	run, err := workflow.Start(clientCtx, versionedInput{})
 	if err != nil {
@@ -134,7 +134,7 @@ func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 		t.Run(map[bool]string{false: "notified", true: "notification retry"}[failNotification], func(t *testing.T) {
 			ctx, stop := context.WithTimeout(queuedSteps(), 3*time.Second)
 			defer stop()
-			base := testworld.NewManual()
+			base := testworld.NewManual(nil)
 			defer base.Close()
 			world := &cancelRaceWorld{World: base}
 			world.failWrite.Store(failNotification)
@@ -193,7 +193,7 @@ func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 				}
 				return versionedOutput{Version: context.Cause(cancelCtx).Error()}, nil
 			})
-			runtime := core.NewRuntime(world, worlds.Runners(runner))
+			runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 			clientCtx := workflow.NewContext(ctx, workflow.NewClient(world))
 			run, err := workflow.Start(clientCtx, versionedInput{})
 			if err != nil {

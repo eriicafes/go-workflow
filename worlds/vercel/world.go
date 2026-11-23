@@ -48,7 +48,7 @@ type Config struct {
 	Topics map[string]string
 	// Routes publishes the deliveries of each workflow named by workflow
 	// name, as worlds.Routes builds it, to the topic of its queue in Topics.
-	// Queue(world, runners) consumes any topic its function is triggered by,
+	// Queue(world, executor) consumes any topic its function is triggered by,
 	// so each topic can have its own trigger and concurrency.
 	Routes map[string]string
 	// OIDCToken returns the deployment's Vercel OIDC token. It is called for
@@ -278,16 +278,17 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
-// Queue returns the Vercel Queues push consumer, which executes deliveries for
-// the workflows of runners. It acknowledges a delivery that succeeds, leaves
+// Queue returns the Vercel Queues push consumer, which executes deliveries
+// with executor: a worlds.RunnerSet runs them with Go workflows, and a
+// worlds.RemoteExecutor sends them to a Workflow SDK app. It acknowledges a delivery that succeeds, leaves
 // the message for its next delivery when the runtime asks for a redelivery,
 // and answers 500 to one that fails, so Vercel redelivers it.
 //
 // Deploy it only as a function with a queue/v2beta trigger for Config.Topic.
 // Vercel does not expose such functions publicly, so the handler does not
 // authenticate requests.
-func Queue(world *World, runners worlds.RunnerSet) http.Handler {
-	return &consumer{world: world, execute: core.NewRuntime(world, runners).Execute}
+func Queue(world *World, executor worlds.Executor) http.Handler {
+	return &consumer{world: world, execute: worlds.BoundExecutor{Executor: executor, Runtime: core.NewRuntime(world)}.Execute}
 }
 
 // Deployment returns a handler serving only the deployment route, which
