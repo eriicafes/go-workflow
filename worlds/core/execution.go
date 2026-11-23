@@ -97,6 +97,9 @@ type Execution struct {
 	continuations []func()
 	// suspended marks a runtime exit before the workflow body finishes.
 	suspended bool
+	// exitCause is the cause of the first runtime exit, which the runtime
+	// returns even when the workflow recovers its panic.
+	exitCause error
 	// pending holds the steps a flow declared or must attempt again, in
 	// declaration order, and waits the timers it declared, which advance
 	// creates once every recorded event is delivered.
@@ -466,6 +469,9 @@ func (e *Execution) DeliveredEventID() worlds.EventID {
 // exit marks replay as suspended and returns cause for the caller to panic with.
 func (e *Execution) exit(cause error) error {
 	e.suspended = true
+	if e.exitCause == nil {
+		e.exitCause = cause
+	}
 	return cause
 }
 

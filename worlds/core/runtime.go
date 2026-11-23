@@ -938,6 +938,11 @@ func (r *Runtime) run(runner worlds.Runner, ctx context.Context, input []byte) (
 		}
 	}()
 	output, err = runner.Run(ctx, input)
+	if execution, ok := ExecutionFromContext(ctx); ok && execution.exitCause != nil {
+		// The workflow recovered the panic of a runtime exit and returned, so
+		// the exit stands and what it returned is dropped.
+		return nil, execution.exitCause
+	}
 	return output, err
 }
 

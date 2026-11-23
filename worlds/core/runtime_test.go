@@ -2555,3 +2555,44 @@ func TestFirstDeliveryOfAStartHookCandidateTheWorldDidNotAdmit(t *testing.T) {
 		t.Fatal("an undecided candidate asked for a handoff instead of failing its delivery")
 	}
 }
+
+type recoveringInput struct{ Token string }
+
+func (recoveringInput) Workflow(string) {}
+
+// A workflow that recovers the panic which suspends it still waits: the run
+// does not complete with what the workflow returned after recovering.
+func TestRecoveredSuspensionStillSuspendsTheRun(t *testing.T) {
+	world := testworld.New(workflow.Use(func(ctx context.Context, input recoveringInput) (output string, err error) {
+		defer func() {
+			if recover() != nil {
+				output = "recovered"
+			}
+		}()
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
+		return hook.Next(ctx)
+	}))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, recoveringInput{Token: "recovering"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := world.HooksGetByToken(ctx, worlds.HooksGetByTokenInput{Token: "recovering"}); err == nil {
+			break
+		}
+		if status, _ := run.Status(ctx); status.Terminal() || ctx.Err() != nil {
+			output, err := run.Value(ctx)
+			t.Fatalf("run ended as %s with %q, %v before its hook was resumed", status, output, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := workflow.ResumeHook(ctx, "recovering", "received"); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := run.Value(ctx); err != nil || output != "received" {
+		t.Fatalf("output = %q, %v, want the hook's payload", output, err)
+	}
+}
