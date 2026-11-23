@@ -25,7 +25,6 @@ import type {
 	WorkflowRunWithoutData,
 	World,
 } from "@workflow/world";
-import { decode, encode } from "cbor-x";
 import { HOOK_RESUME_DEDUP_VERSION, START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
 import { SPEC_VERSION_SINGLE_ORCHESTRATOR } from "@workflow/world/spec-version";
 import { HTTPWorldError, RPCClient, devkitName, goName, type RPC } from "./rpc.js";
@@ -132,10 +131,11 @@ export class HTTPWorld implements World {
 	readonly queueAuthMode = "skip" as const;
 	/**
 	 * Returns the handler of the app's flow route for deliveries a Go World
-	 * sends with worlds.RemoteExecutor: a POST of the CBOR map {queueName,
-	 * message, messageId, attempt, deliveryCount, createdAt}. It answers with
-	 * the CBOR result {timeoutSeconds} when `handler` asks for the message
-	 * again, and {} when the message is done. A delivery without the World's
+	 * sends with worlds.RemoteExecutor, in the Workflow SDK's local queue
+	 * format: the message as JSON, with its queue name, message ID, attempt,
+	 * delivery count and creation time in x-vqs-* headers. It answers
+	 * {timeoutSeconds} when `handler` asks for the message again, and
+	 * {ok: true} when the message is done. A delivery without the World's
 	 * token is refused with 401, and a handler that throws fails it with 500,
 	 * which the Go World retries.
 	 */
@@ -336,8 +336,10 @@ export class HTTPWorld implements World {
 				// The caller's signal aborts the request and is not part of it.
 				const { signal, ...request } = input;
 				const page = await client.call<RPC.EventsPage>("events.list", request, { signal });
-				const { snapshot, ...rest } = page;
-				return { ...withEventDataPage(rest), snapshot: { seq: snapshot.eventCount, seqInBand: snapshot.inBandCount } };
+				const { snapshot, maxEvents, ...rest } = page as RPC.EventsPage & { maxEvents?: number };
+				// Go reports no limit as 0, which the SDK would read as a
+				// ceiling of zero events.
+				return { ...withEventDataPage(rest), snapshot: { seq: snapshot.eventCount, seqInBand: snapshot.inBandCount }, ...(maxEvents ? { maxEvents } : {}) };
 			},
 			listByCorrelationId: async (input) =>
 				withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.listByCorrelationID", input)),
@@ -771,7 +773,7 @@ function queueInput(queueName: string, message: Parameters<World["queue"]>[1], o
 		runId: fields.runId,
 		// The whole message and its queue name, which the Go World stores and
 		// a worlds.RemoteExecutor delivers back to the app unchanged.
-		sdkMessage: encodeBytes({ queueName, message }),
+		sdkMessage: sdkMessageBytes(queueName, message),
 		...(fields.stepId ? { stepId: fields.stepId } : {}),
 		...(fields.stepName ? { stepName: fields.stepName } : {}),
 		...(fields.stepAttempt ? { stepAttempt: fields.stepAttempt } : {}),
@@ -790,67 +792,66 @@ function queueInput(queueName: string, message: Parameters<World["queue"]>[1], o
 	};
 }
 
-// encodeBytes returns value encoded as CBOR in a Uint8Array of its own.
-function encodeBytes(value: unknown): Uint8Array<ArrayBuffer> {
-	const encoded = encode(value);
-	const bytes = new Uint8Array(new ArrayBuffer(encoded.byteLength));
-	bytes.set(encoded);
-	return bytes;
+// sdkMessageBytes returns a queued message and its queue name as JSON, with
+// Uint8Array values as the Workflow SDK's local queue writes them.
+function sdkMessageBytes(queueName: string, message: unknown): Uint8Array {
+	return new TextEncoder().encode(JSON.stringify({ queueName, message }, typedJsonReplacer));
 }
 
-// QueueDelivery is the body a Go World's worlds.RemoteExecutor posts.
-type QueueDelivery = {
-	queueName?: string;
-	message?: unknown;
-	messageId?: string;
-	attempt?: number;
-	deliveryCount?: number;
-	createdAt?: Date;
-};
+function typedJsonReplacer(_key: string, value: unknown): unknown {
+	return value instanceof Uint8Array ? { __type: "Uint8Array", data: Buffer.from(value).toString("base64") } : value;
+}
+
+function typedJsonReviver(_key: string, value: unknown): unknown {
+	if (value !== null && typeof value === "object" && (value as { __type?: unknown }).__type === "Uint8Array" && typeof (value as { data?: unknown }).data === "string") {
+		return new Uint8Array(Buffer.from((value as { data: string }).data, "base64"));
+	}
+	return value;
+}
 
 // queueHandler returns the route handler createQueueHandler returns.
 function queueHandler(prefix: string, handler: Parameters<World["createQueueHandler"]>[1], token: string | undefined): (request: Request) => Promise<Response> {
 	const expected = token ? `Bearer ${token}` : undefined;
 	return async (request) => {
 		if (request.method !== "POST") {
-			return cborResponse({ error: "world-http: deliveries are POST requests" }, 405);
+			return Response.json({ error: "world-http: deliveries are POST requests" }, { status: 405 });
 		}
 		if (expected !== undefined && !sameSecret(request.headers.get("Authorization") ?? "", expected)) {
-			return cborResponse({ error: "world-http: the delivery's token is not the World's" }, 401);
+			return Response.json({ error: "world-http: the delivery's token is not the World's" }, { status: 401 });
 		}
-		let delivery: QueueDelivery;
-		try {
-			delivery = decode(new Uint8Array(await request.arrayBuffer())) as QueueDelivery;
-		} catch (error) {
-			return cborResponse({ error: `world-http: could not decode the delivery: ${error instanceof Error ? error.message : String(error)}` }, 400);
-		}
-		const { queueName, message, messageId } = delivery ?? {};
-		if (typeof queueName !== "string" || typeof messageId !== "string" || messageId === "") {
-			return cborResponse({ error: "world-http: the delivery has no queueName or messageId" }, 400);
+		const queueName = request.headers.get("x-vqs-queue-name");
+		const messageId = request.headers.get("x-vqs-message-id");
+		if (!queueName || !messageId) {
+			return Response.json({ error: "world-http: the delivery has no x-vqs-queue-name or x-vqs-message-id" }, { status: 400 });
 		}
 		if (!queueName.startsWith(prefix)) {
-			return cborResponse({ error: `world-http: queue ${queueName} is not served by this route, which serves ${prefix}` }, 400);
+			return Response.json({ error: `world-http: queue ${queueName} is not served by this route, which serves ${prefix}` }, { status: 400 });
 		}
-		const attempt = typeof delivery.attempt === "number" && delivery.attempt > 0 ? delivery.attempt : 1;
+		let message: unknown;
+		try {
+			message = JSON.parse(await request.text(), typedJsonReviver);
+		} catch (error) {
+			return Response.json({ error: `world-http: could not decode the delivery: ${error instanceof Error ? error.message : String(error)}` }, { status: 400 });
+		}
+		const attempt = Number(request.headers.get("x-vqs-message-attempt")) || 1;
+		const deliveryCount = Number(request.headers.get("x-vqs-message-delivery-count")) || attempt;
+		const createdAt = request.headers.get("x-vqs-message-created-at");
 		let result: unknown;
 		try {
 			result = await handler(message, {
 				attempt,
-				...(typeof delivery.deliveryCount === "number" && delivery.deliveryCount > 0 ? { deliveryCount: delivery.deliveryCount } : {}),
-				...(delivery.createdAt instanceof Date ? { createdAt: delivery.createdAt } : {}),
+				deliveryCount,
+				...(createdAt ? { createdAt: new Date(createdAt) } : {}),
 				queueName: queueName as Parameters<typeof handler>[1]["queueName"],
 				messageId: messageId as MessageId,
 			});
 		} catch (error) {
-			return cborResponse({ error: error instanceof Error ? error.message : String(error) }, 500);
+			return Response.json(String(error), { status: 500 });
 		}
 		const timeoutSeconds = result && typeof result === "object" ? (result as { timeoutSeconds?: unknown }).timeoutSeconds : undefined;
-		return cborResponse(typeof timeoutSeconds === "number" ? { timeoutSeconds } : {}, 200);
+		// JSON has no Infinity, which the Go World caps at its longest delay.
+		return Response.json(typeof timeoutSeconds === "number" ? { timeoutSeconds: Number.isFinite(timeoutSeconds) ? timeoutSeconds : 1e9 } : { ok: true });
 	};
-}
-
-function cborResponse(value: unknown, status: number): Response {
-	return new Response(encodeBytes(value), { status, headers: { "Content-Type": "application/cbor" } });
 }
 
 // sameSecret compares two strings in time that depends only on their lengths.

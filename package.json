@@ -18,7 +18,8 @@
     "prepack": "npm run build && mv README.md .README.go.md && cp world-http/README.md README.md",
     "postpack": "mv .README.go.md README.md",
     "release": "changeset publish",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:world-testing": "vitest run --config vitest.world-testing.config.ts"
   },
   "keywords": [],
   "author": "Eric Afes <eriicafes@gmail.com>",
@@ -36,9 +37,10 @@
     "@types/node": "^26.6.5",
     "@types/ws": "^8.18.1",
     "@workflow/world": "^5.3.0",
+    "@workflow/world-testing": "5.1.5",
     "tsdown": "^0.21.10",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "cbor-x": "^1.6.6",

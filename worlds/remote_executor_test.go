@@ -2,122 +2,115 @@ package worlds_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
-	"github.com/fxamacker/cbor/v2"
 )
 
-// remoteRequest is the body a RemoteExecutor sends, as the app decodes it.
+// remoteRequest is a request a RemoteExecutor sent, as the app received it.
 type remoteRequest struct {
-	RPCVersion    int            `cbor:"rpcVersion"`
-	QueueName     string         `cbor:"queueName"`
-	Message       map[string]any `cbor:"message"`
-	MessageID     string         `cbor:"messageId"`
-	Attempt       int            `cbor:"attempt"`
-	DeliveryCount int            `cbor:"deliveryCount"`
-	CreatedAt     time.Time      `cbor:"createdAt"`
+	header http.Header
+	body   string
 }
 
 // remoteApp serves a flow route that records each request and answers with
-// status and the CBOR encoding of result, or nothing when result is nil.
-func remoteApp(t *testing.T, status int, result any) (*httptest.Server, *[]remoteRequest, *[]http.Header) {
+// status and body.
+func remoteApp(t *testing.T, status int, body string) (*httptest.Server, *[]remoteRequest) {
 	t.Helper()
 	var requests []remoteRequest
-	var headers []http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
+		data, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
 		}
-		var request remoteRequest
-		if err := cbor.Unmarshal(body, &request); err != nil {
-			t.Errorf("decode the delivery: %v", err)
-		}
-		requests = append(requests, request)
-		headers = append(headers, r.Header.Clone())
+		requests = append(requests, remoteRequest{header: r.Header.Clone(), body: string(data)})
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		if result != nil {
-			data, _ := cbor.Marshal(result)
-			_, _ = w.Write(data)
-		}
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(server.Close)
-	return server, &requests, &headers
+	return server, &requests
 }
 
 func TestRemoteExecutorSendsTheSDKMessageUnchanged(t *testing.T) {
-	server, requests, headers := remoteApp(t, http.StatusOK, nil)
-	message, err := cbor.Marshal(map[string]any{
-		"queueName": "__wkf_workflow_workflow//./workflows/a//a",
-		"message":   map[string]any{"runId": "wrun_1", "traceCarrier": map[string]any{"traceparent": "00-x"}},
-	})
+	server, requests := remoteApp(t, http.StatusOK, `{"ok":true}`)
+	message := `{"runId":"wrun_1","traceCarrier":{"traceparent":"00-x"},"stepInput":{"__type":"Uint8Array","data":"AQID"}}`
+	sdk, err := json.Marshal(map[string]any{"queueName": "__wkf_workflow_workflow//./workflows/a//a", "message": json.RawMessage(message)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	input := worlds.QueueInput{RunID: "wrun_1", WorkflowName: "ignored", SDKMessage: message, MessageID: "msg_1", Attempt: 2, DeliveryCount: 3, CreatedAt: created}
-	executor := worlds.RemoteExecutor{URL: server.URL, Token: "secret"}
-	if err := executor.Execute(context.Background(), nil, input); err != nil {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 6_000_000, time.UTC)
+	input := worlds.QueueInput{RunID: "wrun_1", WorkflowName: "ignored", SDKMessage: sdk, MessageID: "msg_1", Attempt: 2, DeliveryCount: 3, CreatedAt: created}
+	if err := (worlds.RemoteExecutor{URL: server.URL, Token: "secret"}).Execute(context.Background(), nil, input); err != nil {
 		t.Fatal(err)
 	}
 	got := (*requests)[0]
-	if got.QueueName != "__wkf_workflow_workflow//./workflows/a//a" || got.MessageID != "msg_1" || got.Attempt != 2 || got.DeliveryCount != 3 || !got.CreatedAt.Equal(created) || got.RPCVersion != worlds.RPCVersion {
-		t.Fatalf("delivery = %+v", got)
+	if got.body != message {
+		t.Fatalf("body = %s, want the SDK message unchanged", got.body)
 	}
-	if got.Message["runId"] != "wrun_1" || got.Message["traceCarrier"] == nil {
-		t.Fatalf("message = %#v, want the SDK message unchanged", got.Message)
+	want := map[string]string{
+		"Authorization":                "Bearer secret",
+		"Content-Type":                 "application/json",
+		"x-vqs-queue-name":             "__wkf_workflow_workflow//./workflows/a//a",
+		"x-vqs-message-id":             "msg_1",
+		"x-vqs-message-attempt":        "2",
+		"x-vqs-message-delivery-count": "3",
+		"x-vqs-message-created-at":     "2026-01-02T03:04:05.006Z",
 	}
-	header := (*headers)[0]
-	if header.Get("Authorization") != "Bearer secret" || header.Get("Content-Type") != worlds.RPCContentType {
-		t.Fatalf("headers = %v", header)
+	for name, value := range want {
+		if got.header.Get(name) != value {
+			t.Errorf("%s = %q, want %q", name, got.header.Get(name), value)
+		}
 	}
 }
 
 func TestRemoteExecutorBuildsAMessageForAGoDelivery(t *testing.T) {
-	server, requests, headers := remoteApp(t, http.StatusOK, nil)
+	server, requests := remoteApp(t, http.StatusOK, `{"ok":true}`)
 	stepID := worlds.StepID("step_1")
-	input := worlds.QueueInput{RunID: "wrun_1", WorkflowName: "workflow//./w//w", StepID: &stepID, StepName: "step//./w//s", RunSpecVersion: 9, Recovery: true}
+	input := worlds.QueueInput{RunID: "wrun_1", WorkflowName: "workflow//./w//w", StepID: &stepID, StepName: "step//./w//s", RunSpecVersion: 9, Recovery: true, MessageID: "msg_1"}
 	if err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, input); err != nil {
 		t.Fatal(err)
 	}
 	got := (*requests)[0]
-	if got.QueueName != "__wkf_workflow_workflow//./w//w" {
-		t.Fatalf("queue name = %q", got.QueueName)
+	if got.header.Get("x-vqs-queue-name") != "__wkf_workflow_workflow//./w//w" || got.header.Get("x-vqs-message-attempt") != "1" {
+		t.Fatalf("headers = %v", got.header)
 	}
-	if got.Message["runId"] != "wrun_1" || got.Message["stepId"] != "step_1" || got.Message["stepName"] != "step//./w//s" || got.Message["recovery"] != true {
-		t.Fatalf("message = %#v", got.Message)
+	var message map[string]any
+	if err := json.Unmarshal([]byte(got.body), &message); err != nil {
+		t.Fatal(err)
 	}
-	if (*headers)[0].Get("Authorization") != "" {
+	if message["runId"] != "wrun_1" || message["stepId"] != "step_1" || message["stepName"] != "step//./w//s" || message["recovery"] != true || message["runSpecVersion"] != 9.0 {
+		t.Fatalf("message = %#v", message)
+	}
+	if got.header.Get("Authorization") != "" {
 		t.Fatal("sent an Authorization header without a token")
 	}
 }
 
 func TestRemoteExecutorMapsTheHandlerResult(t *testing.T) {
 	tests := []struct {
-		name   string
-		result any
-		want   *time.Duration
+		name string
+		body string
+		want *time.Duration
 	}{
-		{"nothing acknowledges", nil, nil},
-		{"null acknowledges", cbor.RawMessage{0xf6}, nil},
-		{"other data acknowledges", map[string]any{"ok": true}, nil},
-		{"timeoutSeconds redelivers", map[string]any{"timeoutSeconds": 5}, ptr(5 * time.Second)},
-		{"fractional timeoutSeconds", map[string]any{"timeoutSeconds": 1.5}, ptr(1500 * time.Millisecond)},
-		{"zero is a handoff", map[string]any{"timeoutSeconds": 0}, ptr(time.Duration(0))},
-		{"infinity waits the longest", map[string]any{"timeoutSeconds": math.Inf(1)}, ptr(worlds.MaxRemoteRedelivery)},
-		{"a long delay is capped", map[string]any{"timeoutSeconds": 86400}, ptr(worlds.MaxRemoteRedelivery)},
+		{"ok acknowledges", `{"ok":true}`, nil},
+		{"null acknowledges", `null`, nil},
+		{"nothing acknowledges", ``, nil},
+		{"timeoutSeconds redelivers", `{"timeoutSeconds":5}`, ptr(5 * time.Second)},
+		{"fractional timeoutSeconds", `{"timeoutSeconds":1.5}`, ptr(1500 * time.Millisecond)},
+		{"zero is a handoff", `{"timeoutSeconds":0}`, ptr(time.Duration(0))},
+		{"a long delay is capped", `{"timeoutSeconds":86400}`, ptr(worlds.MaxRemoteRedelivery)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server, _, _ := remoteApp(t, http.StatusOK, test.result)
-			err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1"})
+			server, _ := remoteApp(t, http.StatusOK, test.body)
+			err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1", MessageID: "msg_1"})
 			redelivery, ok := worlds.RedeliveryOf(err)
 			switch {
 			case test.want == nil && err != nil:
@@ -130,14 +123,13 @@ func TestRemoteExecutorMapsTheHandlerResult(t *testing.T) {
 }
 
 func TestRemoteExecutorFailsOnRefusals(t *testing.T) {
-	server, _, _ := remoteApp(t, http.StatusUnauthorized, nil)
-	if err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1"}); !errors.Is(err, worlds.ErrRemoteUnauthorized) {
+	server, _ := remoteApp(t, http.StatusUnauthorized, `{"error":"no"}`)
+	if err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1", MessageID: "msg_1"}); !errors.Is(err, worlds.ErrRemoteUnauthorized) {
 		t.Fatalf("401: err = %v, want ErrRemoteUnauthorized", err)
 	}
-	server, _, _ = remoteApp(t, http.StatusInternalServerError, nil)
-	err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1"})
+	server, _ = remoteApp(t, http.StatusInternalServerError, `"Error: boom"`)
+	err := (worlds.RemoteExecutor{URL: server.URL}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1", MessageID: "msg_1"})
 	if _, redelivery := worlds.RedeliveryOf(err); err == nil || redelivery {
 		t.Fatalf("500: err = %v, want an error the World retries", err)
 	}
 }
-

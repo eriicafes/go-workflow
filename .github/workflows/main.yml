@@ -76,11 +76,46 @@ jobs:
       - name: Build
         run: npm run build
 
+  world-testing:
+    name: World Testing (${{ matrix.world }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        world: [testworld, local, postgres]
+    services:
+      postgres:
+        image: postgres:17.10
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HARNESS_WORLD: ${{ matrix.world }}
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - run: npm ci
+      - name: Run the Workflow SDK's World test suite
+        run: npm run test:world-testing
+
   release:
     name: Version Releases
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
-    needs: [test, test-js]
+    needs: [test, test-js, world-testing]
     steps:
       - uses: actions/checkout@v7
 

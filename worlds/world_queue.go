@@ -130,7 +130,8 @@ type (
 		CreatedAt time.Time
 		// SDKMessage is set on a delivery a Workflow SDK runtime queued
 		// through world-http: the SDK's queue name and message, encoded as
-		// the CBOR map {queueName, message}. A World stores it with the
+		// the JSON object {queueName, message}, with Uint8Array values as
+		// the SDK's local queue writes them. A World stores it with the
 		// delivery, and a RemoteExecutor sends both back to the SDK app
 		// unchanged. The Go Runtime ignores it.
 		SDKMessage []byte `json:",omitempty"`

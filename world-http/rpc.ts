@@ -446,7 +446,12 @@ function toWire(value: unknown, preserveKeys = false): unknown {
 	if (typeof value === "number" && Number.isInteger(value) && Math.abs(value) >= 2 ** 32) {
 		return BigInt(value);
 	}
-	if (value == null || value instanceof Date || value instanceof Uint8Array || value instanceof ArrayBuffer) {
+	// cbor-x writes a Date as float seconds, which loses milliseconds that a
+	// float cannot hold, so a Date is sent as its exact ISO 8601 text.
+	if (value instanceof Date) {
+		return value.toISOString();
+	}
+	if (value == null || value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return value;
 	}
 	if (Array.isArray(value)) {

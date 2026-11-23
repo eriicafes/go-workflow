@@ -3,19 +3,19 @@ package worlds
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"time"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
 // MaxRemoteRedelivery is the longest redelivery delay a RemoteExecutor asks
-// for. A Workflow SDK app that asks for a longer or non-finite delay gets
-// this one, the longest delay Vercel Queues supports.
+// for. A Workflow SDK app that asks for a longer delay gets this one, the
+// longest delay Vercel Queues supports.
 const MaxRemoteRedelivery = 15 * time.Minute
 
 // sdkWorkflowQueuePrefix is the Workflow SDK's queue name prefix for a
@@ -31,13 +31,16 @@ var ErrRemoteUnauthorized = errors.New("workflow: the Workflow SDK app refused t
 // whose World is world-http, at the app's flow route, which serves both flow
 // and step deliveries. It lets a Go World back a JavaScript app.
 //
-// A delivery is a POST of a CBOR map holding the SDK's queue name and
-// message, and the delivery's messageId, attempt, deliveryCount and
-// createdAt. The app answers with the CBOR result of the SDK's queue
-// handler: {timeoutSeconds: n} asks for the message again after n seconds,
-// where 0 is a handoff, and anything else acknowledges it. A response that is
-// not 2xx, or a request that fails, is an error the World retries; the SDK
-// runtime makes a repeated delivery safe.
+// A delivery is sent as the Workflow SDK's local queue sends one: a POST of
+// the SDK message as JSON, with Uint8Array values as
+// {"__type":"Uint8Array","data":"<base64>"}, and its queue name, message ID,
+// attempt, delivery count and creation time in the x-vqs-queue-name,
+// x-vqs-message-id, x-vqs-message-attempt, x-vqs-message-delivery-count and
+// x-vqs-message-created-at headers. The app answers with JSON:
+// {"timeoutSeconds": n} asks for the message again after n seconds, where 0 is
+// a handoff, and anything else acknowledges it. A response that is not 2xx,
+// or a request that fails, is an error the World retries; the SDK runtime
+// makes a repeated delivery safe.
 type RemoteExecutor struct {
 	// URL is the app's flow route, such as
 	// https://app.example.com/.well-known/workflow/v1/flow.
@@ -50,33 +53,22 @@ type RemoteExecutor struct {
 	Client *http.Client
 }
 
-// remoteDelivery is the body of a RemoteExecutor's request.
-type remoteDelivery struct {
-	RPCVersion    int             `cbor:"rpcVersion"`
-	QueueName     string          `cbor:"queueName"`
-	Message       cbor.RawMessage `cbor:"message"`
-	MessageID     string          `cbor:"messageId,omitempty"`
-	Attempt       int             `cbor:"attempt,omitempty"`
-	DeliveryCount int             `cbor:"deliveryCount,omitempty"`
-	CreatedAt     *time.Time      `cbor:"createdAt,omitempty"`
-}
-
 // sdkMessage is QueueInput.SDKMessage decoded.
 type sdkMessage struct {
-	QueueName string          `cbor:"queueName"`
-	Message   cbor.RawMessage `cbor:"message"`
+	QueueName string          `json:"queueName"`
+	Message   json.RawMessage `json:"message"`
 }
 
 // remoteResult is the part of the SDK queue handler's result a
 // RemoteExecutor reads.
 type remoteResult struct {
-	TimeoutSeconds *float64 `cbor:"timeoutSeconds"`
+	TimeoutSeconds *float64 `json:"timeoutSeconds"`
 }
 
 // Execute sends input to the app and returns its outcome. It ignores
 // runtime.
 func (e RemoteExecutor) Execute(ctx context.Context, _ Runtime, input QueueInput) error {
-	body, err := remoteDeliveryBody(input)
+	queueName, body, err := remoteDelivery(input)
 	if err != nil {
 		return err
 	}
@@ -84,8 +76,16 @@ func (e RemoteExecutor) Execute(ctx context.Context, _ Runtime, input QueueInput
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", RPCContentType)
-	request.Header.Set("Accept", RPCContentType)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-vqs-queue-name", queueName)
+	request.Header.Set("x-vqs-message-id", input.MessageID)
+	request.Header.Set("x-vqs-message-attempt", strconv.Itoa(max(input.Attempt, 1)))
+	if input.DeliveryCount > 0 {
+		request.Header.Set("x-vqs-message-delivery-count", strconv.Itoa(input.DeliveryCount))
+	}
+	if !input.CreatedAt.IsZero() {
+		request.Header.Set("x-vqs-message-created-at", input.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"))
+	}
 	if e.Token != "" {
 		request.Header.Set("Authorization", "Bearer "+e.Token)
 	}
@@ -111,33 +111,19 @@ func (e RemoteExecutor) Execute(ctx context.Context, _ Runtime, input QueueInput
 	return remoteOutcome(data)
 }
 
-// remoteDeliveryBody returns the request body of input.
-func remoteDeliveryBody(input QueueInput) ([]byte, error) {
-	delivery := remoteDelivery{
-		RPCVersion:    RPCVersion,
-		MessageID:     input.MessageID,
-		Attempt:       input.Attempt,
-		DeliveryCount: input.DeliveryCount,
-	}
-	if !input.CreatedAt.IsZero() {
-		delivery.CreatedAt = &input.CreatedAt
-	}
+// remoteDelivery returns the queue name and request body of input.
+func remoteDelivery(input QueueInput) (string, []byte, error) {
 	if len(input.SDKMessage) > 0 {
 		var message sdkMessage
-		if err := cbor.Unmarshal(input.SDKMessage, &message); err != nil {
-			return nil, fmt.Errorf("workflow: decode the SDK message of run %s: %w", input.RunID, err)
+		if err := json.Unmarshal(input.SDKMessage, &message); err != nil {
+			return "", nil, fmt.Errorf("workflow: decode the SDK message of run %s: %w", input.RunID, err)
 		}
-		delivery.QueueName, delivery.Message = message.QueueName, message.Message
-	} else {
-		// A delivery the Go World queued itself, such as a recovery flow,
-		// carries no SDK message, so it gets one built from its fields.
-		message, err := rpcEncoding.Marshal(sdkMessageOf(input))
-		if err != nil {
-			return nil, err
-		}
-		delivery.QueueName, delivery.Message = sdkWorkflowQueuePrefix+input.WorkflowName, message
+		return message.QueueName, message.Message, nil
 	}
-	return rpcEncoding.Marshal(delivery)
+	// A delivery the Go World queued itself, such as a recovery flow,
+	// carries no SDK message, so it gets one built from its fields.
+	body, err := json.Marshal(sdkMessageOf(input))
+	return sdkWorkflowQueuePrefix + input.WorkflowName, body, err
 }
 
 // sdkMessageOf returns the Workflow SDK message of a delivery that has none.
@@ -171,25 +157,15 @@ func sdkMessageOf(input QueueInput) map[string]any {
 }
 
 // remoteOutcome returns the delivery outcome of the SDK queue handler's
-// result data.
+// JSON result.
 func remoteOutcome(data []byte) error {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return nil
-	}
 	var result remoteResult
-	if err := cbor.Unmarshal(data, &result); err != nil {
-		// A result that is not a map, such as null, acknowledges.
-		var value any
-		if cbor.Unmarshal(data, &value) == nil {
-			return nil
-		}
-		return fmt.Errorf("workflow: decode the delivery response: %w", err)
-	}
-	if result.TimeoutSeconds == nil {
+	if json.Unmarshal(data, &result) != nil || result.TimeoutSeconds == nil {
+		// A result that is not an object with timeoutSeconds acknowledges.
 		return nil
 	}
 	seconds := *result.TimeoutSeconds
-	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds*float64(time.Second) > float64(MaxRemoteRedelivery) {
+	if math.IsNaN(seconds) || seconds*float64(time.Second) > float64(MaxRemoteRedelivery) {
 		return Redeliver(MaxRemoteRedelivery)
 	}
 	return Redeliver(time.Duration(seconds * float64(time.Second)))

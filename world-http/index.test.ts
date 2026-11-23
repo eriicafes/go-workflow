@@ -207,7 +207,7 @@ test("queues health checks with the SDK message for the app to answer", async ()
 	await expect(world.queue("__wkf_workflow_report" as never, { __healthCheck: true, correlationId: "probe_01" })).resolves.toEqual({ messageId: "msg_probe" });
 	const queued = calls.find((call) => call.method === "queue.queue")?.input;
 	expect(queued?.RunID).toBeUndefined();
-	expect(decode(queued?.SdkMessage as Uint8Array)).toEqual({ queueName: "__wkf_workflow_report", message: { __healthCheck: true, correlationId: "probe_01" } });
+	expect(JSON.parse(new TextDecoder().decode(queued?.SdkMessage as Uint8Array))).toEqual({ queueName: "__wkf_workflow_report", message: { __healthCheck: true, correlationId: "probe_01" } });
 });
 
 test("maps Go workflow and step names to Workflow SDK names and back", async () => {
@@ -286,6 +286,24 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 	]);
 	expect(events.data[0]).not.toHaveProperty("data");
 	expect(events.snapshot).toEqual({ seq: 3, seqInBand: 2 });
+});
+
+test("reports a run's event ceiling only when the Go World has one", async () => {
+	let maxEvents = 0;
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ RPCVersion: 1, Capabilities: {} });
+			}
+			return rpcResponse({ Data: [], HasMore: false, MaxEvents: maxEvents, Snapshot: { EventCount: 0, InBandCount: 0 } });
+		},
+	});
+	// The SDK reads a maxEvents of 0 as a ceiling of zero events.
+	expect(await world.events.list({ runId: "wrun_01" } as never)).not.toHaveProperty("maxEvents");
+	maxEvents = 25_000;
+	expect(await world.events.list({ runId: "wrun_01" } as never)).toMatchObject({ maxEvents: 25_000 });
 });
 
 test("writes event data as JSON and shapes event results like the Workflow SDK", async () => {
@@ -622,7 +640,8 @@ test("reports each message of a batch and forwards a step's telemetry", async ()
 		{ messageId: null },
 	]);
 	const items = calls.find((call) => call.method === "queue.queueBatch")?.input.Items as Record<string, unknown>[];
-	expect(items[0]?.StepCreatedAt).toEqual(new Date(createdAt));
+	// Dates travel as exact ISO 8601 text.
+	expect(items[0]?.StepCreatedAt).toBe(new Date(createdAt).toISOString());
 	expect(items[1]).not.toHaveProperty("StepCreatedAt");
 
 	// A step's creation time and the mark of a failure recorded after its
@@ -630,7 +649,7 @@ test("reports each message of a batch and forwards a step's telemetry", async ()
 	await world.events.create("wrun_01", { eventType: "step_started", correlationId: "step_01", eventData: { stepName: "send", attempt: 1 } } as never, { stepCreatedAt: createdAt });
 	await world.events.create("wrun_01", { eventType: "step_failed", correlationId: "step_01", eventData: { stepName: "send", attempt: 1, error: new Uint8Array([1]) } } as never, { afterStepBody: true });
 	const writes = calls.filter((call) => call.method === "events.create").map((call) => call.input.Options);
-	expect(writes).toEqual([{ StepCreatedAt: new Date(createdAt) }, { AfterStepBody: true }]);
+	expect(writes).toEqual([{ StepCreatedAt: new Date(createdAt).toISOString() }, { AfterStepBody: true }]);
 });
 
 test("raises a throttled RPC failure as the SDK's ThrottleError", async () => {
@@ -805,7 +824,7 @@ test("forwards a run's creation on its first message, keyed by the run", async (
 	});
 	// Each item carries the SDK's queue name and message, unchanged.
 	const items = calls.find((call) => call.method === "queue.queueBatch")?.input.Items as Record<string, unknown>[];
-	expect(decode(items[1]?.SdkMessage as Uint8Array)).toEqual({ queueName: "__wkf_workflow_workflow//example.com/app//Report", message: { runId: "wrun_02", runSpecVersion: 9 } });
+	expect(JSON.parse(new TextDecoder().decode(items[1]?.SdkMessage as Uint8Array))).toEqual({ queueName: "__wkf_workflow_workflow//example.com/app//Report", message: { runId: "wrun_02", runSpecVersion: 9 } });
 });
 
 test("reports a hook's resume deduplication, event times as Dates, and stores Go names", async () => {
@@ -1173,12 +1192,15 @@ describe("against a Go World that delivers with worlds.RemoteExecutor", () => {
 	});
 
 	test("refuses a delivery without the World's token or for another prefix", async () => {
-		const body = encode({ queueName: "__wkf_workflow_x", message: { runId: "wrun_x" }, messageId: "msg_x", attempt: 1 });
-		const unauthorized = await route(new Request("http://app/.well-known/workflow/v1/flow", { method: "POST", body: new Uint8Array(body) }));
-		expect(unauthorized.status).toBe(401);
-		const other = await world.createQueueHandler("__other_", async () => undefined)(
-			new Request("http://app/flow", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: new Uint8Array(body) }),
-		);
+		const delivery = (headers: Record<string, string>) =>
+			new Request("http://app/.well-known/workflow/v1/flow", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "x-vqs-queue-name": "__wkf_workflow_x", "x-vqs-message-id": "msg_x", "x-vqs-message-attempt": "1", ...headers },
+				body: JSON.stringify({ runId: "wrun_x" }),
+			});
+		expect((await route(delivery({}))).status).toBe(401);
+		expect((await route(delivery({ Authorization: "Bearer wrong-token-xx" }))).status).toBe(401);
+		const other = await world.createQueueHandler("__other_", async () => undefined)(delivery({ Authorization: `Bearer ${token}` }));
 		expect(other.status).toBe(400);
 	});
 });
