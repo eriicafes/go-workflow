@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.10.1
+
+### Patch Changes
+
+- fef30cb: Fix the Vercel World's event writes being refused for not declaring `inBand`.
+
 ## 0.10.0
 
 ### Minor Changes
