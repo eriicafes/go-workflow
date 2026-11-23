@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.10.0
+
+### Minor Changes
+
+- 8db36f5: Move `Runners`, `RunnerSet`, `Runner`, and `NewRunner` from `worlds/core` to `worlds`.
+
 ## 0.9.0
 
 ### Minor Changes
