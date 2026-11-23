@@ -346,8 +346,8 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 
 // fence returns the in-band count a write on route version is fenced with,
 // and the slot it reports skipped events after. /v5 fences a frame with
-// inBand, refuses one without expectedSeqInBand, and reports the events after
-// its maxSlot. /v4 refuses a write to a spec 9 run, and fences and reports
+// inBand, refuses a write to a spec 9 run without inBand and an in-band
+// write without expectedSeqInBand, and reports the events after its maxSlot. /v4 refuses a write to a spec 9 run, and fences and reports
 // nothing.
 func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version string, in frame) (*int, *int, *outcome) {
 	spec, _ := asInt(in.Meta["specVersion"])
@@ -360,7 +360,11 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 		}
 		return nil, nil, nil
 	}
-	inBand, _ := in.Meta["inBand"].(bool)
+	// inBand is required on every write to a spec 9 run.
+	inBand, declared := in.Meta["inBand"].(bool)
+	if !declared && spec >= 9 {
+		return nil, nil, &outcome{status: http.StatusBadRequest, code: "v5-missing-in-band", message: "Writes to a single-orchestrator (spec 9) run must declare meta.inBand."}
+	}
 	if !inBand {
 		return nil, nil, nil
 	}

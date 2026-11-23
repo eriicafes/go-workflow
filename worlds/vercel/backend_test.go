@@ -207,7 +207,7 @@ func contractBackend(t *testing.T, live bool) *World {
 func contractRun(t *testing.T, world *World, version string, spec int) worlds.RunID {
 	t.Helper()
 	runID := worlds.NewRunID()
-	meta := map[string]any{"eventType": "run_created", "specVersion": spec, "workflowName": "contract", "deploymentId": "dpl_contract", "occurredAt": time.Now().UTC(), "remoteRefBehavior": "lazy"}
+	meta := map[string]any{"eventType": "run_created", "specVersion": spec, "workflowName": "contract", "deploymentId": "dpl_contract", "occurredAt": time.Now().UTC(), "remoteRefBehavior": "lazy", "inBand": false}
 	if _, err := contractPost(t, world, version, runID, "run_created", meta, []byte(`"input"`)); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -306,8 +306,20 @@ func TestBackendContractLive(t *testing.T) { backendContract(t, true) }
 
 func backendContract(t *testing.T, live bool) {
 	wait := func(id string) map[string]any {
-		return map[string]any{"eventType": "wait_created", "specVersion": 9, "correlationId": id, "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": time.Now().UTC(), "remoteRefBehavior": "lazy"}
+		return map[string]any{"eventType": "wait_created", "specVersion": 9, "correlationId": id, "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": time.Now().UTC(), "remoteRefBehavior": "lazy", "inBand": false}
 	}
+	t.Run("WriteDeclaresWhetherItIsInBand", func(t *testing.T) {
+		world := contractBackend(t, live)
+		runID := contractRun(t, world, "v5", 9)
+		// A write without inBand is refused.
+		meta := wait("wait_01UNDECLARED")
+		delete(meta, "inBand")
+		_, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil)
+		var api *apiError
+		if !errors.As(err, &api) || api.Status != http.StatusBadRequest || api.Code != "v5-missing-in-band" {
+			t.Fatalf("undeclared write = %v, want 400 v5-missing-in-band", err)
+		}
+	})
 	t.Run("ListSnapshot", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
@@ -476,20 +488,20 @@ func backendAssumptions(t *testing.T, live bool) {
 			t.Fatal(err)
 		}
 		seqInBand++
-		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 1, "occurredAt": time.Now().UTC()}, nil); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 1, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := contractPost(t, world, "v5", runID, "run_completed", fenced(map[string]any{}), []byte(`"done"`)); err != nil {
 			t.Fatal(err)
 		}
 		seqInBand++
-		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 2, "occurredAt": time.Now().UTC()}, nil); err == nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 2, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err == nil {
 			t.Error("step_started on a finished run was accepted")
 		}
 		if _, err := contractPost(t, world, "v5", runID, "step_created", fenced(map[string]any{"correlationId": "step_01LATE", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract"}), []byte(`{"args":[1]}`)); err == nil {
 			t.Error("step_created on a finished run was accepted")
 		}
-		if _, err := contractPost(t, world, "v5", runID, "step_completed", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "occurredAt": time.Now().UTC()}, []byte(`1`)); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_completed", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "occurredAt": time.Now().UTC(), "inBand": false}, []byte(`1`)); err != nil {
 			t.Errorf("step_completed on a finished run err = %v, want it accepted", err)
 		}
 	})

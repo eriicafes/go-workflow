@@ -34,8 +34,11 @@ type createResponse struct {
 // run_created carries, and a first delivery's run_started too.
 func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType worlds.EventType) map[string]any {
 	meta := map[string]any{
-		"eventType":         string(eventType),
-		"specVersion":       specVersion,
+		"eventType":   string(eventType),
+		"specVersion": specVersion,
+		// inBand is required on every write. A creation is out-of-band;
+		// EventsCreate overwrites it for a first delivery's run_started.
+		"inBand":            false,
 		"workflowName":      input.WorkflowName,
 		"deploymentId":      input.DeploymentID,
 		"occurredAt":        time.Now().UTC(),
@@ -128,8 +131,9 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if hasHeld {
 		meta["maxSlot"] = held
 	}
+	// inBand is required on every write, false included.
+	meta["inBand"] = input.Options.InBandCount != nil
 	if input.Options.InBandCount != nil {
-		meta["inBand"] = true
 		meta["expectedSeqInBand"] = *input.Options.InBandCount
 	}
 	if created := input.Options.StepCreatedAt; !created.IsZero() && input.Event.EventType == worlds.EventTypeStepStarted && meta["attempt"] == 1 && payload == nil {
@@ -290,8 +294,8 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		setRequestID(ctx, meta)
 		meta["occurredAt"] = occurredAt(event)
 		meta["remoteRefBehavior"] = "resolve"
+		meta["inBand"] = input.InBandCount != nil
 		if input.InBandCount != nil {
-			meta["inBand"] = true
 			meta["expectedSeqInBand"] = *input.InBandCount
 			if input.EventCount != nil {
 				meta["maxSlot"] = *input.EventCount
