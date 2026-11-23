@@ -11,6 +11,7 @@ export const metadata: Metadata = {
   metadataBase: new URL('https://go-workflow.vercel.app'),
   title: { template: `%s | ${appName}`, default: appName },
   description: appDescription,
+  twitter: { card: 'summary_large_image' },
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {
