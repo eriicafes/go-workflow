@@ -689,3 +689,43 @@ func TestInlineStepTellsTheWorldItRanAndMarksItsFailure(t *testing.T) {
 		t.Fatalf("an inline step was sent a message: %+v", world.batches)
 	}
 }
+
+type mutatedInputInput struct{ Mode string }
+
+func (mutatedInputInput) Workflow(int) {}
+
+// A step gets its own copy of its input, however it runs, so a step that
+// changes its input does not change the workflow's value.
+func TestStepChangingItsInputLeavesTheWorkflowsValue(t *testing.T) {
+	for _, mode := range []string{"inline", "queued", "explicit inline"} {
+		t.Run(mode, func(t *testing.T) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input mutatedInputInput) (int, error) {
+				values := []int{1}
+				change := func(_ context.Context, values []int) (int, error) {
+					values[0] = 99
+					return 0, nil
+				}
+				var err error
+				switch input.Mode {
+				case "inline":
+					_, err = workflow.Step(ctx, change, values)
+				case "queued":
+					_, err = workflow.Step(workflow.SetMaxInlineSteps(ctx, 0), change, values)
+				default:
+					_, err = workflow.InlineStep(ctx, change, values)
+				}
+				return values[0], err
+			})))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, mutatedInputInput{Mode: mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if output, err := run.Value(ctx); err != nil || output != 1 {
+				t.Fatalf("output = %d, %v, want the workflow's value unchanged", output, err)
+			}
+		})
+	}
+}

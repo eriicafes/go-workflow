@@ -69,21 +69,30 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 			// A step delivery records only its own step's events.
 			panic(execution.exit(errReplaySuspended))
 		}
+		encoded, err := execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
+		if err != nil {
+			err = fmt.Errorf("workflow: encode step input: %w", err)
+		}
+		// An inline attempt runs with the input decoded from what is recorded,
+		// as a step delivery does, not with the workflow's own value.
+		var args stepArgs[In]
+		if err == nil {
+			if decodeErr := execution.DecodePayload(encoded, &args); decodeErr != nil {
+				err = fmt.Errorf("workflow: decode step input: %w", decodeErr)
+			}
+		}
 		step := pendingStep{
 			stepID:     stepID,
 			name:       options.Name,
+			input:      encoded,
+			failure:    err,
 			explicit:   explicit,
 			limit:      MaxInlineSteps(ctx),
 			duration:   MaxInlineStepsDuration(ctx),
 			attempt:    1,
 			maxRetries: options.MaxRetries,
-			run:        pendingRun(ctx, execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, input),
+			run:        pendingRun(ctx, execution, stepID, options.Name, options.MaxRetries, CancellationReferences(ctx), fn, args.Args[0]),
 		}
-		encoded, err := execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
-		if err != nil {
-			step.failure = fmt.Errorf("workflow: encode step input: %w", err)
-		}
-		step.input = encoded
 		execution.hold(step)
 		return DurableStepResult[Out]{StepID: stepID}
 	}
