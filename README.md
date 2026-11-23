@@ -1,10 +1,11 @@
 # go-workflow
 
-go-workflow is the Go implementation of the
-[Workflow SDK](https://workflow-sdk.dev). Workflows are Go functions whose
-progress is persisted step by step. A run can suspend on a timer or a hook
-without holding a process and resumes when it can continue. Runs can be
-inspected with the Workflow SDK web UI.
+go-workflow is a Go implementation of the
+[Workflow SDK](https://workflow-sdk.dev). It follows the SDK's behavior and
+stores the same data, so the Workflow SDK's tools, like its web UI, can read Go
+runs. Workflows are Go functions whose progress is persisted step by step. A run
+can suspend on a timer or a hook without holding a process and resumes when it
+can continue.
 
 ```sh
 go get github.com/eriicafes/go-workflow
@@ -435,7 +436,7 @@ through the run's stream, and tool approvals wait for the user across turns. It 
 built on the [Go AI SDK](https://goaisdk.com).
 [`examples/durable-agent`](examples/durable-agent) serves it to a React
 `useChat` client, and the
-[AI Agents guide](https://go-workflow.vercel.app/guide/ai-agents) covers it in
+[AI Agents guide](https://go-workflow.vercel.app/docs/ai-agents) covers it in
 depth.
 
 ## Development

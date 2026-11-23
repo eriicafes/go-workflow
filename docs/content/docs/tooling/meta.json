@@ -1,0 +1,7 @@
+{
+  "title": "Tooling",
+  "description": "Development tools and adapters",
+  "icon": "Wrench",
+  "root": true,
+  "pages": ["dev", "analyzer", "web-ui", "world-http"]
+}

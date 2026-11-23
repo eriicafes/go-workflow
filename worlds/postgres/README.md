@@ -33,7 +33,7 @@ worker and use `workflow.NewHTTPClient(workerURL)` in the application, or
 open the same database from both.
 
 The tables are world-postgres's, in `Config.Schema` (default `workflow`).
-See [Postgres World](https://go-workflow.vercel.app/worlds/postgres) for the
+See [Postgres World](https://go-workflow.vercel.app/docs/worlds/postgres) for the
 configuration, the schema and how it differs from world-postgres's, the
 worker model, retention, and notifications.
 

@@ -3,5 +3,4 @@ npm-debug.log*
 .DS_Store
 dist
 .workflows/
-docs/.vitepress/cache
 worlds/testdata/payload/go-vectors.json

@@ -26,7 +26,7 @@ active runs of the World's tag again, since a restart lost their queued
 messages. Several processes may share a data directory: the database
 serializes their writes.
 
-See [Local World](https://go-workflow.vercel.app/worlds/local) for the
+See [Local World](https://go-workflow.vercel.app/docs/worlds/local) for the
 configuration, the schema and how it differs from world-local's, tags, the
 queue, and restart recovery.
 

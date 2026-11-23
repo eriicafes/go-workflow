@@ -39,8 +39,8 @@ export WORKFLOW_TARGET_WORLD=go-workflow/world-http
 export WORKFLOW_HTTP_BASE_URL=https://workflows.example.com/v1/workflow
 ```
 
-See the [world-http adapter](https://go-workflow.vercel.app/tooling/world-http)
-and [Workflow SDK web UI](https://go-workflow.vercel.app/tooling/web-ui) docs
+See the [world-http adapter](https://go-workflow.vercel.app/docs/tooling/world-http)
+and [Workflow SDK web UI](https://go-workflow.vercel.app/docs/tooling/web-ui) docs
 for every option.
 
 ## Agent skills

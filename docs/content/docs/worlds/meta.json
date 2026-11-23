@@ -1,0 +1,7 @@
+{
+  "title": "Worlds",
+  "description": "Where runs are stored and delivered",
+  "icon": "Globe",
+  "root": true,
+  "pages": ["index", "---Production---", "vercel", "aws", "postgres", "---Development---", "local", "testworld", "---Extend---", "custom"]
+}

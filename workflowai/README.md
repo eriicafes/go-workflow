@@ -20,7 +20,7 @@ go get github.com/eriicafes/go-workflow
 import "github.com/eriicafes/go-workflow/workflowai"
 ```
 
-The [AI Agents guide](https://go-workflow.vercel.app/guide/ai-agents) covers
+The [AI Agents guide](https://go-workflow.vercel.app/docs/ai-agents) covers
 tools, approvals, failures, and callbacks in more depth.
 
 ## Acknowledgements

@@ -65,7 +65,7 @@ clients in other processes, or `workflow.LatestDeployment`, which needs the
 | `Token`, `ProjectID`, `TeamID`, `Environment` | A Vercel access token and the project it acts in, for using the storage from outside a deployment. See [outside a deployment](#outside-a-deployment). |
 | `BackendURL` | Root of the workflow API. Default `https://vercel-workflow.com/api`, or `https://api.vercel.com/v1/workflow` with `Token`. When it is empty, `VERCEL_WORKFLOW_SERVER_URL` names another backend host, used directly with `/api` appended or passed to the proxy in `x-vercel-workflow-api-url`, and `WORKFLOW_VERCEL_BACKEND_URL` another proxy root. |
 | `HTTPClient` | Client for the workflow API and Vercel Queues. Default `http.DefaultClient`. Workflow API requests never follow a redirect, so their credentials stay with the backend. |
-| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](https://go-workflow.vercel.app/guide/replay#pinning-runs-to-a-deployment) and [latest deployment](#latest-deployment). |
+| `DeploymentID` | The deployment this World runs in. Default `VERCEL_DEPLOYMENT_ID`. When set, runs are pinned to the deployment that starts them and their deliveries are published there. See [pinning](https://go-workflow.vercel.app/docs/replay#pinning-runs-to-a-deployment) and [latest deployment](#latest-deployment). |
 
 `New` does not contact Vercel.
 
@@ -79,8 +79,8 @@ has none.
 
 ### Outside a deployment
 
-A script, a CLI, or the [web UI](https://go-workflow.vercel.app/tooling/web-ui) behind
-[world-http](https://go-workflow.vercel.app/tooling/world-http) can read and write the same storage with a
+A script, a CLI, or the [web UI](https://go-workflow.vercel.app/docs/tooling/web-ui) behind
+[world-http](https://go-workflow.vercel.app/docs/tooling/world-http) can read and write the same storage with a
 Vercel access token:
 
 ```go
@@ -250,7 +250,7 @@ configuration. With a project ID, from `Config.ProjectID` or
   `Config.TeamID`.
 
 Without a deployment key, or a project ID, payloads are not encrypted. See
-[Data Format and Encryption](https://go-workflow.vercel.app/guide/encryption).
+[Data Format and Encryption](https://go-workflow.vercel.app/docs/data).
 
 ## Long timers
 
@@ -266,7 +266,7 @@ World publishes no hops of its own.
 ## Latest deployment
 
 In a production deployment, runs started with
-[`workflow.LatestDeployment`](https://go-workflow.vercel.app/guide/replay#moving-chains-to-the-latest-deployment)
+[`workflow.LatestDeployment`](https://go-workflow.vercel.app/docs/replay#moving-chains-to-the-latest-deployment)
 start on the deployment the production domain serves, instead of the
 deployment that starts them.
 

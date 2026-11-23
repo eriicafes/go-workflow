@@ -66,7 +66,7 @@ the agent answers. The page reconnects to the run, and the restarted server
 continues the model call that was interrupted. Ask to book a flight to see the
 approval flow.
 
-The [Workflow SDK web UI](../../docs/tooling/web-ui.md) shows every run's
+The [Workflow SDK web UI](https://go-workflow.vercel.app/docs/tooling/web-ui) shows every run's
 steps and stream from `http://localhost:8080/v1/workflow`.
 
 ## The API

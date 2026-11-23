@@ -1,0 +1,7 @@
+{
+  "title": "Reference",
+  "description": "Packages, events, and endpoints",
+  "icon": "Library",
+  "root": true,
+  "pages": ["---Packages---", "workflow", "worlds", "---Protocol---", "events", "http"]
+}

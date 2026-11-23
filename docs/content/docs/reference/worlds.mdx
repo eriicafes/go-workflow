@@ -1,0 +1,644 @@
+---
+title: "Package worlds"
+description: "The World contract, runtime, client, and HTTP server."
+icon: Package
+sidebarTitle: "worlds"
+---
+
+```go
+import "github.com/eriicafes/go-workflow/worlds"
+```
+
+Package `worlds` defines the World contract that runs are recorded in, the
+runners a World executes, the Client, and the HTTP server that exposes a World
+to clients. Package `worlds/core` holds the runtime that executes deliveries
+against a World and the durable primitives workflow code is built on. Full
+godoc is on
+[pkg.go.dev](https://pkg.go.dev/github.com/eriicafes/go-workflow/worlds).
+
+Most applications only touch `worlds.Runners`. This page is for operators,
+tool builders, and people [implementing a World](/docs/worlds/custom).
+
+## Runners and runtime
+
+`Runners` and `NewRunner` are in package `worlds`. The runtime is in package
+`core` (`github.com/eriicafes/go-workflow/worlds/core`).
+
+```go
+func Runners(values ...Runner) RunnerSet
+func NewRunner(name string, run func(context.Context, []byte) ([]byte, error)) Runner
+
+// package core
+func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...RuntimeOption) *Runtime
+func WithRunAheadDepth(depth int) RuntimeOption
+func (*Runtime) Execute(ctx context.Context, input worlds.QueueInput) error
+```
+
+`workflow.Use` builds a `Runner` from a typed runner function. `NewRunner`
+builds one from a function of payloads, for runners written without the
+`workflow` package: it receives the run's input payload and returns its output
+payload, read and written with the `DecodePayload` and `EncodePayload` methods
+of the run's `core.Execution`, which encrypt as the run does.
+
+`WithRunAheadDepth` sets how many inline steps' results a flow hands to the
+runner before their writes commit: 10 by default, 0 for none, at most 16. See
+[Running ahead](/docs/replay#running-ahead).
+
+`Runtime.Execute` handles one delivery. With a nil `StepID` it executes a
+flow. With `StepID` set it executes that step. A delivery for a terminal run
+returns nil without running code, and one for a terminal step queues the flow
+that consumes its result instead of running the step. A non-nil error means the delivery
+should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
+`NewClientContext`, so a run never uses a Client it inherited.
+
+Set `QueueInput.MessageID` to the ID `Queue` returned for the message before
+calling `Execute`, and keep it the same when the message is redelivered. A
+flow records it as the owner of each step it starts inline, so the
+redelivery of a flow that stopped runs those steps again at once.
+
+A replay that diverges from the event log ends the delivery with an error
+that runner code never sees. `Execute` queues an immediate recovery delivery
+of the same flow or step with `ReplayDivergenceCount` incremented, and once
+three recovery deliveries have diverged, fails the run with an error matching
+`ErrCorruptedEventLog`, without running compensations.
+
+When the World reports `DeploymentAffinity`, a delivery for a run pinned to
+another deployment is re-routed to the run's deployment instead of replayed.
+After three re-routes, or when the World returns `ErrDeploymentUnavailable`,
+the run fails with an error matching `ErrDeploymentMismatch`. See
+[Pinning runs to a deployment](/docs/replay#pinning-runs-to-a-deployment).
+
+A flow whose write another flow superseded (`*InBandSupersededError`) queues one
+follow-up flow delivery right away and acknowledges its own. On a World that
+deduplicates, flows refused by the same write share that follow-up. See
+[Concurrent flows](/docs/replay#concurrent-flows).
+
+A storage error while declaring a step, timer, or hook, or while cancelling a
+context or disposing a hook, ends the delivery so the queue retries it, instead of reaching
+runner code.
+
+When a flow replays past a step's declaration, it queues the step's delivery
+again if the step hasn't started since it was declared or last scheduled for a
+retry, in case a crash or queue error lost the first one. This covers steps
+started with `Background` that nothing awaits. The re-queue uses the step ID as
+its idempotency key, or the retry's key for a step scheduled for a retry. A step
+waiting for a retry that isn't due yet is left alone until its queued retry is
+due. Once that time has passed without a start, it is re-queued like any
+unstarted step. Steps declared in the same replay are skipped, and inline steps
+never need it. If the re-queue fails, the flow delivery fails so the queue
+retries it. Local and Postgres drop the duplicate while the original delivery is
+still queued. AWS and Vercel don't deduplicate, so a step waiting to start may
+be delivered twice, which its at-least-once contract already allows.
+
+Timers settle the same way: a flow that replays past a timer's declaration
+once it is due completes it. `WithTimeout` and `WithDeadline` use normal timers
+and continuations to cancel contexts. Cancelling those contexts affects the
+steps and timers that use them, not the run.
+
+## World
+
+```go
+type World interface {
+	Storage
+	Queue
+	Streamer
+	BaseURL() string
+	Analytics() Analytics
+	Capabilities() Capabilities
+	DeploymentID() string
+}
+
+type Capabilities struct {
+	// Analytics: Analytics returns the World's analytics rather than nil.
+	Analytics bool
+	// SetAttributes: attribute writes are stored rather than no-ops.
+	SetAttributes bool
+	// DeploymentAffinity: runs are pinned to World.DeploymentID, and the
+	// Runtime replays a run only on the deployment it is pinned to.
+	DeploymentAffinity bool
+	// DeleteData: the optional RunsDeleteDataMany. Every World deletes a
+	// run's data as it finishes when its $retention attribute is "0".
+	DeleteData bool
+	// StartHook: EventsCreateRun creates EventsCreateRunInput.StartHook
+	// with the run, or returns a *HookConflictError and creates nothing.
+	StartHook bool
+	// HookResumeDedup: a hook_received with EventsCreateOptions.ResumeID is
+	// appended once per run and resume ID. Hook.ResumeDedup attests it for
+	// one hook.
+	HookResumeDedup bool
+	// RegionalRunIDs: the World implements RegionalRunIDs, and clients ask
+	// it for new run IDs.
+	RegionalRunIDs bool
+}
+```
+
+A capability being false does not remove a method. Unsupported attribute writes
+are successful no-ops, and `Analytics` returns nil.
+
+`DeploymentID` returns the deployment whose code the World's deliveries
+execute, or `""`. Runs created through the World's Client record it on
+`Run.DeploymentID`. With `DeploymentAffinity`, the Runtime also enforces it:
+deliveries are addressed to the run's deployment through
+`QueueInput.DeploymentID`, and misdelivered ones are re-routed. Of the built-in Worlds, only Vercel reports
+affinity, and only when it has a deployment ID.
+
+A World with affinity can also implement `LatestDeployments`, whose
+`LatestDeploymentID(ctx)` returns its newest deployment, or `""` when it knows
+none. `workflow.Start` resolves its `StartOptions.Deployment` through
+`StartDeploymentID(ctx, world, deployment)`, which pins a run started with
+`LatestDeployment` to it: child runs directly, and other runs through the
+Client's `RunsStartDeployment`, resolved on the World's side of a local or
+HTTP Client.
+
+A World can choose a delivery's queue from `QueueInput.WorkflowName`, which the
+Runtime and Client set on every delivery. `ResumeHook` takes it from the hook's
+`ResumeContext`, and other code that queues for a run it hasn't loaded, such as
+wake-ups and cancellation, reads the run for it. `RunDelivery(ctx, world,
+runID)` returns a delivery addressed that way.
+
+## Storage
+
+`Storage` is `StorageRuns`, `StorageSteps`, `StorageEvents`, and
+`StorageHooks`.
+
+| Method | Description |
+| --- | --- |
+| `RunsGet` | A run view. `ErrRunNotFound` if missing. |
+| `RunsList` | Runs filtered by `WorkflowName` and `Status`, paginated. |
+| `RunsWaitForTerminalStatus` | Blocks until the run is terminal, `Timeout` elapses, or `ctx` is done. |
+| `RunsSetAttributes` | Applies attribute changes as one `attr_set` event. |
+| `RunsDeleteDataMany` | Deletes the data of up to 100 finished runs: their payloads, the payloads in their events, their hooks' metadata, and their streams' chunks. Records stay, and the run's `ExpiredAt` is set. Without `Capabilities().DeleteData`, it returns an error wrapping `errors.ErrUnsupported`. |
+| `StepsGet`, `StepsList` | Step views of a run. |
+| `EventsCreateRun` | Creates a run and its `run_created` event, recording `SpecVersion`. The run ID and attributes are checked as `CheckRunCreation` says. `ErrRunAlreadyExists` if it exists, except a repeat of a start whose start hook was accepted, which returns its `run_created`. A start hook's decision is permanent for the run ID: a refused candidate keeps returning the same `*HookConflictError`, and one older than `StartHookCandidateMaxAge` gets `ErrStartHookRejected`. |
+| `EventsCreate` | Appends one event, enforcing transition rules. Hook creation atomically claims or records conflict, returning committed event data and the created Hook. |
+| `EventsCreateBatch` | Appends events in order, fenced as one block. An invalid event, a missing run, or a stale fence appends none of them. Otherwise each event has its own outcome in `Results`, and a refused event refuses the later events of its correlation ID. |
+| `EventsList` | Reads the event log. Every page carries the run's counters in `Snapshot`, read before the page. |
+| `EventsGet`, `EventsListByCorrelationID` | Read the event log. |
+| `HooksGet`, `HooksGetByToken`, `HooksList` | Hook views. |
+
+**In-band fence.** An append whose `EventsCreateOptions.InBandCount` (or
+`EventsCreateBatchInput.InBandCount`) is set is an in-band write by the run's
+orchestrator. The World appends it only when `Run.InBandCount`, which counts
+`run_created` too, still equals that count, advances the count by the
+positions it allocates, and returns it as `EventResult.InBandCount`. Otherwise
+it appends nothing and returns an `*InBandSupersededError`. Appends without a count
+are out-of-band: never refused, and they leave the count alone. An in-band
+write with `EventCount` returns the events between that count and its own
+position in `Events`, and is stored with its `OccurredAt` as `CreatedAt`. See
+[Concurrent flows](/docs/replay#concurrent-flows).
+
+`EventsCreateOptions` also carries two hints from the runtime, which a World
+may ignore. `AfterStepBody` marks a `step_failed` that records the failure of a
+step function that ran, as every `step_completed` and `step_retrying` does:
+losing the write to a redelivery runs the function again, so a World may keep
+it waiting longer than another write. `StepCreatedAt` is when the step a
+`step_started` starts was created, set on the first attempt's start of a step
+created by a `step_created`, for a World that reports the time from a step's
+creation to its start. It is not stored in the event.
+
+`ResumeHook(ctx, world, hook, payload, resumeID)` appends a hook's payload
+with `EventsCreateOptions.ResumeID` and `ResumePayloadDigest`
+(`ResumeDigest(payload)`) when the World deduplicates resumes
+(`Capabilities().HookResumeDedup` or `Hook.ResumeDedup`), so a retried resume
+records the payload once. `workflow.ResumeHook` sends a new ULID from
+`NewResumeID` per call, and `ResumeHookWithRetries` one ID for all its
+attempts. A repeat with a different payload is refused with `ErrEventInvalid`.
+
+Hook token ownership is acquired through `EventsCreate(hook_created)`, with conflict and takeover metadata in the same commit. There is no separate public claim operation. A hook's `TokenRetentionUntil` comes from its `hook_created` data. Explicit disposal releases immediately. Run, step, and hook views retain their timestamps. Step `StartedAt` is the first attempt. Step metadata describes the current attempt.
+
+Lists take a `Pagination` with `Cursor`, `Limit`, and `SortOrder`, and return a
+`Page` with `Data`, `Cursor`, and `HasMore`. Unset fields take the list's
+defaults: runs and steps list newest first, hooks and events oldest first, and a
+zero `Limit` is the World's default page size (200 runs and 20 steps or hooks in
+the AWS, local, and test Worlds, and 20 runs and steps and 100 hooks in the
+Postgres World; an event list holds up to `MaxEventsPerRun`). A negative `Limit`
+reads every remaining item. `ResolveData` selects whether payloads (inputs,
+outputs, hook metadata) are returned.
+
+### Views
+
+```go
+type Run struct {
+	RunID        RunID
+	WorkflowName string
+	Status       Status
+	Input        []byte // payload: the argument list, [input]
+	Output       []byte // payload
+	Error        []byte // payload; DecodeErrorPayload decodes it
+	ErrorCode    string // a failed run's error category, such as USER_ERROR
+	Attributes   map[string]string
+	DeploymentID string // the deployment the run is pinned to
+	EncryptionPublicKey string // base64, set when the run's payloads are encrypted
+	InBandCount  int    // events appended by the run's orchestrator, which fence its writes
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	StartedAt    *time.Time
+	CompletedAt  *time.Time
+	StartHook    *StartHook // the run's start hook, with its HookID and without its metadata
+}
+
+type Step struct {
+	RunID       RunID
+	StepID      StepID
+	StepName    string
+	Status      Status // pending before the first attempt and while a retry is scheduled
+	Input       []byte
+	Output      []byte
+	Error       []byte // last failed attempt
+	Attempt     int
+	SpecVersion int // of the event that created it
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+	RetryAfter  *time.Time
+}
+
+// Hook exists until it is disposed, loses its token to a forced claim, or its
+// run ends without retaining its token.
+type Hook struct {
+	RunID               RunID
+	ResumeContext       HookResumeContext // copied from the run when the hook is created
+	HookID              HookID
+	Token               string
+	Metadata            []byte // payload; a webhook's is its WebhookMetadata
+	IsWebhook           bool
+	CreatedAt           time.Time
+	TokenRetentionUntil *time.Time
+	ClaimedFrom         *HookForceClaim // with the previous owner run's workflow, deployment, and spec version
+	SpecVersion         int // of the event that created it
+	ResumeDedup         bool // the World deduplicates this hook's resumes by ResumeID
+}
+
+type HookResumeContext struct {
+	DeploymentID        string
+	WorkflowName        string
+	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
+	RunSpecVersion      int
+}
+
+// Wait is returned by a wait_created or wait_completed write.
+type Wait struct {
+	WaitID      string // WaitIDOf(run, correlation ID): "<runId>-<correlationId>"
+	RunID       RunID
+	Status      WaitStatus // waiting or completed
+	ResumeAt    *time.Time
+	CompletedAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	SpecVersion int
+}
+```
+
+Every event records the `SpecVersion` of its writer (`EventsCreateEvent.SpecVersion`,
+`worlds.SpecVersion` when zero), and a World that stores the time an event
+occurred apart from its creation returns it as `Event.OccurredAt`. A
+`wait_created` or `wait_completed` write returns the wait in
+`EventResult.Wait`; `worlds.WaitOfEvents` derives it from the wait's events.
+Run attributes are never nil.
+
+A view's payloads are in the Workflow SDK's format and may be encrypted; a
+World stores them as opaque bytes. See [Payloads](#payloads).
+
+Run attributes `$parentRunId` (`ParentRunIDAttribute`) and `$rootRunId`
+(`RootRunIDAttribute`) are set on child runs.
+
+## Queue
+
+```go
+type Queue interface {
+	Queue(context.Context, QueueInput) (QueueResult, error)
+	QueueBatch(context.Context, QueueBatchInput) ([]QueueResult, error)
+}
+
+type QueueInput struct {
+	QueueName      string // empty selects the default queue
+	WorkflowName   string // workflow of the run, for Worlds that route by it
+	RunID          RunID
+	StepID         *StepID    // nil makes the delivery a flow
+	NotBefore      *time.Time // nil allows immediate delivery
+	IdempotencyKey string     // for implementations that deduplicate
+	DeploymentID   string     // deployment to deliver to; empty uses the World's own
+
+	DeploymentMismatchRetryCount int    // re-routes so far, set by the Runtime
+	ReplayDivergenceCount        int    // recovery deliveries after divergence, set by the Runtime
+	MessageID                    string // the delivered message's ID, stable across redeliveries; Queue ignores it
+	Attempt                      int    // 1-based attempt, excluding handoffs, set by the World before Execute
+	DeliveryCount                int    // 1-based delivery count, set by the World before Execute
+
+	StepName, StepAttempt, StepResent            // a step delivery's step
+	StepCreatedAt                                // when that step was created, on its first attempt's message
+	RunSpecVersion                               // SpecVersion
+	RunInput                                     // a run's first delivery: the run's creation
+	CompleteWaits                                // waits a WakeUp's flow completes first
+	Recovery                                     // a flow queued after the World lost its messages
+	WaitContinuation                             // a wait's timer; an intermediate hop has ResumeAt and HopAt
+	Retention                                    // how long the message may live
+}
+```
+
+```go
+type QueueResult struct {
+	MessageID string
+	Err       error // why QueueBatch did not store the item; nil for a stored one
+	Retryable bool  // with Err: sending the batch again may store it
+}
+
+func QueueAll(ctx context.Context, queue Queue, items []QueueInput) ([]QueueResult, error)
+func QueueEach(ctx context.Context, queue func(context.Context, QueueInput) (QueueResult, error), items []QueueInput) []QueueResult
+```
+
+`QueueBatch` returns one result per item, in order. An item the queue did not
+store has its `Err` set, and `Retryable` when sending the batch again may store
+it. `QueueBatch` returns an error only for a failure that leaves no item's
+outcome known. `QueueAll` sends a batch that must be stored whole, and returns
+a `*QueueBatchError` when it was not. `QueueEach` is a `QueueBatch` for a queue
+without a batch send. The runtime sends the messages of the steps a flow
+creates through `QueueAll`, 16 to a batch, with the step's key on each, and
+fails the delivery when one is not stored, so its redelivery sends them again.
+
+Delivery is at least once, and a queued delivery cannot be cancelled: one that
+is no longer needed only replays its run. A message with an `IdempotencyKey` is
+stored once while it lives, for at least `MinDeduplicationWindow`.
+`Runtime.Execute` returns a `*Redelivery` to ask for the same message again
+after `After`: zero is a handoff, which does not count as an attempt. A World
+delivers one flow of a run at a time (`QueueInput.SerializedFlow`), and
+`Capabilities().MaxQueueDelay` is the furthest `NotBefore` its queue accepts:
+the runtime reaches a later timer in hops anchored on its deadline, keyed
+`wait:<id>:<resumeAtMs>:<hopAtMs>`. A World sets `Attempt` from its backend's
+delivery count, and the Runtime gives up on a delivery past `MaxDeliveries` (48)
+attempts: a flow delivery fails its run, and a step delivery fails its step,
+both with `ErrMaxDeliveriesExceeded`. A World with deployment affinity returns
+an error wrapping `ErrDeploymentUnavailable` when the addressed deployment no
+longer exists.
+
+### Routing
+
+```go
+type Workflow[Out any] interface{ Workflow(Out) }
+
+func WorkflowName[In Workflow[Out], Out any]() string
+func Route[In Workflow[Out], Out any](queue string) QueueRoute
+func Routes(routes ...QueueRoute) map[string]string
+```
+
+`Workflow` is satisfied by a workflow type, such as one embedding
+`workflow.Struct`. `WorkflowName` returns the name its runs are recorded under,
+its package path and type name. `Routes(Route[W](queue), ...)` builds the
+`Config.Routes` of a World that routes deliveries by workflow.
+
+### Retention
+
+```go
+type WorkflowRetention struct {
+	Workflow  string
+	Retention time.Duration
+}
+
+func Retain[In Workflow[Out], Out any](retention time.Duration) WorkflowRetention
+func Retentions(retentions ...WorkflowRetention) map[string]time.Duration
+func RetentionFor(fallback time.Duration, retentions map[string]time.Duration, workflow string) time.Duration
+func MaxRetention(fallback time.Duration, retentions map[string]time.Duration) (longest time.Duration, negative bool)
+```
+
+`Retentions(Retain[W](retention), ...)` builds the `Config.Retentions` of a
+World that supports [retention](/docs/worlds#retention). `RetentionFor` returns how
+long finished runs of a workflow are kept, its entry or else the fallback, where
+zero keeps them. `MaxRetention` returns the longest retention and whether any
+is negative, for validating a configuration.
+
+## Streamer
+
+| Method | Description |
+| --- | --- |
+| `StreamsWrite`, `StreamsWriteMulti` | Append chunks. A closed stream, or one of a run whose data was deleted, drops them, or, in the Vercel World, refuses them with `ErrStreamClosed`. |
+| `StreamsClose` | Marks a stream done for every writer. Closing it again does nothing. |
+| `StreamsGetChunks` | Chunks after a cursor, or from `StartIndex` when the cursor is empty, waiting up to `Wait` for more. A negative `StartIndex` counts back from the end; `worlds.StreamsStartIndex` resolves it. |
+| `StreamsGetInfo` | Tail index and whether the stream is done. |
+| `StreamsList` | Stream names of a run. |
+
+Streams have no exclusive writers: any number of writers append to a stream at
+once and their chunks interleave. `OpenStreamWriter` returns a `StreamWriter`
+for one writer, through the optional `StreamWriterOpener` interface when the
+World implements it, and otherwise through `StreamsWriteMulti` and
+`StreamsClose`:
+
+```go
+type StreamWriterOpener interface {
+	StreamsOpenWriter(context.Context, StreamsOpenWriterInput) (StreamWriter, error)
+}
+
+type StreamsOpenWriterInput struct {
+	RunID    RunID
+	Name     string
+	WriterID string // from NewWriterID, "wrtr_" and a ULID
+}
+
+type StreamWriter interface {
+	Write(ctx context.Context, chunks [][]byte) error
+	Release(ctx context.Context) error     // ends this writer, leaving the stream open
+	CloseStream(ctx context.Context) error // closes the stream for every writer
+}
+```
+
+A World implements `StreamWriterOpener` to hold a connection for a writer's
+lifetime. `HTTPHandler` serves the Workflow SDK's stream socket protocol at
+`<prefix>/websockets/v1/runs/{runId}/streams/{name}?writerId=`, behind the same
+RPC protection, and `NewHTTPClient` writes over it, falling back to RPC writes
+while it opens and when it is declined or fails. `OpenStreamSocketWriter` and
+`StreamSocketHandler` are the two ends, for a World whose backend speaks the
+protocol, as Vercel's does.
+
+## Analytics
+
+`Analytics` is the Workflow SDK's analytics, which report runs and what they
+own without their payloads:
+
+| Part | Methods | Reports |
+| --- | --- | --- |
+| `AnalyticsRuns` | `RunsGet`, `RunsList` | Run summaries, filtered by workflow, status, creation time, and attributes. |
+| `AnalyticsAttributes` | `AttributesList` | One aggregate per attribute key. |
+| `AnalyticsSteps` | `StepsGet`, `StepsList` | A run's steps. |
+| `AnalyticsEvents` | `EventsGet`, `EventsGetMany`, `EventsList`, `EventsListByCorrelationID` | A run's events, with the run's workflow and deployment, filtered by type or correlation ID. |
+| `AnalyticsHooks` | `HooksGet`, `HooksList` | A run's hooks, read from their events, so a disposed hook is still reported, with its status and when it was received and disposed. |
+| `AnalyticsWaits` | `WaitsGet`, `WaitsList` | A run's waits, read from their events, so a finished run's waits are still reported, filtered by status. |
+
+A World returns it only when `Capabilities().Analytics` is true.
+`worlds.LogAnalytics` implements the steps, events, hooks, and waits from a
+World's storage reads, for a World to embed. A time window takes both
+`StartTime` and `EndTime` or neither.
+
+## Client
+
+`Client` is the API outside a run. `workflow.Client` is an alias. Its first
+methods are shared with the World:
+
+| Method | Description |
+| --- | --- |
+| `RunsGet`, `RunsList`, `RunsWaitForTerminalStatus`, `RunsSetAttributes`, `RunsDeleteDataMany` | Read runs, change their attributes, and delete their data. |
+| `StepsGet`, `StepsList` | Read steps. |
+| `StreamsGetChunks`, `StreamsGetInfo`, `StreamsList` | Read streams. |
+| `StreamsOpenWriter` | Open a stream writer. |
+| `HooksGet`, `HooksGetByToken` | Look up hook metadata by ID, or by the token of an active or retained hook. |
+| `Analytics` | As on World. |
+
+The rest are the Client's own:
+
+| Method | Description |
+| --- | --- |
+| `RunsCreate` | Starts a run and queues its first delivery. Returns the run ID. |
+| `RunsCancel` | Cancels a run. Returns a `*RunExpiredError` if finished. |
+| `RunsWake` | Settles pending waits early. |
+| `StreamsWrite`, `StreamsWriteMulti`, `StreamsClose` | Write streams one call at a time. |
+| `HooksResume` | Resolves the token owner once, records a payload, and queues the run. Ownership races reach the caller. |
+| `Spec` | The World's protocol version and capabilities, as a `ClientSpec`. |
+| `RunKeys` | The keys of a run's payloads, or nil when they are not encrypted. |
+| `RunsStartDeployment` | The deployment a new run starts on, so its input is encrypted for it. |
+
+```go
+type ClientSpec struct {
+	RPCVersion   int
+	Capabilities Capabilities
+}
+```
+
+`Spec` takes a context and returns an error, because the HTTP client asks the
+World for it over RPC. The HTTP client caches a successful result.
+
+```go
+func NewClient(world World) Client
+func NewHTTPClient(endpoint string, clients ...*http.Client) Client
+func NewClientContext(ctx context.Context, client Client) context.Context
+func ClientFromContext(ctx context.Context) (Client, bool)
+```
+
+## HTTP
+
+```go
+func HTTPHandler(world World, prefix string) http.Handler // empty prefix is /v1/workflow
+func RPCHandler(world World) http.Handler
+func WebhookHandler(world World) http.Handler
+func NormalizeBaseURL(value string) (string, error)
+```
+
+See [HTTP Endpoints](/docs/reference/http).
+
+## Payloads
+
+```go
+func EncodePayload(value any, options PayloadOptions) ([]byte, error)
+func DecodePayload(data []byte, keys *RunKeys, value any) error
+func EncodeErrorPayload(err error, options PayloadOptions) ([]byte, error)
+func DecodeErrorPayload(data []byte, keys *RunKeys) *Error
+
+type PayloadOptions struct {
+	Keys          *RunKeys // encrypt with the run's key (encr)
+	SealTo        []byte   // seal to a run's public key (encp)
+	NoCompression bool
+}
+
+type EncryptionKeys interface {
+	EncryptionKeyForRun(ctx context.Context, runID RunID, deploymentID string) ([]byte, error)
+}
+
+// StepExecutions is an optional World interface the runtime calls right
+// before a step's function runs, for every attempt.
+type StepExecutions interface {
+	RecordStepExecution(ctx context.Context, stepID StepID)
+}
+
+func RunKeysFor(ctx context.Context, world World, runID RunID, deploymentID string) (*RunKeys, error)
+func NewRunKeys(runKey []byte) (*RunKeys, error)
+func DeriveRunKey(key []byte, scope string, runID RunID) ([]byte, error)
+```
+
+Payloads use the Workflow SDK's format: devalue text labelled `devl`, optionally
+compressed (`gzip`, `zstd`) and encrypted (`encr`, `encp`). See
+[Data Format and Encryption](/docs/data). `EncryptionKeys` is the
+optional World interface that returns a run's encryption key. A World that takes
+a `Config.EncryptionKey` returns `DeriveRunKey(key, scope, runID)`, with its
+`Config.EncryptionScope` as the scope. `RunKeysFor` resolves and caches a run's
+keys. `EncodeStreamFrame` and `SplitStreamFrames` write and read stream frames,
+and `PayloadMarshaler` and `PayloadUnmarshaler` let a type choose its encoding,
+as `WebhookRequest`, `WebhookResponse`, and `WebhookMetadata` do to be the SDK's
+`Request`, `Response`, and `{respondWith}`.
+
+## Durable primitives
+
+These live in package `core`.
+
+The `workflow` package is built on these functions, which read and append to
+the `Execution` of the current delivery. They are exported for advanced
+integrations. Operations draw their IDs from the run's seed with
+`Execution.NextStepID`, `NextWaitID`, and `NextHookID`, and a hook created
+without a token draws one with `NextHookToken`. Lazy hooks draw their ID at
+creation and pass it to `DurableHook` when receiving, selecting, or explicitly
+checking ownership.
+
+| Function | Description |
+| --- | --- |
+| `DurableStep` | Declares the next step, created inline or as a step delivery when the runner waits, or starts and executes its attempt in its step delivery. |
+| `DurableInlineStep` | Declares the next step, created inline whatever the flow's limit. |
+| `DurableWait` | Declares a durable timer. Context cancellation can end its wait early. |
+| `DurableDisposeHook` | Records a hook's disposal as a write of the flow. |
+| `DurableHook` | Creates a hook and claims its token, or matches its recorded declaration. Takes options only and uses the execution’s delivery context. |
+| `Execution.Settled`, `Execution.SettledEvent` | Whether an operation's result has been delivered, and the event that delivered it. |
+| `Execution.Advance` | Deliver the next recorded event and run continuations. Returns false at the end of the loaded log. |
+| `Execution.IsSuspended` | Whether the runtime stopped replay before the workflow body finished. Deferred cleanup skips work in this case. |
+| `Execution.CreateEvent` | Append one of this replay's writes, in-band and fenced for flows, and add it with the events before it. A superseded write ends the replay, and the delivery asks for its message again a second later. Other World errors retry the delivery. A non-nil `mapError` sees the error first and can accept it. |
+| `StepOutcome`, `HookOutcome` | Decode a delivered step or hook result. |
+| `Execution.InBandCount` | The in-band count a flow's writes are fenced with. |
+| `WakeRun` | Queues a flow that completes the selected pending waits first. |
+| `PendingWaits` | The IDs of a run's pending waits, in creation order. |
+| `ResumeHook` | Appends a hook's payload and queues its run, addressed to the run's deployment. |
+| `EncodeEventData`, `DecodeEventData` | An event's JSON Data as the CBOR the local World stores, with payloads as raw bytes, and back. Data that fits its event type's `Data*` struct is stored as that struct; other Data is kept as its JSON value. |
+| `RunDeploymentID` | The deployment a run is pinned to, for addressing deliveries queued from outside it. |
+| `ExecutionFromContext` | The replay state of the current delivery. |
+
+## Errors
+
+| Error | Meaning |
+| --- | --- |
+| `ErrWorkflowNotRegistered` | No runner is registered for the run's workflow. |
+| `ErrRunNotFound` | No run has the ID. |
+| `ErrRunAlreadyExists` | `EventsCreateRun` with an existing ID. |
+| `*RunExpiredError` | Appending to or writing a stream of a finished run, or reading a run whose data expired. |
+| `ErrRunCancelled` | The run was cancelled. |
+| `ErrStepNotFound` | No step has the ID. |
+| `ErrStepNotStartable` | A batch event of a step whose earlier event in the batch was refused. |
+| `*TooEarlyError` | A `step_started` before the step's retry is due. Its `RetryAfter` says how long to wait. |
+| `ErrEventNotFound` | No event (or wait) has the ID. |
+| `ErrEntityConflict` | The event repeats a creation the run's log holds, such as a second `step_created`. |
+| `ErrEventInvalid` | Malformed event, ID, or cursor, a new run's ID that is not a recent ULID, a resume digest that is not its payload's, or an item over a backend limit. |
+| `ErrAttributeInvalid` | Run attributes or an `attr_set`'s changes outside the attribute limits, or a `$` key without `AllowReservedAttributes`. |
+| `*HookNotFoundError` | No hook has the ID, no hook owns the token, or a `hook_received` or `hook_disposed` names a hook its run doesn't have. |
+| `ErrHookNotActive` | The hook can no longer receive payloads, or a backend refused a hook event as a conflict. |
+| `*HookConflictError` | Another active hook owns the token. |
+| `*HookForceClaimedError` | Another hook took the token with `Force`. |
+| `ErrStartHookRejected` | A start hook candidate the World will never admit, such as one whose run ID is older than `StartHookCandidateMaxAge`. |
+| `ErrResumeNotQueued` | A hook payload was recorded but its run could not be queued. |
+| `ErrStreamClosed` | Writing to a closed stream, on a World that refuses it. |
+| `*RunNotSupportedError` | An event on a run created under a newer spec version than this release supports. |
+| `ErrMaxDeliveriesExceeded` | A delivery went past `MaxDeliveries` attempts. |
+| `ErrCorruptedEventLog` | The run's replay kept diverging from its event log. |
+| `ErrDeploymentMismatch` | The run's deliveries kept reaching other deployments, or its deployment is gone. |
+| `ErrDeploymentUnavailable` | `Queue` addressed a deployment that no longer exists. |
+| `*InBandSupersededError` | An in-band write's count is stale because another flow wrote to the run first. |
+| `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
+
+```go
+type Error struct {
+	// Error chain fields omitted.
+}
+
+func NewError(err error) *Error
+func DecodeError(data []byte) *Error
+func DeliveryError(cause error) error
+```
+
+`DeliveryError` marks a World error that a step function hit while doing the
+runtime's own work, such as recording a hook's disposal. The delivery is
+retried, instead of the step recording a failed attempt.
+
+`Error` keeps the type, message, and JSON encoding of every error in the chain
+so `errors.Is` and `errors.As` work after replay.

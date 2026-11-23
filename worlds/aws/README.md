@@ -229,7 +229,7 @@ first and `dataPurged` last. `$retention: "0"` deletes the data right after the
 commit that finishes the run, `RunsDeleteDataMany` deletes it on demand, and
 `Config.Retention` sets `expiredAt` when the run finishes and queues a
 `QUEUE#expire-<runID>` delivery due then (through Scheduler beyond 15 minutes).
-See the [docs](https://go-workflow.vercel.app/worlds/aws#retention).
+See the [docs](https://go-workflow.vercel.app/docs/worlds/aws#retention).
 
 ## Infrastructure
 
