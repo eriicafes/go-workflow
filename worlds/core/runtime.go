@@ -597,10 +597,13 @@ func (r *Runtime) loadLog(ctx context.Context, runID worlds.RunID, stopAtLimit b
 	if err != nil {
 		return loadedRun{}, err
 	}
-	if len(page.Data) == 0 || page.Data[0].EventType != worlds.EventTypeRunCreated {
-		return loadedRun{}, fmt.Errorf("workflow: event log of run %s does not start with run_created", runID)
+	// A finished run is not replayed, and its log may have been deleted.
+	if !run.Status.Terminal() {
+		if len(page.Data) == 0 || page.Data[0].EventType != worlds.EventTypeRunCreated {
+			return loadedRun{}, fmt.Errorf("workflow: event log of run %s does not start with run_created", runID)
+		}
+		run.Input = worlds.EventPayload(page.Data[0])
 	}
-	run.Input = worlds.EventPayload(page.Data[0])
 	// The flow fences its writes with the in-band count of the snapshot the
 	// listing was read under, which covers every event it returns.
 	run.InBandCount = page.Snapshot.InBandCount
