@@ -122,7 +122,9 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"baseURL": baseURL}); err != nil {
 		log.Fatal(err)
 	}
-	if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&os.ModeNamedPipe != 0 {
+	// Node.js gives a child a socket for its standard input, and a shell a
+	// named pipe.
+	if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&(os.ModeNamedPipe|os.ModeSocket) != 0 {
 		go func() {
 			// The process that started the harness holds the pipe, which
 			// closes when that process exits.

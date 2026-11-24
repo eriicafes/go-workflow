@@ -5,3 +5,4 @@ dist
 .workflows/
 worlds/testdata/payload/go-vectors.json
 world-http/tests/world-testing/.bin
+.env

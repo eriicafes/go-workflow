@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -29,27 +30,41 @@ const vercelLease = 5 * time.Minute
 // variables the Workflow SDK's tests use: WORKFLOW_VERCEL_AUTH_TOKEN, a Vercel
 // access token, and WORKFLOW_VERCEL_PROJECT and WORKFLOW_VERCEL_TEAM, the
 // project and team to use. The World reads WORKFLOW_VERCEL_BACKEND_URL itself.
+// The backend refuses to create a run without a deployment ID, and a run's
+// key is fetched for its deployment, so the World is given the project's
+// newest production deployment, as if it ran there.
 // Vercel Queues, which push deliveries to a deployment, are played by a local
-// queue that pushes them to the World's queue handler.
+// queue that pushes them to the World's queue handler. HARNESS_UNENCRYPTED,
+// when set, gives runs no keys.
 func openVercel(ctx context.Context, baseURL string, executor worlds.Executor) (worlds.World, func(), error) {
 	token := os.Getenv("WORKFLOW_VERCEL_AUTH_TOKEN")
 	if token == "" {
 		return nil, nil, errors.New("harness: set WORKFLOW_VERCEL_AUTH_TOKEN for the Vercel World")
 	}
+	project, team := os.Getenv("WORKFLOW_VERCEL_PROJECT"), os.Getenv("WORKFLOW_VERCEL_TEAM")
+	deployment, err := latestDeployment(ctx, token, project, team)
+	if err != nil {
+		return nil, nil, err
+	}
 	queue := &localQueue{}
 	server := httptest.NewServer(queue)
 	config := vercelworld.Config{
-		BaseURL:   baseURL,
-		QueueURL:  server.URL + "/api/v3",
-		Topic:     "workflow",
-		Token:     token,
-		ProjectID: os.Getenv("WORKFLOW_VERCEL_PROJECT"),
-		TeamID:    os.Getenv("WORKFLOW_VERCEL_TEAM"),
+		BaseURL:      baseURL,
+		QueueURL:     server.URL + "/api/v3",
+		Topic:        "workflow",
+		Token:        token,
+		ProjectID:    project,
+		TeamID:       team,
+		DeploymentID: deployment,
 	}
 	world, err := vercelworld.New(config)
 	if err != nil {
 		server.Close()
 		return nil, nil, err
+	}
+	var served worlds.World = world
+	if os.Getenv("HARNESS_UNENCRYPTED") != "" {
+		served = unencrypted{world}
 	}
 	delivering, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -57,11 +72,48 @@ func openVercel(ctx context.Context, baseURL string, executor worlds.Executor) (
 		defer close(done)
 		queue.deliver(delivering, vercelworld.Queue(world, executor))
 	}()
-	return world, func() {
+	return served, func() {
 		stop()
 		<-done
 		server.Close()
 	}, nil
+}
+
+// unencrypted is the Vercel World with no run keys, so a Workflow SDK app
+// writes its payloads in plain text. The World suite needs it, because it
+// reads runs' outputs without a key.
+type unencrypted struct{ *vercelworld.World }
+
+func (unencrypted) EncryptionKeyForRun(context.Context, worlds.RunID, string) ([]byte, error) {
+	return nil, nil
+}
+
+// latestDeployment returns the ID of the project's newest ready production
+// deployment, through Vercel's API with token.
+func latestDeployment(ctx context.Context, token, project, team string) (string, error) {
+	query := url.Values{"projectId": {project}, "target": {"production"}, "state": {"READY"}, "limit": {"1"}}
+	if team != "" {
+		query.Set("teamId", team)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.vercel.com/v6/deployments?"+query.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	var answer struct {
+		Deployments []struct {
+			UID string `json:"uid"`
+		} `json:"deployments"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&answer) != nil || len(answer.Deployments) == 0 {
+		return "", fmt.Errorf("harness: no ready production deployment of project %s: %s", project, response.Status)
+	}
+	return answer.Deployments[0].UID, nil
 }
 
 // localQueue plays the Vercel Queues API: it stores published messages, one
