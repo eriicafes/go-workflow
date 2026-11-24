@@ -172,7 +172,7 @@ func logRPC(next http.Handler) http.Handler {
 			Error  any `cbor:"error"`
 		}
 		_ = cbor.Unmarshal(recorder.body.Bytes(), &response)
-		if strings.HasPrefix(request.Method, "events.create") || response.Error != nil {
+		if strings.HasPrefix(request.Method, "events.create") || request.Method == "runs.encryptionKey" || response.Error != nil {
 			log.Printf("harness: rpc %s input=%v error=%v output=%.600v", request.Method, summarize(request.Input), response.Error, response.Output)
 		}
 	})
