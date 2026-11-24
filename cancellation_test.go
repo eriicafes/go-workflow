@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -73,6 +74,11 @@ func TestCancelledStepRecordsItsOwnResultAndAbortsWithoutRetry(t *testing.T) {
 			<-ctx.Done()
 			return "", ctx.Err()
 		}, struct{}{})
+		// A step that returns the cause is retried as any other error.
+		threw := workflow.Background(cancelCtx, func(ctx context.Context, _ struct{}) (string, error) {
+			<-ctx.Done()
+			return "", context.Cause(ctx)
+		}, struct{}{}, workflow.StepOptions{MaxRetries: 1})
 		if err := cancel(errors.New("stop work")); err != nil {
 			return cancellationOutput{}, err
 		}
@@ -84,10 +90,12 @@ func TestCancelledStepRecordsItsOwnResultAndAbortsWithoutRetry(t *testing.T) {
 			return cancellationOutput{}, err
 		}
 		_, err = gaveUp.Value(ctx)
-		return cancellationOutput{Cause: cause, Cancelled: aborted(err)}, nil
+		_, threwErr := threw.Value(ctx)
+		retried := threwErr != nil && strings.HasSuffix(threwErr.Error(), "failed after 1 retry: stop work")
+		return cancellationOutput{Cause: cause, Cancelled: aborted(err) && retried}, nil
 	})))
 	defer world.Close()
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 10*time.Second)
 	defer cancel()
 	run, err := workflow.Start(ctx, cancellationInput{})
 	if err != nil {
@@ -97,15 +105,19 @@ func TestCancelledStepRecordsItsOwnResultAndAbortsWithoutRetry(t *testing.T) {
 	if err != nil || !output.Cancelled || output.Cause != "stop work" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
-	// A step that gives up on its cancelled context fails without a retry.
+	// Only the step that returned its cause is retried.
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
 		t.Fatal(err)
 	}
+	retried := map[string]int{}
 	for _, event := range events.Data {
 		if event.EventType == worlds.EventTypeStepRetrying {
-			t.Fatalf("cancelled step retried: %s", event.Data)
+			retried[event.CorrelationID]++
 		}
+	}
+	if len(retried) != 1 {
+		t.Fatalf("retried steps = %v, want only the one that returned its cause", retried)
 	}
 }
 

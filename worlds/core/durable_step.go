@@ -277,24 +277,18 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 	if returnErr := returned.run(); returnErr != nil && err == nil {
 		err = returnErr
 	}
-	if aborted(stepCtx, err) && execution.ctx.Err() == nil {
+	if aborted(err) && execution.ctx.Err() == nil {
 		err = worlds.FatalError{Cause: fmt.Errorf("Aborted: %w", err)}
 	}
 	return value, err
 }
 
-// aborted reports whether err, a step's error, is it giving up on a
-// cancellation: an error matching context.Canceled, as the Workflow SDK
-// promotes an AbortError, or once stepCtx is done, one matching its cause,
-// such as an HTTP request's error after a durable timeout.
-func aborted(stepCtx context.Context, err error) bool {
-	if err == nil || errors.As(err, new(worlds.FatalError)) {
-		return false
-	}
-	if errors.Is(err, context.Canceled) {
-		return true
-	}
-	return stepCtx.Err() != nil && errors.Is(err, context.Cause(stepCtx))
+// aborted reports whether err, a step's error, is the abort itself: an
+// error matching context.Canceled, as the Workflow SDK promotes an
+// AbortError. Any other error, such as a cancellation's cause or
+// context.DeadlineExceeded (the SDK's TimeoutError), is retried as usual.
+func aborted(err error) bool {
+	return errors.Is(err, context.Canceled) && !errors.As(err, new(worlds.FatalError))
 }
 
 type stepReturnKey struct{}

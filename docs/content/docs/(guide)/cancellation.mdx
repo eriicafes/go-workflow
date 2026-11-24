@@ -95,12 +95,12 @@ func pollJob(ctx context.Context, jobID string) (string, error) {
 A step started with a context that is already cancelled still runs, and sees
 `ctx.Err()` at once. `context.Cause(ctx)` reports the cancellation's cause.
 
-A step that gives up on its cancellation fails without retrying: an error that
-wraps `context.Canceled`, such as `ctx.Err()`, or once the context is done, one
-that wraps `context.Cause(ctx)`, such as the error of an HTTP request after a
-timeout. It is recorded as a `workflow.FatalError` whose message is `Aborted: `
-and the error's, and `errors.Is` still finds the wrapped error. Any other error
-is retried as usual. Pending timers using the context fail with a fatal
+An error that wraps `context.Canceled`, such as `ctx.Err()` or the error of an
+HTTP request whose context was cancelled, fails the step without retrying. It
+is recorded as a `workflow.FatalError` whose message is `Aborted: ` and the
+error's, and `errors.Is` still finds `context.Canceled`. Any other error is
+retried as usual, including the cancellation's cause returned by
+`context.Cause(ctx)` and `context.DeadlineExceeded`. Pending timers using the context fail with a fatal
 cancellation error. The runner can handle these errors and continue.
 
 A step can request cancellation through `workflow.CancelFunc(ctx)`. It reports

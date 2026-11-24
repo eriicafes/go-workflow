@@ -12,7 +12,9 @@ import (
 // started with a cancellation context sees it done when the workflow, or
 // another step, cancels it, as a step sees its AbortSignal abort, and what
 // the step returns is its result. A step error that wraps context.Canceled,
-// Go's AbortError, fails the step as a FatalError without retries.
+// Go's AbortError, fails the step as a FatalError without retries. A step
+// that returns the cancellation's cause, as throwIfAborted throws the abort
+// reason, is retried as any other error until its retries run out.
 
 type timeoutResult struct {
 	Status  string `json:"status"`
