@@ -27,7 +27,8 @@ var _ worlds.EncryptionKeys = (*World)(nil)
 // are not encrypted. With no project ID, from Config.ProjectID or
 // VERCEL_PROJECT_ID, payloads are not encrypted. An empty deploymentID is
 // the run's own: inside a function, this deployment's, and outside one, the
-// deployment the run is pinned to.
+// deployment the run is pinned to, or this World's for a run the backend
+// does not have yet.
 func (w *World) EncryptionKeyForRun(ctx context.Context, runID worlds.RunID, deploymentID string) ([]byte, error) {
 	projectID := w.config.ProjectID
 	if projectID == "" {
@@ -50,14 +51,19 @@ func (w *World) EncryptionKeyForRun(ctx context.Context, runID worlds.RunID, dep
 	if deploymentID == "" {
 		// A caller that names no deployment, such as a Workflow SDK runtime
 		// reading a run by its ID, means the run's own.
+		// A run the backend does not have yet, such as one whose first
+		// delivery arrives before its run_created lands, was started here and
+		// is pinned to this World's deployment.
 		run, err := w.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
-		if errors.Is(err, worlds.ErrRunNotFound) {
-			return nil, nil
-		}
-		if err != nil {
+		switch {
+		case err == nil:
+			deploymentID = run.DeploymentID
+		case errors.Is(err, worlds.ErrRunNotFound):
+			deploymentID = w.config.DeploymentID
+		default:
 			return nil, err
 		}
-		if deploymentID = run.DeploymentID; deploymentID == "" {
+		if deploymentID == "" {
 			return nil, nil
 		}
 	}

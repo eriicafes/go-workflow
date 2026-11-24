@@ -72,9 +72,19 @@ func TestEncryptionKeysMatchWorldVercel(t *testing.T) {
 	if key, err := world.EncryptionKeyForRun(ctx, pinned, ""); err != nil || !bytes.Equal(key, other) || calls != 2 {
 		t.Fatalf("key of the run's deployment = %x err=%v calls=%d", key, err, calls)
 	}
+	// A run the backend does not have yet is this World's deployment's, and
+	// without a deployment of its own the World has no key for it.
+	own := world.config.DeploymentID
+	world.config.DeploymentID = ""
 	if key, err := world.EncryptionKeyForRun(ctx, worlds.NewRunID(), ""); err != nil || key != nil {
-		t.Fatalf("key of a missing run = %x err=%v", key, err)
+		t.Fatalf("key of a missing run without a deployment = %x err=%v", key, err)
 	}
+	world.config.DeploymentID = "dpl_other"
+	calls = 1
+	if key, err := world.EncryptionKeyForRun(ctx, worlds.NewRunID(), ""); err != nil || !bytes.Equal(key, other) || calls != 2 {
+		t.Fatalf("key of a missing run = %x err=%v calls=%d, want the World's deployment's", key, err, calls)
+	}
+	world.config.DeploymentID = own
 	t.Setenv("VERCEL", "1")
 
 	// A rate limit is Vercel's answer, and is not asked about again.
