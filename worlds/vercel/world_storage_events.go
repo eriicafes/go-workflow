@@ -38,11 +38,13 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 		"specVersion": specVersion,
 		// inBand is required on every write. A creation is out-of-band;
 		// EventsCreate overwrites it for a first delivery's run_started.
-		"inBand":            false,
-		"workflowName":      input.WorkflowName,
-		"deploymentId":      input.DeploymentID,
-		"occurredAt":        time.Now().UTC(),
-		"remoteRefBehavior": "lazy",
+		"inBand":       false,
+		"workflowName": input.WorkflowName,
+		"deploymentId": input.DeploymentID,
+		"occurredAt":   time.Now().UTC(),
+		// The answer holds the run with its input, which a caller reads at
+		// once, as the Workflow SDK's Vercel World asks for it.
+		"remoteRefBehavior": "resolve",
 	}
 	if input.EncryptionPublicKey != "" {
 		meta["encryptionPublicKey"] = input.EncryptionPublicKey
