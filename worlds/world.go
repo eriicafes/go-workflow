@@ -613,10 +613,11 @@ func HookPayloadOptions(ctx context.Context, client Client, hook Hook) (PayloadO
 
 // RunIDTime returns the time a run ID was minted at: the time of its ULID,
 // with the region tag bit cleared. It reports false for a run ID that is not
-// wrun_ and a ULID.
+// wrun_ and a ULID, and for one whose ULID is the body of an event slot's ID,
+// which holds no time.
 func RunIDTime(id RunID) (time.Time, bool) {
 	rest, ok := strings.CutPrefix(string(id), "wrun_")
-	if !ok {
+	if !ok || isSlotBody(rest) {
 		return time.Time{}, false
 	}
 	value, err := ulid.ParseStrict(rest)

@@ -789,15 +789,34 @@ func EventIDForSlot(slot uint64) EventID {
 // EventSlot returns the 1-based log position encoded in id. It returns an
 // error wrapping ErrEventInvalid when id was not made by EventIDForSlot.
 func EventSlot(id EventID) (uint64, error) {
-	value := string(id)
-	if !strings.HasPrefix(value, "evnt_") || len(value) != len("evnt_")+26 {
+	body, ok := strings.CutPrefix(string(id), "evnt_")
+	if !ok || !isSlotBody(body) {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
-	slot, err := strconv.ParseUint(value[len("evnt_"):], 10, 64)
+	slot, err := strconv.ParseUint(body, 10, 64)
 	if err != nil || slot == 0 {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
 	return slot, nil
+}
+
+// slotLeadingZeros is how many leading zeros the body of an event ID made by
+// EventIDForSlot has: the characters that hold a ULID's time, which is never
+// zero, so a slot's body is never mistaken for a ULID.
+const slotLeadingZeros = 10
+
+// isSlotBody reports whether body, an event ID without its prefix, is a
+// slot's: 26 decimal digits, the first slotLeadingZeros of them zeros.
+func isSlotBody(body string) bool {
+	if len(body) != 26 {
+		return false
+	}
+	for index := range len(body) {
+		if body[index] < '0' || body[index] > '9' || index < slotLeadingZeros && body[index] != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 // MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes.
