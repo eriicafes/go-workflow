@@ -805,7 +805,6 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				executable = append(executable, call)
 			}
 		}
-		step.Content = slices.Concat(step.Content, automaticRequests, automaticResponses)
 
 		results, err := r.executeTools(ctx, stepNumber, executable, history, nil)
 		if err != nil {
@@ -835,7 +834,15 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			if err != nil {
 				return r.result(nil, nil), err
 			}
-			added = addApprovalRequests(added, approvalRequests)
+			// Like the Workflow SDK, the step's content gets the approval
+			// requests in the order of their calls, then the responses of the
+			// approval policy's decisions, and the messages get the requests.
+			ordered := slices.Concat(approvalRequests, automaticRequests)
+			slices.SortStableFunc(ordered, func(a, b ContentPart) int {
+				return cmp.Compare(callIndex(calls, a.ToolCallID), callIndex(calls, b.ToolCallID))
+			})
+			step.Content = slices.Concat(step.Content, ordered, automaticResponses)
+			added = addApprovalRequests(added, slices.Concat(approvalRequests, automaticRequests))
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
@@ -869,6 +876,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			return r.result(step.ToolCalls, step.ToolResults), nil
 		}
 
+		step.Content = slices.Concat(step.Content, automaticRequests, automaticResponses)
 		// The results keep the order of the calls, and provider results for
 		// calls of earlier steps come last.
 		provider := r.providerResults(calls, providerResults, nil)
@@ -1353,6 +1361,11 @@ func orderedResults(calls []ToolCall, local, provider []ToolResult) []ToolResult
 		}
 	}
 	return out
+}
+
+// callIndex returns the index of the call with id toolCallID in calls.
+func callIndex(calls []ToolCall, toolCallID string) int {
+	return slices.IndexFunc(calls, func(call ToolCall) bool { return call.ToolCallID == toolCallID })
 }
 
 // inCallOrder returns results in the order of their calls.

@@ -3,6 +3,7 @@ package workflowai_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -119,6 +120,43 @@ func TestStreamToolApprovalPolicyDeniesApprovedCall(t *testing.T) {
 		}
 		if !strings.Contains(sent, "bookings are closed") {
 			t.Fatalf("result = %s", sent)
+		}
+	})
+}
+
+// A paused turn's step content has its approval requests in the order of
+// their calls, the user's and the approval policy's, then the policy's
+// responses, and its last message has the requests, as in the Workflow SDK.
+func TestStreamPausedTurnApprovalParts(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`), call("c2", "getWeather", `{"city":"Lagos"}`)))
+		testOptions.ToolApprovals = map[string]workflowai.ToolApprovalFunc{"getWeather": approve}
+		result, _, err := chat(t, []workflowai.ModelMessage{user("book LH123 and check the weather")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parts []string
+		for _, part := range result.Steps[0].Content {
+			switch part.Type {
+			case workflowai.PartToolApprovalRequest:
+				parts = append(parts, fmt.Sprintf("request %s automatic=%v", part.ToolCallID, part.Automatic))
+			case workflowai.PartToolApprovalResponse:
+				parts = append(parts, "response "+part.ToolCallID)
+			}
+		}
+		if want := []string{"request c1 automatic=false", "request c2 automatic=true", "response c2"}; !slices.Equal(parts, want) {
+			t.Fatalf("approval parts = %v, want %v", parts, want)
+		}
+		var requests []string
+		for _, message := range result.Messages {
+			for _, part := range message.Content {
+				if part.Type == workflowai.PartToolApprovalRequest {
+					requests = append(requests, part.ToolCallID)
+				}
+			}
+		}
+		if want := []string{"c1", "c2"}; !slices.Equal(requests, want) {
+			t.Fatalf("message requests = %v, want %v", requests, want)
 		}
 	})
 }
