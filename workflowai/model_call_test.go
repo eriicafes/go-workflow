@@ -255,12 +255,18 @@ func TestStreamProviderToolResult(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var output ai.UIMessageChunk
+		// The model call step streams the provider's result, and like in the
+		// Workflow SDK the agent writes it again with the step's results.
+		var outputs []ai.UIMessageChunk
 		for _, chunk := range chunks {
 			if chunk["type"] == "tool-output-available" {
-				output = chunk
+				outputs = append(outputs, chunk)
 			}
 		}
+		if len(outputs) != 2 || outputs[1]["toolCallId"] != "p1" {
+			t.Fatalf("chunks = %v", chunks)
+		}
+		output := outputs[0]
 		if output == nil || output["toolCallId"] != "p1" || output["providerExecuted"] != true {
 			t.Fatalf("chunks = %v", chunks)
 		}

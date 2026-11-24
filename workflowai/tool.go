@@ -112,15 +112,6 @@ type toolResult struct {
 	invalid bool
 }
 
-func (t toolResult) streamPart() ModelCallStreamPart {
-	if t.isError {
-		var message string
-		_ = json.Unmarshal(t.raw, &message)
-		return ModelCallStreamPart{Type: "tool-error", ToolCallID: t.call.ToolCallID, ToolName: t.call.ToolName, Input: t.call.Input, Error: message}
-	}
-	return ModelCallStreamPart{Type: "tool-result", ToolCallID: t.call.ToolCallID, ToolName: t.call.ToolName, Input: t.call.Input, Output: t.raw}
-}
-
 // Executor executes tool calls. It may also describe its input with an
 // InputSchema() map[string]any method, which the agent calls when it sends
 // the tool to the model.

@@ -161,8 +161,24 @@ func TestStreamRejectsTamperedApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if chunks[2]["type"] != "tool-output-error" || !strings.Contains(chunks[2]["errorText"].(string), "invalid signature") {
-			t.Fatalf("chunk = %v", chunks[2])
+		// Like in the Workflow SDK, the model gets the rejected call's error
+		// and the stream gets no output for it.
+		for _, chunk := range chunks {
+			if chunk["toolCallId"] == "c1" {
+				t.Fatalf("chunk = %v", chunk)
+			}
+		}
+		var sent string
+		for _, message := range testModel.prompts()[1] {
+			for _, part := range message.Content {
+				if part, ok := part.(types.ToolResultContent); ok && part.ToolCallID == "c1" {
+					data, _ := json.Marshal(part.Output)
+					sent = string(data)
+				}
+			}
+		}
+		if !strings.Contains(sent, "invalid signature") {
+			t.Fatalf("tool result = %s", sent)
 		}
 	})
 }

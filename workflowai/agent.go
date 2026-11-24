@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/digitallysavvy/go-ai/pkg/ai"
@@ -271,13 +272,6 @@ type Response struct {
 	Body any `json:"body,omitempty"`
 }
 
-// writePartsInput is the input of the writePartsStep step.
-type writePartsInput struct {
-	Writer workflow.WriterOption
-	Parts  []ModelCallStreamPart
-	Close  bool
-}
-
 // WorkflowAgent is an agent whose loop runs as a durable workflow. Each model
 // call is a step, and each tool call
 // runs its tool's Execute in workflow context, which records its steps. A
@@ -378,8 +372,9 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	}
 	ctx, err := r.prepare(ctx)
 	if err != nil {
-		closeErr := r.closeWriter(ctx, ModelCallStreamPart{Type: "error", Error: err.Error()})
-		return Result{}, errors.Join(err, closeErr)
+		// Like the Workflow SDK, a call that cannot start leaves its stream
+		// untouched.
+		return Result{}, err
 	}
 
 	r.callbacks.OnStart(ctx, StartEvent{Messages: r.messages})
@@ -398,10 +393,8 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	}
 	if err != nil {
 		r.callbacks.OnError(ctx, err)
-		// Report the failure to stream readers and end the stream, so they
-		// do not wait for parts that never come.
-		closeErr := r.closeWriter(ctx, ModelCallStreamPart{Type: "error", Error: err.Error()})
-		return result, errors.Join(err, closeErr)
+		// End the stream, so readers do not wait for parts that never come.
+		return result, errors.Join(err, r.closeWriter(ctx))
 	}
 	if result.Error != "" {
 		r.callbacks.OnError(ctx, errors.New(result.Error))
@@ -598,6 +591,12 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		if err != nil {
 			return r.result(nil, nil), err
 		}
+		if r.streaming && r.options.Writer != nil {
+			_, err := workflow.Step(ctx, writeDeferredToolCalls, writeDeferredToolCallsInput{Writer: *r.options.Writer, ToolCalls: []ToolCall{}})
+			if err != nil {
+				return r.result(nil, nil), err
+			}
+		}
 
 		step := StepResult{
 			StepNumber:   stepNumber,
@@ -636,26 +635,39 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			return result, nil
 		}
 
+		// Tools are processed when the model finished to call them, or when the
+		// provider reported results of the tools it executes.
 		toolExecutionAllowed := step.FinishReason == string(types.FinishReasonToolCalls) || step.FinishReason == string(types.FinishReasonStop)
-		var localCalls []ToolCall
-		for _, call := range step.ToolCalls {
-			if !call.ProviderExecuted {
-				localCalls = append(localCalls, call)
-			}
-		}
-		if !toolExecutionAllowed || len(localCalls) == 0 {
+		providerResults := providerToolResults(response.Content)
+		processTools := (toolExecutionAllowed && (len(step.ToolCalls) > 0 || len(providerResults) > 0)) ||
+			(step.FinishReason == string(types.FinishReasonLength) && len(providerResults) > 0)
+		if !processTools {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
 			r.callbacks.OnStepEnd(ctx, step)
 			return r.result(step.ToolCalls, nil), nil
 		}
+		// When the finish reason does not allow tool execution, only invalid
+		// calls get their error results and provider calls their results.
+		calls := step.ToolCalls
+		if !toolExecutionAllowed {
+			calls = slices.DeleteFunc(slices.Clone(calls), func(call ToolCall) bool {
+				_, hasResult := providerResults[call.ToolCallID]
+				return !(call.Invalid && !call.ProviderExecuted) && !(call.ProviderExecuted && hasResult)
+			})
+		}
 
-		// Split the calls into those to execute now and those that pause the
-		// loop: client tools and calls that need approval.
+		// Split the local calls into those to execute now and those that pause
+		// the loop: client tools and calls that need approval.
 		var executable, paused []ToolCall
 		var approvalRequests []ContentPart
-		for _, call := range localCalls {
+		hasLocalCalls := false
+		for _, call := range calls {
+			if call.ProviderExecuted {
+				continue
+			}
+			hasLocalCalls = true
 			tool, known := r.tools[call.ToolName]
 			if call.Invalid || !known {
 				executable = append(executable, call)
@@ -683,49 +695,103 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 		}
 
-		results, parts, err := r.executeTools(ctx, stepNumber, executable, history)
+		results, err := r.executeTools(ctx, stepNumber, executable, history)
 		if err != nil {
 			return r.result(nil, nil), err
 		}
-		step.ToolResults = executedResults(results)
 		if len(results) > 0 {
 			added = append(added, toolMessage(results))
 		}
 
 		// A provider approval request also pauses the loop, since the
 		// provider waits for the user's response.
-		providerApproval := slices.ContainsFunc(response.Content, func(part ContentPart) bool {
-			return part.Type == PartToolApprovalRequest
-		})
-		if len(paused) > 0 || providerApproval {
+		providerApprovals := map[string]bool{}
+		for _, part := range response.Content {
+			if part.Type == PartToolApprovalRequest && part.ProviderExecuted {
+				providerApprovals[part.ToolCallID] = true
+			}
+		}
+		if len(paused) > 0 || len(providerApprovals) > 0 {
+			// Calls that wait for the provider's approval have no result yet.
+			provider := r.providerResults(calls, providerResults, providerApprovals)
+			step.ToolResults = slices.Concat(executedResults(results), provider)
 			added = addApprovalRequests(added, approvalRequests)
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
 			r.callbacks.OnStepEnd(ctx, step)
-			for _, request := range approvalRequests {
-				parts = append(parts, ModelCallStreamPart{Type: "tool-approval-request", ApprovalID: request.ApprovalID, ToolCallID: request.ToolCallID, Signature: request.Signature})
-			}
-			if err := r.write(ctx, parts...); err != nil {
-				return r.result(nil, nil), err
+			if r.options.Writer != nil {
+				if len(step.ToolResults) > 0 {
+					if _, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults}); err != nil {
+						return r.result(nil, nil), err
+					}
+				}
+				if len(approvalRequests) > 0 {
+					requests := make([]approvalRequest, len(approvalRequests))
+					for i, request := range approvalRequests {
+						requests[i] = approvalRequest{ApprovalID: request.ApprovalID, ToolCallID: request.ToolCallID, Signature: request.Signature}
+					}
+					if _, err := workflow.Step(ctx, writeApprovalRequests, writeApprovalRequestsInput{Writer: *r.options.Writer, ApprovalRequests: requests}); err != nil {
+						return r.result(nil, nil), err
+					}
+				}
 			}
 			return r.result(step.ToolCalls, step.ToolResults), nil
 		}
 
+		// The results keep the order of the calls, and provider results for
+		// calls of earlier steps come last.
+		provider := r.providerResults(calls, providerResults, nil)
+		step.ToolResults = orderedResults(calls, executedResults(results), provider)
 		step.Response.Messages = added
 		r.messages = append(r.messages, added...)
 		r.steps = append(r.steps, step)
-		// Separate the tool call step from the next model call in the UI
-		// message, so the client converts them to separate messages.
-		parts = append(parts, ModelCallStreamPart{Type: "finish-step"}, ModelCallStreamPart{Type: "start-step"})
-		if err := r.write(ctx, parts...); err != nil {
-			return r.result(nil, nil), err
+		if r.options.Writer != nil {
+			_, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults, WriteStepBoundary: true})
+			if err != nil {
+				return r.result(nil, nil), err
+			}
 		}
 		r.callbacks.OnStepEnd(ctx, step)
-		if slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
+		// The loop continues only after local calls, and stop conditions are
+		// only checked when it could continue.
+		if !toolExecutionAllowed || !hasLocalCalls || slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
 			return r.result(step.ToolCalls, step.ToolResults), nil
 		}
 	}
+}
+
+// providerResults returns the results of the provider-executed calls among
+// calls, followed by the results the provider reported for calls of earlier
+// steps, leaving out calls in skip. A call whose result the provider has not
+// reported yet, which it may deliver in a later step, has none.
+func (r *run) providerResults(calls []ToolCall, reported map[string]providerResult, skip map[string]bool) []ToolResult {
+	var out []ToolResult
+	seen := map[string]bool{}
+	for _, call := range calls {
+		if !call.ProviderExecuted || call.Invalid || skip[call.ToolCallID] {
+			continue
+		}
+		seen[call.ToolCallID] = true
+		found, ok := reported[call.ToolCallID]
+		if !ok {
+			continue
+		}
+		result := found.ToolResult
+		result.Input = call.Input
+		out = append(out, result)
+	}
+	ids := make([]string, 0, len(reported))
+	for id := range reported {
+		if !seen[id] && !skip[id] {
+			ids = append(ids, id)
+		}
+	}
+	slices.SortFunc(ids, func(a, b string) int { return cmp.Compare(reported[a].order, reported[b].order) })
+	for _, id := range ids {
+		out = append(out, reported[id].ToolResult)
+	}
+	return out
 }
 
 // toolDefinitions returns the definitions of the active tools in name order.
@@ -749,10 +815,9 @@ func (r *run) toolCallOptions(call ToolCall, messages []ModelMessage) ToolCallOp
 }
 
 // executeTools executes calls, at most r.concurrency at once when it is set,
-// and returns their results and the stream parts that report them in call
-// order. Calls start in order, and a call starts when an earlier one settles
+// and returns their results in call order. Calls start in order, and a call starts when an earlier one settles
 // in recorded order, so replay starts them the same way.
-func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall, messages []ModelMessage) ([]toolResult, []ModelCallStreamPart, error) {
+func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall, messages []ModelMessage) ([]toolResult, error) {
 	results := make([]toolResult, len(calls))
 	var running []int
 	var pending []*workflow.Result[any]
@@ -784,20 +849,14 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 		winner, err := workflow.Select(ctx, workflow.MapResults(pending)...)
 		j := slices.Index(workflow.MapResults(pending), winner)
 		if j < 0 {
-			return nil, nil, err
+			return nil, err
 		}
 		output, err := pending[j].Value(ctx)
 		results[running[j]] = r.finishTool(ctx, stepNumber, calls[running[j]], output, err)
 		running = slices.Delete(running, j, j+1)
 		pending = slices.Delete(pending, j, j+1)
 	}
-	var parts []ModelCallStreamPart
-	for _, result := range results {
-		if !result.invalid {
-			parts = append(parts, result.streamPart())
-		}
-	}
-	return results, parts, nil
+	return results, nil
 }
 
 // finishTool reports the end of a call's execution and returns its result.
@@ -839,34 +898,41 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 		return nil
 	}
 
+	// Approved calls to a tool that is gone or runs on the client get no
+	// result, as in the Workflow SDK. Calls that fail validation get an error
+	// result the model sees and the stream does not.
 	var results []toolResult
-	var parts []ModelCallStreamPart
 	var executable []ToolCall
 	for _, approval := range approved {
 		call := approvedCall(approval)
 		if call.ProviderExecuted {
 			continue
 		}
+		if tool, known := r.tools[call.ToolName]; !known || tool.Execute == nil {
+			continue
+		}
 		if reason := r.validateApproval(approval.ApprovalRequest, call); reason != "" {
-			result := errorResult(call, reason)
-			results = append(results, result)
-			parts = append(parts, result.streamPart())
+			results = append(results, errorResult(call, reason))
 			continue
 		}
 		executable = append(executable, call)
 	}
-	executed, executedParts, err := r.executeTools(ctx, 0, executable, r.messages)
+	executed, err := r.executeTools(ctx, 0, executable, r.messages)
 	if err != nil {
 		return err
 	}
 	results = append(results, executed...)
-	parts = append(parts, executedParts...)
+	var approvedResults []ToolResult
+	for _, result := range executed {
+		approvedResults = append(approvedResults, ToolResult{ToolCallID: result.call.ToolCallID, ToolName: result.call.ToolName, Input: result.call.Input, Output: result.raw})
+	}
+	var deniedResults []deniedResult
 	for _, denial := range denied {
 		call := approvedCall(denial)
 		if call.ProviderExecuted {
 			continue
 		}
-		parts = append(parts, ModelCallStreamPart{Type: "tool-output-denied", ToolCallID: call.ToolCallID})
+		deniedResults = append(deniedResults, deniedResult{ToolCallID: call.ToolCallID})
 		if denial.ExistingToolResult != nil {
 			continue
 		}
@@ -903,17 +969,16 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 	}
 	r.messages = cleaned
 
-	parts = append(parts, ModelCallStreamPart{Type: "finish-step"}, ModelCallStreamPart{Type: "start-step"})
-	return r.write(ctx, parts...)
+	if r.options.Writer == nil || (len(results) == 0 && len(deniedResults) == 0) {
+		return nil
+	}
+	_, err = workflow.Step(ctx, writeApprovalToolResults, writeApprovalToolResultsInput{Writer: *r.options.Writer, ApprovedResults: approvedResults, DeniedResults: deniedResults})
+	return err
 }
 
 // validateApproval returns why an approved call must not execute, or "".
 func (r *run) validateApproval(request types.ToolApprovalRequestContent, call ToolCall) string {
-	tool, known := r.tools[call.ToolName]
-	if !known || tool.Execute == nil {
-		return fmt.Sprintf("Tool %q not found", call.ToolName)
-	}
-	if tool.NeedsApproval == nil {
+	if r.tools[call.ToolName].NeedsApproval == nil {
 		return fmt.Sprintf("Tool %q does not require approval", call.ToolName)
 	}
 	if r.agent.options.ToolApprovalSecret == nil {
@@ -933,28 +998,17 @@ func (r *run) validateApproval(request types.ToolApprovalRequestContent, call To
 	return ""
 }
 
-// write writes parts to the Writer's stream in a step.
-func (r *run) write(ctx context.Context, parts ...ModelCallStreamPart) error {
-	if r.options.Writer == nil || len(parts) == 0 {
-		return nil
-	}
-	_, err := workflow.Step(ctx, writePartsStep, writePartsInput{Writer: *r.options.Writer, Parts: parts})
-	return err
-}
-
-// closeWriter writes parts and a finish part to the Writer's stream, then
-// closes it, as SendFinish and PreventClose allow.
-func (r *run) closeWriter(ctx context.Context, parts ...ModelCallStreamPart) error {
+// closeWriter ends the Writer's stream with the closeStream step, as
+// SendFinish and PreventClose allow.
+func (r *run) closeWriter(ctx context.Context) error {
 	if r.options.Writer == nil {
 		return nil
 	}
-	if r.options.SendFinish == nil || *r.options.SendFinish {
-		parts = append(parts, ModelCallStreamPart{Type: "finish"})
+	sendFinish := r.options.SendFinish == nil || *r.options.SendFinish
+	if !sendFinish && r.options.PreventClose {
+		return nil
 	}
-	if r.options.PreventClose {
-		return r.write(ctx, parts...)
-	}
-	_, err := workflow.Step(ctx, writePartsStep, writePartsInput{Writer: *r.options.Writer, Parts: parts, Close: true})
+	_, err := workflow.Step(ctx, closeStream, closeStreamInput{Writer: *r.options.Writer, PreventClose: r.options.PreventClose, SendFinish: sendFinish})
 	return err
 }
 
@@ -975,26 +1029,6 @@ func (r *run) result(toolCalls []ToolCall, toolResults []ToolResult) Result {
 		result.TotalUsage = addUsage(result.TotalUsage, step.Usage)
 	}
 	return result
-}
-
-// writePartsStep writes parts to the stream input.Writer names, and closes
-// the stream when input.Close is set. Streams can only be written in step
-// context, so the agent runs it as a step.
-func writePartsStep(ctx context.Context, input writePartsInput) (struct{}, error) {
-	writer, err := workflow.Writer(ctx, input.Writer)
-	if err != nil {
-		return struct{}{}, err
-	}
-	defer writer.Close()
-	for _, part := range input.Parts {
-		if err := writePart(writer, part); err != nil {
-			return struct{}{}, err
-		}
-	}
-	if input.Close {
-		return struct{}{}, writer.CloseStream()
-	}
-	return struct{}{}, writer.Close()
 }
 
 // addApprovalRequests appends approval requests to the last assistant
@@ -1034,6 +1068,54 @@ func decodeInput(raw json.RawMessage) (any, error) {
 
 func errorResult(call ToolCall, message string) toolResult {
 	return toolResult{call: call, output: &ToolResultOutput{Type: "error-text", Value: marshalRaw(message)}, raw: marshalRaw(message), isError: true}
+}
+
+// providerResult is a result the provider reported in a model call's
+// content, with its position there.
+type providerResult struct {
+	ToolResult
+	order int
+}
+
+// providerToolResults returns the results of provider-executed tools in
+// content, by call ID.
+func providerToolResults(content []ContentPart) map[string]providerResult {
+	results := map[string]providerResult{}
+	for i, part := range content {
+		if part.Type != PartToolResult || !part.ProviderExecuted {
+			continue
+		}
+		result := ToolResult{ToolCallID: part.ToolCallID, ToolName: part.ToolName, Output: json.RawMessage("null")}
+		if part.Output != nil {
+			result.Output = rawOrNull(part.Output.Value)
+			result.IsError = strings.HasPrefix(part.Output.Type, "error")
+		}
+		results[part.ToolCallID] = providerResult{ToolResult: result, order: i}
+	}
+	return results
+}
+
+// orderedResults returns the local and provider results in the order of
+// calls, followed by the provider results for calls of earlier steps.
+func orderedResults(calls []ToolCall, local, provider []ToolResult) []ToolResult {
+	byID := map[string]ToolResult{}
+	for _, result := range slices.Concat(local, provider) {
+		byID[result.ToolCallID] = result
+	}
+	var out []ToolResult
+	inCalls := map[string]bool{}
+	for _, call := range calls {
+		inCalls[call.ToolCallID] = true
+		if result, ok := byID[call.ToolCallID]; ok {
+			out = append(out, result)
+		}
+	}
+	for _, result := range provider {
+		if !inCalls[result.ToolCallID] {
+			out = append(out, result)
+		}
+	}
+	return out
 }
 
 func executedResults(results []toolResult) []ToolResult {

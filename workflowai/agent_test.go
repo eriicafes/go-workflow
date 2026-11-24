@@ -2,6 +2,7 @@ package workflowai_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/eriicafes/go-workflow/worlds"
@@ -269,6 +270,51 @@ func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, 
 	return result, chunks, err
 }
 
+// stepNames returns the names of run runID's steps in the order the run
+// created them, without their package path.
+func stepNames(t *testing.T, world worlds.World, runID string) []string {
+	t.Helper()
+	var names []string
+	seen := map[string]bool{}
+	var cursor worlds.Pagination
+	for {
+		page, err := world.EventsList(t.Context(), worlds.EventsListInput{RunID: worlds.RunID(runID), Pagination: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range page.Data {
+			if event.EventType != worlds.EventTypeStepCreated && event.EventType != worlds.EventTypeStepStarted || seen[event.CorrelationID] {
+				continue
+			}
+			var data struct{ StepName string }
+			if err := json.Unmarshal(event.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			seen[event.CorrelationID] = true
+			names = append(names, data.StepName[strings.LastIndex(data.StepName, "//")+2:])
+		}
+		if !page.HasMore {
+			return names
+		}
+		cursor = worlds.Pagination{Cursor: page.Cursor}
+	}
+}
+
+// chatSteps runs one turn without reading its stream and returns its result
+// and the names of the steps it ran.
+func chatSteps(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []string, error) {
+	t.Helper()
+	world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
+	defer world.Close()
+	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, Chat{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := run.Value(ctx)
+	return result, stepNames(t, world, run.ID()), err
+}
+
 func chunkTypes(chunks []ai.UIMessageChunk) []string {
 	var out []string
 	for _, chunk := range chunks {
@@ -369,8 +415,10 @@ func TestStreamFailureEndsStream(t *testing.T) {
 		if len(testModel.calls) != 1 {
 			t.Fatalf("model called %d times", len(testModel.calls))
 		}
+		// The stream ends with a finish part and no error part, as in the
+		// Workflow SDK.
 		types := chunkTypes(chunks)
-		if !slices.Contains(types, "error") || types[len(types)-1] != "finish" {
+		if slices.Contains(types, "error") || types[len(types)-1] != "finish" {
 			t.Fatalf("chunks = %v", types)
 		}
 	})
@@ -433,13 +481,14 @@ func TestStreamRejectsNegativeToolCallConcurrency(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(text("unused"))
 		testOptions.ToolCallConcurrency = -1
-		_, chunks, err := chat(t, []workflowai.ModelMessage{user("hi")})
+		// The call fails before it starts, and like in the Workflow SDK it
+		// leaves the stream untouched.
+		_, steps, err := chatSteps(t, []workflowai.ModelMessage{user("hi")})
 		if err == nil {
 			t.Fatal("expected an error")
 		}
-		// The stream reports the error and closes, so readers do not wait.
-		if !slices.Contains(chunkTypes(chunks), "error") || len(testModel.calls) != 0 {
-			t.Fatalf("chunks = %v after %d model calls", chunkTypes(chunks), len(testModel.calls))
+		if len(steps) != 0 || len(testModel.calls) != 0 {
+			t.Fatalf("steps = %v after %d model calls", steps, len(testModel.calls))
 		}
 	})
 }
@@ -575,7 +624,7 @@ func TestStreamRejectsInvalidSystemMessages(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				setup(text("Hi!"))
 				tt.prepare()
-				_, _, err := chat(t, tt.messages)
+				_, _, err := chatSteps(t, tt.messages)
 				if (err != nil) != tt.wantErr {
 					t.Fatalf("err = %v, want error %v", err, tt.wantErr)
 				}
