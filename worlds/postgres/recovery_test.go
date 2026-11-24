@@ -111,6 +111,7 @@ func recoveryFlows(t *testing.T, world *World) map[worlds.RunID]worlds.QueueInpu
 // TestRecoverActiveRuns checks recovery queues one flow, keyed by its run,
 // for every active run but those parked on a hook or a wait, however many
 // times it runs.
+// SDK: packages/world/src/recovery.test.ts > reenqueueActiveRuns > marks each message as a recovery after the queue lost its messages, and only then
 func TestRecoverActiveRuns(t *testing.T) {
 	t.Parallel()
 	world := newTestWorld(t)

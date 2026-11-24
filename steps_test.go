@@ -572,6 +572,7 @@ func TestCancelledTimerSettlesThroughItsContext(t *testing.T) {
 	}
 }
 
+// SDK: packages/errors/src/fatal-error.test.ts > FatalError.is > returns true for direct FatalError instances
 func TestFatalAndRetryableStepErrorsControlRetries(t *testing.T) {
 	var fatalAttempts atomic.Int32
 	var retryAttempts atomic.Int32

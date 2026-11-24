@@ -9,6 +9,7 @@ import (
 	"github.com/eriicafes/go-workflow/worlds"
 )
 
+// SDK: packages/world/src/recovery.test.ts > reenqueueActiveRuns > marks each message as a recovery after the queue lost its messages, and only then
 func TestRecoveryReleasesOrphanedInlineSteps(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

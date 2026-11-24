@@ -33,6 +33,7 @@ func TestCheckAttributesMatchesTheSDKLimits(t *testing.T) {
 	}
 }
 
+// SDK: packages/world/src/spec-version.test.ts > requiresNewerWorld > rejects runs newer than the highest supported spec version
 func TestCheckRunSpecVersion(t *testing.T) {
 	if err := CheckRunSpecVersion("wrun_a", SpecVersion); err != nil {
 		t.Fatalf("current spec version: %v", err)
