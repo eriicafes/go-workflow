@@ -91,9 +91,10 @@ type modelCallResult struct {
 	RequestBody any `json:"requestBody,omitempty"`
 }
 
-// modelCall calls a language model in a step. Its methods are the step
-// functions, so a model call is identified by the method and the step ID it
-// draws.
+// modelCall holds what a model call step needs that its input cannot carry:
+// the model and the call's callbacks. The agent passes it to doStreamStep and
+// doGenerateStep through their context, since a step delivery decodes the
+// input from the event log and replay builds the modelCall again.
 type modelCall struct {
 	model      provider.LanguageModel
 	telemetry  *telemetry.Options
@@ -139,8 +140,8 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 	return options, nil
 }
 
-// stream streams one model call, writing its parts to the Writer as they
-// arrive.
+// doStreamStep streams one model call, writing its parts to the Writer as
+// they arrive.
 //
 // Retries only open the model stream again, and an error part in the stream
 // ends the turn instead of retrying it: the part is written
@@ -148,7 +149,11 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 // finish reason and usage. The step itself is not retried, but it runs again
 // when its delivery is interrupted, so it first writes a reset-step part that
 // makes a client discard the parts of an earlier execution.
-func (m modelCall) stream(ctx context.Context, input modelCallInput) (result modelCallResult, err error) {
+func doStreamStep(ctx context.Context, input modelCallInput) (result modelCallResult, err error) {
+	m, err := modelCallFrom(ctx)
+	if err != nil {
+		return modelCallResult{}, err
+	}
 	var writer io.Writer = io.Discard
 	if input.Writer != nil {
 		w, err := workflow.Writer(ctx, *input.Writer)
@@ -218,9 +223,13 @@ func (m modelCall) stream(ctx context.Context, input modelCallInput) (result mod
 	return acc.result, nil
 }
 
-// generate makes one model call without streaming, retrying it like stream
-// retries opening its stream.
-func (m modelCall) generate(ctx context.Context, input modelCallInput) (result modelCallResult, err error) {
+// doGenerateStep makes one model call without streaming, retrying it like
+// doStreamStep retries opening its stream.
+func doGenerateStep(ctx context.Context, input modelCallInput) (result modelCallResult, err error) {
+	m, err := modelCallFrom(ctx)
+	if err != nil {
+		return modelCallResult{}, err
+	}
 	options, err := m.options(ctx, input)
 	if err != nil {
 		return modelCallResult{}, err
@@ -799,4 +808,21 @@ func telemetryUsage(usage types.Usage) telemetry.TelemetryUsage {
 		out.ReasoningTokens = usage.OutputDetails.ReasoningTokens
 	}
 	return out
+}
+
+// modelCallKey is the context key of the modelCall a model call step uses.
+type modelCallKey struct{}
+
+// withModelCall returns ctx carrying m for the model call step it starts.
+func withModelCall(ctx context.Context, m modelCall) context.Context {
+	return context.WithValue(ctx, modelCallKey{}, m)
+}
+
+// modelCallFrom returns the modelCall ctx carries.
+func modelCallFrom(ctx context.Context) (modelCall, error) {
+	m, ok := ctx.Value(modelCallKey{}).(modelCall)
+	if !ok || m.model == nil {
+		return modelCall{}, errors.New("workflowai: model call step started without its model")
+	}
+	return m, nil
 }

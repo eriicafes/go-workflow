@@ -503,7 +503,7 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		}
 		// The root span is recorded in an inline step, and every step the
 		// call starts gets its trace context through ctx.
-		traceparent, err := workflow.InlineStep(ctx, traceStart{settings: r.telemetry, model: r.model}.run, traceStartInput{Operation: operation, Instructions: r.instructions})
+		traceparent, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), traceStartStep, traceStartInput{Operation: operation, Instructions: r.instructions})
 		if err != nil {
 			return ctx, err
 		}
@@ -586,14 +586,15 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			Include:          r.options.Include,
 			Writer:           r.options.Writer,
 		}
-		call := modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform}.generate
+		call := doGenerateStep
 		if r.streaming {
-			call = modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform}.stream
+			call = doStreamStep
 		}
+		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform})
 		// The model call retries opening the model itself, so the step is not
 		// retried: a retry would repeat a model call whose stream failed
 		// partway.
-		response, err := workflow.Step(r.modelCtx, call, input, workflow.StepOptions{MaxRetries: 0})
+		response, err := workflow.Step(callCtx, call, input, workflow.StepOptions{MaxRetries: 0})
 		if err != nil {
 			return r.result(nil, nil), err
 		}
