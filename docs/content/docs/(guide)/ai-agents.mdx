@@ -263,6 +263,26 @@ client shows it, the user answers with `addToolApprovalResponse`, and the next
 turn executes the approved calls or reports the denied ones to the model as
 `execution-denied`. The user can answer much later: no run waits in between.
 
+`ToolApproval` and `ToolApprovals` in `WorkflowAgentOptions` or
+`CallOptions` decide approvals in code, as the AI SDK's `toolApproval` does.
+`ToolApproval` decides every call, and `ToolApprovals` decides the calls of the
+tools it names, in place of their `NeedsApproval`. A call they approve runs
+without asking the user, a call they deny reaches the model as
+`execution-denied` and the client as `tool-output-denied`, and a call that
+needs the user's approval ends the turn as above. The policy also runs when an
+approved call resumes, so it can deny a call the user approved:
+
+```go
+ToolApprovals: map[string]workflowai.ToolApprovalFunc{
+	"bookFlight": func(ctx context.Context, call workflowai.ToolCall, options workflowai.ToolApprovalOptions) (workflowai.ToolApprovalStatus, error) {
+		if bookingsClosed() {
+			return workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalDenied, Reason: "bookings are closed"}, nil
+		}
+		return workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalUserApproval}, nil
+	},
+},
+```
+
 Set `WorkflowAgentOptions.ToolApprovalSecret` to sign approval requests with
 HMAC. It names the environment variable that holds the secret, so only the
 name enters the run's steps:

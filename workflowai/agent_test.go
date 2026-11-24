@@ -251,6 +251,14 @@ func user(content string) workflowai.ModelMessage {
 // chat runs one turn and returns its result and the UI chunks of its stream.
 func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []ai.UIMessageChunk, error) {
 	t.Helper()
+	result, chunks, _, err := chatWithSteps(t, messages)
+	return result, chunks, err
+}
+
+// chatWithSteps runs one turn and returns its result, the UI chunks of its
+// stream, and the names of the steps it ran.
+func chatWithSteps(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []ai.UIMessageChunk, []string, error) {
+	t.Helper()
 	world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
 	defer world.Close()
 	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -267,7 +275,7 @@ func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, 
 		chunks = append(chunks, chunk)
 	}
 	result, err := run.Value(ctx)
-	return result, chunks, err
+	return result, chunks, stepNames(t, world, run.ID()), err
 }
 
 // stepNames returns the names of run runID's steps in the order the run

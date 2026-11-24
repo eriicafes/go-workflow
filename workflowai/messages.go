@@ -64,10 +64,12 @@ type ContentPart struct {
 	ThoughtSignature string            `json:"thoughtSignature,omitempty"`
 
 	// ApprovalID identifies tool-approval-request and tool-approval-response
-	// parts. Approved and Reason are set on responses.
+	// parts. Approved and Reason are set on responses. Automatic marks the
+	// request of a call the approval policy decided without the user.
 	ApprovalID string `json:"approvalId,omitempty"`
 	Approved   bool   `json:"approved,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	Automatic  bool   `json:"isAutomatic,omitempty"`
 
 	ProviderOptions  map[string]any  `json:"providerOptions,omitempty"`
 	ProviderMetadata json.RawMessage `json:"providerMetadata,omitempty"`

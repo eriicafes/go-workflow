@@ -65,3 +65,72 @@ func (s ToolApprovalSecret) value() ([]byte, error) {
 	}
 	return []byte(secret), nil
 }
+
+// ToolApprovalFunc decides whether a tool call runs, is denied, or waits for
+// the user's approval. It runs in workflow context, like NeedsApproval, so it
+// must be deterministic.
+type ToolApprovalFunc func(ctx context.Context, call ToolCall, options ToolApprovalOptions) (ToolApprovalStatus, error)
+
+// ToolApprovalOptions describes the call a ToolApprovalFunc decides on.
+type ToolApprovalOptions struct {
+	// Messages is the conversation up to the step that made the call.
+	Messages []ModelMessage
+	// ToolContext is the tool's entry in ToolsContext.
+	ToolContext    any
+	ToolsContext   map[string]any
+	RuntimeContext any
+}
+
+// ToolApprovalStatus is a ToolApprovalFunc's decision. Reason explains a
+// denial to the model.
+type ToolApprovalStatus struct {
+	Type   ToolApprovalType
+	Reason string
+}
+
+// ToolApprovalType is the kind of a ToolApprovalStatus.
+type ToolApprovalType string
+
+const (
+	// ToolApprovalNotApplicable leaves the call to its tool's NeedsApproval.
+	// It is the zero value.
+	ToolApprovalNotApplicable ToolApprovalType = ""
+	// ToolApprovalApproved runs the call without asking the user.
+	ToolApprovalApproved ToolApprovalType = "approved"
+	// ToolApprovalDenied reports the call to the model as denied without
+	// running it.
+	ToolApprovalDenied ToolApprovalType = "denied"
+	// ToolApprovalUserApproval ends the turn with an approval request.
+	ToolApprovalUserApproval ToolApprovalType = "user-approval"
+)
+
+// resolveApproval returns the approval status of a call, as the Workflow SDK
+// resolves it: the agent's ToolApproval decides when it is set, otherwise the
+// tool's entry in ToolApprovals, otherwise the tool's NeedsApproval.
+func (r *run) resolveApproval(ctx context.Context, call ToolCall, messages []ModelMessage) (ToolApprovalStatus, error) {
+	options := ToolApprovalOptions{Messages: messages, ToolContext: r.toolsContext[call.ToolName], ToolsContext: r.toolsContext, RuntimeContext: r.runtimeContext}
+	if r.toolApproval != nil {
+		return r.toolApproval(ctx, call, options)
+	}
+	if decide := r.toolApprovals[call.ToolName]; decide != nil {
+		return decide(ctx, call, options)
+	}
+	tool := r.tools[call.ToolName]
+	if tool.NeedsApproval == nil {
+		return ToolApprovalStatus{}, nil
+	}
+	needsApproval, err := tool.NeedsApproval(ctx, call.Input, r.toolCallOptions(call, messages))
+	if err != nil || !needsApproval {
+		return ToolApprovalStatus{}, err
+	}
+	return ToolApprovalStatus{Type: ToolApprovalUserApproval}, nil
+}
+
+// automaticApproval returns the approval request and response parts that a
+// call the approval policy approved or denied adds to its step's content.
+func automaticApproval(call ToolCall, status ToolApprovalStatus) (request, response ContentPart) {
+	id := "approval-" + call.ToolCallID
+	request = ContentPart{Type: PartToolApprovalRequest, ApprovalID: id, ToolCallID: call.ToolCallID, Automatic: true}
+	response = ContentPart{Type: PartToolApprovalResponse, ApprovalID: id, ToolCallID: call.ToolCallID, Approved: status.Type == ToolApprovalApproved, Reason: status.Reason, ProviderExecuted: call.ProviderExecuted}
+	return request, response
+}

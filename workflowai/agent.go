@@ -84,6 +84,13 @@ type WorkflowAgentOptions struct {
 	// Use at least 32 random bytes, the same in every process that runs the
 	// workflow. Changing it invalidates pending approvals.
 	ToolApprovalSecret *ToolApprovalSecret
+	// ToolApproval decides the approval of every tool call, in place of
+	// ToolApprovals and the tools' NeedsApproval. ToolApprovals decides the
+	// approval of the calls of the tools it names, in place of their
+	// NeedsApproval. A call they approve runs without asking the user, and a
+	// call they deny is reported to the model as denied.
+	ToolApproval  ToolApprovalFunc
+	ToolApprovals map[string]ToolApprovalFunc
 	// PrepareCall changes the settings of each Stream and Generate call
 	// before the loop starts.
 	PrepareCall PrepareCallFunc
@@ -114,6 +121,9 @@ type CallOptions struct {
 	Telemetry           *telemetry.Options
 	StopWhen            []StopCondition
 	ToolApprovalSecret  *ToolApprovalSecret
+	// ToolApproval and ToolApprovals replace the agent's when either is set.
+	ToolApproval  ToolApprovalFunc
+	ToolApprovals map[string]ToolApprovalFunc
 	// RuntimeContext and ToolsContext replace the agent's.
 	RuntimeContext any
 	ToolsContext   map[string]any
@@ -351,6 +361,10 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	if r.runtimeContext == nil {
 		r.runtimeContext = a.options.RuntimeContext
 	}
+	r.toolApproval, r.toolApprovals = options.ToolApproval, options.ToolApprovals
+	if r.toolApproval == nil && r.toolApprovals == nil {
+		r.toolApproval, r.toolApprovals = a.options.ToolApproval, a.options.ToolApprovals
+	}
 	if r.toolsContext == nil {
 		r.toolsContext = a.options.ToolsContext
 	}
@@ -425,6 +439,8 @@ type run struct {
 	download       ai.DownloadFunction
 	telemetry      *telemetry.Options
 	approvalSecret *ToolApprovalSecret
+	toolApproval   ToolApprovalFunc
+	toolApprovals  map[string]ToolApprovalFunc
 	// stopTimeout disarms the Timeout once the call ends.
 	stopTimeout    func() error
 	tools          ToolSet
@@ -664,6 +680,8 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		// Split the local calls into those to execute now and those that pause
 		// the loop: client tools and calls that need approval.
 		var executable, paused, approvalCalls []ToolCall
+		var denied []toolResult
+		var automaticRequests, automaticResponses []ContentPart
 		hasLocalCalls := false
 		for _, call := range calls {
 			if call.ProviderExecuted {
@@ -675,15 +693,19 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				executable = append(executable, call)
 				continue
 			}
-			needsApproval := false
-			if tool.NeedsApproval != nil {
-				needsApproval, err = tool.NeedsApproval(ctx, call.Input, r.toolCallOptions(call, history))
-				if err != nil {
-					return r.result(nil, nil), err
-				}
+			status, err := r.resolveApproval(ctx, call, history)
+			if err != nil {
+				return r.result(nil, nil), err
+			}
+			if status.Type == ToolApprovalApproved || status.Type == ToolApprovalDenied {
+				request, response := automaticApproval(call, status)
+				automaticRequests = append(automaticRequests, request)
+				automaticResponses = append(automaticResponses, response)
 			}
 			switch {
-			case needsApproval:
+			case status.Type == ToolApprovalDenied:
+				denied = append(denied, toolResult{call: call, output: &ToolResultOutput{Type: "execution-denied", Reason: status.Reason}})
+			case status.Type == ToolApprovalUserApproval:
 				approvalCalls = append(approvalCalls, call)
 				paused = append(paused, call)
 			case tool.Execute == nil:
@@ -692,13 +714,11 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				executable = append(executable, call)
 			}
 		}
+		step.Content = slices.Concat(step.Content, automaticRequests, automaticResponses)
 
 		results, err := r.executeTools(ctx, stepNumber, executable, history, nil)
 		if err != nil {
 			return r.result(nil, nil), err
-		}
-		if len(results) > 0 {
-			added = append(added, toolMessage(results))
 		}
 
 		// A provider approval request also pauses the loop, since the
@@ -709,7 +729,14 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				providerApprovals[part.ToolCallID] = true
 			}
 		}
+		var deniedResults []deniedResult
+		for _, result := range denied {
+			deniedResults = append(deniedResults, deniedResult{ToolCallID: result.call.ToolCallID})
+		}
 		if len(paused) > 0 || len(providerApprovals) > 0 {
+			if resolved := slices.Concat(results, denied); len(resolved) > 0 {
+				added = append(added, toolMessage(resolved))
+			}
 			// Calls that wait for the provider's approval have no result yet.
 			provider := r.providerResults(calls, providerResults, providerApprovals)
 			step.ToolResults = slices.Concat(executedResults(results), provider)
@@ -725,6 +752,11 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			if r.options.Writer != nil {
 				if len(step.ToolResults) > 0 {
 					if _, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults}); err != nil {
+						return r.result(nil, nil), err
+					}
+				}
+				if len(deniedResults) > 0 {
+					if _, err := workflow.Step(ctx, writeToolOutputDenied, writeToolOutputDeniedInput{Writer: *r.options.Writer, DeniedResults: deniedResults}); err != nil {
 						return r.result(nil, nil), err
 					}
 				}
@@ -745,10 +777,18 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		// calls of earlier steps come last.
 		provider := r.providerResults(calls, providerResults, nil)
 		step.ToolResults = orderedResults(calls, executedResults(results), provider)
+		if resolved := inCallOrder(calls, slices.Concat(results, denied)); len(resolved) > 0 {
+			added = append(added, toolMessage(resolved))
+		}
 		step.Response.Messages = added
 		r.messages = append(r.messages, added...)
 		r.steps = append(r.steps, step)
 		if r.options.Writer != nil {
+			if len(deniedResults) > 0 {
+				if _, err := workflow.Step(ctx, writeToolOutputDenied, writeToolOutputDeniedInput{Writer: *r.options.Writer, DeniedResults: deniedResults}); err != nil {
+					return r.result(nil, nil), err
+				}
+			}
 			_, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults, WriteStepBoundary: true})
 			if err != nil {
 				return r.result(nil, nil), err
@@ -1016,8 +1056,11 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 // checks, and the input must still match the tool's schema. It returns the
 // result of start when the call passes, and an approvalRejection otherwise.
 func (r *run) checkApproval(ctx context.Context, call ToolCall, approval ai.CollectedToolApproval, start func() *workflow.Result[any]) *workflow.Result[any] {
-	tool := r.tools[call.ToolName]
-	if tool.NeedsApproval == nil {
+	status, err := r.resolveApproval(ctx, call, r.messages)
+	if err != nil {
+		return rejectApproval(err.Error())
+	}
+	if r.tools[call.ToolName].NeedsApproval == nil && status.Type == ToolApprovalNotApplicable {
 		return rejectApproval(fmt.Sprintf("Tool %q does not require approval", call.ToolName))
 	}
 	execute := func() *workflow.Result[any] {
@@ -1074,6 +1117,14 @@ func (r *run) revalidateApproval(ctx context.Context, call ToolCall, approval ai
 		return validated.InvalidToolApprovals[0].Error.Error()
 	case len(validated.DeniedToolApprovals) > 0:
 		return cmp.Or(validated.DeniedToolApprovals[0].ApprovalResponse.Reason, "Tool approval denied")
+	}
+	// The approval policy may deny a call the user approved.
+	status, err := r.resolveApproval(ctx, call, r.messages)
+	if err != nil {
+		return err.Error()
+	}
+	if status.Type == ToolApprovalDenied {
+		return cmp.Or(status.Reason, "Tool approval denied")
 	}
 	return ""
 }
@@ -1193,6 +1244,19 @@ func orderedResults(calls []ToolCall, local, provider []ToolResult) []ToolResult
 	for _, result := range provider {
 		if !inCalls[result.ToolCallID] {
 			out = append(out, result)
+		}
+	}
+	return out
+}
+
+// inCallOrder returns results in the order of their calls.
+func inCallOrder(calls []ToolCall, results []toolResult) []toolResult {
+	out := make([]toolResult, 0, len(results))
+	for _, call := range calls {
+		for _, result := range results {
+			if result.call.ToolCallID == call.ToolCallID {
+				out = append(out, result)
+			}
 		}
 	}
 	return out
