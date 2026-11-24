@@ -14,9 +14,8 @@ import (
 	"time"
 )
 
-// MaxRemoteRedelivery is the longest redelivery delay a RemoteExecutor asks
-// for. A Workflow SDK app that asks for a longer delay gets this one, the
-// longest delay Vercel Queues supports.
+// MaxRemoteRedelivery caps the redelivery delay a Workflow SDK app asks for
+// with timeoutSeconds. A longer delay, including Infinity, is shortened to it.
 const MaxRemoteRedelivery = 15 * time.Minute
 
 // sdkWorkflowQueuePrefix is the Workflow SDK's queue name prefix for a

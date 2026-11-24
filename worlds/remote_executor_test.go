@@ -95,13 +95,13 @@ func TestRemoteExecutorBuildsAMessageForAGoDelivery(t *testing.T) {
 
 func TestRemoteExecutorSendsItsHeader(t *testing.T) {
 	server, requests := remoteApp(t, http.StatusOK, `{"ok":true}`)
-	header := http.Header{"x-vercel-protection-bypass": {"bypass"}, "X-Vqs-Message-Id": {"overridden"}}
+	header := http.Header{"x-proxy-key": {"key"}, "X-Vqs-Message-Id": {"overridden"}}
 	if err := (worlds.RemoteExecutor{URL: server.URL, Header: header}).Execute(context.Background(), nil, worlds.QueueInput{RunID: "wrun_1", MessageID: "msg_1"}); err != nil {
 		t.Fatal(err)
 	}
 	got := (*requests)[0].header
-	if got.Get("x-vercel-protection-bypass") != "bypass" {
-		t.Fatalf("x-vercel-protection-bypass = %q, want bypass", got.Get("x-vercel-protection-bypass"))
+	if got.Get("x-proxy-key") != "key" {
+		t.Fatalf("x-proxy-key = %q, want key", got.Get("x-proxy-key"))
 	}
 	if got.Get("x-vqs-message-id") != "msg_1" {
 		t.Fatalf("x-vqs-message-id = %q, want the delivery's own", got.Get("x-vqs-message-id"))
