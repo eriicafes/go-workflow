@@ -15,7 +15,10 @@ import (
 )
 
 type attributesInput struct{}
-type attributesOutput struct{ Reserved bool }
+type attributesOutput struct {
+	Reserved bool
+	Nil      bool
+}
 
 func (attributesInput) Workflow(attributesOutput) {}
 
@@ -37,7 +40,11 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 			return attributesOutput{}, err
 		}
 		err := workflow.SetAttributes(ctx, map[string]*string{"$internal": ptrTo("x")})
-		return attributesOutput{Reserved: errors.Is(err, worlds.ErrAttributeInvalid)}, nil
+		nilErr := workflow.SetAttributes(ctx, nil)
+		return attributesOutput{
+			Reserved: errors.Is(err, worlds.ErrAttributeInvalid) && strings.Contains(err.Error(), "allowReservedAttributes"),
+			Nil:      errors.As(nilErr, new(worlds.FatalError)) && nilErr.Error() == "SetAttributes requires a mapping, got nil",
+		}, nil
 	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
@@ -52,6 +59,9 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 	}
 	if !output.Reserved {
 		t.Fatal("a reserved key without AllowReservedAttributes was accepted")
+	}
+	if !output.Nil {
+		t.Fatal("a nil attribute map did not return a FatalError")
 	}
 	stored, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {

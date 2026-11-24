@@ -67,8 +67,8 @@ type setAttributesValidationWorkflow struct {
 	workflow.Struct[map[string]string]
 }
 
-// A Go attribute map cannot be a non-object, so the nonObject case has no
-// counterpart.
+// A Go attribute map cannot be a non-object, so the nonObject case passes a
+// nil map, which SetAttributes rejects as JavaScript's rejects null.
 func setAttributesValidationRun(ctx context.Context, _ setAttributesValidationWorkflow) (map[string]string, error) {
 	outcomes := map[string]string{}
 	overCap := map[string]*string{}
@@ -85,6 +85,7 @@ func setAttributesValidationRun(ctx context.Context, _ setAttributesValidationWo
 		{"valueTooLong", attributes("note", strings.Repeat("v", 257))},
 		{"valueTooManyBytes", attributes("note", strings.Repeat("é", 200))},
 		{"overCap", overCap},
+		{"nonObject", nil},
 	}
 	for _, c := range cases {
 		err := workflow.SetAttributes(ctx, c.attrs)

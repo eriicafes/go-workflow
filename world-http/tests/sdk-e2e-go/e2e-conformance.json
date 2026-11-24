@@ -101,7 +101,6 @@
     "health check endpoint (HTTP) - workflow endpoint responds to __health query parameter": "A Go app has no flow route: its World runs its workflows in process.",
     "health check (queue-based) - workflow endpoint responds to health check messages": "Go Worlds acknowledge a health check message without writing its response stream.",
     "health check (CLI) - workflow health command reports healthy endpoints": "Go Worlds acknowledge a health check message without writing its response stream.",
-    "workflowAndStepMetadataWorkflow": "Go's WorkflowMetadata has no url or features, and its StepMetadata has no maxAttempts.",
-    "validation DX: invalid writes throw catchable FatalErrors naming rule and limit": "worlds.CheckAttributes words its errors in its own terms (no allowReservedAttributes hint, no \"exceeds limit\" phrasing), and a Go attribute map cannot be the non-object the test passes."
+    "workflowAndStepMetadataWorkflow": "Go's WorkflowMetadata has no url or features, and its StepMetadata has no maxAttempts."
   }
 }

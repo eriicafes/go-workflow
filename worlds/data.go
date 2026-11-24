@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -633,27 +634,20 @@ const (
 	ReservedAttributePrefix = "$"
 )
 
-// CheckAttributes returns ErrAttributeInvalid unless attributes are within
-// the limits: at most MaxAttributesPerRun, with non-empty keys of at most
-// MaxAttributeKeyLength and values of at most MaxAttributeValueBytes. Keys
-// starting with ReservedAttributePrefix are refused unless allowReserved.
+// CheckAttributes returns an error matching ErrAttributeInvalid unless
+// attributes are within the limits: at most MaxAttributesPerRun, with
+// non-empty keys of at most MaxAttributeKeyLength and values of at most
+// MaxAttributeValueBytes. Keys starting with ReservedAttributePrefix are
+// refused unless allowReserved. Errors carry the SDK's messages, checked in
+// key order.
 func CheckAttributes(attributes map[string]string, allowReserved bool) error {
-	if len(attributes) > MaxAttributesPerRun {
-		return fmt.Errorf("%w: %d attributes, over the limit of %d", ErrAttributeInvalid, len(attributes), MaxAttributesPerRun)
+	keys := slices.Sorted(maps.Keys(attributes))
+	changes := make([]RunsAttributeChange, len(keys))
+	for index, key := range keys {
+		value := attributes[key]
+		changes[index] = RunsAttributeChange{Key: key, Value: &value}
 	}
-	for key, value := range attributes {
-		switch {
-		case key == "":
-			return fmt.Errorf("%w: empty key", ErrAttributeInvalid)
-		case len(utf16.Encode([]rune(key))) > MaxAttributeKeyLength:
-			return fmt.Errorf("%w: key %.32q is longer than %d", ErrAttributeInvalid, key, MaxAttributeKeyLength)
-		case !allowReserved && strings.HasPrefix(key, ReservedAttributePrefix):
-			return fmt.Errorf("%w: key %q starts with the reserved prefix %q", ErrAttributeInvalid, key, ReservedAttributePrefix)
-		case len(value) > MaxAttributeValueBytes:
-			return fmt.Errorf("%w: value of %q is %d bytes, over the limit of %d", ErrAttributeInvalid, key, len(value), MaxAttributeValueBytes)
-		}
-	}
-	return nil
+	return CheckAttributeChanges(nil, changes, allowReserved)
 }
 
 // AttributeWriter names what set run attributes: the workflow, or one
@@ -767,23 +761,24 @@ func CheckRunCreation(input EventsCreateRunInput, now time.Time) error {
 	return CheckAttributes(input.Attributes, input.AllowReservedAttributes)
 }
 
-// CheckAttributeChanges returns ErrAttributeInvalid unless an attr_set's
-// changes may apply to a run's attributes: each key within the limits of
-// CheckAttributes and set once, each value within MaxAttributeValueBytes,
-// and at most MaxAttributesPerRun attributes after the changes.
+// CheckAttributeChanges returns an error matching ErrAttributeInvalid
+// unless an attr_set's changes may apply to a run's attributes: each key and
+// value within the limits of CheckAttributes, each key changed once, and at
+// most MaxAttributesPerRun attributes after the changes.
 func CheckAttributeChanges(attributes map[string]string, changes []RunsAttributeChange, allowReserved bool) error {
+	for _, change := range changes {
+		if err := checkAttributeKey(change.Key, allowReserved); err != nil {
+			return err
+		}
+		if change.Value != nil && len(*change.Value) > MaxAttributeValueBytes {
+			return attributeError(fmt.Sprintf("Attribute value byte length %d exceeds limit %d", len(*change.Value), MaxAttributeValueBytes))
+		}
+	}
 	seen := make(map[string]bool, len(changes))
 	count := len(attributes)
 	for _, change := range changes {
-		value := ""
-		if change.Value != nil {
-			value = *change.Value
-		}
-		if err := CheckAttributes(map[string]string{change.Key: value}, allowReserved); err != nil {
-			return err
-		}
 		if seen[change.Key] {
-			return fmt.Errorf("%w: key %q is changed more than once", ErrAttributeInvalid, change.Key)
+			return attributeError(fmt.Sprintf("Attribute key %s appears more than once in the same batch", jsonString(change.Key)))
 		}
 		seen[change.Key] = true
 		_, exists := attributes[change.Key]
@@ -795,7 +790,7 @@ func CheckAttributeChanges(attributes map[string]string, changes []RunsAttribute
 		}
 	}
 	if count > MaxAttributesPerRun {
-		return fmt.Errorf("%w: %d attributes after the changes, over the limit of %d", ErrAttributeInvalid, count, MaxAttributesPerRun)
+		return attributeError(fmt.Sprintf("Run attribute count would exceed limit %d (post-merge %d)", MaxAttributesPerRun, count))
 	}
 	return nil
 }
@@ -827,7 +822,7 @@ func AttrSetDataSize(data []byte) int {
 // (CheckAttributeChanges).
 func CheckAttrSet(attributes map[string]string, data []byte) error {
 	if size := AttrSetDataSize(data); size > MaxAttrSetDataBytes {
-		return fmt.Errorf("%w: attr_set data is %d bytes, over the limit of %d", ErrAttributeInvalid, size, MaxAttrSetDataBytes)
+		return attributeError(fmt.Sprintf("Attribute eventData exceeds limit %d UTF-8 JSON bytes (received %d bytes). Split the changes into smaller setAttributes() calls.", MaxAttrSetDataBytes, size))
 	}
 	var set DataAttrSet
 	if err := json.Unmarshal(data, &set); err != nil {
@@ -908,4 +903,38 @@ func CheckRunSpecVersion(runID RunID, version int) error {
 		return &RunNotSupportedError{RunSpecVersion: version, WorldSpecVersion: SpecVersion}
 	}
 	return nil
+}
+
+// attributeError is a run attribute outside the limits, with the SDK's
+// message. It matches ErrAttributeInvalid.
+type attributeError string
+
+func (e attributeError) Error() string { return string(e) }
+
+func (e attributeError) Is(target error) bool { return target == ErrAttributeInvalid }
+
+// checkAttributeKey returns an attributeError unless key is a valid
+// attribute key.
+func checkAttributeKey(key string, allowReserved bool) error {
+	units := utf16.Encode([]rune(key))
+	switch {
+	case key == "":
+		return attributeError("Attribute key must not be empty")
+	case len(units) > MaxAttributeKeyLength:
+		prefix := string(utf16.Decode(units[:32]))
+		return attributeError(fmt.Sprintf("Attribute key length %d exceeds limit %d: %s\u2026", len(units), MaxAttributeKeyLength, jsonString(prefix)))
+	case !allowReserved && strings.HasPrefix(key, ReservedAttributePrefix):
+		return attributeError(fmt.Sprintf("Attribute key %s starts with reserved prefix %q \u2014 that namespace is reserved for framework/library code. Set { allowReservedAttributes: true } only if your caller is framework-level.", jsonString(key), ReservedAttributePrefix))
+	}
+	return nil
+}
+
+// jsonString returns s as a JSON string that writes <, > and & as
+// themselves, as JavaScript's JSON.stringify does.
+func jsonString(s string) string {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(s)
+	return strings.TrimSuffix(buffer.String(), "\n")
 }
