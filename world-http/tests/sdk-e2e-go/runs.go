@@ -240,6 +240,55 @@ func fibonacci(ctx context.Context, n int) (int, error) {
 	return sum, nil
 }
 
+type workflowMetadata struct {
+	WorkflowName      string `json:"workflowName"`
+	WorkflowRunID     string `json:"workflowRunId"`
+	WorkflowStartedAt string `json:"workflowStartedAt"`
+}
+
+type stepMetadata struct {
+	StepName      string `json:"stepName"`
+	StepID        string `json:"stepId"`
+	StepStartedAt string `json:"stepStartedAt"`
+	Attempt       int    `json:"attempt"`
+}
+
+type metadataPair struct {
+	StepMetadata     stepMetadata     `json:"stepMetadata"`
+	WorkflowMetadata workflowMetadata `json:"workflowMetadata"`
+}
+
+type bothMetadata struct {
+	WorkflowMetadata      workflowMetadata `json:"workflowMetadata"`
+	StepMetadata          stepMetadata     `json:"stepMetadata"`
+	InnerWorkflowMetadata workflowMetadata `json:"innerWorkflowMetadata"`
+}
+
+// workflowAndStepMetadataWorkflow reports the metadata Go has: no url or
+// features for the run, and no maxAttempts for the step.
+type workflowAndStepMetadataWorkflow struct{ workflow.Struct[bothMetadata] }
+
+func workflowAndStepMetadataRun(ctx context.Context, _ workflowAndStepMetadataWorkflow) (bothMetadata, error) {
+	outer := toWorkflowMetadata(workflow.GetWorkflowMetadata(ctx))
+	inner, err := workflow.Step(ctx, stepWithMetadata, struct{}{})
+	if err != nil {
+		return bothMetadata{}, err
+	}
+	return bothMetadata{WorkflowMetadata: outer, StepMetadata: inner.StepMetadata, InnerWorkflowMetadata: inner.WorkflowMetadata}, nil
+}
+
+func stepWithMetadata(ctx context.Context, _ struct{}) (metadataPair, error) {
+	step := workflow.GetStepMetadata(ctx)
+	return metadataPair{
+		StepMetadata:     stepMetadata{StepName: step.Name, StepID: step.ID, StepStartedAt: step.StartedAt.UTC().Format(time.RFC3339Nano), Attempt: step.Attempt},
+		WorkflowMetadata: toWorkflowMetadata(workflow.GetWorkflowMetadata(ctx)),
+	}, nil
+}
+
+func toWorkflowMetadata(metadata workflow.WorkflowMetadata) workflowMetadata {
+	return workflowMetadata{WorkflowName: metadata.Name, WorkflowRunID: metadata.RunID, WorkflowStartedAt: metadata.StartedAt.UTC().Format(time.RFC3339Nano)}
+}
+
 type fatalRoundTrip struct {
 	Caught           bool   `json:"caught"`
 	IsFatal          bool   `json:"isFatal"`

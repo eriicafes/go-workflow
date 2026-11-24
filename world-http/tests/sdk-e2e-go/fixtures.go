@@ -97,6 +97,14 @@ var fixtures = []worlds.Runner{
 	workflow.Use(hookForceClaimOwnHookRun),
 	workflow.Use(hookForceClaimTolerantClaimerRun),
 	workflow.Use(distributedAbortControllerRun),
+	workflow.Use(fetchRun),
+	workflow.Use(serializationErrorStepArgsCaughtRun),
+	workflow.Use(serializationErrorStepArgsUncaughtRun),
+	workflow.Use(serializationErrorStepReturnCaughtRun),
+	workflow.Use(serializationErrorStepReturnUncaughtRun),
+	workflow.Use(workflowAndStepMetadataRun),
+	workflow.Use(setAttributesValidationRun),
+	workflow.Use(setAttributesParallelRun),
 }
 
 type addTenWorkflow struct {

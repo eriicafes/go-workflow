@@ -35,6 +35,7 @@
     "errorRetrySuccess",
     "errorStepThrowFatalRoundTrip",
     "errorWorkflowThrowFatalRoundTrip",
+    "fetchWorkflow",
     "fibonacciWorkflow",
     "hookAdoptOwnerResultWorkflow",
     "hookClaimOnlyMutexWorkflow",
@@ -74,8 +75,14 @@
     "promiseRaceStressTestWorkflow",
     "promiseRaceWorkflow",
     "retainedInterleavingWorkflow",
+    "serializationErrorStepArgsCaught",
+    "serializationErrorStepArgsUncaught",
+    "serializationErrorStepReturnCaught",
+    "serializationErrorStepReturnUncaught",
     "setAttributesInsideStepWorkflow",
+    "setAttributesParallelWorkflow",
     "setAttributesThrowsAfterWorkflow",
+    "setAttributesValidationWorkflow",
     "setAttributesWorkflow",
     "sleepInLoopWorkflow",
     "sleepWinsRaceWorkflow",
@@ -86,12 +93,19 @@
     "stepWinsRaceWorkflow",
     "utf8StreamWorkflow",
     "webhookWorkflow",
+    "workflowAndStepMetadataWorkflow",
     "writableForwardedFromStepWorkflow",
     "writableForwardedFromWorkflowWorkflow"
   ],
   "unsupported": {
     "health check endpoint (HTTP) - workflow endpoint responds to __health query parameter": "A Go app has no flow route: its World runs its workflows in process.",
     "health check (queue-based) - workflow endpoint responds to health check messages": "Go Worlds acknowledge a health check message without writing its response stream.",
-    "health check (CLI) - workflow health command reports healthy endpoints": "Go Worlds acknowledge a health check message without writing its response stream."
+    "health check (CLI) - workflow health command reports healthy endpoints": "Go Worlds acknowledge a health check message without writing its response stream.",
+    "workflowAndStepMetadataWorkflow": "Go's WorkflowMetadata has no url or features, and its StepMetadata has no maxAttempts.",
+    "step-argument serialization failure is catchable in workflow code": "A Go step input that cannot be encoded fails the step with a plain Error, \"workflow: encode step input: ...\", not a SerializationError naming the step arguments.",
+    "uncaught step-argument serialization failure fails the run as USER_ERROR without redelivery retries": "A Go step input that cannot be encoded fails the run with \"workflow: encode step input: ...\", not the SDK's \"Failed to serialize step arguments\" message.",
+    "step-return-value serialization failure is catchable in workflow code": "A Go step output that cannot be encoded fails the step with a plain Error, \"workflow: encode step output: ...\", not a SerializationError naming the return value.",
+    "uncaught step-return-value serialization failure fails the run as USER_ERROR": "A Go step output that cannot be encoded fails the run with \"workflow: encode step output: ...\", not the SDK's \"Failed to serialize step return value\" message.",
+    "validation DX: invalid writes throw catchable FatalErrors naming rule and limit": "worlds.CheckAttributes words its errors in its own terms (no allowReservedAttributes hint, no \"exceeds limit\" phrasing), and a Go attribute map cannot be the non-object the test passes."
   }
 }
