@@ -473,8 +473,10 @@ when the World redelivers it. It first writes a `reset-step` part, so clients
 discard the text of the interrupted execution. A tool step behaves like any
 [step](/docs/steps): it runs at least once and its result is recorded.
 
-When a run fails outright, `Stream` writes an `error` part and closes the
-stream, so the client does not wait for parts that never come.
+When a run fails outright, `Stream` ends the stream with a `finish` part, as
+`@ai-sdk/workflow` does, so the client does not wait for parts that never
+come, and returns the error. A call that cannot start, such as one with
+invalid options, returns its error without writing to the stream.
 
 `Timeout` in `WorkflowAgentOptions` or `CallOptions` limits how long a call's
 model calls run. It is a durable timeout, counted from the start of the call
@@ -546,10 +548,12 @@ support, inside the model call's step. Without one, URLs are sent as they are.
 - `OnStart`, `OnStepStart`, `OnToolExecutionStart`, `OnToolExecutionEnd`,
   `OnStepEnd`, `OnEnd`, `OnError`, and `OnAbort` are called as the agent
   runs. Set them on `WorkflowAgentOptions` or `CallOptions`; both are called,
-  the agent's first.
+  the agent's first. `OnStart` is called after the call resumes the approvals
+  in its messages, and a turn that ends to wait for the user calls `OnEnd`
+  before it writes its tool results and approval requests.
 
 <Callout type="warn" title="Callbacks replay">
-`PrepareCall`, `PrepareStep`, `NeedsApproval`, `Execute`, and callbacks run
+`PrepareCall`, `PrepareStep`, `NeedsApproval`, `ToolApproval`, `Execute`, and callbacks run
 in workflow context, so they run again on every replay and must be
 deterministic. They get the workflow `ctx`, so they can call `workflow.Step`
 or `workflow.InlineStep` themselves to record side effects and external

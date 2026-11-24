@@ -677,3 +677,51 @@ func GenerateRunner(ctx context.Context, input Generate) (workflowai.Result, err
 	callOptions.Prompt = input.Prompt
 	return workflowai.NewWorkflowAgent(options).Generate(ctx, callOptions)
 }
+
+// Generate stops at its default step limit and logs a warning in a step, so
+// replays do not log it again.
+func TestGenerateDefaultStepLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		responses := make([]func() ([]provider.StreamChunk, error), 21)
+		for i := range responses {
+			responses[i] = toolCalls(call(fmt.Sprintf("c%d", i), "getWeather", `{"city":"Lagos"}`))
+		}
+		setup(responses...)
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
+		defer world.Close()
+		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
+		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := run.Value(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps := stepNames(t, world, run.ID())
+		if len(result.Steps) != 20 || len(steps) != 41 || steps[len(steps)-1] != "logDefaultStepLimitWarning" {
+			t.Fatalf("%d agent steps, steps = %v", len(result.Steps), steps)
+		}
+	})
+}
+
+// A call resumes the approvals in its messages before OnStart, as the
+// Workflow SDK does, so OnStart sees the conversation with their results.
+func TestStreamResumesApprovalsBeforeStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked."))
+		approvalTurn(t)
+		var started []workflowai.ModelMessage
+		testOptions.Callbacks.OnStart = func(_ context.Context, event workflowai.StartEvent) { started = event.Messages }
+		_, _, steps, err := chatWithSteps(t, respond(t, "", true, `{"flightId":"LH123"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"bookFlight", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"}; !slices.Equal(steps, want) {
+			t.Fatalf("steps = %v, want %v", steps, want)
+		}
+		if len(started) == 0 || started[len(started)-1].Role != workflowai.RoleTool {
+			t.Fatalf("OnStart messages = %+v", started)
+		}
+	})
+}

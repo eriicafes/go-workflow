@@ -3,6 +3,7 @@ package workflowai
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	"github.com/eriicafes/go-workflow"
 )
@@ -134,6 +135,25 @@ func closeStream(ctx context.Context, input closeStreamInput) (struct{}, error) 
 		return struct{}{}, writer.CloseStream()
 	}
 	return struct{}{}, writer.Close()
+}
+
+// defaultStepLimit is the number of steps Generate stops after unless
+// StopWhen is set.
+const defaultStepLimit = 20
+
+// defaultStepLimitWarning is the input of logDefaultStepLimitWarning.
+type defaultStepLimitWarning struct {
+	StepCount int    `json:"stepCount"`
+	Provider  string `json:"provider"`
+	ModelID   string `json:"modelId"`
+}
+
+// logDefaultStepLimitWarning logs that Generate stopped at its default step
+// limit. It runs as a step so replays do not log the warning again.
+func logDefaultStepLimitWarning(ctx context.Context, input defaultStepLimitWarning) (struct{}, error) {
+	log.Printf("workflowai: warning (%s / %s): The tool loop stopped because it reached the default StopWhen condition, IsStepCount(%d). "+
+		"To allow more steps, set StopWhen to IsStepCount(...) with a higher limit or provide a custom stop condition.", input.Provider, input.ModelID, input.StepCount)
+	return struct{}{}, nil
 }
 
 // approvalRequest is an approval request a paused turn writes.

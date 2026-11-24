@@ -381,7 +381,8 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		r.download = a.options.Download
 	}
 	if r.stopWhen == nil && !streaming {
-		r.stopWhen = []StopCondition{IsStepCount(20)}
+		r.defaultLimit = true
+		r.stopWhen = []StopCondition{IsStepCount(defaultStepLimit)}
 	}
 	if options.Prompt != "" {
 		r.messages = []ModelMessage{{Role: RoleUser, Content: []ContentPart{{Type: PartText, Text: options.Prompt}}}}
@@ -393,8 +394,23 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		return Result{}, err
 	}
 
-	r.callbacks.OnStart(ctx, StartEvent{Messages: r.messages})
-	result, err := r.loop(ctx)
+	// Like the Workflow SDK, the call resumes the approvals in its messages,
+	// then starts, then records its root span.
+	result := r.result(nil, nil)
+	err = r.resumeApprovals(ctx)
+	if err == nil {
+		r.callbacks.OnStart(ctx, StartEvent{Messages: r.messages})
+		ctx, err = r.startTrace(ctx)
+	}
+	if err == nil {
+		result, err = r.loop(ctx)
+	}
+	if r.defaultLimitStopped && len(r.steps) > 0 {
+		last := r.stepModel
+		if _, logErr := workflow.Step(ctx, logDefaultStepLimitWarning, defaultStepLimitWarning{StepCount: defaultStepLimit, Provider: last.Provider(), ModelID: last.ModelID()}); logErr != nil {
+			err = errors.Join(err, logErr)
+		}
+	}
 	if err == nil && result.Error == "" {
 		result.Output, err = r.parseOutput(ctx)
 	}
@@ -415,7 +431,9 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	if result.Error != "" {
 		r.callbacks.OnError(ctx, errors.New(result.Error))
 	}
-	r.callbacks.OnEnd(ctx, result)
+	if !r.ended {
+		r.callbacks.OnEnd(ctx, result)
+	}
 	return result, r.closeWriter(ctx)
 }
 
@@ -442,12 +460,20 @@ type run struct {
 	toolApproval   ToolApprovalFunc
 	toolApprovals  map[string]ToolApprovalFunc
 	// stopTimeout disarms the Timeout once the call ends.
-	stopTimeout    func() error
-	tools          ToolSet
-	toolChoice     *types.ToolChoice
-	activeTools    []string
-	concurrency    int
-	stopWhen       []StopCondition
+	stopTimeout func() error
+	tools       ToolSet
+	toolChoice  *types.ToolChoice
+	activeTools []string
+	concurrency int
+	stopWhen    []StopCondition
+	// defaultLimit is set when stopWhen is Generate's default step limit,
+	// and defaultLimitStopped when the limit ended the loop.
+	defaultLimit        bool
+	defaultLimitStopped bool
+	// stepModel is the model of the last model call.
+	stepModel provider.LanguageModel
+	// ended is set when OnEnd was called before the call's last writes.
+	ended          bool
 	settings       GenerationSettings
 	runtimeContext any
 	toolsContext   map[string]any
@@ -508,19 +534,6 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		}
 		r.responseFormat = format
 	}
-	if r.telemetry != nil && telemetry.Enabled(r.telemetry) {
-		operation := "ai.workflowAgent.generate"
-		if r.streaming {
-			operation = "ai.workflowAgent.stream"
-		}
-		// The root span is recorded in an inline step, and every step the
-		// call starts gets its trace context through ctx.
-		traceparent, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), traceStartStep, traceStartInput{Operation: operation, Instructions: r.instructions})
-		if err != nil {
-			return ctx, err
-		}
-		ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": traceparent})
-	}
 	r.modelCtx = ctx
 	if r.timeout > 0 {
 		modelCtx, stop, err := workflow.WithTimeout(ctx, r.timeout)
@@ -530,6 +543,26 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		r.modelCtx, r.stopTimeout = modelCtx, stop
 	}
 	return ctx, nil
+}
+
+// startTrace records the call's root span in the traceStartStep inline step,
+// when telemetry is enabled, and returns ctx with its trace context, which
+// every step the call starts after it gets.
+func (r *run) startTrace(ctx context.Context) (context.Context, error) {
+	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) {
+		return ctx, nil
+	}
+	operation := "ai.workflowAgent.generate"
+	if r.streaming {
+		operation = "ai.workflowAgent.stream"
+	}
+	traceparent, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), traceStartStep, traceStartInput{Operation: operation, Instructions: r.instructions})
+	if err != nil {
+		return ctx, err
+	}
+	carrier := propagation.MapCarrier{"traceparent": traceparent}
+	r.modelCtx = propagation.TraceContext{}.Extract(r.modelCtx, carrier)
+	return propagation.TraceContext{}.Extract(ctx, carrier), nil
 }
 
 // parseOutput parses the last step's text with the call's Output. It parses
@@ -552,9 +585,6 @@ func (r *run) parseOutput(ctx context.Context) (any, error) {
 }
 
 func (r *run) loop(ctx context.Context) (Result, error) {
-	if err := r.resumeApprovals(ctx); err != nil {
-		return r.result(nil, nil), err
-	}
 	for {
 		stepNumber := len(r.steps)
 		model, instructions, messages := r.model, r.instructions, r.messages
@@ -610,6 +640,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		if err != nil {
 			return r.result(nil, nil), err
 		}
+		r.stepModel = model
 		if r.streaming && r.options.Writer != nil {
 			_, err := workflow.Step(ctx, writeDeferredToolCalls, writeDeferredToolCallsInput{Writer: *r.options.Writer, ToolCalls: []ToolCall{}})
 			if err != nil {
@@ -749,6 +780,11 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
 			r.callbacks.OnStepEnd(ctx, step)
+			// Like the Workflow SDK, a paused turn ends before it writes its
+			// results and approval requests.
+			result := r.result(step.ToolCalls, step.ToolResults)
+			r.callbacks.OnEnd(ctx, result)
+			r.ended = true
 			if r.options.Writer != nil {
 				if len(step.ToolResults) > 0 {
 					if _, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults}); err != nil {
@@ -797,7 +833,11 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		r.callbacks.OnStepEnd(ctx, step)
 		// The loop continues only after local calls, and stop conditions are
 		// only checked when it could continue.
-		if !toolExecutionAllowed || !hasLocalCalls || slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
+		if !toolExecutionAllowed || !hasLocalCalls {
+			return r.result(step.ToolCalls, step.ToolResults), nil
+		}
+		if slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
+			r.defaultLimitStopped = r.defaultLimit
 			return r.result(step.ToolCalls, step.ToolResults), nil
 		}
 	}
