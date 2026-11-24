@@ -699,7 +699,7 @@ func (mutatedInputInput) Workflow(int) {}
 func TestStepChangingItsInputLeavesTheWorkflowsValue(t *testing.T) {
 	for _, mode := range []string{"inline", "queued", "explicit inline"} {
 		t.Run(mode, func(t *testing.T) {
-			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input mutatedInputInput) (int, error) {
+			world := testworld.New(workflow.Use(func(ctx context.Context, input mutatedInputInput) (int, error) {
 				values := []int{1}
 				change := func(_ context.Context, values []int) (int, error) {
 					values[0] = 99
@@ -715,7 +715,7 @@ func TestStepChangingItsInputLeavesTheWorkflowsValue(t *testing.T) {
 					_, err = workflow.InlineStep(ctx, change, values)
 				}
 				return values[0], err
-			})))
+			}))
 			defer world.Close()
 			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 			defer cancel()
