@@ -1,0 +1,44 @@
+# world-local storage tests (packages/world-local/src/storage.test.ts and
+# packages/world-local/src/storage/) that go-workflow does not port, in the
+# format of skips.txt.
+
+# APIs go-workflow's Worlds do not have.
+packages/world-local/src/storage/usage-storage.test.ts -- experimental_usage.getRun, a run's usage counts; go-workflow's Worlds expose no usage API.
+packages/world-local/src/storage/usage-cache.test.ts -- world-local's cache of the usage counts experimental_usage.getRun reports; go-workflow's Worlds expose no usage API.
+packages/world-local/src/storage/purged-usage.test.ts -- the usage sizes world-local saves for experimental_usage.getRun before a purge; go-workflow's Worlds expose no usage API.
+packages/world-local/src/storage/snapshots-storage.test.ts -- experimental_snapshots, the QuickJS VM snapshots of a suspended run; go-workflow runs Go workflows and keeps no VM snapshots.
+packages/world-local/src/storage/delete-data-many.test.ts > runs.deleteDataMany (world-local) > deletes a cancelled run's VM snapshot, which holds its heap -- QuickJS VM snapshots; go-workflow keeps none.
+packages/world-local/src/storage/run-retention.test.ts > run retention (world-local) > $retention: '0' > deletes the run's VM snapshot -- QuickJS VM snapshots; go-workflow keeps none.
+packages/world-local/src/storage/run-retention.test.ts > run retention (world-local) > $retention: '0' > drops a dynamic run's stored workflow code -- dynamicWorkflowCode stored on a run; Go workflows are compiled in.
+packages/world-local/src/storage/runs-storage.test.ts > runs resolveData: 'none' (world-local) -- dynamicWorkflowCode stored on a run; Go workflows are compiled in.
+packages/world-local/src/storage.test.ts > Storage > runs > getMany > preserves input order, deduplicates reads, and returns null for missing runs -- runs.getMany; go-workflow's Storage reads runs one at a time with RunsGet.
+packages/world-local/src/storage.test.ts > Storage > runs > maxEvents > advertises the default ceiling for node runs -- the maxEvents a run_started returns; a Go World's EventResult carries none, and the Go runtime applies DefaultMaxEvents itself.
+packages/world-local/src/storage.test.ts > Storage > runs > maxEvents > honors WORKFLOW_MAX_EVENTS for non-exempt runs -- the maxEvents a run_started returns; the Go runtime reads WORKFLOW_MAX_EVENTS itself (core.budget), not the World.
+packages/world-local/src/storage.test.ts > Storage > runs > maxEvents > exempts QuickJS runs with a positive snapshot threshold -- QuickJS runs and their snapshot threshold; go-workflow runs Go workflows.
+packages/world-local/src/storage.test.ts > Storage > runs > maxEvents > keeps the ceiling for QuickJS runs with snapshotting disabled -- QuickJS runs and their snapshot threshold; go-workflow runs Go workflows.
+packages/world-local/src/storage.test.ts > Storage > runs > maxEvents > lists the ceiling run_started reports (%s) -- the maxEvents a run_started returns and its QuickJS exemption; a Go World's EventResult carries none.
+packages/world-local/src/storage.test.ts > Storage > events > create > returns a resumable partial preload at the event ceiling -- the log a run_started preloads, capped at WORKFLOW_MAX_EVENTS; a Go World returns events on a write only for EventCount or SinceCursor.
+packages/world-local/src/storage.test.ts > Storage > events > inline delta (sinceCursor) > truncates the delta and surfaces hasMore=true when it exceeds one page, matching events.list -- a SinceCursor delta cut at world-local's 20-event file query page; a Go World returns the whole delta.
+packages/world-local/src/storage.test.ts > Storage > custom runId validation > should not validate when runId is null (server-generated) -- a run ID the World mints; go-workflow callers mint every run ID (worlds.NewRunID), and EventsCreateRun refuses an empty one.
+
+# Runs before the single orchestrator (spec 8 and earlier). go-workflow's
+# Worlds create every run at worlds.SpecVersion and keep no compatibility
+# with older runs.
+packages/world-local/src/storage.test.ts > Storage > steps > lazy step start > writes a synthetic step_created event on a run before the single orchestrator, so replay observes it -- a spec 8 run's lazy start; go-workflow creates no runs before spec 9.
+packages/world-local/src/storage/slot-identity.test.ts > slot event ids > numbers a lazily created step_created from the same allocator -- a spec 8 run's synthetic step_created; go-workflow creates no runs before spec 9.
+packages/world-local/src/storage/slot-identity.test.ts > slot event ids > paginates a run whose step_created events were created lazily -- a spec 8 run's synthetic step_created; go-workflow creates no runs before spec 9.
+packages/world-local/src/storage/hook-force-claim.test.ts > local World hook force-claim > declines to take a token from a running victim below the force-claim spec version -- a victim run below the force-claim spec version; go-workflow creates no runs before spec 9.
+packages/world-local/src/storage/fuzz-invariants.test.ts -- a seeded fuzzer of world-local's SQLite World, half of whose runs are spec 8, which go-workflow does not create.
+
+# world-local's own implementation.
+packages/world-local/src/storage.test.ts > Storage > events > reuses locally appended events without exposing cached instances -- world-local's in-memory cache of appended events, observed by spying on its event file reads.
+packages/world-local/src/storage.test.ts > Storage > events > reuses sequential-step events with a relative data directory -- world-local's in-memory cache of appended events and its relative data directory, observed by spying on its event file reads.
+packages/world-local/src/storage.test.ts > Storage > events > reuses locally appended events for correlation queries -- world-local's in-memory cache of appended events, observed by spying on its event file reads.
+packages/world-local/src/storage/events-query-plan.test.ts -- SQLite query plans of world-local's own indexes.
+packages/world-local/src/storage/events-page-bytes.test.ts > reads no further than the capped page, however large the limit -- the rows world-local's SQL reads, counted by spying on its Database class.
+packages/world-local/src/storage/crash-consistency.test.ts -- world-local writers killed with SIGKILL in Node.js child processes on one data directory.
+packages/world-local/src/storage/atomic-start-hook.test.ts > atomic start Hook (world-local) > logs decisions under DEBUG, naming runs but never the token -- world-local's console.debug lines under DEBUG; the Go local World logs no start hook decisions.
+packages/world-local/src/storage/slot-identity.test.ts > sealed-log noop events > stores, lists, and numbers past a noop event -- a noop written through events.create, standing in for a sealer; a Go World refuses a caller's noop (ErrEventInvalid), and only a World writes one.
+
+# Real differences.
+packages/world-local/src/storage/run-retention.test.ts > run retention (world-local) > $retention: '0', a step that finishes after the run ended > deletes nothing a run kept when it was given $retention: '0' after it ended -- gives a finished run attributes through runs.experimentalSetAttributes, which world-local writes to the run without an event; a Go World's RunsSetAttributes appends an attr_set, which a finished run refuses (RunExpiredError).
