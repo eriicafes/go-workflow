@@ -31,7 +31,7 @@ NITRO_DIR="$SDK_DIR/workbench/nitro-v3"
 # The suite runs the workflow CLI from the app's directory, so the Go app's
 # directory holds its conformance declaration beside the nitro app's
 # node_modules.
-GO_APP_DIR="$SDK_DIR/workbench/go"
+GO_APP_DIR="${GO_APP_DIR:-$SDK_DIR/workbench/go}"
 APP_PORT="${APP_PORT:-3000}"
 HARNESS_PORT="${HARNESS_PORT:-4100}"
 

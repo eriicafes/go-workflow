@@ -28,6 +28,21 @@ var fixtures = []worlds.Runner{
 	workflow.Use(errorRetryDisabledRun),
 	workflow.Use(errorRetryCustomDelayRun),
 	workflow.Use(errorFatalCatchableRun),
+	workflow.Use(hookRun),
+	workflow.Use(hookCleanupTestRun),
+	workflow.Use(hookDisposeTestRun),
+	workflow.Use(hookGetConflictRun),
+	workflow.Use(hookGetConflictWithPriorStepRun),
+	workflow.Use(hookGetConflictWithParallelStepRun),
+	workflow.Use(hookGetConflictThenStepParallelRun),
+	workflow.Use(hookMinRetentionRun),
+	workflow.Use(hookClaimOnlyMutexRun),
+	workflow.Use(hookAdoptOwnerResultRun),
+	workflow.Use(hookSignalOwnerRun),
+	workflow.Use(hookTokenReuseLoopRun),
+	workflow.Use(hookWithSleepRun),
+	workflow.Use(hookWithSleepFinalStepRun),
+	workflow.Use(retainedInterleavingRun),
 }
 
 type addTenWorkflow struct {

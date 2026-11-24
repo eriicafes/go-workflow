@@ -27,6 +27,41 @@ type span struct {
 	EndTime   int64 `json:"endTime"`
 }
 
+// box is an object argument, which a step unwraps.
+type box struct {
+	Value int `json:"value"`
+}
+
+// timedDelay is the arguments of a step that waits DelayMs milliseconds.
+type timedDelay struct {
+	Label   string
+	DelayMs int
+}
+
+// timedStep is when a step started and ended, in Unix milliseconds.
+type timedStep struct {
+	Label     string `json:"label"`
+	StartedAt int64  `json:"startedAt"`
+	EndedAt   int64  `json:"endedAt"`
+}
+
+type conflictStepData struct {
+	CustomData              string `json:"customData"`
+	HookGetConflictStepData string `json:"hookGetConflictStepData"`
+}
+
+// tokenMessage is the arguments of a step that resumes a hook.
+type tokenMessage struct {
+	Token   string
+	Message string
+}
+
+type processed struct {
+	Processed bool   `json:"processed"`
+	Type      string `json:"type"`
+	ID        *int   `json:"id,omitempty"`
+}
+
 func add(_ context.Context, in pair) (int, error) { return in.A + in.B, nil }
 
 func addNumbers(_ context.Context, in pair) (int, error) { return in.A + in.B, nil }
@@ -80,6 +115,36 @@ func throwRetryableError(ctx context.Context, _ struct{}) (retriedAfter, error) 
 		return retriedAfter{}, workflow.RetryableError(errors.New("Retryable error"), 10*time.Second)
 	}
 	return retriedAfter{Attempt: meta.Attempt, Duration: time.Since(meta.StartedAt).Milliseconds()}, nil
+}
+
+func unwrapValue(_ context.Context, in box) (int, error) { return in.Value, nil }
+
+func hookGetConflictStep(_ context.Context, customData string) (conflictStepData, error) {
+	return conflictStepData{CustomData: customData, HookGetConflictStepData: "step_completed"}, nil
+}
+
+func hookGetConflictTimedStep(ctx context.Context, in timedDelay) (timedStep, error) {
+	startedAt := workflow.GetStepMetadata(ctx).StartedAt.UnixMilli()
+	if err := wait(ctx, time.Duration(in.DelayMs)*time.Millisecond); err != nil {
+		return timedStep{}, err
+	}
+	return timedStep{Label: in.Label, StartedAt: startedAt, EndedAt: time.Now().UnixMilli()}, nil
+}
+
+func awaitWorkflowResult(ctx context.Context, runID string) (any, error) {
+	run, err := workflow.Get[any](ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	return run.Value(ctx)
+}
+
+func forwardPayloadToOwner(ctx context.Context, in tokenMessage) (struct{}, error) {
+	return struct{}{}, workflow.ResumeHook(ctx, in.Token, signalPayload{Message: in.Message})
+}
+
+func processPayload(_ context.Context, payload sleepHookPayload) (processed, error) {
+	return processed{Processed: true, Type: payload.Type, ID: payload.ID}, nil
 }
 
 // wait sleeps for d, or until ctx is done.
