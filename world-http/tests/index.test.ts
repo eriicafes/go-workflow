@@ -124,6 +124,32 @@ test("reports a run's event ceiling only when the Go World has one", async () =>
 	expect(await world.events.list({ runId: "wrun_01" } as never)).toMatchObject({ maxEvents: 25_000 });
 });
 
+test("reads lists a Go World sends as null as empty", async () => {
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ RPCVersion: 1, Capabilities: { Analytics: true } });
+			}
+			if (envelope.method === "streams.list" || envelope.method === "analytics.events.getMany") {
+				return rpcResponse(null);
+			}
+			// A nil slice is encoded as null.
+			return rpcResponse({ Data: null, HasMore: false, Snapshot: { EventCount: 0, InBandCount: 0 } });
+		},
+	});
+	expect((await world.events.list({ runId: "wrun_01" } as never)).data).toEqual([]);
+	expect((await world.events.listByCorrelationId({ runId: "wrun_01", correlationId: "hook_01" } as never)).data).toEqual([]);
+	expect((await world.runs.list()).data).toEqual([]);
+	expect((await world.steps.list({ runId: "wrun_01" } as never)).data).toEqual([]);
+	expect((await world.hooks.list({ runId: "wrun_01" } as never)).data).toEqual([]);
+	expect(await world.streams.list("wrun_01")).toEqual([]);
+	expect((await world.analytics!.runs.list()).data).toEqual([]);
+	expect((await world.analytics!.events.list({ runId: "wrun_01" } as never)).data).toEqual([]);
+	expect(await world.analytics!.events.getMany("wrun_01", ["evnt_01"])).toEqual([]);
+});
+
 test("waits for a terminal run across bounded requests", async () => {
 	const timeouts: unknown[] = [];
 	const world = await createWorld({

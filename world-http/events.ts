@@ -2,6 +2,7 @@ import type { CreateEventParams, Event, EventResult, PaginatedResponse } from "@
 import { START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
 import { toHook, toRun, toStep, toWait } from "./entities.js";
 import { HTTPWorldError, devkitName, goName, type RPC } from "./rpc.js";
+import { page } from "./utils.js";
 
 // RunCreation is what creates a run: the data of a run_created event, and the
 // runInput of the run's first queue message.
@@ -99,8 +100,8 @@ export function storedEventData(value: unknown): unknown {
 	return fields;
 }
 
-export function withEventDataPage(page: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
-	return { ...page, data: page.data.map(withEventData) };
+export function withEventDataPage(events: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
+	return { ...events, data: page(events).data.map(withEventData) };
 }
 
 // payloadFields are the eventData fields that hold payloads, in the Workflow

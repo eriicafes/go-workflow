@@ -1,4 +1,5 @@
 import { SPEC_VERSION_SINGLE_ORCHESTRATOR } from "@workflow/world/spec-version";
+import type { PaginatedResponse } from "@workflow/world";
 import type { RPC } from "./rpc.js";
 
 // GO_SPEC_VERSION is the spec version a Go World records on every run it
@@ -34,4 +35,10 @@ export function durationMilliseconds(nanoseconds: number | undefined): number {
 		return 0;
 	}
 	return Number(nanoseconds) / 1_000_000;
+}
+
+// page returns a page of a list with no items as empty data, which a Go World
+// sends as null, the encoding of a nil slice.
+export function page<T>(value: PaginatedResponse<T>): PaginatedResponse<T> {
+	return { ...value, data: value.data ?? [] };
 }

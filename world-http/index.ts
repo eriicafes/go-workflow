@@ -28,7 +28,7 @@ import { queueHandler, queueInput } from "./queue.js";
 import { HTTPWorldError, RPCClient, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
 import { createReadableStream, getStreamChunks } from "./stream-reader.js";
-import { GO_SPEC_VERSION, bytes, durationNanoseconds, environment } from "./utils.js";
+import { GO_SPEC_VERSION, bytes, durationNanoseconds, environment, page } from "./utils.js";
 
 const HTTP_WORLD_RPC_VERSION = 1;
 
@@ -202,7 +202,7 @@ export class HTTPWorld implements World {
 				...input,
 				...("status" in input && input.status !== undefined ? { status: Array.isArray(input.status) ? input.status : [input.status] } : {}),
 			};
-			return client.call<PaginatedResponse<RPC.Run>>("runs.list", normalized).then((page) => ({ ...page, data: page.data.map(toRun) }));
+			return client.call<PaginatedResponse<RPC.Run>>("runs.list", normalized).then((result) => ({ ...result, data: page(result).data.map(toRun) }));
 		}
 		function waitForTerminalStatus(runId: string, params: WaitForTerminalRunStatusParams & { resolveData: "none" }): Promise<WorkflowRunWithoutData>;
 		function waitForTerminalStatus(runId: string, params?: WaitForTerminalRunStatusParams & { resolveData?: "all" }): Promise<WorkflowRun>;
@@ -253,7 +253,7 @@ export class HTTPWorld implements World {
 		function list(input: ListWorkflowRunStepsParams & { resolveData?: "all" }): Promise<PaginatedResponse<Step>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>> {
-			return client.call<PaginatedResponse<RPC.Step>>("steps.list", input).then((page) => ({ ...page, data: page.data.map(toStep) }));
+			return client.call<PaginatedResponse<RPC.Step>>("steps.list", input).then((result) => ({ ...result, data: page(result).data.map(toStep) }));
 		}
 		return {
 			get,
@@ -346,7 +346,7 @@ export class HTTPWorld implements World {
 		return {
 			get: (hookId, params) => client.call<RPC.Hook>("hooks.get", { hookId, ...params }).then(toHook),
 			getByToken: (token, params) => client.call<RPC.Hook>("hooks.getByToken", { token, ...params }).then(toHook),
-			list: (input) => client.call<PaginatedResponse<RPC.Hook>>("hooks.list", input).then((page) => ({ ...page, data: page.data.map(toHook) })),
+			list: (input) => client.call<PaginatedResponse<RPC.Hook>>("hooks.list", input).then((result) => ({ ...result, data: page(result).data.map(toHook) })),
 		};
 	}
 
@@ -390,7 +390,7 @@ export class HTTPWorld implements World {
 				await client.call<RPC.Empty>("streams.close", { runId, name });
 			},
 			get: async (runId, name, startIndex = 0) => createReadableStream(client, { runId, name, startIndex }),
-			list: (runId) => client.call<string[]>("streams.list", { runId }),
+			list: async (runId) => (await client.call<string[] | null>("streams.list", { runId })) ?? [],
 			getChunks: async (runId, name, options = {}) => {
 				const result = await getStreamChunks(client, { runId, name, ...options });
 				return {
@@ -419,28 +419,28 @@ export class HTTPWorld implements World {
 				list: (input = {}) => client.call<PaginatedResponse<AnalyticsRun>>("analytics.runs.list", {
 					...input,
 					...(input.status === undefined ? {} : { status: Array.isArray(input.status) ? input.status : [input.status] }),
-				}),
+				}).then(page),
 			},
 			attributes: {
-				list: (input = {}) => client.call<PaginatedResponse<AnalyticsAttributeKey>>("analytics.attributes.list", input),
+				list: (input = {}) => client.call<PaginatedResponse<AnalyticsAttributeKey>>("analytics.attributes.list", input).then(page),
 			},
 			steps: {
 				get: (runId, stepId) => client.call<AnalyticsStep>("analytics.steps.get", { runId, stepId }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsStep>>("analytics.steps.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsStep>>("analytics.steps.list", input).then(page),
 			},
 			events: {
 				get: (runId, eventId) => client.call<AnalyticsEvent>("analytics.events.get", { runId, eventId }),
-				getMany: (runId, eventIds) => client.call<AnalyticsEvent[]>("analytics.events.getMany", { runId, eventIds }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.list", input),
-				listByCorrelationId: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.listByCorrelationId", input),
+				getMany: async (runId, eventIds) => (await client.call<AnalyticsEvent[] | null>("analytics.events.getMany", { runId, eventIds })) ?? [],
+				list: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.list", input).then(page),
+				listByCorrelationId: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.listByCorrelationId", input).then(page),
 			},
 			hooks: {
 				get: (hookId, params) => client.call<AnalyticsHook>("analytics.hooks.get", { hookId, ...params }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsHook>>("analytics.hooks.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsHook>>("analytics.hooks.list", input).then(page),
 			},
 			waits: {
 				get: (runId, waitId) => client.call<AnalyticsWait>("analytics.waits.get", { runId, waitId }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsWait>>("analytics.waits.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsWait>>("analytics.waits.list", input).then(page),
 			},
 		};
 	}
