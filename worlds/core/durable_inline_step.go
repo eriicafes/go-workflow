@@ -137,8 +137,13 @@ type inlineOutcome struct {
 // pendingRun returns the function that calls fn with input as an attempt of
 // the step stepID outside the replay, in step context.
 func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID worlds.StepID, name string, maxRetries int, refs []cancellationReference, fn func(context.Context, In) (Out, error), input In) func(int, *stepLatency) (worlds.DataStepResult, error) {
+	// Attempts run outside the workflow goroutine, so the log is read here.
+	startedAt := stepStartedAt(execution.events, stepID, time.Time{})
 	return func(attempt int, latency *stepLatency) (result worlds.DataStepResult, err error) {
-		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: time.Now(), Attempt: attempt})
+		if startedAt.IsZero() {
+			startedAt = time.Now()
+		}
+		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: startedAt, Attempt: attempt})
 		stepCtx, stop, err := stepCancelContext(stepCtx, execution, refs)
 		if err != nil {
 			return worlds.DataStepResult{}, err

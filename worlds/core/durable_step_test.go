@@ -76,6 +76,46 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	}
 }
 
+// A retry reports the step's first start, as the Workflow SDK's
+// stepStartedAt does, so it can tell how long the step has been trying.
+func TestStepMetadataStartedAtIsTheFirstAttemptsStart(t *testing.T) {
+	for _, inline := range []bool{true, false} {
+		t.Run(fmt.Sprintf("inline=%v", inline), func(t *testing.T) {
+			var mu sync.Mutex
+			var starts []time.Time
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input exhaustedInput) (exhaustedOutput, error) {
+				step := workflow.Step[int, int]
+				if input.Inline {
+					step = workflow.InlineStep[int, int]
+				}
+				_, err := step(ctx, func(ctx context.Context, _ int) (int, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					starts = append(starts, workflow.GetStepMetadata(ctx).StartedAt)
+					if len(starts) == 1 {
+						return 0, workflow.RetryableError(errors.New("retry"), 20*time.Millisecond)
+					}
+					return 0, nil
+				}, 0)
+				return exhaustedOutput{}, err
+			})))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, exhaustedInput{Inline: inline})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run.Value(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(starts) != 2 || !starts[1].Equal(starts[0]) && starts[1].Sub(starts[0]).Abs() > 10*time.Millisecond {
+				t.Fatalf("starts = %v, want the retry to report the first attempt's start", starts)
+			}
+		})
+	}
+}
+
 func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	var attempts atomic.Int32
 	original := errors.New("fatal")

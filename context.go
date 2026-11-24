@@ -57,7 +57,8 @@ type StepMetadata struct {
 	ID string
 	// Name is the step function's name.
 	Name string
-	// StartedAt is when the current attempt started.
+	// StartedAt is when the step's first attempt started, so a retry
+	// can tell how long the step has been trying.
 	StartedAt time.Time
 	// Attempt is the current attempt number, starting at 1.
 	Attempt int

@@ -181,7 +181,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	if result.EventID == "" {
 		panic(execution.exit(errReplaySuspended))
 	}
-	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
+	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: stepStartedAt(execution.events, stepID, time.Now()), Attempt: attempt})
 	stepCtx, stop := StepCancelContext(ctx, execution, CancellationReferences(ctx))
 	defer stop()
 	stepCtx, span := startStepSpan(stepCtx, execution, stepID, options.Name, attempt)

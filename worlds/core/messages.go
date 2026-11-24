@@ -73,6 +73,17 @@ func stepCreatedAt(events []worlds.Event, stepID worlds.StepID) time.Time {
 	return time.Time{}
 }
 
+// stepStartedAt returns when step stepID's first attempt started: its first
+// step_started in events, or now when events hold none.
+func stepStartedAt(events []worlds.Event, stepID worlds.StepID, now time.Time) time.Time {
+	for _, event := range events {
+		if event.EventType == worlds.EventTypeStepStarted && event.CorrelationID == string(stepID) {
+			return event.CreatedAt
+		}
+	}
+	return now
+}
+
 // StepMessageKey returns the idempotency key of the message of step stepID
 // named name: the step ID and the FNV-1a hash of the name's UTF-16 code
 // units, in hexadecimal.

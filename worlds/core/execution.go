@@ -18,7 +18,8 @@ type executionContextKey struct{}
 type stepContextKey struct{}
 
 // StepMetadata describes the step whose function is executing. Attempt
-// starts at 1 and StartedAt is the start of the current attempt.
+// starts at 1 and StartedAt is when the step's first attempt started, as the
+// Workflow SDK reports it.
 type StepMetadata struct {
 	ID        worlds.StepID
 	Name      string
