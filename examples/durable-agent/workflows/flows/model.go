@@ -8,6 +8,7 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/provider"
 	"github.com/digitallysavvy/go-ai/pkg/providers/anthropic"
 	"github.com/digitallysavvy/go-ai/pkg/providers/gateway"
+	"github.com/digitallysavvy/go-ai/pkg/telemetry"
 	"github.com/eriicafes/go-workflow/workflowai"
 )
 
@@ -36,4 +37,17 @@ func toolApprovalSecret() *workflowai.ToolApprovalSecret {
 		return nil
 	}
 	return &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
+}
+
+// agentTelemetry records the agent's spans with go-ai's OpenTelemetry
+// integration when OTEL_EXPORTER_OTLP_ENDPOINT is set, or returns nil to
+// record none.
+func agentTelemetry() *telemetry.Options {
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" {
+		return nil
+	}
+	return &telemetry.Options{
+		FunctionID:   "flight-agent",
+		Integrations: []telemetry.TelemetryIntegration{telemetry.NewOpenTelemetry(telemetry.OpenTelemetryOptions{})},
+	}
 }
