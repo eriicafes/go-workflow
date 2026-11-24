@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -49,6 +50,10 @@ type RemoteExecutor struct {
 	// authenticates RPC requests with, the one passed to WithClientToken.
 	// Empty sends no Authorization header.
 	Token string
+	// Header is sent with every request, such as Vercel's
+	// x-vercel-protection-bypass header for an app behind Deployment
+	// Protection. The delivery's own headers take precedence.
+	Header http.Header
 	// Client sends the requests. Nil uses http.DefaultClient.
 	Client *http.Client
 }
@@ -75,6 +80,9 @@ func (e RemoteExecutor) Execute(ctx context.Context, _ Runtime, input QueueInput
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, e.URL, bytes.NewReader(body))
 	if err != nil {
 		return err
+	}
+	for name, values := range e.Header {
+		request.Header[http.CanonicalHeaderKey(name)] = slices.Clone(values)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("x-vqs-queue-name", queueName)
