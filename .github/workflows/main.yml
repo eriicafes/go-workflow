@@ -108,7 +108,7 @@ jobs:
     env:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-    steps: &world-testing-steps
+    steps:
       - uses: actions/checkout@v7
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -163,7 +163,7 @@ jobs:
       SDK_DIR: ${{ github.workspace }}/sdk
       # The vercel/workflow commit whose e2e suite and workbench app run.
       SDK_COMMIT: &sdk-commit f717314b6fa8e91d653f56f90b9a1facf36a5f38
-    steps: &sdk-e2e-steps
+    steps:
       - uses: actions/checkout@v7
         with:
           path: go-workflow
@@ -196,23 +196,13 @@ jobs:
         run: npm run test:sdk-e2e
 
   # The Vercel World runs on Vercel's workflow backend, with the variables the
-  # Workflow SDK's tests use, which the vercel environment holds. Its jobs run
+  # Workflow SDK's tests use, which the vercel environment holds. Its job runs
   # in this repository only, never for a fork or a pull request from one, and
-  # the environment's protection rules decide which runs may use them.
-  world-testing-vercel:
-    name: World Testing (vercel)
-    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
-    environment: vercel
-    env:
-      HARNESS_WORLD: vercel
-      WORKFLOW_VERCEL_AUTH_TOKEN: ${{ secrets.WORKFLOW_VERCEL_AUTH_TOKEN }}
-      WORKFLOW_VERCEL_PROJECT: ${{ vars.WORKFLOW_VERCEL_PROJECT }}
-      WORKFLOW_VERCEL_TEAM: ${{ vars.WORKFLOW_VERCEL_TEAM }}
-    steps: *world-testing-steps
-
-  sdk-e2e-vercel:
-    name: SDK E2E (vercel)
+  # the environment's protection rules decide which runs may use them. The Go
+  # live tests run first, so a backend that refuses the project fails the job
+  # in a minute, before the suites wait out their timeouts.
+  vercel:
+    name: Vercel World
     if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -227,7 +217,41 @@ jobs:
       WORKFLOW_VERCEL_AUTH_TOKEN: ${{ secrets.WORKFLOW_VERCEL_AUTH_TOKEN }}
       WORKFLOW_VERCEL_PROJECT: ${{ vars.WORKFLOW_VERCEL_PROJECT }}
       WORKFLOW_VERCEL_TEAM: ${{ vars.WORKFLOW_VERCEL_TEAM }}
-    steps: *sdk-e2e-steps
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: go-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/workflow
+          ref: ${{ env.SDK_COMMIT }}
+          path: sdk
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk/package.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            sdk/target
+          key: sdk-cargo-${{ env.SDK_COMMIT }}
+      - name: Run the Vercel World's live tests
+        run: go test ./worlds/vercel -run Live -count=1 -timeout 10m -v
+      - run: npm ci
+      - name: Run the Workflow SDK's World test suite
+        run: npm run test:world-testing
+      - name: Build the Workflow SDK's workbench app
+        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
+      - name: Run the Workflow SDK's e2e suite
+        run: npm run test:sdk-e2e
 
   release:
     name: Version Releases
