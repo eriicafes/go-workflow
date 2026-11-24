@@ -961,9 +961,16 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
 			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
-		_, owned, err := tx.owns(ctx, entry.hook)
+		token, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return nil, err
+		}
+		// A finished run's hook is gone once its token retention lapses.
+		if owned {
+			if err := tx.releaseLapsed(ctx, token); err != nil {
+				return nil, err
+			}
+			owned = token.cur != nil && token.cur.hookID == entry.hook.HookID
 		}
 		if !owned {
 			return nil, &worlds.HookNotFoundError{Token: entry.hook.Token}
