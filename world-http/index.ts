@@ -399,7 +399,9 @@ export class HTTPWorld implements World {
 				const result = await getStreamChunks(client, { runId, name, ...options });
 				return {
 					data: result.data,
-					cursor: result.cursor,
+					// The SDK ends pagination with a null cursor once no more
+					// chunks are available.
+					cursor: result.hasMore ? result.cursor : null,
 					hasMore: result.hasMore,
 					done: result.done,
 				};
@@ -455,7 +457,8 @@ async function getStreamChunks(client: RPCClient, input: RPC.GetStreamChunksInpu
 		wait: durationNanoseconds(waitMs),
 	});
 	return {
-		data: result.data,
+		// A Go World sends a page without chunks as null.
+		data: result.data ?? [],
 		cursor: result.cursor || null,
 		hasMore: result.hasMore,
 		done: result.done,
@@ -465,23 +468,38 @@ async function getStreamChunks(client: RPCClient, input: RPC.GetStreamChunksInpu
 
 function createReadableStream(client: RPCClient, input: RPC.GetStreamInput): ReadableStream<Uint8Array> {
 	let cursor = input.cursor ?? "";
+	let cancelled = false;
 	return new ReadableStream({
+		cancel() {
+			cancelled = true;
+		},
 		async pull(controller) {
 			try {
-				const result = await getStreamChunks(client, {
-					...input,
-					cursor,
-					waitMs: input.pollIntervalMs ?? 100,
-				});
-				// Once a page returns a cursor, it replaces startIndex.
-				if (result.cursor !== null) {
-					cursor = result.cursor;
-				}
-				for (const chunk of result.data) {
-					controller.enqueue(chunk.data);
-				}
-				if (result.done && !result.hasMore) {
-					controller.close();
+				// A pull that enqueues nothing is not called again, so it reads
+				// until it has a chunk or the stream is closed.
+				while (!cancelled) {
+					const result = await getStreamChunks(client, {
+						...input,
+						cursor,
+						waitMs: input.pollIntervalMs ?? 100,
+					});
+					// Once a page returns a cursor, it replaces startIndex.
+					if (result.cursor !== null) {
+						cursor = result.cursor;
+					}
+					if (cancelled) {
+						return;
+					}
+					for (const chunk of result.data) {
+						controller.enqueue(chunk.data);
+					}
+					if (result.done && !result.hasMore) {
+						controller.close();
+						return;
+					}
+					if (result.data.length > 0) {
+						return;
+					}
 				}
 			} catch (error) {
 				controller.error(error);

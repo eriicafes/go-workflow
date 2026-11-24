@@ -390,6 +390,35 @@ test("reads a stream from a chunk index, then follows the cursor", async () => {
 	expect(inputs[1]).toMatchObject({ Cursor: "4" });
 });
 
+test("waits through empty stream pages, and ends getChunks pagination with a null cursor", async () => {
+	const pages = [
+		{ Data: null, Cursor: "0", HasMore: false, Done: false },
+		{ Data: null, Cursor: "0", HasMore: false, Done: false },
+		{ Data: [{ Index: 0, Data: new Uint8Array([7]) }], Cursor: "1", HasMore: false, Done: true },
+		{ Data: null, Cursor: "0", HasMore: false, Done: false },
+		{ Data: [{ Index: 0, Data: new Uint8Array([7]) }], Cursor: "1", HasMore: true, Done: true },
+		{ Data: [{ Index: 1, Data: new Uint8Array([8]) }], Cursor: "2", HasMore: false, Done: true },
+	];
+	const world = await createWorld({
+		baseURL: "https://workflow.example/v1/workflow",
+		fetch: async (_url, init) => {
+			const envelope = decode(init?.body as Uint8Array) as Record<string, unknown>;
+			if (envelope.method === "client.spec") {
+				return rpcResponse({ RPCVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
+			}
+			return rpcResponse(pages.shift());
+		},
+	});
+
+	const reader = (await world.streams.get("wrun_01", "strm_progress")).getReader();
+	expect((await reader.read()).value).toEqual(new Uint8Array([7]));
+	expect((await reader.read()).done).toBe(true);
+
+	expect(await world.streams.getChunks("wrun_01", "strm_progress")).toEqual({ data: [], cursor: null, hasMore: false, done: false });
+	expect(await world.streams.getChunks("wrun_01", "strm_progress", { limit: 1 })).toMatchObject({ cursor: "1", hasMore: true });
+	expect(await world.streams.getChunks("wrun_01", "strm_progress", { cursor: "1" })).toMatchObject({ cursor: null, hasMore: false, done: true });
+});
+
 test("passes run and step payloads through in the Workflow SDK's format", async () => {
 	const json = (value: unknown) => new TextEncoder().encode("devl" + JSON.stringify([value]));
 	const world = await createWorld({

@@ -220,7 +220,7 @@ export namespace RPC {
 	};
 
 	export type WireStreamChunksResult = {
-		data: { index: number; data: Uint8Array }[];
+		data: { index: number; data: Uint8Array }[] | null;
 		cursor: string;
 		hasMore: boolean;
 		done: boolean;

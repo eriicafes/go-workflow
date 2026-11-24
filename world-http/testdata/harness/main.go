@@ -1,7 +1,9 @@
-// Command harness serves a Go World over HTTP for the Workflow SDK's
-// world-testing suite. The World sends its deliveries to the suite's app with
-// a worlds.RemoteExecutor, whose URL the app's World module sets with a POST
-// of the flow route's URL to /_harness/remote once the app listens.
+// Command harness serves a Go World over HTTP for the Workflow SDK's test
+// suites. The World sends its deliveries to the suite's app with a
+// worlds.RemoteExecutor, at the flow route URL in HARNESS_REMOTE_URL, or the
+// one the app's World module sets with a POST to /_harness/remote once the
+// app listens. HARNESS_ADDR sets the address it listens on, which is
+// 127.0.0.1 on a free port by default.
 //
 // HARNESS_WORLD selects the World: testworld (the default), local, in a
 // temporary directory, or postgres, in a fresh schema of the database at
@@ -10,9 +12,9 @@
 // each delivery and, on exit, every run's events; set to a path, it appends
 // the log to that file.
 //
-// It prints one line of JSON with its base URL, then serves until its
-// standard input closes, which happens when the process that started it
-// exits.
+// It prints one line of JSON with its base URL, then serves. When its standard
+// input is a pipe, it exits once the pipe closes, which happens when the
+// process that started it exits.
 package main
 
 import (
@@ -27,8 +29,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -65,13 +69,16 @@ func (r *remote) Execute(ctx context.Context, runtime worlds.Runtime, input worl
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", cmp.Or(os.Getenv("HARNESS_ADDR"), "127.0.0.1:0"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	baseURL := "http://" + listener.Addr().String() + worlds.HTTPPrefixPath("")
 	token := os.Getenv("WORKFLOW_HTTP_TOKEN")
 	executor := &remote{token: token}
+	if url := os.Getenv("HARNESS_REMOTE_URL"); url != "" {
+		executor.url.Store(&url)
+	}
 	world, closeWorld, err := open(ctx, os.Getenv("HARNESS_WORLD"), baseURL, executor)
 	if err != nil {
 		log.Fatal(err)
@@ -113,10 +120,18 @@ func main() {
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"baseURL": baseURL}); err != nil {
 		log.Fatal(err)
 	}
+	if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&os.ModeNamedPipe != 0 {
+		go func() {
+			// The process that started the harness holds the pipe, which
+			// closes when that process exits.
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			cancel()
+		}()
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		// The process that started the harness holds its standard input,
-		// which closes when that process exits.
-		_, _ = io.Copy(io.Discard, os.Stdin)
+		<-signals
 		cancel()
 	}()
 	server := &http.Server{Handler: mux}
