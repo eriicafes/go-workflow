@@ -1,0 +1,45 @@
+# Workflow SDK tests go-workflow does not port, one per line:
+#
+#   <upstream file>[ > <describe or test name>] -- <reason>
+#
+# A file skips all its tests, and a describe block all the tests in it. Every
+# other test of internal/sdkdrift.TrackedDirs is ported to a Go test that names
+# it in a `// SDK: <file> > <test name>` comment.
+
+# JavaScript and Node.js runtime concerns, which Go has no counterpart of.
+packages/errors/src/ansi.test.ts -- ANSI coloring of error output; Go errors are plain strings.
+packages/errors/src/build-error.test.ts -- errors of the SDK's build step; Go programs have none.
+packages/errors/src/dynamic-workflows-not-enabled-error.test.ts -- dynamic workflow code; Go workflows are compiled in.
+packages/errors/src/module-scope-state.test.ts -- JavaScript module-scope state across bundles.
+packages/world-local/src/module-scope-state.test.ts -- JavaScript module-scope state across bundles.
+packages/world-postgres/src/module-scope-state.test.ts -- JavaScript module-scope state across bundles.
+packages/world/src/node-http.test.ts -- the SDK's Node.js HTTP transport; Go uses net/http.
+packages/world/src/node-http-flag.test.ts -- the SDK's Node.js HTTP transport flag.
+packages/world/src/env-config.test.ts -- the SDK's environment variable parsing; Go Worlds take a Config.
+packages/world-local/src/instrumentObject.test.ts -- OpenTelemetry instrumentation wrappers of world-local's JavaScript objects.
+
+# world-local's own setup: its data directory, configuration, and the HTTP
+# queue it delivers through. The Go local World stores in SQLite through
+# Config and delivers in process.
+packages/world-local/src/clear-disk.test.ts -- world-local's data directory layout.
+packages/world-local/src/config.test.ts -- world-local's configuration resolution; the Go local World takes a Config.
+packages/world-local/src/init.test.ts -- world-local's data directory initialization.
+packages/world-local/src/init-write-probe.test.ts -- world-local's data directory write probe.
+packages/world-local/src/legacy-data.test.ts -- world-local's migration of data written by earlier SDK versions; go-workflow keeps no compatibility with old data.
+packages/world-local/src/tag.test.ts -- world-local's data directory tags.
+packages/world-local/src/vercel-deployment-warning.test.ts -- world-local's warning when deployed to Vercel.
+packages/world-local/src/db/lock-contention.test.ts -- world-local's SQLite locking.
+packages/world-local/src/db/schema.test.ts -- world-local's SQLite migrations.
+packages/world-local/src/db/write-lock-wait.test.ts -- world-local's SQLite write lock.
+packages/world-local/src/queue-auth.test.ts -- world-local's HTTP queue authentication; the Go local World delivers in process.
+packages/world-local/src/queue-auth-key.test.ts -- world-local's HTTP queue authentication key file.
+packages/world-local/src/queue-auth-key-clear.test.ts -- world-local's HTTP queue authentication key file.
+packages/world-local/src/queue-close.test.ts -- shutting down world-local's HTTP queue.
+packages/world-local/src/queue-deadline-defaults.test.ts -- world-local's HTTP queue request deadlines.
+
+# world-postgres's deployment tooling.
+packages/world-postgres/src/kubernetes/lifecycle.test.ts -- world-postgres's Kubernetes lifecycle hooks.
+packages/world-postgres/src/kubernetes/prune/cli.test.ts -- world-postgres's Kubernetes prune command.
+packages/world-postgres/src/kubernetes/prune/plan.test.ts -- world-postgres's Kubernetes prune command.
+packages/world-postgres/src/kubernetes/prune/prune.test.ts -- world-postgres's Kubernetes prune command.
+packages/world-postgres/src/kubernetes/prune/prune.fuzz.test.ts -- world-postgres's Kubernetes prune command.
