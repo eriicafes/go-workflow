@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -206,6 +208,160 @@ func spawnChildWorkflow(ctx context.Context, value int) (string, error) {
 func throwFatalErrorWithCause(context.Context, struct{}) (struct{}, error) {
 	cause := &workflow.Error{Type: "TypeError", Message: "underlying type error"}
 	return struct{}{}, workflow.FatalError(causedError{message: "fatal with cause", cause: cause})
+}
+
+// signalState is whether a step's context was done, and its cause.
+type signalState struct {
+	Aborted bool `json:"aborted"`
+	Reason  any  `json:"reason"`
+}
+
+type listenerResult struct {
+	Saw bool   `json:"saw"`
+	Via string `json:"via"`
+}
+
+type fetchResult struct {
+	OK        bool   `json:"ok"`
+	Aborted   bool   `json:"aborted"`
+	Status    int    `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
+	ElapsedMs int64  `json:"elapsedMs"`
+}
+
+// reasonError is a cancellation cause with an object's fields.
+type reasonError struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+func (e *reasonError) Error() string { return e.Code + ": " + e.Detail }
+
+// longStep runs for 30s unless its context is done first. With a token, it
+// first resumes that hook to report it is running.
+func longStep(ctx context.Context, readyHookToken string) (string, error) {
+	if readyHookToken != "" {
+		if err := workflow.ResumeHook(ctx, readyHookToken, map[string]bool{"ready": true}); err != nil {
+			return "", err
+		}
+	}
+	for range 60 {
+		if ctx.Err() != nil {
+			return "aborted", nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return "completed", nil
+}
+
+func checkSignalState(ctx context.Context, _ struct{}) (signalState, error) {
+	return signalState{Aborted: ctx.Err() != nil, Reason: reason(context.Cause(ctx))}, nil
+}
+
+// abortFromStep cancels the step's cancellation context after delayMs.
+func abortFromStep(ctx context.Context, delayMs int) (struct{}, error) {
+	if err := wait(ctx, time.Duration(delayMs)*time.Millisecond); err != nil {
+		return struct{}{}, err
+	}
+	cancel, ok := workflow.CancelFunc(ctx)
+	if !ok {
+		return struct{}{}, errors.New("the step has no cancellation context")
+	}
+	return struct{}{}, cancel()
+}
+
+func stepThatThrowsIfAborted(ctx context.Context, _ struct{}) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", context.Cause(ctx)
+	}
+	return "should not reach here", nil
+}
+
+func stepWaitingOnAbortListener(ctx context.Context, _ struct{}) (listenerResult, error) {
+	select {
+	case <-ctx.Done():
+		return listenerResult{Saw: true, Via: "listener"}, nil
+	case <-time.After(30 * time.Second):
+		return listenerResult{Saw: ctx.Err() != nil, Via: "timeout"}, nil
+	}
+}
+
+func stepPollingThrowIfAborted(ctx context.Context, _ struct{}) (string, error) {
+	for range 60 {
+		if ctx.Err() != nil {
+			return "", context.Cause(ctx)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return "completed", nil
+}
+
+// fetchWithSignal requests a loopback server that holds its response for
+// 30s, with the step's context.
+func fetchWithSignal(ctx context.Context, _ struct{}) (fetchResult, error) {
+	startedAt := time.Now()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fetchResult{}, err
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(30 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"delayed":true}`))
+		case <-r.Context().Done():
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String()+"/delay", nil)
+	if err != nil {
+		return fetchResult{}, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	elapsed := time.Since(startedAt).Milliseconds()
+	if err != nil {
+		if ctx.Err() != nil {
+			return fetchResult{Aborted: true, ElapsedMs: elapsed}, nil
+		}
+		return fetchResult{Error: err.Error(), ElapsedMs: elapsed}, nil
+	}
+	defer response.Body.Close()
+	return fetchResult{OK: response.StatusCode < 300, Status: response.StatusCode, ElapsedMs: elapsed}, nil
+}
+
+func stepThatFetchesWithSignal(ctx context.Context, _ struct{}) (int, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		return 0, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	return response.StatusCode, nil
+}
+
+// reason returns a cancellation cause as the Workflow SDK reports an abort
+// reason: an object error's fields, the message of another error, and
+// nothing for a cancellation without a cause.
+func reason(cause error) any {
+	var object *reasonError
+	switch {
+	case cause == nil || errors.Is(cause, context.Canceled):
+		return nil
+	case errors.As(cause, &object):
+		return object
+	default:
+		return cause.Error()
+	}
 }
 
 // wait sleeps for d, or until ctx is done.
