@@ -261,11 +261,37 @@ jobs:
         env:
           SDK_APP: go
 
+  # Every test of the Workflow SDK packages go-workflow mirrors is ported to
+  # a Go test that names it, or skipped with a reason, in internal/sdkdrift.
+  sdk-drift:
+    name: SDK Drift
+    runs-on: ubuntu-latest
+    env:
+      SDK_COMMIT: *sdk-commit
+      SDK_DIR: ${{ github.workspace }}/sdk
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: go-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/workflow
+          ref: ${{ env.SDK_COMMIT }}
+          path: sdk
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
+      - name: Check every SDK test is ported or skipped
+        working-directory: go-workflow
+        run: go test ./internal/sdkdrift/ -run TestSDKTestsAreAccountedFor -count=1 -v
+
   release:
     name: Version Releases
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
-    needs: [test, test-js, world-testing, sdk-e2e]
+    needs: [test, test-js, world-testing, sdk-e2e, sdk-drift]
     steps:
       - uses: actions/checkout@v7
 
