@@ -84,6 +84,9 @@ var fixtures = []worlds.Runner{
 	workflow.Use(abortAnyInStepRun),
 	workflow.Use(webhookRun),
 	workflow.Use(parallelStepsThenWebhookRun),
+	workflow.Use(childWithHookSignalRun),
+	workflow.Use(startFromRun),
+	workflow.Use(fibonacciRun),
 }
 
 type addTenWorkflow struct {

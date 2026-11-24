@@ -147,6 +147,99 @@ func spawnWorkflowFromStepRun(ctx context.Context, input spawnWorkflowFromStepWo
 	return spawnResult{ParentInput: input.InputValue, ChildRunID: childRunID, ChildResult: result}, nil
 }
 
+type processedValue struct {
+	Processed int `json:"processed"`
+}
+
+type childWorkflowWithHookSignal struct {
+	workflow.Struct[processedValue]
+	workflow.Args
+	HookToken string
+	Value     int
+}
+
+func childWithHookSignalRun(ctx context.Context, input childWorkflowWithHookSignal) (processedValue, error) {
+	return workflow.Step(ctx, processAndSignalParent, hookValue{Token: input.HookToken, Value: input.Value})
+}
+
+type startFromResult struct {
+	ParentInput     int            `json:"parentInput"`
+	ChildRunID      string         `json:"childRunId"`
+	SignalFromChild processedValue `json:"signalFromChild"`
+}
+
+type startFromWorkflow struct {
+	workflow.Struct[startFromResult]
+	workflow.Args
+	InputValue int
+}
+
+func startFromRun(ctx context.Context, input startFromWorkflow) (startFromResult, error) {
+	hook := workflow.CreateHook[processedValue](ctx)
+	defer hook.Dispose(ctx)
+	// The hook is registered before the child can resume it.
+	if _, err := hook.GetConflict(ctx); err != nil {
+		return startFromResult{}, err
+	}
+	child, err := workflow.Start(ctx, childWorkflowWithHookSignal{HookToken: hook.Token(), Value: input.InputValue})
+	if err != nil {
+		return startFromResult{}, err
+	}
+	signal, err := hook.Next(ctx)
+	if err != nil {
+		return startFromResult{}, err
+	}
+	return startFromResult{ParentInput: input.InputValue, ChildRunID: child.ID(), SignalFromChild: signal}, nil
+}
+
+// fibonacciWorkflow starts runs for fib(n-1) and fib(n-2). A Go workflow
+// cannot wait for a child run's value, so each child resumes its parent's
+// hook, named by ParentToken, with its value.
+type fibonacciWorkflow struct {
+	workflow.Struct[int]
+	workflow.Args
+	N           int
+	ParentToken string
+}
+
+func fibonacciRun(ctx context.Context, input fibonacciWorkflow) (int, error) {
+	value, err := fibonacci(ctx, input.N)
+	if err != nil {
+		return 0, err
+	}
+	if input.ParentToken != "" {
+		if _, err := workflow.Step(ctx, signalParent, hookValue{Token: input.ParentToken, Value: value}); err != nil {
+			return 0, err
+		}
+	}
+	return value, nil
+}
+
+func fibonacci(ctx context.Context, n int) (int, error) {
+	if n <= 1 {
+		return n, nil
+	}
+	sum := 0
+	hooks := []*workflow.Hook[int]{workflow.CreateHook[int](ctx), workflow.CreateHook[int](ctx)}
+	for i, hook := range hooks {
+		defer hook.Dispose(ctx)
+		if _, err := hook.GetConflict(ctx); err != nil {
+			return 0, err
+		}
+		if _, err := workflow.Start(ctx, fibonacciWorkflow{N: n - 1 - i, ParentToken: hook.Token()}); err != nil {
+			return 0, err
+		}
+	}
+	for _, hook := range hooks {
+		value, err := hook.Next(ctx)
+		if err != nil {
+			return 0, err
+		}
+		sum += value
+	}
+	return sum, nil
+}
+
 type fatalRoundTrip struct {
 	Caught           bool   `json:"caught"`
 	IsFatal          bool   `json:"isFatal"`

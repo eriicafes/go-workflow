@@ -364,6 +364,22 @@ func reason(cause error) any {
 	}
 }
 
+// hookValue is the arguments of a step that resumes the hook Token with
+// Value.
+type hookValue struct {
+	Token string
+	Value int
+}
+
+func processAndSignalParent(ctx context.Context, in hookValue) (processedValue, error) {
+	processed := processedValue{Processed: in.Value * 3}
+	return processed, workflow.ResumeHook(ctx, in.Token, processed)
+}
+
+func signalParent(ctx context.Context, in hookValue) (struct{}, error) {
+	return struct{}{}, workflow.ResumeHook(ctx, in.Token, in.Value)
+}
+
 // wait sleeps for d, or until ctx is done.
 func wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
