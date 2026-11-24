@@ -794,14 +794,18 @@ func rpcEventResult(ctx context.Context, world World, runID RunID, correlationID
 		}
 		return value, nil
 	}
-	event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID})
-	if err != nil {
-		return RPCEventResult{}, err
-	}
-	value := RPCEventResult{Event: &event, Hook: result.Hook, Wait: result.Wait, StepCreated: result.StepCreated, Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
-	value.Run, value.Step, err = eventEntity(ctx, world, event, correlationID, result.Step)
-	if err != nil {
-		return RPCEventResult{}, err
+	value := RPCEventResult{Event: result.Event, Run: result.Run, Step: result.Step, Hook: result.Hook, Wait: result.Wait, StepCreated: result.StepCreated, Allocated: result.AllocatedEventCount, InBandCount: result.InBandCount}
+	if result.Event == nil {
+		// The World answered with the event's ID alone, so the event and the
+		// entity it changed are read.
+		event, err := world.EventsGet(ctx, EventsGetInput{RunID: runID, EventID: result.EventID})
+		if err != nil {
+			return RPCEventResult{}, err
+		}
+		value.Event = &event
+		if value.Run, value.Step, err = eventEntity(ctx, world, event, correlationID, result.Step); err != nil {
+			return RPCEventResult{}, err
+		}
 	}
 	if result.Events != nil {
 		hasMore := result.MoreEvents

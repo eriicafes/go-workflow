@@ -91,9 +91,16 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, classify(err, worlds.EventTypeRunCreated)
 	}
-	event := wireEventFromMap(response.Event)
+	event, err := toEvent(input.RunID, wireEventFromMap(response.Event), worlds.EventsResolveDataAll)
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
+	run, err := responseRun(response)
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
 	// run_created takes the first position, which counts as in-band.
-	return worlds.EventResult{EventID: worlds.EventID(event.EventID), EventType: worlds.EventTypeRunCreated, CreatedAt: event.CreatedAt, AllocatedEventCount: 1, InBandCount: 1}, nil
+	return worlds.EventResult{EventID: event.EventID, EventType: worlds.EventTypeRunCreated, CreatedAt: event.CreatedAt, Data: event.Data, Event: &event, Run: run, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -168,7 +175,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if response.Allocated != nil {
 		allocated = *response.Allocated
 	}
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, AllocatedEventCount: allocated}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, Event: &event, AllocatedEventCount: allocated}
+	if result.Run, err = responseRun(response); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if input.Options.InBandCount != nil {
 		result.InBandCount = *input.Options.InBandCount + allocated
 	}
@@ -362,7 +372,10 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err != nil {
 			return worlds.EventBatchResult{}, err
 		}
-		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, CreatedAt: appended.CreatedAt, Data: appended.Data, AllocatedEventCount: 1}
+		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, CreatedAt: appended.CreatedAt, Data: appended.Data, Event: &appended, AllocatedEventCount: 1}
+		if one.Run, err = responseRun(item.createResponse); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
 		result.AllocatedEventCount++
 		if item.Step != nil {
 			step, err := toStep(item.Step, worlds.ResolveDataAll)
@@ -618,3 +631,16 @@ func listQuery(pagination worlds.Pagination) url.Values {
 // carry them, because the payload of step_created and hook_created also holds
 // their metadata; ResolveEventData strips them afterwards.
 func refBehavior(worlds.EventsResolveData) string { return "resolve" }
+
+// responseRun returns the run a write's answer holds, or nil when it holds
+// none.
+func responseRun(response createResponse) (*worlds.Run, error) {
+	if response.Run == nil {
+		return nil, nil
+	}
+	run, err := toRun(response.Run, worlds.ResolveDataAll)
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}

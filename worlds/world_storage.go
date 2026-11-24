@@ -696,6 +696,13 @@ type (
 		// Events is incomplete. The write was appended, and the writer reads
 		// the log before it uses anything the write resolves.
 		MoreEvents bool
+		// Event is the appended event, set by a World whose write answers
+		// with it, and Run the run the answer holds. A World that sets Event
+		// answers with everything it has: Run and Step are nil when its
+		// answer holds none. Without Event, a caller reads the event and the
+		// entity it changed.
+		Event *Event
+		Run   *Run
 		// Step is the step created by a step_created event.
 		Step *Step
 		Hook *Hook
