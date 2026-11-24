@@ -51,6 +51,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/eriicafes/go-workflow/internal/devalue"
@@ -124,14 +125,19 @@ func (Struct[Out]) Workflow(Out) {}
 // Get return one. A Run has an independent lifetime; use Cancel to cancel it.
 //
 // A Run started in workflow context is a child run. In workflow context, every
-// Run method reads or changes the run once in an inline step and replay returns the
-// recorded result, so a method does not wait for the run to finish. Value
-// returns ErrRunNotFinished for a run that had not finished when it was called.
-// These inline steps do not inherit managed context cancellation.
-// To wait for a child run, create a hook and have the child resume it.
+// Run method reads or changes the run in an inline step and replay returns the
+// recorded result. Value and ReturnValue wait for the run to finish; see
+// ReturnValue. These inline steps do not inherit managed context cancellation.
 type Run[Out any] struct {
 	id     worlds.RunID
 	client Client
+	// parent is the run that started this one in workflow context, which
+	// waits for it through its child-run completion hook.
+	parent worlds.RunID
+	// returned is the promise ReturnValue returned for a child run in the
+	// execution returnedIn.
+	returned   *Result[Out]
+	returnedIn *core.Execution
 }
 
 // ID returns the run ID.
@@ -276,36 +282,77 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 // cancelled run's error is fatal, so a step that awaits the run fails
 // without retrying.
 //
-// In workflow context, Value reads the run once and returns ErrRunNotFinished
-// when the run had not finished, so replay stays deterministic. In step context
-// and outside a run, it blocks until the run finishes or ctx is done.
+// In workflow context, Value is ReturnValue followed by Result.Value. In step
+// context and outside a run, it blocks until the run finishes or ctx is done.
 func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
-	var zero Out
-	var run worlds.Run
-	var err error
-	if execution, ok := workflowExecutionFromContext(ctx); ok {
-		run, err = InlineStep(execution.Context(), runValue, r.id)
-	} else {
-		for {
-			run, err = r.client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: r.id, Timeout: clientWait})
-			if err != nil || run.Status.Terminal() {
-				break
-			}
-			timer := time.NewTimer(10 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				return zero, ctx.Err()
-			case <-timer.C:
-			}
-		}
+	if _, ok := workflowExecutionFromContext(ctx); ok {
+		return r.ReturnValue(ctx).Value(ctx)
 	}
+	run, err := waitForRun(NewContext(ctx, r.client), r.id)
+	return r.output(ctx, run, err)
+}
+
+// ReturnValue returns a promise of the run's output, which settles once the
+// run has finished, with what Value returns. The wait starts when the promise
+// is first awaited. Outside workflow context, the promise fails with
+// ErrNoWorkflow.
+//
+// For a child run this run started, the run suspends on a system hook, its
+// child-run completion hook, which every child resumes when it finishes, so
+// waiting holds no worker and ends as soon as the child finishes. All the
+// children share the hook, and children awaited together, such as with
+// JoinOk, are read together. A timer reads them again after 5 minutes,
+// doubling up to 6 hours, in case a resume was lost. The child's output is
+// then read in an inline step. Repeated calls for a child return the same
+// promise.
+//
+// For any other run, an inline step waits for the run to finish.
+func (r *Run[Out]) ReturnValue(ctx context.Context) *Result[Out] {
+	execution, ok := workflowExecutionFromContext(ctx)
+	if !ok {
+		return &Result[Out]{err: ErrNoWorkflow}
+	}
+	child := r.parent != "" && r.parent == execution.Run().RunID
+	if child && r.returned != nil && r.returnedIn == execution {
+		return r.returned
+	}
+	var released func() bool
+	var read *Result[worlds.Run]
+	result := &Result[Out]{}
+	result.settled = func() bool {
+		if read == nil {
+			if child {
+				if released == nil {
+					released = core.AwaitChildRun(execution, r.id, readFinishedRuns)
+				}
+				if !released() {
+					return false
+				}
+			}
+			read = InlineBackground(execution.Context(), waitForRun, r.id)
+			result.id = read.id
+		}
+		settled, _, _ := read.done(ctx)
+		return settled
+	}
+	result.outcome = func() (Out, error) {
+		run, err := read.Value(ctx)
+		return r.output(ctx, run, err)
+	}
+	if child {
+		r.returned, r.returnedIn = result, execution
+	}
+	return result
+}
+
+// output returns the output of run, as waitForRun returned it with err.
+func (r *Run[Out]) output(ctx context.Context, run worlds.Run, err error) (Out, error) {
+	var zero Out
 	switch {
 	case err != nil:
 		return zero, err
 	case run.RunID == "":
 		return zero, worlds.ErrRunNotFound
-	case !run.Status.Terminal():
-		return zero, ErrRunNotFinished
 	case run.Status != worlds.StatusCancelled && worlds.RunDataExpired(run, time.Now()):
 		return zero, &RunExpiredError{RunID: run.RunID, RunStatus: run.Status, ExpiredAt: *run.ExpiredAt}
 	}
@@ -326,23 +373,80 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 	return zero, nil
 }
 
-func runValue(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
+// waitForRun waits for runID to finish and returns it without its input, or
+// the zero Run when it does not exist. The returned run keeps ExpiredAt only
+// once it has passed, so a replay of the step reaches the same answer later.
+func waitForRun(ctx context.Context, runID worlds.RunID) (worlds.Run, error) {
 	client, err := clientFromContext(ctx)
 	if err != nil {
 		return worlds.Run{}, err
 	}
-	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
-	if errors.Is(err, worlds.ErrRunNotFound) {
-		return worlds.Run{}, nil
+	for {
+		run, err := client.RunsWaitForTerminalStatus(ctx, worlds.RunsWaitForTerminalStatusInput{RunID: runID, Timeout: clientWait})
+		switch {
+		case errors.Is(err, worlds.ErrRunNotFound):
+			return worlds.Run{}, nil
+		case err != nil:
+			return worlds.Run{}, err
+		case run.Status.Terminal():
+			run.Input = nil
+			if !worlds.RunDataExpired(run, time.Now()) {
+				run.ExpiredAt = nil
+			}
+			return run, nil
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return worlds.Run{}, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	run.Input = nil
-	// The recorded run keeps ExpiredAt only once it has passed, so a replay
-	// reaches the same answer later.
-	if !worlds.RunDataExpired(run, time.Now()) {
-		run.ExpiredAt = nil
-	}
-	return run, err
 }
+
+// readFinishedRuns is the inline step that reports which of runIDs have
+// finished, in their order. A run that cannot be found is reported as
+// finished, so reading its output reports it.
+func readFinishedRuns(ctx context.Context, runIDs []worlds.RunID) ([]worlds.RunID, error) {
+	client, err := clientFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finished := make([]bool, len(runIDs))
+	errs := make([]error, len(runIDs))
+	limit := make(chan struct{}, readFinishedConcurrency)
+	var wg sync.WaitGroup
+	for i, runID := range runIDs {
+		wg.Go(func() {
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
+			switch {
+			case errors.Is(err, worlds.ErrRunNotFound):
+				finished[i] = true
+			case err != nil:
+				errs[i] = err
+			default:
+				finished[i] = run.Status.Terminal()
+			}
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	result := []worlds.RunID{}
+	for i, runID := range runIDs {
+		if finished[i] {
+			result = append(result, runID)
+		}
+	}
+	return result, nil
+}
+
+// readFinishedConcurrency is how many runs readFinishedRuns reads at once.
+const readFinishedConcurrency = 20
 
 // CancelOptions configures Run.Cancel.
 type CancelOptions struct {
@@ -633,7 +737,9 @@ func (settings startSettings) startHook(keys *worlds.RunKeys) (*worlds.StartHook
 
 // runExecutionContext returns the ExecutionContext of a run started from ctx
 // whose payloads are encrypted or not: the release that started it, whether
-// it is encrypted, the trace it was started in, and the run it replays.
+// it is encrypted, the trace it was started in, the run it replays, and, when
+// ctx belongs to a run, that run, whose completion hook it resumes when it
+// finishes.
 func (settings startSettings) runExecutionContext(ctx context.Context, encrypted bool) map[string]any {
 	// The carrier is the trace context of ctx as the configured propagator
 	// writes it, and empty outside a trace.
@@ -650,6 +756,9 @@ func (settings startSettings) runExecutionContext(ctx context.Context, encrypted
 	}
 	if settings.ReplayedFrom != "" {
 		executionContext[worlds.ExecutionContextReplayedFromRunID] = settings.ReplayedFrom
+	}
+	if execution, ok := core.ExecutionFromContext(ctx); ok {
+		executionContext[worlds.ExecutionContextCompletionParentRunID] = string(execution.Run().RunID)
 	}
 	return executionContext
 }
@@ -709,7 +818,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 		if err != nil {
 			return nil, err
 		}
-		return &Run[Out]{id: id, client: client}, nil
+		return &Run[Out]{id: id, client: client, parent: execution.Run().RunID}, nil
 	}
 	// The client caches the World's capabilities, so this costs a request
 	// once per client.

@@ -25,6 +25,8 @@ type StepMetadata struct {
 	Name      string
 	StartedAt time.Time
 	Attempt   int
+	// MaxAttempts is the step's MaxRetries plus one.
+	MaxAttempts int
 }
 
 // StepMetadataFromContext returns the metadata of the step whose function is
@@ -147,6 +149,9 @@ type Execution struct {
 	// settle. See feed.go.
 	feed     *liveFeed
 	feedHeld bool
+	// childRuns is the run's state of waiting for its children, created by
+	// the first AwaitChildRun.
+	childRuns *childRunCompletion
 	// observedHooks holds the hooks the runner has looked for a payload of,
 	// which may change its decisions when one arrives.
 	observedHooks map[worlds.HookID]bool
@@ -275,6 +280,11 @@ func (e *Execution) trackEvent(index int, event worlds.Event) {
 // World returns the World the run is recorded in.
 func (e *Execution) World() worlds.World {
 	return e.world
+}
+
+// Encrypted reports whether the run's payloads are encrypted.
+func (e *Execution) Encrypted() bool {
+	return e.keys != nil
 }
 
 // Context returns the delivery context with execution metadata, without a
@@ -691,6 +701,9 @@ func (e *Execution) checkLimits() {
 // inline when every recorded event is delivered, and suspends the replay when
 // no event can arrive in this delivery.
 func (e *Execution) Wait() {
+	if e.childRuns != nil {
+		e.childRuns.beforeWait()
+	}
 	if !e.advance() {
 		e.Suspend()
 	}

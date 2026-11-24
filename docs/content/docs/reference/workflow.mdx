@@ -63,8 +63,8 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
 | `RetryableError` | S | Wraps an error a step returns so the step retries no sooner than `after`. Has no effect on a runner's error. |
 | `IsFatal` | — | Reports whether a step failing with an error fails without retrying: one made by `FatalError`, or another fatal error, such as a `*SerializationError` or `*RunFailedError`, or one whose `Fatal() bool` method returns true. |
 | `StepID` | S | Stable step ID, usable as an idempotency key. |
-| `GetStepMetadata` | S | ID, name, start time, and attempt of the current step. |
-| `GetWorkflowMetadata` | W, S | Workflow name, run ID, and start time. |
+| `GetStepMetadata` | S | ID, name, start time, attempt, and maximum attempts of the current step. |
+| `GetWorkflowMetadata` | W, S | Workflow name, run ID, start time, URL, and features. |
 
 ```go
 type StepOptions struct {
@@ -72,16 +72,23 @@ type StepOptions struct {
 }
 
 type StepMetadata struct {
-	ID        string
-	Name      string
-	StartedAt time.Time
-	Attempt   int // starting at 1
+	ID          string
+	Name        string
+	StartedAt   time.Time
+	Attempt     int // starting at 1
+	MaxAttempts int // MaxRetries + 1
 }
 
 type WorkflowMetadata struct {
 	Name      string
 	RunID     string
 	StartedAt time.Time
+	URL       string // the World's BaseURL
+	Features  WorkflowFeatures
+}
+
+type WorkflowFeatures struct {
+	Encryption bool // the run's payloads are encrypted
 }
 ```
 
@@ -218,6 +225,7 @@ func Get[Out any](ctx context.Context, runID string) (*Run[Out], error)
 ```go
 func (r *Run[Out]) ID() string
 func (r *Run[Out]) Value(ctx context.Context) (Out, error)
+func (r *Run[Out]) ReturnValue(ctx context.Context) *Result[Out]
 func (r *Run[Out]) Cancel(ctx context.Context) error
 func (r *Run[Out]) Status(ctx context.Context) (Status, error)
 func (r *Run[Out]) Exists(ctx context.Context) (bool, error)
@@ -230,7 +238,8 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 | Method | Description |
 | --- | --- |
 | `ID` | Run ID. |
-| `Value` | Output once finished. Blocks in step context and outside a run. In workflow context, returns `ErrRunNotFinished` for an unfinished run. |
+| `Value` | Output once finished. Blocks in step context and outside a run. In workflow context, `ReturnValue` + `Value`. |
+| `ReturnValue` | Promise of the output (W). A child run is awaited on the parent's child-run completion hook; any other run in an inline step that waits for it. |
 | `Cancel` | Cancels the run. Uses an inline step in workflow context. |
 | `Status` | Current status. |
 | `Exists` | Whether the run is recorded. |
@@ -438,7 +447,6 @@ Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`.
 | `*RunCancelledError` | `Run.Value` on a cancelled run. Fatal. |
 | `*SerializationError` | A step's arguments or return value could not be encoded. Fatal. |
 | `*EncryptionKeyLookupError` | `Run.Writer` could not resolve the run's encryption key for good. Fatal. |
-| `ErrRunNotFinished` | `Run.Value` in workflow context on an unfinished run. |
 | `ErrHookNotActive` | Hook was disposed and no longer receives. |
 | `*HookNotFoundError` | No active hook has the token. |
 | `ErrHookNotRegistered` | Receiving from a hook not created in this run. |

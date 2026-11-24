@@ -143,7 +143,9 @@ Cancelling a run marks it cancelled and prevents new work; already admitted
 running steps finish naturally. It does not automatically run compensations.
 
 `Run.Value(ctx)` blocks in external or step context. In workflow context it
-durably reads the current outcome and returns `ErrRunNotFinished` if pending;
-it does not suspend to await a child. For durable parent/child coordination,
-register a parent hook before passing its token to the child, have a child
-step resume it, and wait with `hook.Next(ctx)` in the parent.
+waits durably: for a child the run started, the parent suspends on its
+child-run completion hook, a system hook every child resumes when it
+finishes, then reads the output in an inline step; for any other run an
+inline step waits for it. `Run.ReturnValue(ctx)` returns the wait as a
+`*Result`, so `JoinOk` or `Select` can wait for several children together,
+which are then read in one step.

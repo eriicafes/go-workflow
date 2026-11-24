@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -193,7 +194,7 @@ func (e *Execution) boundaryInert() bool {
 		switch event.EventType {
 		case worlds.EventTypeHookCreated:
 			var data worlds.DataHookCreated
-			if json.Unmarshal(event.Data, &data) == nil && data.IsSystem {
+			if json.Unmarshal(event.Data, &data) == nil && alwaysObserved(data) {
 				created[event.CorrelationID] = true
 			}
 		case worlds.EventTypeHookDisposed:
@@ -238,10 +239,18 @@ func (e *Execution) systemHook(hookID string) bool {
 	for _, event := range e.events {
 		if event.EventType == worlds.EventTypeHookCreated && event.CorrelationID == hookID {
 			var data worlds.DataHookCreated
-			return json.Unmarshal(event.Data, &data) == nil && data.IsSystem
+			return json.Unmarshal(event.Data, &data) == nil && alwaysObserved(data)
 		}
 	}
 	return false
+}
+
+// alwaysObserved reports whether the hook created with data may change the
+// runner's decisions whether or not the runner looks for its payloads: a
+// system hook other than a child-run completion hook, whose payloads reach
+// the runner only while it waits for children.
+func alwaysObserved(data worlds.DataHookCreated) bool {
+	return data.IsSystem && !strings.HasPrefix(data.Token, worlds.ChildRunCompletionTokenPrefix)
 }
 
 // writeAhead adds result, the outcome of an inline step's attempt, to the log

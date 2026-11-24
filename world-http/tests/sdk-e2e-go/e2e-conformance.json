@@ -27,6 +27,8 @@
     "abortViaHookWorkflow",
     "abortVoidSleepTimeoutWorkflow",
     "addTenWorkflow",
+    "awaitChildReturnValueWorkflow",
+    "awaitChildrenFanOutWorkflow",
     "distributedAbortControllerWorkflow",
     "errorFatalCatchable",
     "errorRetryCustomDelay",
@@ -96,8 +98,5 @@
     "workflowAndStepMetadataWorkflow",
     "writableForwardedFromStepWorkflow",
     "writableForwardedFromWorkflowWorkflow"
-  ],
-  "unsupported": {
-    "workflowAndStepMetadataWorkflow": "Go's WorkflowMetadata has no url or features, and its StepMetadata has no maxAttempts."
-  }
+  ]
 }

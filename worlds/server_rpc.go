@@ -607,6 +607,7 @@ func dispatchRPC(ctx context.Context, world World, request RPCRequest) (cbor.Raw
 		if _, err := world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled, Data: data}}); err != nil {
 			return nil, err
 		}
+		NotifyRunEnd(ctx, world, input.RunID, nil, StatusCancelled)
 		return encodeRPC(struct{}{})
 	case "client.runs.wake":
 		input, err := decodeRPC[ClientRunsWakeInput](request.Input)

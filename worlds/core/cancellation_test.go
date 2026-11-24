@@ -172,9 +172,6 @@ func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 					if _, err := child.WorkflowName(cancelCtx); err != nil {
 						return versionedOutput{}, err
 					}
-					if _, err := child.Value(cancelCtx); !errors.Is(err, workflow.ErrRunNotFinished) {
-						return versionedOutput{}, errors.New("context cancellation affected child Value")
-					}
 					if _, err := child.WakeUp(cancelCtx); err != nil {
 						return versionedOutput{}, err
 					}
@@ -189,6 +186,9 @@ func TestChildRunsRequireExplicitCancellation(t *testing.T) {
 					}
 					if status != workflow.StatusCancelled {
 						return versionedOutput{}, errors.New("explicit cancellation did not cancel child run")
+					}
+					if _, err := child.Value(cancelCtx); !errors.Is(err, workflow.ErrRunCancelled) {
+						return versionedOutput{}, errors.New("context cancellation affected child Value")
 					}
 				}
 				return versionedOutput{Version: context.Cause(cancelCtx).Error()}, nil

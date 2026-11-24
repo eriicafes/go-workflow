@@ -301,6 +301,9 @@ func (r *Runtime) failSetup(ctx context.Context, run worlds.Run, cause error) er
 	if is[*worlds.RunExpiredError](err) || errors.Is(err, worlds.ErrEntityConflict) {
 		return nil
 	}
+	if err == nil {
+		worlds.NotifyRunEnd(ctx, r.world, run.RunID, runExecutionContext(run), worlds.StatusFailed)
+	}
 	return err
 }
 
@@ -671,6 +674,11 @@ func (r *Runtime) recordRunEnd(execution *Execution, eventType worlds.EventType,
 		}
 	}()
 	execution.CreateEvent(worlds.EventsCreateEvent{EventType: eventType, Data: data}, nil)
+	status := worlds.StatusFailed
+	if eventType == worlds.EventTypeRunCompleted {
+		status = worlds.StatusCompleted
+	}
+	worlds.NotifyRunEnd(execution.ctx, r.world, execution.run.RunID, runExecutionContext(execution.run), status)
 	return nil
 }
 
@@ -984,6 +992,9 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input worlds.QueueInput
 		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 			return nil
 		}
+		if err == nil {
+			worlds.NotifyRunEnd(ctx, r.world, input.RunID, nil, worlds.StatusFailed)
+		}
 		return err
 	}
 	// The recovery is a new message, which the key of the one being
@@ -1031,6 +1042,9 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 	})
 	if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 		return nil
+	}
+	if err == nil {
+		worlds.NotifyRunEnd(ctx, r.world, run.RunID, runExecutionContext(run), worlds.StatusFailed)
 	}
 	return err
 }
@@ -1140,4 +1154,13 @@ func (r *Runtime) runFailedData(ctx context.Context, runID worlds.RunID, deploym
 		return nil, keysErr
 	}
 	return worlds.EncodeRunFailed(err, worlds.PayloadOptions{Keys: keys})
+}
+
+// runExecutionContext returns run's executionContext, or an empty one when it
+// has none, so NotifyRunEnd does not read the run again.
+func runExecutionContext(run worlds.Run) map[string]any {
+	if run.ExecutionContext == nil {
+		return map[string]any{}
+	}
+	return run.ExecutionContext
 }

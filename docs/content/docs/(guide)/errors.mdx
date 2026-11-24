@@ -228,7 +228,6 @@ which also reads its fields.
 | `*workflow.EncryptionKeyLookupError` | `Run.Writer` when the run's encryption key cannot be resolved for good, such as for a run that does not exist. It is fatal; a transient failure is returned as it is. |
 | `workflow.ErrResumeNotQueued` | `ResumeHook` recorded the payload but could not queue its run. Don't resend the payload. |
 | `workflow.ErrNilResult` | A nil `*Result` is returned from a `Then` callback or awaited. |
-| `workflow.ErrRunNotFinished` | `Run.Value` in workflow context, when the awaited run had not finished. |
 | `*workflow.HookNotFoundError` | Resuming a token that no active hook has. |
 | `workflow.ErrHookNotRegistered` | Receiving or selecting a hook from another execution or a lookup. |
 | `*workflow.HookConflictError` | Receiving or selecting a hook whose token another active hook already has. The token is claimed on first use, not at creation. |

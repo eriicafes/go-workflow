@@ -219,8 +219,11 @@ func (c worldClient) RunsCancel(ctx context.Context, input ClientRunsCancelInput
 	if err != nil {
 		return err
 	}
-	_, err = c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled, Data: data}})
-	return err
+	if _, err = c.world.EventsCreate(ctx, EventsCreateInput{RunID: input.RunID, Event: EventsCreateEvent{EventType: EventTypeRunCancelled, Data: data}}); err != nil {
+		return err
+	}
+	NotifyRunEnd(ctx, c.world, input.RunID, nil, StatusCancelled)
+	return nil
 }
 
 func (c worldClient) RunsWake(ctx context.Context, input ClientRunsWakeInput) (int, error) {

@@ -142,7 +142,7 @@ func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID w
 		if startedAt.IsZero() {
 			startedAt = time.Now()
 		}
-		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: startedAt, Attempt: attempt})
+		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: startedAt, Attempt: attempt, MaxAttempts: maxRetries + 1})
 		stepCtx, stop, err := stepCancelContext(stepCtx, execution, refs)
 		if err != nil {
 			return worlds.DataStepResult{}, err

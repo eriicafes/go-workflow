@@ -136,4 +136,7 @@ meta := workflow.GetWorkflowMetadata(ctx)
 log.Printf("workflow %s, run %s, started %s", meta.Name, meta.RunID, meta.StartedAt)
 ```
 
-Outside a run it returns the zero `WorkflowMetadata`.
+`URL` is the World's `BaseURL`, where its HTTP handler is mounted and the
+run's webhooks are served. `Features.Encryption` reports whether the run's
+payloads are [encrypted](/docs/data). Outside a run it returns the zero
+`WorkflowMetadata`.

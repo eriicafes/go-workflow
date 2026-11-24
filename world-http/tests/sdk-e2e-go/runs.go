@@ -3,6 +3,7 @@ package sdke2e
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	workflow "github.com/eriicafes/go-workflow"
@@ -95,6 +96,7 @@ type helperMetadata struct {
 	WorkflowRunID string `json:"workflowRunId"`
 	StepID        string `json:"stepId"`
 	Attempt       int    `json:"attempt"`
+	MaxAttempts   int    `json:"maxAttempts"`
 }
 
 type metadataFromHelperWorkflow struct {
@@ -192,58 +194,151 @@ func startFromRun(ctx context.Context, input startFromWorkflow) (startFromResult
 	return startFromResult{ParentInput: input.InputValue, ChildRunID: child.ID(), SignalFromChild: signal}, nil
 }
 
-// fibonacciWorkflow starts runs for fib(n-1) and fib(n-2). A Go workflow
-// cannot wait for a child run's value, so each child resumes its parent's
-// hook, named by ParentToken, with its value.
+// fibonacciWorkflow starts runs for fib(n-1) and fib(n-2) and waits for
+// both, suspended on its child-run completion hook.
 type fibonacciWorkflow struct {
 	workflow.Struct[int]
 	workflow.Args
-	N           int
-	ParentToken string
+	N int
 }
 
 func fibonacciRun(ctx context.Context, input fibonacciWorkflow) (int, error) {
-	value, err := fibonacci(ctx, input.N)
+	if input.N <= 1 {
+		return input.N, nil
+	}
+	runA, err := workflow.Start(ctx, fibonacciWorkflow{N: input.N - 1})
 	if err != nil {
 		return 0, err
 	}
-	if input.ParentToken != "" {
-		if _, err := workflow.Step(ctx, signalParent, hookValue{Token: input.ParentToken, Value: value}); err != nil {
-			return 0, err
-		}
+	runB, err := workflow.Start(ctx, fibonacciWorkflow{N: input.N - 2})
+	if err != nil {
+		return 0, err
 	}
-	return value, nil
+	a, b := runA.ReturnValue(ctx), runB.ReturnValue(ctx)
+	if err := workflow.JoinOk(ctx, a, b); err != nil {
+		return 0, err
+	}
+	return a.Unwrap(ctx) + b.Unwrap(ctx), nil
 }
 
-func fibonacci(ctx context.Context, n int) (int, error) {
-	if n <= 1 {
-		return n, nil
+// slowChildWorkflow sleeps first, so its parent reads it unfinished and
+// waits on its completion hook, then doubles Value or fails.
+type slowChildWorkflow struct {
+	workflow.Struct[int]
+	workflow.Args
+	Value int
+	Fail  bool
+}
+
+func slowChildRun(ctx context.Context, input slowChildWorkflow) (int, error) {
+	if err := workflow.Sleep(ctx, 2*time.Second); err != nil {
+		return 0, err
 	}
-	sum := 0
-	hooks := []*workflow.Hook[int]{workflow.CreateHook[int](ctx), workflow.CreateHook[int](ctx)}
-	for i, hook := range hooks {
-		defer hook.Dispose(ctx)
-		if _, err := hook.GetConflict(ctx); err != nil {
-			return 0, err
-		}
-		if _, err := workflow.Start(ctx, fibonacciWorkflow{N: n - 1 - i, ParentToken: hook.Token()}); err != nil {
-			return 0, err
-		}
+	if input.Fail {
+		return 0, workflow.FatalError(fmt.Errorf("slow child failed for %d", input.Value))
 	}
-	for _, hook := range hooks {
-		value, err := hook.Next(ctx)
+	return workflow.Step(ctx, doubleValue, input.Value)
+}
+
+type childReturnValue struct {
+	ChildRunID      string `json:"childRunId"`
+	ChildResult     *int   `json:"childResult,omitempty"`
+	ChildError      string `json:"childError,omitempty"`
+	ChildErrorCause string `json:"childErrorCause,omitempty"`
+}
+
+// awaitChildReturnValueWorkflow waits for a child's output from workflow
+// code. A failed child's Value is a *RunFailedError, the SDK's
+// WorkflowRunFailedError, with the child's error as its cause.
+type awaitChildReturnValueWorkflow struct {
+	workflow.Struct[childReturnValue]
+	workflow.Args
+	Value int
+	Fail  bool
+}
+
+func awaitChildReturnValueRun(ctx context.Context, input awaitChildReturnValueWorkflow) (childReturnValue, error) {
+	child, err := workflow.Start(ctx, slowChildWorkflow{Value: input.Value, Fail: input.Fail})
+	if err != nil {
+		return childReturnValue{}, err
+	}
+	result := childReturnValue{ChildRunID: child.ID()}
+	value, err := child.Value(ctx)
+	var failure *workflow.RunFailedError
+	switch {
+	case errors.As(err, &failure):
+		result.ChildError, result.ChildErrorCause = "WorkflowRunFailedError", failure.Cause.Error()
+	case err != nil:
+		return childReturnValue{}, err
+	default:
+		result.ChildResult = &value
+	}
+	return result, nil
+}
+
+// gatedChildWorkflow finishes once its hook, Token, is resumed, then doubles
+// Value.
+type gatedChildWorkflow struct {
+	workflow.Struct[int]
+	workflow.Args
+	Token string
+	Value int
+}
+
+func gatedChildRun(ctx context.Context, input gatedChildWorkflow) (int, error) {
+	hook := workflow.CreateHook[map[string]any](ctx, workflow.HookOption{Token: input.Token})
+	defer hook.Dispose(ctx)
+	if _, err := hook.Next(ctx); err != nil {
+		return 0, err
+	}
+	return workflow.Step(ctx, doubleValue, input.Value)
+}
+
+type fanOutResult struct {
+	ChildRunIDs []string `json:"childRunIds"`
+	Results     []int    `json:"results"`
+}
+
+// awaitChildrenFanOutWorkflow starts a child per value and waits for them
+// all. Every child resumes the parent's one completion hook. Child i waits
+// on the hook TokenPrefix:i.
+type awaitChildrenFanOutWorkflow struct {
+	workflow.Struct[fanOutResult]
+	workflow.Args
+	Values      []int
+	TokenPrefix string
+}
+
+func awaitChildrenFanOutRun(ctx context.Context, input awaitChildrenFanOutWorkflow) (fanOutResult, error) {
+	result := fanOutResult{ChildRunIDs: []string{}, Results: []int{}}
+	var values []*workflow.Result[int]
+	for i, value := range input.Values {
+		child, err := workflow.Start(ctx, gatedChildWorkflow{Token: fmt.Sprintf("%s:%d", input.TokenPrefix, i), Value: value})
 		if err != nil {
-			return 0, err
+			return fanOutResult{}, err
 		}
-		sum += value
+		result.ChildRunIDs = append(result.ChildRunIDs, child.ID())
+		values = append(values, child.ReturnValue(ctx))
 	}
-	return sum, nil
+	if err := workflow.JoinOk(ctx, workflow.MapResults(values)...); err != nil {
+		return fanOutResult{}, err
+	}
+	for _, value := range values {
+		result.Results = append(result.Results, value.Unwrap(ctx))
+	}
+	return result, nil
 }
 
 type workflowMetadata struct {
-	WorkflowName      string `json:"workflowName"`
-	WorkflowRunID     string `json:"workflowRunId"`
-	WorkflowStartedAt string `json:"workflowStartedAt"`
+	WorkflowName      string           `json:"workflowName"`
+	WorkflowRunID     string           `json:"workflowRunId"`
+	WorkflowStartedAt string           `json:"workflowStartedAt"`
+	URL               string           `json:"url"`
+	Features          workflowFeatures `json:"features"`
+}
+
+type workflowFeatures struct {
+	Encryption bool `json:"encryption"`
 }
 
 type stepMetadata struct {
@@ -251,6 +346,7 @@ type stepMetadata struct {
 	StepID        string `json:"stepId"`
 	StepStartedAt string `json:"stepStartedAt"`
 	Attempt       int    `json:"attempt"`
+	MaxAttempts   int    `json:"maxAttempts"`
 }
 
 type metadataPair struct {
@@ -264,8 +360,8 @@ type bothMetadata struct {
 	InnerWorkflowMetadata workflowMetadata `json:"innerWorkflowMetadata"`
 }
 
-// workflowAndStepMetadataWorkflow reports the metadata Go has: no url or
-// features for the run, and no maxAttempts for the step.
+// workflowAndStepMetadataWorkflow reports the run's metadata from workflow
+// and step context, and the step's metadata.
 type workflowAndStepMetadataWorkflow struct{ workflow.Struct[bothMetadata] }
 
 func workflowAndStepMetadataRun(ctx context.Context, _ workflowAndStepMetadataWorkflow) (bothMetadata, error) {
@@ -280,13 +376,19 @@ func workflowAndStepMetadataRun(ctx context.Context, _ workflowAndStepMetadataWo
 func stepWithMetadata(ctx context.Context, _ struct{}) (metadataPair, error) {
 	step := workflow.GetStepMetadata(ctx)
 	return metadataPair{
-		StepMetadata:     stepMetadata{StepName: step.Name, StepID: step.ID, StepStartedAt: step.StartedAt.UTC().Format(time.RFC3339Nano), Attempt: step.Attempt},
+		StepMetadata:     stepMetadata{StepName: step.Name, StepID: step.ID, StepStartedAt: step.StartedAt.UTC().Format(time.RFC3339Nano), Attempt: step.Attempt, MaxAttempts: step.MaxAttempts},
 		WorkflowMetadata: toWorkflowMetadata(workflow.GetWorkflowMetadata(ctx)),
 	}, nil
 }
 
 func toWorkflowMetadata(metadata workflow.WorkflowMetadata) workflowMetadata {
-	return workflowMetadata{WorkflowName: metadata.Name, WorkflowRunID: metadata.RunID, WorkflowStartedAt: metadata.StartedAt.UTC().Format(time.RFC3339Nano)}
+	return workflowMetadata{
+		WorkflowName:      metadata.Name,
+		WorkflowRunID:     metadata.RunID,
+		WorkflowStartedAt: metadata.StartedAt.UTC().Format(time.RFC3339Nano),
+		URL:               metadata.URL,
+		Features:          workflowFeatures{Encryption: metadata.Features.Encryption},
+	}
 }
 
 type fatalRoundTrip struct {
