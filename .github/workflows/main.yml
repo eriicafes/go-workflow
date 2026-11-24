@@ -75,6 +75,12 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Check Go-written payloads with the Workflow SDK
+        working-directory: worlds/testdata/payload
+        run: |
+          npm ci
+          WORKFLOW_PAYLOAD_VECTORS_OUT="$PWD/go-vectors.json" go test ../.. -run TestWriteGoPayloadVectors -count=1
+          npm run verify
 
   world-testing:
     name: World Testing (${{ matrix.world }})
