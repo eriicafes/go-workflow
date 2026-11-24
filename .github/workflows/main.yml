@@ -127,6 +127,38 @@ jobs:
       - name: Run the Workflow SDK's World test suite
         run: npm run test:world-testing
 
+  # The Vercel World runs on Vercel's workflow backend, with the variables the
+  # Workflow SDK's tests use, which the vercel environment holds. Its jobs run
+  # in this repository only, never for a fork or a pull request from one, and
+  # the environment's protection rules decide which runs may use them.
+  world-testing-vercel:
+    name: World Testing (vercel)
+    if: &vercel ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: vercel
+    env:
+      HARNESS_WORLD: vercel
+      WORKFLOW_VERCEL_AUTH_TOKEN: ${{ secrets.WORKFLOW_VERCEL_AUTH_TOKEN }}
+      WORKFLOW_VERCEL_PROJECT: ${{ vars.WORKFLOW_VERCEL_PROJECT }}
+      WORKFLOW_VERCEL_TEAM: ${{ vars.WORKFLOW_VERCEL_TEAM }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      # The Go live tests run first, so a backend that refuses the project
+      # fails the job in a minute, before the suite waits out its timeouts.
+      - name: Run the Vercel World's live tests
+        run: go test ./worlds/vercel -run Live -count=1 -timeout 10m -v
+      - run: npm ci
+      - name: Run the Workflow SDK's World test suite
+        run: npm run test:world-testing
+
   sdk-e2e:
     name: SDK E2E (${{ matrix.world }})
     runs-on: ubuntu-latest
@@ -205,15 +237,9 @@ jobs:
         env:
           SDK_APP: go
 
-  # The Vercel World runs on Vercel's workflow backend, with the variables the
-  # Workflow SDK's tests use, which the vercel environment holds. Its job runs
-  # in this repository only, never for a fork or a pull request from one, and
-  # the environment's protection rules decide which runs may use them. The Go
-  # live tests run first, so a backend that refuses the project fails the job
-  # in a minute, before the suites wait out their timeouts.
-  vercel:
-    name: Vercel World
-    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+  sdk-e2e-vercel:
+    name: SDK E2E (vercel)
+    if: *vercel
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: vercel
@@ -253,11 +279,7 @@ jobs:
             ~/.cargo/registry
             sdk/target
           key: sdk-cargo-${{ env.SDK_COMMIT }}
-      - name: Run the Vercel World's live tests
-        run: go test ./worlds/vercel -run Live -count=1 -timeout 10m -v
       - run: npm ci
-      - name: Run the Workflow SDK's World test suite
-        run: npm run test:world-testing
       - name: Build the Workflow SDK's workbench app
         run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
       # parallelStepsThenWebhookWorkflow polls the backend's hook listing,
