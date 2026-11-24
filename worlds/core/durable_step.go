@@ -247,9 +247,10 @@ func lastStepStart(events []worlds.Event, stepID worlds.StepID) time.Time {
 
 // invoke calls fn with input in stepCtx. A panic in fn becomes its error,
 // except, when inReplay is set, the panic that ends a suspended replay, which
-// passes on. A cancelled stepCtx makes the error fatal, unless the delivery
-// itself stopped. A World that records step executions is told right before
-// fn is called.
+// passes on. What fn returns is its result whether or not stepCtx is
+// cancelled, except that an aborted error becomes a FatalError "Aborted:
+// ...", unless the delivery itself stopped. A World that records step
+// executions is told right before fn is called.
 func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay bool, fn func(context.Context, In) (Out, error), input In) (value Out, err error) {
 	returned := &stepReturn{}
 	stepCtx = context.WithValue(stepCtx, stepReturnKey{}, returned)
@@ -276,28 +277,25 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 	if returnErr := returned.run(); returnErr != nil && err == nil {
 		err = returnErr
 	}
-	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
-		err = worlds.FatalError{Cause: cancellation(stepCtx)}
+	if aborted(stepCtx, err) && execution.ctx.Err() == nil {
+		err = worlds.FatalError{Cause: fmt.Errorf("Aborted: %w", err)}
 	}
 	return value, err
 }
 
-// cancellation returns the error of a step attempt whose context is done:
-// context.Canceled, which also wraps the cancellation's cause when it has
-// another, so the runner can read why the step was cancelled.
-func cancellation(ctx context.Context) error {
-	cause := context.Cause(ctx)
-	if cause == nil || errors.Is(cause, context.Canceled) {
-		return context.Canceled
+// aborted reports whether err, a step's error, is it giving up on a
+// cancellation: an error matching context.Canceled, as the Workflow SDK
+// promotes an AbortError, or once stepCtx is done, one matching its cause,
+// such as an HTTP request's error after a durable timeout.
+func aborted(stepCtx context.Context, err error) bool {
+	if err == nil || errors.As(err, new(worlds.FatalError)) {
+		return false
 	}
-	return canceledError{cause: cause}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return stepCtx.Err() != nil && errors.Is(err, context.Cause(stepCtx))
 }
-
-// canceledError is context.Canceled with the cancellation's cause.
-type canceledError struct{ cause error }
-
-func (e canceledError) Error() string   { return context.Canceled.Error() }
-func (e canceledError) Unwrap() []error { return []error{context.Canceled, e.cause} }
 
 type stepReturnKey struct{}
 

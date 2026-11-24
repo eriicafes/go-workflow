@@ -57,26 +57,34 @@ func TestCancellationConstructorsReturnErrorsInStepContext(t *testing.T) {
 	}
 }
 
-func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
+func TestCancelledStepRecordsItsOwnResultAndAbortsWithoutRetry(t *testing.T) {
 	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ cancellationInput) (cancellationOutput, error) {
 		cancelCtx, cancel, err := workflow.WithCancelCause(ctx)
 		if err != nil {
 			return cancellationOutput{}, err
 		}
-		result := workflow.Background(cancelCtx, func(ctx context.Context, _ struct{}) (string, error) {
+		// One step returns a value once it sees the cancellation, the other
+		// gives up with the context's error.
+		saw := workflow.Background(cancelCtx, func(ctx context.Context, _ struct{}) (string, error) {
 			<-ctx.Done()
-			return context.Cause(ctx).Error(), ctx.Err()
+			return context.Cause(ctx).Error(), nil
 		}, struct{}{})
-		stopWork := errors.New("stop work")
-		if err := cancel(stopWork); err != nil {
+		gaveUp := workflow.Background(cancelCtx, func(ctx context.Context, _ struct{}) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}, struct{}{})
+		if err := cancel(errors.New("stop work")); err != nil {
 			return cancellationOutput{}, err
 		}
 		if err := cancel(errors.New("ignored")); err != nil {
 			return cancellationOutput{}, err
 		}
-		// The step's error also wraps the cause.
-		_, err = result.Value(ctx)
-		return cancellationOutput{Cause: context.Cause(cancelCtx).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled)) && errors.Is(err, stopWork)}, nil
+		cause, err := saw.Value(ctx)
+		if err != nil {
+			return cancellationOutput{}, err
+		}
+		_, err = gaveUp.Value(ctx)
+		return cancellationOutput{Cause: cause, Cancelled: aborted(err)}, nil
 	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
@@ -89,8 +97,7 @@ func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
 	if err != nil || !output.Cancelled || output.Cause != "stop work" {
 		t.Fatalf("output=%#v err=%v", output, err)
 	}
-	// A replay can deliver the unstarted step again, so the step may start more
-	// than once, but cancellation must never schedule a retry.
+	// A step that gives up on its cancelled context fails without a retry.
 	events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +126,7 @@ func TestStepCanCancelItsDurableContext(t *testing.T) {
 			<-ctx.Done()
 			return struct{}{}, ctx.Err()
 		}, struct{}{})
-		return cancellationOutput{Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
+		return cancellationOutput{Cancelled: aborted(err)}, nil
 	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)
@@ -172,7 +179,7 @@ func TestCancelAnyPreservesBaseValuesAndObservesEverySource(t *testing.T) {
 					observed <- !controller && workflow.GetWorkflowMetadata(ctx).RunID != "" && ctx.Value(valueKey{}) == "base value" && context.Cause(ctx).Error() == "chosen source"
 					return struct{}{}, nil
 				}, struct{}{})
-				return cancellationOutput{Cause: context.Cause(combined).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
+				return cancellationOutput{Cause: context.Cause(combined).Error(), Cancelled: err == nil}, nil
 			})))
 			defer world.Close()
 			ctx, stop := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 3*time.Second)
@@ -292,7 +299,7 @@ func TestDeadlineCancellationStopsWorkWithoutCancellingRun(t *testing.T) {
 					}
 					return cancellationOutput{
 						Cause: context.Cause(cancelCtx).Error(),
-						Cancelled: errors.Is(err, workflow.FatalError(context.Canceled)) &&
+						Cancelled: (test.sleep && errors.Is(err, workflow.FatalError(context.Canceled)) || aborted(err)) &&
 							errors.Is(context.Cause(cancelCtx), wantCause),
 					}, nil
 				})))
@@ -318,4 +325,12 @@ func TestDeadlineCancellationStopsWorkWithoutCancellingRun(t *testing.T) {
 			})
 		})
 	}
+}
+
+// aborted reports whether err is the FatalError of a step that returned its
+// cancelled context's error.
+func aborted(err error) bool {
+	var recorded *workflow.Error
+	fatal := errors.As(err, new(worlds.FatalError)) || errors.As(err, &recorded) && recorded.Type == "FatalError"
+	return fatal && errors.Is(err, context.Canceled) && err.Error() == "Aborted: context canceled"
 }

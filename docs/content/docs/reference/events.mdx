@@ -174,7 +174,7 @@ when it occurred, which the World stores as its `CreatedAt`.
   own outcome, and once one is refused, every later event of the batch with
   the same correlation ID is refused too.
 
-Managed cancellation records its cause as hook payload data and uses a stream for live notification. Cancelled attempts record `step_failed` with `FatalError` wrapping `context.Canceled`. The first committed cancellation cause wins.
+Managed cancellation records its cause as hook payload data and uses a stream for live notification. A cancelled attempt records what the step returns; an error wrapping `context.Canceled` records `step_failed` with a `FatalError` whose message starts with `Aborted: `. The first committed cancellation cause wins.
 
 ## A sample run
 

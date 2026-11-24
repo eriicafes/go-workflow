@@ -131,7 +131,7 @@ func TestErrGroupCancelsAfterObservationAndStillWaitsForAll(t *testing.T) {
 				}
 				<-ctx.Done()
 				cancelled.Store(errors.Is(context.Cause(ctx), failure))
-				return 0, nil
+				return 0, ctx.Err()
 			}, struct{}{})
 			workflow.Go(groupCtx, group, func(context.Context, struct{}) (string, error) {
 				<-started

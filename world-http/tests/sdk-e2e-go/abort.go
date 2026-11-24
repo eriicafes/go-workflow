@@ -10,10 +10,9 @@ import (
 
 // The AbortController fixtures use durable cancellation contexts: a step
 // started with a cancellation context sees it done when the workflow, or
-// another step, cancels it, as a step sees its AbortSignal abort. Where a
-// TypeScript step returns a value saying it saw the abort, a Go step attempt
-// whose context is done fails with an error that wraps context.Canceled and
-// the cause, and the fixture reads that error as the step's value.
+// another step, cancels it, as a step sees its AbortSignal abort, and what
+// the step returns is its result. A step error that wraps context.Canceled,
+// Go's AbortError, fails the step as a FatalError without retries.
 
 type timeoutResult struct {
 	Status  string `json:"status"`
@@ -76,7 +75,7 @@ func abortParallelRun(ctx context.Context, _ abortParallelWorkflow) (parallelRes
 	// The steps observe the cancellation and return before the run does.
 	results := make([]string, len(steps))
 	for i, step := range steps {
-		if results[i], err = orAborted(step.Value(ctx)); err != nil {
+		if results[i], err = step.Value(ctx); err != nil {
 			return parallelResult{}, err
 		}
 	}
@@ -100,17 +99,11 @@ func abortFromStepRun(ctx context.Context, _ abortFromStepWorkflow) (fromStepRes
 	}
 	long := workflow.Background(cctx, longStep, "")
 	abort := workflow.Background(cctx, abortFromStep, 1000)
-	// The group waits for both, whether they fail or not.
-	var group workflow.WaitGroup
-	group.Add(long, abort)
-	if err := group.Wait(ctx); err != nil {
+	if err := workflow.JoinOk(ctx, long, abort); err != nil {
 		return fromStepResult{}, err
 	}
-	longResult, err := orAborted(long.Value(ctx))
-	if err != nil {
-		return fromStepResult{}, err
-	}
-	state, err := checkSignal(cctx)
+	longResult := long.Unwrap(ctx)
+	state, err := workflow.Step(cctx, checkSignalState, struct{}{})
 	if err != nil {
 		return fromStepResult{}, err
 	}
@@ -127,7 +120,7 @@ func abortAlreadyAbortedRun(ctx context.Context, _ abortAlreadyAbortedWorkflow) 
 	if err := cancel(errors.New("pre-aborted")); err != nil {
 		return signalState{}, err
 	}
-	return checkSignal(cctx)
+	return workflow.Step(cctx, checkSignalState, struct{}{})
 }
 
 type abortReasonWorkflow struct{ workflow.Struct[signalState] }
@@ -146,7 +139,7 @@ func abortReasonRun(ctx context.Context, _ abortReasonWorkflow) (signalState, er
 			return signalState{}, err
 		}
 	}
-	return checkSignal(cctx)
+	return workflow.Step(cctx, checkSignalState, struct{}{})
 }
 
 type afterCompletionResult struct {
@@ -163,7 +156,7 @@ func abortAfterCompletionRun(ctx context.Context, _ abortAfterCompletionWorkflow
 	if err != nil {
 		return afterCompletionResult{}, err
 	}
-	state, err := checkSignal(cctx)
+	state, err := workflow.Step(cctx, checkSignalState, struct{}{})
 	if err != nil {
 		return afterCompletionResult{}, err
 	}
@@ -228,7 +221,7 @@ func abortSurvivesReplayRun(ctx context.Context, _ abortSurvivesReplayWorkflow) 
 	if err != nil {
 		return replayResult{}, err
 	}
-	before, err := checkSignal(cctx)
+	before, err := workflow.Step(cctx, checkSignalState, struct{}{})
 	if err != nil {
 		return replayResult{}, err
 	}
@@ -238,7 +231,7 @@ func abortSurvivesReplayRun(ctx context.Context, _ abortSurvivesReplayWorkflow) 
 	if err := cancel(errors.New("after-replay")); err != nil {
 		return replayResult{}, err
 	}
-	after, err := checkSignal(cctx)
+	after, err := workflow.Step(cctx, checkSignalState, struct{}{})
 	if err != nil {
 		return replayResult{}, err
 	}
@@ -285,7 +278,7 @@ func abortReasonTypesRun(ctx context.Context, _ abortReasonTypesWorkflow) (reaso
 	if err := cancel1(errors.New("string-reason")); err != nil {
 		return result, err
 	}
-	if result.StringReason, err = checkSignal(c1); err != nil {
+	if result.StringReason, err = workflow.Step(c1, checkSignalState, struct{}{}); err != nil {
 		return result, err
 	}
 	// An object reason is an error type whose fields are the object's.
@@ -296,7 +289,7 @@ func abortReasonTypesRun(ctx context.Context, _ abortReasonTypesWorkflow) (reaso
 	if err := cancel2(&reasonError{Code: "CANCELLED", Detail: "by user"}); err != nil {
 		return result, err
 	}
-	if result.ObjectReason, err = checkSignal(c2); err != nil {
+	if result.ObjectReason, err = workflow.Step(c2, checkSignalState, struct{}{}); err != nil {
 		return result, err
 	}
 	c3, cancel3, err := workflow.WithCancel(ctx)
@@ -306,7 +299,7 @@ func abortReasonTypesRun(ctx context.Context, _ abortReasonTypesWorkflow) (reaso
 	if err := cancel3(); err != nil {
 		return result, err
 	}
-	result.UndefinedReason, err = checkSignal(c3)
+	result.UndefinedReason, err = workflow.Step(c3, checkSignalState, struct{}{})
 	return result, err
 }
 
@@ -335,7 +328,7 @@ func abortFetchInFlightRun(ctx context.Context, _ abortFetchInFlightWorkflow) (f
 			return fetchOutcome{}, err
 		}
 	}
-	outcome.FetchResult, err = fetchOrAborted(fetch.Value(ctx))
+	outcome.FetchResult, err = fetch.Value(ctx)
 	return outcome, err
 }
 
@@ -348,7 +341,7 @@ func abortVoidSleepTimeoutRun(ctx context.Context, _ abortVoidSleepTimeoutWorkfl
 	if err != nil {
 		return fetchResult{}, err
 	}
-	return fetchOrAborted(workflow.Step(cctx, fetchWithSignal, struct{}{}))
+	return workflow.Step(cctx, fetchWithSignal, struct{}{})
 }
 
 type abortFetchUncaughtWorkflow struct{ workflow.Struct[thrown] }
@@ -389,7 +382,7 @@ func abortDeterministicBranchRun(ctx context.Context, _ abortDeterministicBranch
 		}
 		result = "just aborted"
 	}
-	state, err := checkSignal(cctx)
+	state, err := workflow.Step(cctx, checkSignalState, struct{}{})
 	if err != nil {
 		return branchResult{}, err
 	}
@@ -411,14 +404,10 @@ func abortListenerRun(ctx context.Context, _ abortListenerWorkflow) (listenerOut
 	}
 	listener := workflow.Background(cctx, stepWaitingOnAbortListener, struct{}{})
 	abort := workflow.Background(cctx, abortFromStep, 1000)
-	// The group waits for both, whether they fail or not.
-	var group workflow.WaitGroup
-	group.Add(listener, abort)
-	if err := group.Wait(ctx); err != nil {
+	if err := workflow.JoinOk(ctx, listener, abort); err != nil {
 		return listenerOutcome{}, err
 	}
-	result, err := listenerOrAborted(listener.Value(ctx))
-	return listenerOutcome{StepResult: result}, err
+	return listenerOutcome{StepResult: listener.Unwrap(ctx)}, nil
 }
 
 type abortThrowIfAbortedMidFlightWorkflow struct{ workflow.Struct[thrown] }
@@ -430,17 +419,10 @@ func abortThrowIfAbortedMidFlightRun(ctx context.Context, _ abortThrowIfAbortedM
 	}
 	poll := workflow.Background(cctx, stepPollingThrowIfAborted, struct{}{})
 	abort := workflow.Background(cctx, abortFromStep, 1000)
-	// The group waits for both, whether they fail or not.
-	var group workflow.WaitGroup
-	group.Add(poll, abort)
-	if err := group.Wait(ctx); err != nil {
-		return thrown{}, err
-	}
-	result, err := poll.Value(ctx)
-	if err != nil {
+	if err := workflow.JoinOk(ctx, poll, abort); err != nil {
 		return thrown{Threw: true, Message: err.Error(), IsFatal: isFatal(err)}, nil
 	}
-	return thrown{Result: result}, nil
+	return thrown{Result: poll.Unwrap(ctx)}, nil
 }
 
 type stepBranchResult struct {
@@ -463,7 +445,7 @@ func abortDeterministicBranchFromStepRun(ctx context.Context, _ abortDeterminist
 	if result.BeforeAborted {
 		result.BeforeBranch = "unexpected-aborted"
 	}
-	if _, err := workflow.Step(cctx, abortFromStep, 0); err != nil && !cancelled(err) {
+	if _, err := workflow.Step(cctx, abortFromStep, 0); err != nil {
 		return stepBranchResult{}, err
 	}
 	if err := workflow.Sleep(ctx, time.Second); err != nil {
@@ -529,68 +511,11 @@ func abortAnyInStepRun(ctx context.Context, _ abortAnyInStepWorkflow) (anyInStep
 	// The step's context is done when either source is.
 	listener := workflow.Background(workflow.CancelAny(ctx, c1, c2), stepWaitingOnAbortListener, struct{}{})
 	abort := workflow.Background(c2, abortFromStep, 1000)
-	// The group waits for both, whether they fail or not.
-	var group workflow.WaitGroup
-	group.Add(listener, abort)
-	if err := group.Wait(ctx); err != nil {
+	if err := workflow.JoinOk(ctx, listener, abort); err != nil {
 		return anyInStepResult{}, err
 	}
 	if err := workflow.Sleep(ctx, 100*time.Millisecond); err != nil {
 		return anyInStepResult{}, err
 	}
-	result, err := listenerOrAborted(listener.Value(ctx))
-	return anyInStepResult{StepResult: result, C1Aborted: c1.Err() != nil, C2Aborted: c2.Err() != nil}, err
-}
-
-// cancelled reports whether err is the failure of a step attempt whose
-// cancellation context was done.
-func cancelled(err error) bool { return errors.Is(err, context.Canceled) }
-
-func orAborted(result string, err error) (string, error) {
-	if cancelled(err) {
-		return "aborted", nil
-	}
-	return result, err
-}
-
-func listenerOrAborted(result listenerResult, err error) (listenerResult, error) {
-	if cancelled(err) {
-		return listenerResult{Saw: true, Via: "listener"}, nil
-	}
-	return result, err
-}
-
-func fetchOrAborted(result fetchResult, err error) (fetchResult, error) {
-	if cancelled(err) {
-		return fetchResult{Aborted: true}, nil
-	}
-	return result, err
-}
-
-// checkSignal runs checkSignalState with ctx, and reads a cancelled
-// attempt's error as the state it saw.
-func checkSignal(ctx context.Context) (signalState, error) {
-	state, err := workflow.Step(ctx, checkSignalState, struct{}{})
-	if !cancelled(err) {
-		return state, err
-	}
-	return signalState{Aborted: true, Reason: errorReason(err)}, nil
-}
-
-// errorReason returns the cancellation cause a cancelled attempt's error
-// wraps, as reason does.
-func errorReason(err error) any {
-	var object *reasonError
-	if errors.As(err, &object) {
-		return object
-	}
-	var recorded *workflow.Error
-	if errors.As(err, &recorded) {
-		for node := recorded; node != nil; node = node.Cause {
-			if node.Message != context.Canceled.Error() {
-				return node.Message
-			}
-		}
-	}
-	return nil
+	return anyInStepResult{StepResult: listener.Unwrap(ctx), C1Aborted: c1.Err() != nil, C2Aborted: c2.Err() != nil}, nil
 }
