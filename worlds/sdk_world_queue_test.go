@@ -18,13 +18,17 @@ func TestSDKARunsFlowsAreSerialized(t *testing.T) {
 	}
 }
 
-// A Go queue carries no health checks, so only step deliveries are left to
-// check.
+// A health check names no run, so it has no run to serialize, whatever
+// SerializedFlow reports.
 //
 // SDK: packages/world/src/queue.test.ts > orchestratorRunIdOf > leaves step messages and health checks unserialized
 func TestSDKStepDeliveriesAreNotSerialized(t *testing.T) {
 	step := worlds.StepID("step_1")
 	if input := (worlds.QueueInput{RunID: "wrun_a", StepID: &step}); input.SerializedFlow() {
 		t.Fatalf("SerializedFlow(%+v) = true", input)
+	}
+	health := worlds.QueueInput{SDKMessage: []byte(`{"queueName":"__wkf_workflow_health_check","message":{"__healthCheck":true,"correlationId":"c"}}`)}
+	if _, ok := worlds.ParseHealthCheck(health); !ok || health.RunID != "" {
+		t.Fatalf("health check %+v names a run or is not one", health)
 	}
 }

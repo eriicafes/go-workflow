@@ -16,8 +16,8 @@
 //
 // HARNESS_APP=go runs the Go ports of the SDK's e2e fixtures in
 // world-http/tests/sdk-e2e-go in process instead, and serves the routes the
-// suite reads from the app beside the World: the manifest and the webhook
-// route.
+// suite reads from the app beside the World: the manifest, the webhook
+// route, and the flow route's health check.
 //
 // It prints one line of JSON with its base URL, then serves. When its standard
 // input is a pipe, it exits once the pipe closes, which happens when the
@@ -133,6 +133,7 @@ func main() {
 	if goApp {
 		mux.Handle("GET "+sdke2e.ManifestPath, sdke2e.Manifest())
 		mux.Handle("/.well-known/workflow/v1/webhook/", worlds.WebhookHandler(world))
+		mux.Handle("/.well-known/workflow/v1/flow", worlds.WithHealthCheck(nil))
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"baseURL": baseURL}); err != nil {
 		log.Fatal(err)

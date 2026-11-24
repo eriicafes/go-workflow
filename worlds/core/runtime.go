@@ -93,6 +93,14 @@ func (r *Runtime) Execute(ctx context.Context, runners worlds.RunnerSet, input w
 
 // execute handles one delivery with r's runners.
 func (r *Runtime) execute(ctx context.Context, input worlds.QueueInput) error {
+	if input.RunID == "" {
+		// A delivery that names no run holds nothing for Go workflows,
+		// except a Workflow SDK health check, which is answered.
+		if check, ok := worlds.ParseHealthCheck(input); ok {
+			return worlds.AnswerHealthCheck(ctx, r.world, check)
+		}
+		return nil
+	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	ctx = worlds.NewClientContext(ctx, nil)

@@ -65,13 +65,9 @@ type Executor interface {
 }
 
 // Execute executes input with the runners in s on runtime. A run whose
-// workflow s does not hold fails with ErrWorkflowNotRegistered. A delivery
-// that names no run, such as a Workflow SDK health check queued through
-// world-http, holds nothing for Go workflows and is acknowledged.
+// workflow s does not hold fails with ErrWorkflowNotRegistered. The runtime
+// answers a Workflow SDK health check queued through world-http.
 func (s RunnerSet) Execute(ctx context.Context, runtime Runtime, input QueueInput) error {
-	if input.RunID == "" {
-		return nil
-	}
 	return runtime.Execute(ctx, s, input)
 }
 
