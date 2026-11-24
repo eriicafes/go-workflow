@@ -52,8 +52,12 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	if input.NotBefore != nil {
 		delay = time.Until(*input.NotBefore)
 	}
-	if scheduled(queue, delay) && w.scheduler == nil {
-		return worlds.QueueResult{}, fmt.Errorf("workflow/aws: delivery %s from now exceeds SQS's 15-minute delay and requires Config.Scheduler", delay.Round(time.Second))
+	publishDelay := delay
+	if w.scheduler == nil {
+		// Without Scheduler the queue is a standard one, as New requires: a
+		// delivery due later than SQS's longest delay arrives after it, early,
+		// and deliver sends it again for the rest.
+		publishDelay = min(delay, maxSQSDelay)
 	}
 	id := ulid.Make().String()
 	inputJSON, err := json.Marshal(input)
@@ -71,7 +75,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		expiresAt := now.Add(max(delay, 0) + input.Retention)
 		setTime(item, "expiresAt", &expiresAt)
 	}
-	if scheduled(queue, delay) {
+	if scheduled(queue, publishDelay) {
 		item["schedule"] = avs(scheduleName(id))
 	}
 	if queue.name != "" {
@@ -100,7 +104,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			return worlds.QueueResult{}, err
 		}
 	}
-	if err := w.publish(ctx, queue, id, input, delay, scheduleName(id), true); err != nil {
+	if err := w.publish(ctx, queue, id, input, publishDelay, scheduleName(id), true); err != nil {
 		cleanup := w.deleteQueueRecord(context.WithoutCancel(ctx), id)
 		if input.IdempotencyKey != "" {
 			cleanup = errors.Join(cleanup, w.releaseKey(context.WithoutCancel(ctx), input.RunID, input.IdempotencyKey, id))

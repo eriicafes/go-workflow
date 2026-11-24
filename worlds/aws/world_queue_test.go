@@ -28,6 +28,35 @@ func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	}
 }
 
+// A delivery due beyond SQS's longest delay is accepted without Scheduler,
+// as a Workflow SDK runtime queues one through world-http: it is sent with
+// that delay, and each early arrival sends it again until it is due.
+func TestQueueHoldsALongDelayWithoutScheduler(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	later := time.Now().Add(time.Hour)
+	result, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_later", NotBefore: &later})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := queue.sent()
+	if len(sent) != 1 || sent[0].DelaySeconds != int32(maxSQSDelay/time.Second) {
+		t.Fatalf("sent = %d messages, first delayed %ds, want one delayed %ds", len(sent), sent[0].DelaySeconds, int32(maxSQSDelay/time.Second))
+	}
+	executor := &recordingExecutor{}
+	response, err := Queue(world, executor)(ctx, events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, result.MessageID, worlds.QueueInput{RunID: "wrun_later", NotBefore: &later})}})
+	if err != nil || len(response.BatchItemFailures) != 0 {
+		t.Fatalf("early arrival: response = %+v, err = %v", response, err)
+	}
+	if len(executor.inputs) != 0 {
+		t.Fatal("an early arrival was executed")
+	}
+	if sent := queue.sent(); len(sent) != 2 || sent[1].DelaySeconds != int32(maxSQSDelay/time.Second) {
+		t.Fatalf("early arrival re-sent %d messages, want one more delayed %ds", len(queue.sent())-1, int32(maxSQSDelay/time.Second))
+	}
+}
+
 func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}
@@ -370,4 +399,14 @@ func assertFIFOSchedule(t *testing.T, schedule *scheduler.CreateScheduleInput, m
 	if !strings.Contains(awsv2.ToString(schedule.Target.Input), messageID) {
 		t.Fatalf("schedule input = %s, want delivery %s", awsv2.ToString(schedule.Target.Input), messageID)
 	}
+}
+
+// recordingExecutor records the deliveries it executes.
+type recordingExecutor struct {
+	inputs []worlds.QueueInput
+}
+
+func (e *recordingExecutor) Execute(_ context.Context, _ worlds.Runtime, input worlds.QueueInput) error {
+	e.inputs = append(e.inputs, input)
+	return nil
 }

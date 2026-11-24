@@ -108,8 +108,9 @@ still interleave when one waits.
   delivery either way.
 
 If publishing fails the record is deleted and the error returned. Without
-`Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
-error, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the runtime
+`Config.Scheduler`, a delivery due more than 15 minutes ahead is sent with a
+15-minute delay, arrives early, and is sent again for the rest until it is
+due, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the Go runtime
 reaches a later timer in hops of at most 15 minutes. With `Scheduler`,
 `MaxQueueDelay` is zero and any delay is scheduled directly. `New` rejects a
 `SchedulerConfig` without a client, target ARN, and role ARN.

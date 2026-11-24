@@ -99,18 +99,6 @@ func TestQueueRouting(t *testing.T) {
 	}
 }
 
-func TestQueueWithoutScheduler(t *testing.T) {
-	dynamo, queue := newFakeDynamo(), &fakeSQS{}
-	world := testWorld(t, dynamo, queue, nil)
-	later := time.Now().Add(time.Hour)
-	if _, err := world.Queue(context.Background(), worlds.QueueInput{RunID: "wrun_a", NotBefore: &later}); err == nil {
-		t.Fatal("long delay without scheduler succeeded")
-	}
-	if dynamo.count() != 0 || len(queue.sent()) != 0 {
-		t.Fatal("rejected message left state behind")
-	}
-}
-
 func TestQueuePublishFailure(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue, schedules := newFakeDynamo(), &fakeSQS{err: errors.New("sqs down")}, newFakeScheduler()

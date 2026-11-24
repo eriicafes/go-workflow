@@ -38,9 +38,9 @@ type Config struct {
 	Routes map[string]string
 	// Scheduler, when set, delivers work due more than 15 minutes ahead, beyond
 	// the SQS delay limit, and every delayed delivery to a FIFO queue. Without
-	// it, queueing such a delivery returns an error, and Capabilities report a
-	// MaxQueueDelay of 15 minutes, so the runtime reaches a later timer in
-	// hops.
+	// it, such a delivery is sent with a 15-minute delay and sent again on each
+	// early arrival until it is due, and Capabilities report a MaxQueueDelay of
+	// 15 minutes, so the runtime reaches a later timer in hops.
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
 	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
