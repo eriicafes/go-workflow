@@ -120,7 +120,7 @@ func TestStartedChildRunResumesParentHook(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, step := range steps.Data {
-			if !released && strings.HasSuffix(step.StepName, ".runValue") && step.Status == worlds.StatusCompleted {
+			if !released && strings.HasSuffix(step.StepName, "//runValue") && step.Status == worlds.StatusCompleted {
 				close(read)
 				released = true
 			}
@@ -157,7 +157,7 @@ func TestStructDeclaresWorkflowOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The workflow is named after the struct that embeds Struct.
-	expected := reflect.TypeFor[structWorkflowInput]().PkgPath() + "." + reflect.TypeFor[structWorkflowInput]().Name()
+	expected := "workflow//" + reflect.TypeFor[structWorkflowInput]().PkgPath() + "//" + reflect.TypeFor[structWorkflowInput]().Name()
 	if name, err := run.WorkflowName(ctx); err != nil || name != expected {
 		t.Fatalf("workflow name = %q, %v; want %q", name, err, expected)
 	}
@@ -181,7 +181,7 @@ func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := reflect.TypeFor[pointerWorkflowInput]().PkgPath() + "." + reflect.TypeFor[pointerWorkflowInput]().Name()
+	expected := "workflow//" + reflect.TypeFor[pointerWorkflowInput]().PkgPath() + "//" + reflect.TypeFor[pointerWorkflowInput]().Name()
 	if name, err := run.WorkflowName(ctx); err != nil || name != expected {
 		t.Fatalf("workflow name = %q, %v; want %q", name, err, expected)
 	}

@@ -3,7 +3,7 @@ import { decode } from "cbor-x";
 import { AnalyticsEventSchema, AnalyticsHookSchema, AnalyticsRunSchema, EventSchema, type EventResult, HookSchema, SPEC_VERSION_SINGLE_ORCHESTRATOR, StepSchema, WorkflowRunSchema } from "@workflow/world";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createWorld, type HTTPWorld } from "../index.js";
-import { eventually, rpcContentType, rpcResponse, sdkName, startServer, text, ulid } from "./helpers.js";
+import { eventually, rpcContentType, rpcResponse, startServer, text, ulid } from "./helpers.js";
 
 test("creates a world from its spec and maps Go CBOR fields", async () => {
 	const requests: { url: string | URL | Request; init: RequestInit; envelope: Record<string, unknown> }[] = [];
@@ -275,8 +275,7 @@ describe("against a Go RPC server", () => {
 		const server = await startServer<{ baseURL: string; review: string; nap: string }>({ WORKFLOW_DISABLE_COMPRESSION: "1" });
 		stop = server.stop;
 		world = await createWorld({ baseURL: server.started.baseURL });
-		// The SDK knows workflows by the names the World's reads report.
-		names = { review: sdkName(server.started.review), nap: sdkName(server.started.nap) };
+		names = { review: server.started.review, nap: server.started.nap };
 	}, 300_000);
 
 	afterAll(() => {
@@ -364,8 +363,7 @@ describe("against a Go RPC server", () => {
 		expect(types.filter((type) => type === "hook_received")).toHaveLength(1);
 		expect(types.at(-1)).toBe("run_completed");
 		expect(events.snapshot?.seq).toBeGreaterThanOrEqual(events.data.length);
-		// The resume names its workflow in the Go form in the stored log,
-		// which reads report in the SDK's.
+		// The resume names its workflow in the stored log.
 		const stored = events.data.find((event) => event.eventType === "hook_received") as { eventData: Record<string, unknown>; resumeId?: string };
 		expect(stored.eventData).toMatchObject({ token, workflowName: names.review, payload });
 		expect(stored.resumeId).toBe("resume_01");

@@ -46,12 +46,6 @@ export function text(value: string): Uint8Array {
 	return new TextEncoder().encode(value);
 }
 
-// sdkName returns a Go workflow name in the Workflow SDK's form.
-export function sdkName(name: string): string {
-	const dot = name.indexOf(".", name.lastIndexOf("/") + 1);
-	return `workflow//${name.slice(0, dot)}//${name.slice(dot + 1)}`;
-}
-
 // ulid returns a new ULID, as the SDK mints a run ID from.
 export function ulid(): string {
 	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";

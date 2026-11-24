@@ -289,7 +289,7 @@ func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 		t.Fatalf("got %d spans", len(spans))
 	}
 	for i, span := range spans {
-		if span.Name != "step core_test.tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
+		if span.Name != "step tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
 			t.Fatalf("span = %q with parent %v", span.Name, span.Parent)
 		}
 		if span.Status.Code != codes.Error {
@@ -471,7 +471,7 @@ func TestStepThatRunsOutOfRetriesFailsWithAFatalErrorThatKeepsItsLastError(t *te
 			var fatal worlds.FatalError
 			var cause exhaustedCause
 			if !errors.As(err, &recorded) || recorded.Type != "FatalError" || !strings.HasPrefix(recorded.Message, `Step "`) ||
-				!strings.HasSuffix(recorded.Message, `.alwaysRefused" failed after 0 retries: refused with 7`) {
+				!strings.HasSuffix(recorded.Message, `//alwaysRefused" failed after 0 retries: refused with 7`) {
 				t.Fatalf("run = %#v, want the step's retries used up", err)
 			}
 			// The step's own error is the cause, which errors.As reaches.

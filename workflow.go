@@ -415,7 +415,7 @@ func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamW
 
 // Use registers fn as the runner of workflow In. Pass the returned Runner to
 // worlds.Runners so the runtime can execute the workflow. The workflow name is
-// the package path and type name of In. fn replays on every delivery, so it
+// formed from the package path and type name of In (see worlds.WorkflowName). fn replays on every delivery, so it
 // must be deterministic. It does side effects only through steps and reads
 // time only through Now.
 func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, error)) worlds.Runner {
@@ -426,11 +426,11 @@ func Use[In worlds.Workflow[Out], Out any](fn func(context.Context, In) (Out, er
 			return nil, ErrNoWorkflow
 		}
 		// The input is the workflow's argument list.
-		var args [1]In
-		if err := execution.DecodePayload(raw, &args); err != nil {
+		input, err := decodeArguments[In](raw, execution.DecodePayload)
+		if err != nil {
 			return nil, fmt.Errorf("workflow: decode %s input: %w", name, err)
 		}
-		output, err := fn(ctx, args[0])
+		output, err := fn(ctx, input)
 		if err != nil {
 			return nil, err
 		}
@@ -753,7 +753,7 @@ func Start[In worlds.Workflow[Out], Out any](ctx context.Context, input In, opti
 // runCreateInput returns the run_created input of a run of input, its
 // argument list encrypted with keys when they are set.
 func runCreateInput[In any](runID worlds.RunID, deploymentID, name string, input In, keys *worlds.RunKeys, settings startSettings) (worlds.EventsCreateRunInput, error) {
-	encoded, err := worlds.EncodePayload([1]In{input}, worlds.PayloadOptions{Keys: keys, NoCompression: settings.NoCompression})
+	encoded, err := worlds.EncodePayload(arguments(input), worlds.PayloadOptions{Keys: keys, NoCompression: settings.NoCompression})
 	if err != nil {
 		return worlds.EventsCreateRunInput{}, fmt.Errorf("workflow: encode %s input: %w", name, err)
 	}

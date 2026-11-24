@@ -23,7 +23,7 @@ import type {
 	World,
 } from "@workflow/world";
 import { toHook, toRun, toStep, toWait } from "./entities.js";
-import { createOptions, jsonEncoded, runCreation, startHookConflict, storedEventData, toEventResult, withEventData, withEventDataPage } from "./events.js";
+import { createOptions, jsonEncoded, runCreation, startHookConflict, toEventResult, withEventData, withEventDataPage } from "./events.js";
 import { queueHandler, queueInput } from "./queue.js";
 import { HTTPWorldError, RPCClient, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
@@ -291,7 +291,7 @@ export class HTTPWorld implements World {
 						event: {
 							eventType: event.eventType,
 							correlationId: event.correlationId ?? "",
-							data: jsonEncoded(storedEventData(event.eventData)),
+							data: jsonEncoded(event.eventData),
 							...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 							...(options?.inBand && options.occurredAt ? { occurredAt: options.occurredAt } : {}),
 						},
@@ -310,7 +310,7 @@ export class HTTPWorld implements World {
 					events: events.map(({ event, occurredAt }) => ({
 						eventType: event.eventType,
 						correlationId: event.correlationId ?? "",
-						data: jsonEncoded(storedEventData(event.eventData)),
+						data: jsonEncoded(event.eventData),
 						...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 						...(occurredAt ? { occurredAt } : {}),
 					})),

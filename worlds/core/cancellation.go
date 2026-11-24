@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -85,7 +83,7 @@ func NewCancelContext(ctx context.Context, execution *Execution) (context.Contex
 		input := cancelContextInput{Reference: ref, Cause: worlds.NewError(cause)}
 		outcome := DurableInlineStep(execution.Context(), DurableInlineStepOptions{
 			Execution: execution,
-			Name:      runtime.FuncForPC(reflect.ValueOf(CancelContext).Pointer()).Name(),
+			Name:      worlds.StepName(CancelContext),
 		}, func(ctx context.Context, input cancelContextInput) (cancellationData, error) {
 			return CancelContext(ctx, input.Reference, input.Cause)
 		}, input)

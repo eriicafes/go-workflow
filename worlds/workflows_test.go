@@ -1,6 +1,7 @@
 package worlds_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -35,5 +36,41 @@ func TestRetentions(t *testing.T) {
 	}
 	if _, negative := worlds.MaxRetention(0, map[string]time.Duration{"w": -time.Second}); !negative {
 		t.Error("MaxRetention missed a negative retention")
+	}
+}
+
+type namedFlow struct{}
+
+func (namedFlow) Workflow(struct{}) {}
+
+func (namedFlow) report(context.Context, int) (int, error) { return 0, nil }
+
+func plainStep(context.Context, int) (int, error) { return 0, nil }
+
+func genericStep[T any](context.Context, T) (T, error) {
+	var zero T
+	return zero, nil
+}
+
+// Workflows and steps are named in the Workflow SDK's form, with a step's
+// nested name joined by slashes and a generic step's type arguments kept.
+func TestNamesTakeTheWorkflowSDKsForm(t *testing.T) {
+	const pkg = "github.com/eriicafes/go-workflow/worlds_test"
+	if got := worlds.WorkflowName[namedFlow](); got != "workflow//"+pkg+"//namedFlow" {
+		t.Errorf("WorkflowName = %q", got)
+	}
+	closure := func(context.Context, int) (int, error) { return 0, nil }
+	for _, test := range []struct {
+		fn   any
+		want string
+	}{
+		{plainStep, "step//" + pkg + "//plainStep"},
+		{closure, "step//" + pkg + "//TestNamesTakeTheWorkflowSDKsForm/func1"},
+		{namedFlow{}.report, "step//" + pkg + "//namedFlow/report-fm"},
+		{genericStep[time.Duration], "step//" + pkg + "//genericStep[...]"},
+	} {
+		if got := worlds.StepName(test.fn); got != test.want {
+			t.Errorf("StepName = %q, want %q", got, test.want)
+		}
 	}
 }

@@ -1,7 +1,7 @@
 import type { CreateEventParams, Event, EventResult, PaginatedResponse } from "@workflow/world";
 import { START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
 import { toHook, toRun, toStep, toWait } from "./entities.js";
-import { HTTPWorldError, devkitName, goName, type RPC } from "./rpc.js";
+import { HTTPWorldError, type RPC } from "./rpc.js";
 import { page } from "./utils.js";
 
 // RunCreation is what creates a run: the data of a run_created event, and the
@@ -84,22 +84,6 @@ export function jsonEncoded(value: unknown): Uint8Array {
 	return new TextEncoder().encode(text);
 }
 
-// storedEventData returns event data as the Go World stores it: with its
-// workflow and step names in Go form, like the names beside it in the log.
-export function storedEventData(value: unknown): unknown {
-	if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Uint8Array) {
-		return value;
-	}
-	const fields = { ...(value as Record<string, unknown>) };
-	if (typeof fields.workflowName === "string") {
-		fields.workflowName = goName("workflow", fields.workflowName);
-	}
-	if (typeof fields.stepName === "string") {
-		fields.stepName = goName("step", fields.stepName);
-	}
-	return fields;
-}
-
 export function withEventDataPage(events: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
 	return { ...events, data: page(events).data.map(withEventData) };
 }
@@ -110,9 +94,8 @@ export function withEventDataPage(events: PaginatedResponse<RPC.Event>): Paginat
 const payloadFields = ["input", "output", "result", "error", "payload", "metadata"];
 
 // withEventData exposes an event's stored data as the eventData object the
-// Workflow SDK reads: its payloads as bytes, its times as Dates, and Go
-// workflow and step names in SDK form. An event about the run itself has no
-// correlation ID.
+// Workflow SDK reads: its payloads as bytes and its times as Dates. An event
+// about the run itself has no correlation ID.
 export function withEventData(event: RPC.Event): Event {
 	const { data, occurredAt, resumeId, correlationId, ...fields } = event;
 	const rest = { ...fields, ...(correlationId ? { correlationId } : {}), ...(occurredAt ? { occurredAt } : {}), ...(resumeId ? { resumeId } : {}) };
@@ -122,12 +105,6 @@ export function withEventData(event: RPC.Event): Event {
 	}
 	if (eventData && typeof eventData === "object" && !Array.isArray(eventData)) {
 		const fields = eventData as Record<string, unknown>;
-		if (typeof fields.workflowName === "string") {
-			fields.workflowName = devkitName("workflow", fields.workflowName);
-		}
-		if (typeof fields.stepName === "string") {
-			fields.stepName = devkitName("step", fields.stepName);
-		}
 		for (const field of payloadFields) {
 			if (typeof fields[field] === "string") {
 				fields[field] = new Uint8Array(Buffer.from(fields[field] as string, "base64"));

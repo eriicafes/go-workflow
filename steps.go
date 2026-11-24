@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"reflect"
-	"runtime"
 	"slices"
 	"time"
 
@@ -56,7 +54,7 @@ func Background[In, Out any](ctx context.Context, fn func(context.Context, In) (
 	option := stepOptions(options)
 	durable := core.DurableStep(ctx, core.DurableStepOptions{
 		Execution:  execution,
-		Name:       functionIdentity(fn),
+		Name:       worlds.StepName(fn),
 		MaxRetries: option.MaxRetries,
 	}, fn, input)
 	return stepResult(execution, durable)
@@ -103,7 +101,7 @@ func InlineBackground[In, Out any](ctx context.Context, fn func(context.Context,
 	option := stepOptions(options)
 	durable := core.DurableInlineStep(ctx, core.DurableInlineStepOptions{
 		Execution:  execution,
-		Name:       functionIdentity(fn),
+		Name:       worlds.StepName(fn),
 		MaxRetries: option.MaxRetries,
 	}, fn, input)
 	return stepResult(execution, durable)
@@ -179,7 +177,7 @@ func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, i
 	execution.AddRollback(func(ctx context.Context, execution *core.Execution) error {
 		result := core.DurableStep(ctx, core.DurableStepOptions{
 			Execution:  execution,
-			Name:       rollbackFunctionIdentity(fn),
+			Name:       worlds.StepName(fn),
 			MaxRetries: option.MaxRetries,
 		}, func(ctx context.Context, value In) (struct{}, error) {
 			return struct{}{}, fn(ctx, value)
@@ -354,12 +352,4 @@ func selectPromise(ctx context.Context, successful bool, results ...promise) (pr
 		}
 		execution.Wait()
 	}
-}
-
-func functionIdentity[In, Out any](fn func(context.Context, In) (Out, error)) string {
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
-}
-
-func rollbackFunctionIdentity[In any](fn func(context.Context, In) error) string {
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }

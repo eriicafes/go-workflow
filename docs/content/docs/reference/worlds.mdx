@@ -389,7 +389,8 @@ func Routes(routes ...QueueRoute) map[string]string
 
 `Workflow` is satisfied by a workflow type, such as one embedding
 `workflow.Struct`. `WorkflowName` returns the name its runs are recorded under,
-its package path and type name. `Routes(Route[W](queue), ...)` builds the
+`workflow//<package path>//<type name>`, and `StepName(fn)` the name a step
+function is recorded under, `step//<package path>//<name>`. `Routes(Route[W](queue), ...)` builds the
 `Config.Routes` of a World that routes deliveries by workflow.
 
 ### Retention

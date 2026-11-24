@@ -97,8 +97,8 @@ test("forwards reserved attributes, the queue's workflow and the waits to comple
 	expect(calls[0]?.input).toMatchObject({ AllowReservedAttributes: true });
 	expect(calls.find((call) => call.method === "runs.setAttributes")?.input).toMatchObject({ AllowReservedAttributes: true });
 	const queued = calls.filter((call) => call.method === "queue.queue").map((call) => call.input);
-	// The SDK's queue name is the workflow's, in the Go World's form.
-	expect(queued[0]).toMatchObject({ WorkflowName: "example.com/app.Report", CompleteWaits: ["wait_01"], RunSpecVersion: 9 });
+	// The SDK's queue name is the workflow's, which the Go World routes by.
+	expect(queued[0]).toMatchObject({ WorkflowName: "workflow//example.com/app//Report", CompleteWaits: ["wait_01"], RunSpecVersion: 9 });
 	expect(queued[0]).not.toHaveProperty("QueueName");
 	expect(queued[1]).toMatchObject({ QueueName: "orders" });
 });
@@ -141,9 +141,9 @@ test("forwards a run's creation on its first message, keyed by the run", async (
 	const queued = calls.find((call) => call.method === "queue.queue")?.input;
 	// The message's delivery creates the run run_created describes.
 	expect(queued?.RunInput).toEqual(created);
-	expect(queued?.RunInput).toMatchObject({ RunID: "wrun_01", WorkflowName: "example.com/app.Report", AllowReservedAttributes: true, StartHook: { Token: "tok" } });
+	expect(queued?.RunInput).toMatchObject({ RunID: "wrun_01", WorkflowName: "workflow//example.com/app//Report", AllowReservedAttributes: true, StartHook: { Token: "tok" } });
 	// A Go World records the run at its own spec version, whatever was asked.
-	expect(queued).toMatchObject({ WorkflowName: "example.com/app.Report", IdempotencyKey: "wrun_01", RunSpecVersion: 9, DeploymentID: "dpl_go", Retention: 60_000_000_000n });
+	expect(queued).toMatchObject({ WorkflowName: "workflow//example.com/app//Report", IdempotencyKey: "wrun_01", RunSpecVersion: 9, DeploymentID: "dpl_go", Retention: 60_000_000_000n });
 
 	// A wake falls back to the options' spec version, and a step queue's
 	// name is the SDK's, not a queue of the Go World.
@@ -160,8 +160,8 @@ test("forwards a run's creation on its first message, keyed by the run", async (
 	expect(results).toEqual([{ messageId: "msg_01" }, { messageId: "msg_02" }]);
 	expect(calls.find((call) => call.method === "queue.queueBatch")?.input).toEqual({
 		Items: [
-			{ WorkflowName: "example.com/app.Report", RunID: "wrun_01", RunSpecVersion: 9, SdkMessage: expect.any(Uint8Array) },
-			{ WorkflowName: "example.com/app.Report", RunID: "wrun_02", RunSpecVersion: 9, IdempotencyKey: "key", SdkMessage: expect.any(Uint8Array) },
+			{ WorkflowName: "workflow//example.com/app//Report", RunID: "wrun_01", RunSpecVersion: 9, SdkMessage: expect.any(Uint8Array) },
+			{ WorkflowName: "workflow//example.com/app//Report", RunID: "wrun_02", RunSpecVersion: 9, IdempotencyKey: "key", SdkMessage: expect.any(Uint8Array) },
 		],
 	});
 	// Each item carries the SDK's queue name and message, unchanged.

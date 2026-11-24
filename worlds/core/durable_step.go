@@ -405,7 +405,7 @@ func stepMessageSent(events []worlds.Event, stepID worlds.StepID) time.Time {
 // ctx, the step's span continues the trace the run was started in, which the
 // run's execution context carries.
 func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.StepID, name string, attempt int) (context.Context, trace.Span) {
-	short := strings.TrimSuffix(name[strings.LastIndex(name, "/")+1:], "-fm")
+	short := strings.TrimSuffix(name[strings.LastIndex(name, "//")+2:], "-fm")
 	run := execution.Run()
 	if !trace.SpanContextFromContext(ctx).IsValid() {
 		if recorded, ok := run.ExecutionContext[worlds.ExecutionContextTraceCarrier].(map[string]any); ok {

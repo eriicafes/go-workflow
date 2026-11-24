@@ -34,10 +34,27 @@ type GenerateReport struct {
 func (GenerateReport) Workflow(GenerateReportResult) {}
 ```
 
-The struct's package path and type name form the **workflow name**, such as
-`example.com/app/workflows.GenerateReport`. Runs record this name to select
-their runner. Each value of the struct supplies a run's input. Inputs and
-outputs use JSON, so give them exported fields and JSON-friendly types.
+The struct's package path and type name form the **workflow name**, in the
+Workflow SDK's form, such as
+`workflow//example.com/app/workflows//GenerateReport`. Runs record this name to
+select their runner. Steps are named the same way from their function, such as
+`step//example.com/app/flows//writeDraft`. Each value of the struct supplies a
+run's input. Inputs and outputs use JSON, so give them exported fields and
+JSON-friendly types.
+
+A run records its input as an argument list with the struct as its one
+argument. To take several arguments instead, as a Workflow SDK caller passes
+them with `start(workflow, [a, b])`, embed `workflow.Args`: the struct's
+exported fields become the arguments, in the order they are declared. Missing
+arguments leave their fields zero, and extra ones are ignored.
+
+```go
+type Add struct {
+	workflow.Struct[int]
+	workflow.Args
+	A, B int
+}
+```
 
 Keep workflow types in a `workflows` package and their runners in a `flows`
 package inside it, `workflows/flows`. Request handlers import only

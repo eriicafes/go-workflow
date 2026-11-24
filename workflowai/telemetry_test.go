@@ -50,7 +50,7 @@ func TestStreamTelemetryTrace(t *testing.T) {
 		count := func(name string) int {
 			return len(slices.DeleteFunc(slices.Clone(names), func(n string) bool { return n != name }))
 		}
-		if count("ai.workflowAgent.stream fake-model") != 1 || count("step workflowai.modelCall.stream") != 2 || count("step workflowai_test.getWeather") != 1 ||
+		if count("ai.workflowAgent.stream fake-model") != 1 || count("step modelCall/stream") != 2 || count("step getWeather") != 1 ||
 			count("invoke_agent fake-model") != 2 || count("chat fake-model") != 2 {
 			t.Fatalf("spans = %v", names)
 		}
@@ -62,12 +62,12 @@ func TestStreamTelemetryTrace(t *testing.T) {
 			}
 			parent := spans[span.Parent.SpanID()].Name
 			switch span.Name {
-			case "step workflowai.modelCall.stream", "step workflowai_test.getWeather":
+			case "step modelCall/stream", "step getWeather":
 				if span.Parent.SpanID() != root.SpanContext.SpanID() {
 					t.Fatalf("span %q has parent %q", span.Name, parent)
 				}
 			case "invoke_agent fake-model":
-				if parent != "step workflowai.modelCall.stream" {
+				if parent != "step modelCall/stream" {
 					t.Fatalf("span %q has parent %q", span.Name, parent)
 				}
 			}

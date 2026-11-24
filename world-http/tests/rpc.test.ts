@@ -28,7 +28,7 @@ test("raises structured RPC errors", async () => {
 	});
 });
 
-test("maps Go workflow and step names to Workflow SDK names and back", async () => {
+test("passes workflow and step names through as written", async () => {
 	const calls: { method: unknown; input: unknown }[] = [];
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
@@ -39,12 +39,12 @@ test("maps Go workflow and step names to Workflow SDK names and back", async () 
 				case "client.spec":
 					return rpcResponse({ RPCVersion: 1, Capabilities: { Analytics: false, SetAttributes: false } });
 				case "runs.get":
-					return rpcResponse({ RunID: "wrun_01", WorkflowName: "example.com/app/workflows.PublishReport" });
+					return rpcResponse({ RunID: "wrun_01", WorkflowName: "workflow//example.com/app/workflows//PublishReport" });
 				case "steps.list":
 					return rpcResponse({
 						Data: [
-							{ StepID: "step_01", StepName: "example.com/app/flows.writeDraft" },
-							{ StepID: "step_02", StepName: "example.com/app/flows.PublishReport.func1" },
+							{ StepID: "step_01", StepName: "step//example.com/app/flows//writeDraft" },
+							{ StepID: "step_02", StepName: "step//example.com/app/flows//PublishReport/func1" },
 							{ StepID: "step_03", StepName: "step//./src/jobs//send" },
 						],
 						HasMore: false,
@@ -70,7 +70,7 @@ test("maps Go workflow and step names to Workflow SDK names and back", async () 
 		eventData: { workflowName: run.workflowName, input: new Uint8Array() },
 	} as never);
 	expect(calls.find((call) => call.method === "events.createRun")?.input).toMatchObject({
-		WorkflowName: "example.com/app/workflows.PublishReport",
+		WorkflowName: "workflow//example.com/app/workflows//PublishReport",
 	});
 });
 

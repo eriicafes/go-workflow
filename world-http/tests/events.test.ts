@@ -4,8 +4,8 @@ import { expect, test } from "vitest";
 import { HTTPWorldError, createWorld } from "../index.js";
 import { rpcResponse } from "./helpers.js";
 
-test("exposes stored event data as eventData with Workflow SDK names", async () => {
-	const goData = new TextEncoder().encode(JSON.stringify({ stepName: "example.com/app/flows.writeDraft", input: "ZGV2bA==" }));
+test("exposes stored event data as eventData", async () => {
+	const goData = new TextEncoder().encode(JSON.stringify({ stepName: "step//example.com/app/flows//writeDraft", input: "ZGV2bA==" }));
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
 		fetch: async (_url, init) => {
@@ -50,7 +50,7 @@ test("writes event data as JSON and shapes event results like the Workflow SDK",
 				case "events.create":
 					return rpcResponse({
 						Event: { RunID: "wrun_01", EventID: "evnt_02", EventType: "step_created", CorrelationID: "step_01", Data: (input.Event as Record<string, unknown>).Data },
-						Step: { StepID: "step_01", StepName: "example.com/app/flows.write" },
+						Step: { StepID: "step_01", StepName: "step//example.com/app/flows//write" },
 						StepCreated: true,
 						Allocated: 1,
 						Events: [],
@@ -143,7 +143,7 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 	await expect(create("wrun_05")).rejects.toMatchObject({ name: "WorkflowWorldError", code: "START_HOOK_ADMISSION_DISABLED", status: 400 });
 });
 
-test("reports a hook's resume deduplication, event times as Dates, and stores Go names", async () => {
+test("reports a hook's resume deduplication and event times as Dates, and stores names as written", async () => {
 	const now = new Date();
 	const stored: Uint8Array[] = [];
 	const world = await createWorld({
@@ -197,9 +197,9 @@ test("reports a hook's resume deduplication, event times as Dates, and stores Go
 		expect(EventSchema.safeParse(event).error).toBeUndefined();
 	}
 
-	// A resume names its run's workflow, which is stored in the Go form.
+	// A resume names its run's workflow, which is stored as written.
 	await world.events.create("wrun_01", { eventType: "hook_received", correlationId: "hook_01", eventData: { token: "tok", workflowName: "workflow//example.com/app//Report", payload: new Uint8Array([1]) } } as never);
-	expect(JSON.parse(new TextDecoder().decode(stored[0]))).toEqual({ token: "tok", workflowName: "example.com/app.Report", payload: "AQ==" });
+	expect(JSON.parse(new TextDecoder().decode(stored[0]))).toEqual({ token: "tok", workflowName: "workflow//example.com/app//Report", payload: "AQ==" });
 
 	await expect(world.resolveLatestDeploymentId?.()).resolves.toBe("dpl_latest");
 	expect(world.isDeploymentUnavailableError(new HTTPWorldError("internal", "gone", 500, "deployment_unavailable"))).toBe(true);
