@@ -196,13 +196,12 @@ jobs:
         run: npm run test:sdk-e2e
 
   # The Vercel World runs on Vercel's workflow backend, with the variables the
-  # Workflow SDK's tests use. Its jobs run where the repository has the
-  # WORKFLOW_VERCEL_PROJECT variable, never for a pull request from a fork, and
-  # read the token from the vercel environment, whose protection rules decide
-  # which runs may use it.
+  # Workflow SDK's tests use, which the vercel environment holds. Its jobs run
+  # in this repository only, never for a fork or a pull request from one, and
+  # the environment's protection rules decide which runs may use them.
   world-testing-vercel:
     name: World Testing (vercel)
-    if: ${{ vars.WORKFLOW_VERCEL_PROJECT != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     environment: vercel
     env:
@@ -214,7 +213,7 @@ jobs:
 
   sdk-e2e-vercel:
     name: SDK E2E (vercel)
-    if: ${{ vars.WORKFLOW_VERCEL_PROJECT != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: vercel
