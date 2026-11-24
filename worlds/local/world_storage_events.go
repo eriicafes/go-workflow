@@ -1079,17 +1079,30 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 }
 
 // checkAppendIDs refuses an append whose run ID or correlation ID, when it
-// has one, is unsafe.
+// has one, is unsafe. A step, hook, or wait event names its entity by its
+// correlation ID, so it must have one.
 func checkAppendIDs(runID worlds.RunID, event worlds.EventsCreateEvent) error {
 	if runID != "" {
 		if err := checkID("run ID", string(runID)); err != nil {
 			return err
 		}
 	}
-	if event.CorrelationID != "" {
+	if event.CorrelationID != "" || correlated(event.EventType) {
 		return checkID("correlation ID", event.CorrelationID)
 	}
 	return nil
+}
+
+// correlated reports whether an event of eventType belongs to the step,
+// hook, or wait its correlation ID names.
+func correlated(eventType worlds.EventType) bool {
+	switch eventType {
+	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying,
+		worlds.EventTypeHookCreated, worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed,
+		worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted:
+		return true
+	}
+	return false
 }
 
 func validAppend(eventType worlds.EventType) bool {
