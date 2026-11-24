@@ -2,4 +2,4 @@
 "go-workflow": minor
 ---
 
-Add `worlds.RemoteExecutor` and `world-http` queue handlers, so a Go World can run a Workflow SDK app's workflows.
+Take a `worlds.Executor` in Worlds instead of runners, and add `worlds.RemoteExecutor` to run a Workflow SDK app's workflows through `world-http`.
