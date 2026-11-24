@@ -50,9 +50,8 @@ type RemoteExecutor struct {
 	// authenticates RPC requests with, the one passed to WithClientToken.
 	// Empty sends no Authorization header.
 	Token string
-	// Header is sent with every request, such as Vercel's
-	// x-vercel-protection-bypass header for an app behind Deployment
-	// Protection. The delivery's own headers take precedence.
+	// Header is sent with every request, such as the headers a proxy in
+	// front of the app needs. The delivery's own headers take precedence.
 	Header http.Header
 	// Client sends the requests. Nil uses http.DefaultClient.
 	Client *http.Client

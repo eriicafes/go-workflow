@@ -124,17 +124,20 @@ result of `{ timeoutSeconds: n }` asks the Go World for the message again after
 `n` seconds, where `0` is a handoff, and a handler that throws fails the
 delivery, which the World retries.
 
-On Vercel, the flow route is an ordinary public function route. Deployment
-Protection blocks requests from outside to protected deployments, previews by
-default, so pass a protection bypass secret in the executor's `Header`:
+The executor's `Header` is sent with every delivery, for an app behind a proxy
+that needs headers of its own:
 
 ```go
 worlds.RemoteExecutor{
-	URL:    "https://app-git-preview.vercel.app/.well-known/workflow/v1/flow",
+	URL:    "https://app.example.com/.well-known/workflow/v1/flow",
 	Token:  token,
-	Header: http.Header{"x-vercel-protection-bypass": {bypassSecret}},
+	Header: http.Header{"X-Proxy-Key": {proxyKey}},
 }
 ```
+
+An app deployed on Vercel cannot be backed this way: its Vercel build gives the
+flow route a queue trigger, and Vercel does not expose queue-triggered
+functions publicly.
 
 ## Limits
 
