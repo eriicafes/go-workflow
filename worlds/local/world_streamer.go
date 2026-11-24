@@ -2,6 +2,7 @@ package localworld
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -19,10 +20,23 @@ const streamRetryAfter = 50 * time.Millisecond
 // A stream is keyed by its name alone: the run ID is stored with each chunk,
 // for StreamsList and purges, but a read, an append, or an info of a stream
 // names it only.
+//
+// It reads the stream's last row alone, so it costs the same however long
+// the stream is: chunks fill rows 1 to count, and an end marker is the row
+// after them, or row 0 when a purge left only the marker.
 func (s *store) streamState(name string) (int, bool, error) {
-	var count, closed int
-	err := s.q.QueryRowContext(s.ctx, "SELECT coalesce(sum(1 - eof), 0), coalesce(max(eof), 0) FROM stream_chunks WHERE name = ?", name).Scan(&count, &closed)
-	return count, closed == 1, err
+	var last, eof int
+	err := s.q.QueryRowContext(s.ctx, "SELECT idx, eof FROM stream_chunks WHERE name = ? ORDER BY idx DESC LIMIT 1", name).Scan(&last, &eof)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if eof == 1 {
+		return max(last-1, 0), true, nil
+	}
+	return last, false, nil
 }
 
 // endPurgedStream writes the end marker of a new stream of a run whose data

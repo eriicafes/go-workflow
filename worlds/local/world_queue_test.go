@@ -138,6 +138,7 @@ func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 	}
 }
 
+// SDK: packages/world-local/src/queue.test.ts > queue delaySeconds > close() aborts a pending delayed message without delivering it
 func TestQueueLosesMessagesOnClose(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
