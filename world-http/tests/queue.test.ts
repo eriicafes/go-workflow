@@ -2,8 +2,8 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { decode } from "cbor-x";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { createWorld, type HTTPWorld } from "./index.js";
-import { eventually, rpcResponse, startServer, ulid } from "./testdata/helpers.js";
+import { createWorld, type HTTPWorld } from "../index.js";
+import { eventually, rpcResponse, startServer, ulid } from "./helpers.js";
 
 test("queues health checks with the SDK message for the app to answer", async () => {
 	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
@@ -24,6 +24,7 @@ test("queues health checks with the SDK message for the app to answer", async ()
 	expect(queued?.RunID).toBeUndefined();
 	expect(JSON.parse(new TextDecoder().decode(queued?.SdkMessage as Uint8Array))).toEqual({ queueName: "__wkf_workflow_report", message: { __healthCheck: true, correlationId: "probe_01" } });
 });
+
 test("reports each message of a batch and forwards a step's telemetry", async () => {
 	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
 	const world = await createWorld({
@@ -68,6 +69,7 @@ test("reports each message of a batch and forwards a step's telemetry", async ()
 	const writes = calls.filter((call) => call.method === "events.create").map((call) => call.input.Options);
 	expect(writes).toEqual([{ StepCreatedAt: new Date(createdAt).toISOString() }, { AfterStepBody: true }]);
 });
+
 test("forwards reserved attributes, the queue's workflow and the waits to complete", async () => {
 	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
 	const world = await createWorld({
@@ -100,6 +102,7 @@ test("forwards reserved attributes, the queue's workflow and the waits to comple
 	expect(queued[0]).not.toHaveProperty("QueueName");
 	expect(queued[1]).toMatchObject({ QueueName: "orders" });
 });
+
 test("forwards a run's creation on its first message, keyed by the run", async () => {
 	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
 	const world = await createWorld({
@@ -165,6 +168,7 @@ test("forwards a run's creation on its first message, keyed by the run", async (
 	const items = calls.find((call) => call.method === "queue.queueBatch")?.input.Items as Record<string, unknown>[];
 	expect(JSON.parse(new TextDecoder().decode(items[1]?.SdkMessage as Uint8Array))).toEqual({ queueName: "__wkf_workflow_workflow//example.com/app//Report", message: { runId: "wrun_02", runSpecVersion: 9 } });
 });
+
 describe("against a Go World that delivers with worlds.RemoteExecutor", () => {
 	const token = "delivery-token";
 	let stop: (() => void) | undefined;

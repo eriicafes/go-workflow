@@ -1,8 +1,8 @@
 import { decode, encode } from "cbor-x";
 import { EventSchema, HOOK_RESUME_DEDUP_VERSION, HookSchema, SPEC_VERSION_SINGLE_ORCHESTRATOR } from "@workflow/world";
 import { expect, test } from "vitest";
-import { HTTPWorldError, createWorld } from "./index.js";
-import { rpcResponse } from "./testdata/helpers.js";
+import { HTTPWorldError, createWorld } from "../index.js";
+import { rpcResponse } from "./helpers.js";
 
 test("exposes stored event data as eventData with Workflow SDK names", async () => {
 	const goData = new TextEncoder().encode(JSON.stringify({ stepName: "example.com/app/flows.writeDraft", input: "ZGV2bA==" }));
@@ -35,6 +35,7 @@ test("exposes stored event data as eventData with Workflow SDK names", async () 
 	expect(events.data[0]).not.toHaveProperty("data");
 	expect(events.snapshot).toEqual({ seq: 3, seqInBand: 2 });
 });
+
 test("writes event data as JSON and shapes event results like the Workflow SDK", async () => {
 	const calls: { method: unknown; input: Record<string, unknown> }[] = [];
 	const world = await createWorld({
@@ -93,6 +94,7 @@ test("writes event data as JSON and shapes event results like the Workflow SDK",
 		{ status: 200, event: { runId: "wrun_01", eventId: "evnt_03", eventType: "wait_created", correlationId: "wait_01" }, run: undefined, step: undefined },
 	]);
 });
+
 test("creates a start hook with its run and reports a refused one as the SDK's HookConflictError", async () => {
 	const inputs: Record<string, unknown>[] = [];
 	const world = await createWorld({
@@ -140,6 +142,7 @@ test("creates a start hook with its run and reports a refused one as the SDK's H
 	// SDK's start() tells from a rejection by the code.
 	await expect(create("wrun_05")).rejects.toMatchObject({ name: "WorkflowWorldError", code: "START_HOOK_ADMISSION_DISABLED", status: 400 });
 });
+
 test("reports a hook's resume deduplication, event times as Dates, and stores Go names", async () => {
 	const now = new Date();
 	const stored: Uint8Array[] = [];

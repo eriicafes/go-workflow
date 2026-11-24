@@ -1,8 +1,8 @@
 import { decode } from "cbor-x";
 import { HookSchema, SPEC_VERSION_SINGLE_ORCHESTRATOR, StepSchema, WorkflowRunSchema } from "@workflow/world";
 import { expect, test } from "vitest";
-import { createWorld } from "./index.js";
-import { rpcResponse } from "./testdata/helpers.js";
+import { createWorld } from "../index.js";
+import { rpcResponse } from "./helpers.js";
 
 test("passes run and step payloads through in the Workflow SDK's format", async () => {
 	const json = (value: unknown) => new TextEncoder().encode("devl" + JSON.stringify([value]));
@@ -34,6 +34,7 @@ test("passes run and step payloads through in the Workflow SDK's format", async 
 	expect(step.input).toEqual(json(1));
 	expect(step.output).toEqual(json("done"));
 });
+
 test("passes a run's executionContext through with its keys as written", async () => {
 	const inputs: Record<string, unknown>[] = [];
 	const world = await createWorld({
@@ -59,6 +60,7 @@ test("passes a run's executionContext through with its keys as written", async (
 	const run = await world.runs.get("wrun_01");
 	expect(run.executionContext).toEqual({ replayedFromRunId: "wrun_00" });
 });
+
 test("shapes hooks, runs and steps so the SDK's schemas accept them", async () => {
 	const now = new Date();
 	const world = await createWorld({

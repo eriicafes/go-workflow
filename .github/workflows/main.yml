@@ -171,7 +171,7 @@ jobs:
           key: sdk-cargo-${{ env.SDK_COMMIT }}
       - run: npm ci
       - name: Build the Workflow SDK's workbench app
-        run: world-http/testdata/sdk-e2e/sdk-e2e.sh prepare
+        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
       - name: Run the Workflow SDK's e2e suite
         run: npm run test:sdk-e2e
 

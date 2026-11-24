@@ -1,7 +1,7 @@
 import { decode } from "cbor-x";
 import { expect, test } from "vitest";
-import { createWorld } from "./index.js";
-import { rpcResponse } from "./testdata/helpers.js";
+import { createWorld } from "../index.js";
+import { rpcResponse } from "./helpers.js";
 
 test("pulls stream chunks through bounded RPC polling", async () => {
 	const calls: { method: unknown; input: unknown }[] = [];
@@ -32,6 +32,7 @@ test("pulls stream chunks through bounded RPC polling", async () => {
 	expect(last.done).toBe(true);
 	expect(calls.filter((call) => call.method === "streams.getChunks")).toHaveLength(1);
 });
+
 test("reads a stream from a chunk index, then follows the cursor", async () => {
 	const inputs: Record<string, unknown>[] = [];
 	const world = await createWorld({
@@ -56,6 +57,7 @@ test("reads a stream from a chunk index, then follows the cursor", async () => {
 	expect(inputs[0]).toMatchObject({ StartIndex: -2, Cursor: "" });
 	expect(inputs[1]).toMatchObject({ Cursor: "4" });
 });
+
 test("waits through empty stream pages, and ends getChunks pagination with a null cursor", async () => {
 	const pages = [
 		{ Data: null, Cursor: "0", HasMore: false, Done: false },

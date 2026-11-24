@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the Workflow SDK's e2e suite against a Go World. The SDK's nitro-v3
 # workbench app runs with world-http as its World, backed by the harness in
-# ../harness, which delivers to the app with a worlds.RemoteExecutor.
+# world-http/testdata/harness, which delivers to the app with a
+# worlds.RemoteExecutor.
 #
 #   sdk-e2e.sh prepare   installs and builds the app in SDK_DIR
 #   sdk-e2e.sh run       starts the harness and the app, then runs the suite

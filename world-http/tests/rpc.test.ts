@@ -1,7 +1,7 @@
 import { decode, encode } from "cbor-x";
 import { expect, test } from "vitest";
-import { HTTPWorldError, createWorld } from "./index.js";
-import { rpcContentType, rpcResponse } from "./testdata/helpers.js";
+import { HTTPWorldError, createWorld } from "../index.js";
+import { rpcContentType, rpcResponse } from "./helpers.js";
 
 test("raises structured RPC errors", async () => {
 	const world = await createWorld({
@@ -27,6 +27,7 @@ test("raises structured RPC errors", async () => {
 		name: "WorkflowRunNotFoundError",
 	});
 });
+
 test("maps Go workflow and step names to Workflow SDK names and back", async () => {
 	const calls: { method: unknown; input: unknown }[] = [];
 	const world = await createWorld({
@@ -72,6 +73,7 @@ test("maps Go workflow and step names to Workflow SDK names and back", async () 
 		WorkflowName: "example.com/app/workflows.PublishReport",
 	});
 });
+
 test("raises a throttled RPC failure as the SDK's ThrottleError", async () => {
 	const world = await createWorld({
 		baseURL: "https://workflow.example/v1/workflow",
@@ -86,6 +88,7 @@ test("raises a throttled RPC failure as the SDK's ThrottleError", async () => {
 	});
 	await expect(world.runs.deleteDataMany!({ runIds: ["wrun_01"] })).rejects.toMatchObject({ name: "ThrottleError", retryAfter: 3, status: 429 });
 });
+
 test("reports World failures as the SDK's error classes with their fields", async () => {
 	const failures: Record<string, Record<string, unknown>> = {
 		wrun_claimed: { code: "conflict", message: "taken", sentinel: "hook_force_claimed", details: { Token: "tok", RunID: "wrun_new", HookID: "hook_new" } },

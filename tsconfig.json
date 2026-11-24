@@ -8,5 +8,5 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["world-http/*.ts", "world-http/testdata/helpers.ts"]
+  "include": ["world-http/*.ts", "world-http/tests/*.ts"]
 }

@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { decode } from "cbor-x";
 import { AnalyticsEventSchema, AnalyticsHookSchema, AnalyticsRunSchema, EventSchema, type EventResult, HookSchema, SPEC_VERSION_SINGLE_ORCHESTRATOR, StepSchema, WorkflowRunSchema } from "@workflow/world";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { createWorld, type HTTPWorld } from "./index.js";
-import { eventually, rpcContentType, rpcResponse, sdkName, startServer, text, ulid } from "./testdata/helpers.js";
+import { createWorld, type HTTPWorld } from "../index.js";
+import { eventually, rpcContentType, rpcResponse, sdkName, startServer, text, ulid } from "./helpers.js";
 
 test("creates a world from its spec and maps Go CBOR fields", async () => {
 	const requests: { url: string | URL | Request; init: RequestInit; envelope: Record<string, unknown> }[] = [];
@@ -46,6 +46,7 @@ test("creates a world from its spec and maps Go CBOR fields", async () => {
 	expect(requests[0]?.url).toBe("https://workflow.example/v1/workflow/rpc");
 	expect(new Headers(requests[0]?.init.headers).get("Content-Type")).toBe(rpcContentType);
 });
+
 test("passes deployment IDs through to the Go world", async () => {
 	const calls: { method: unknown; input: unknown }[] = [];
 	const world = await createWorld({
@@ -81,6 +82,7 @@ test("passes deployment IDs through to the Go world", async () => {
 	expect(calls.find((call) => call.method === "events.createRun")?.input).toMatchObject({ RunID: "wrun_01", DeploymentID: "dpl_go" });
 	expect(calls.find((call) => call.method === "queue.queue")?.input).toMatchObject({ RunID: "wrun_01", DeploymentID: "dpl_go" });
 });
+
 test("uses WORKFLOW_HTTP_BASE_URL when no base URL is passed", async () => {
 	const previous = process.env.WORKFLOW_HTTP_BASE_URL;
 	process.env.WORKFLOW_HTTP_BASE_URL = "https://workflow.example/v1/workflow/";
@@ -103,6 +105,7 @@ test("uses WORKFLOW_HTTP_BASE_URL when no base URL is passed", async () => {
 		}
 	}
 });
+
 test("reports a run's event ceiling only when the Go World has one", async () => {
 	let maxEvents = 0;
 	const world = await createWorld({
@@ -120,6 +123,7 @@ test("reports a run's event ceiling only when the Go World has one", async () =>
 	maxEvents = 25_000;
 	expect(await world.events.list({ runId: "wrun_01" } as never)).toMatchObject({ maxEvents: 25_000 });
 });
+
 test("waits for a terminal run across bounded requests", async () => {
 	const timeouts: unknown[] = [];
 	const world = await createWorld({
@@ -138,6 +142,7 @@ test("waits for a terminal run across bounded requests", async () => {
 	// Nanoseconds past 2^32 travel as 64-bit integers, which Go decodes.
 	expect(timeouts).toEqual([10_000_000_000n, 10_000_000_000n, 10_000_000_000n]);
 });
+
 test("sends a bearer token from the option or WORKFLOW_HTTP_TOKEN", async () => {
 	const authorization = async (options: Parameters<typeof createWorld>[0]) => {
 		let header: string | null = null;
@@ -167,6 +172,7 @@ test("sends a bearer token from the option or WORKFLOW_HTTP_TOKEN", async () => 
 		else process.env.WORKFLOW_HTTP_TOKEN = previous;
 	}
 });
+
 test("reads a run's encryption key from the Go world", async () => {
 	const inputs: Record<string, unknown>[] = [];
 	const world = await createWorld({
@@ -189,6 +195,7 @@ test("reads a run's encryption key from the Go world", async () => {
 		{ RunID: "wrun_plain", DeploymentID: "" },
 	]);
 });
+
 test("deletes run data only when the Go world supports it, and reports deleted runs as expired", async () => {
 	const inputs: unknown[] = [];
 	const create = (deleteData: boolean) =>
@@ -228,6 +235,7 @@ test("deletes run data only when the Go world supports it, and reports deleted r
 	const run = await world.runs.get("wrun_01");
 	expect(run.expiredAt).toEqual(new Date("2026-01-02T03:04:05Z"));
 });
+
 // These tests drive a real Go RPC server, backed by an in-memory World that
 // executes its deliveries, through the adapter with the calls the Workflow
 // SDK's start, resumeHook, cancelRun and wakeUpRun make.
