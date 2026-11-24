@@ -8,6 +8,7 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/provider"
 	"github.com/digitallysavvy/go-ai/pkg/providers/anthropic"
 	"github.com/digitallysavvy/go-ai/pkg/providers/gateway"
+	"github.com/eriicafes/go-workflow/workflowai"
 )
 
 // LanguageModel returns the model named by MODEL through the AI Gateway when
@@ -28,11 +29,11 @@ func LanguageModel() (provider.LanguageModel, error) {
 	return nil, errors.New("set AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY")
 }
 
-// toolApprovalSecret returns the secret that signs tool approval requests, or
-// nil to leave them unsigned.
-func toolApprovalSecret() []byte {
-	if secret := os.Getenv("TOOL_APPROVAL_SECRET"); secret != "" {
-		return []byte(secret)
+// toolApprovalSecret names the environment variable whose secret signs tool
+// approval requests, or returns nil to leave them unsigned when it is unset.
+func toolApprovalSecret() *workflowai.ToolApprovalSecret {
+	if os.Getenv("TOOL_APPROVAL_SECRET") == "" {
+		return nil
 	}
-	return nil
+	return &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
 }

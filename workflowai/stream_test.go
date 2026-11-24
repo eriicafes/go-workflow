@@ -95,7 +95,8 @@ func respond(t *testing.T, signature string, approved bool, input string) []work
 func TestStreamApprovedToolCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked!"))
-		testOptions.ToolApprovalSecret = []byte("0123456789abcdef0123456789abcdef")
+		t.Setenv("TOOL_APPROVAL_SECRET", "0123456789abcdef0123456789abcdef")
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
 		first := approvalTurn(t)
 		var signature string
 		for _, part := range first.Messages[len(first.Messages)-1].Content {
@@ -152,7 +153,8 @@ func TestStreamDeniedToolCall(t *testing.T) {
 func TestStreamRejectsTamperedApproval(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Something went wrong."))
-		testOptions.ToolApprovalSecret = []byte("0123456789abcdef0123456789abcdef")
+		t.Setenv("TOOL_APPROVAL_SECRET", "0123456789abcdef0123456789abcdef")
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
 		first := approvalTurn(t)
 		signature := first.Messages[len(first.Messages)-1].Content[1].Signature
 

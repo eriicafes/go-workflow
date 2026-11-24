@@ -110,6 +110,9 @@ type toolResult struct {
 	// invalid marks the result of an invalid call, which the client already
 	// received as a tool-input-error.
 	invalid bool
+	// rejected marks the result of an approved call that failed its check,
+	// which the stream does not report.
+	rejected bool
 }
 
 // Executor executes tool calls. It may also describe its input with an

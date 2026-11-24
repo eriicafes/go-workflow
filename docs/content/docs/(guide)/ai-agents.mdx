@@ -264,9 +264,21 @@ turn executes the approved calls or reports the denied ones to the model as
 `execution-denied`. The user can answer much later: no run waits in between.
 
 Set `WorkflowAgentOptions.ToolApprovalSecret` to sign approval requests with
-HMAC. An approval then only executes the call it was issued for, with the same
-input, so a client cannot edit a call's input and approve it. Use at least 32
-random bytes, the same in every process that runs the workflow.
+HMAC. It names the environment variable that holds the secret, so only the
+name enters the run's steps:
+
+```go
+ToolApprovalSecret: &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"},
+```
+
+An approval then only executes the call it was issued for, with the same
+input, so a client cannot edit a call's input and approve it. Each request is
+signed in a step, and each approved call's signature is verified in a step
+before it executes. Before executing an approved call, the agent also checks
+that its tool still needs approval and that its input still matches the
+tool's schema. A call that fails a check reaches the model as an error and
+writes nothing to the stream. Set the variable to at least 32 random bytes,
+the same in every process that runs the workflow.
 
 Tools the provider executes itself, such as Anthropic's web search, report
 their results in the model's stream, sometimes in a later step than their

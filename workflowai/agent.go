@@ -78,12 +78,12 @@ type WorkflowAgentOptions struct {
 	// ToolsContext holds each tool's context, passed to its Execute and
 	// NeedsApproval as ToolCallOptions.Context.
 	ToolsContext map[string]any
-	// ToolApprovalSecret signs tool approval requests with HMAC, so an
-	// approval response only executes a call the agent asked approval for
-	// with the same input. Use at least 32 random bytes, the same in every
-	// process that runs the workflow. Changing it invalidates pending
-	// approvals.
-	ToolApprovalSecret []byte
+	// ToolApprovalSecret names the environment variable holding the secret
+	// that signs tool approval requests with HMAC, so an approval response
+	// only executes a call the agent asked approval for with the same input.
+	// Use at least 32 random bytes, the same in every process that runs the
+	// workflow. Changing it invalidates pending approvals.
+	ToolApprovalSecret *ToolApprovalSecret
 	// PrepareCall changes the settings of each Stream and Generate call
 	// before the loop starts.
 	PrepareCall PrepareCallFunc
@@ -113,6 +113,7 @@ type CallOptions struct {
 	Download            ai.DownloadFunction
 	Telemetry           *telemetry.Options
 	StopWhen            []StopCondition
+	ToolApprovalSecret  *ToolApprovalSecret
 	// RuntimeContext and ToolsContext replace the agent's.
 	RuntimeContext any
 	ToolsContext   map[string]any
@@ -335,6 +336,7 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		repair:              options.RepairToolCall,
 		download:            options.Download,
 		telemetry:           cmp.Or(options.Telemetry, a.options.Telemetry),
+		approvalSecret:      cmp.Or(options.ToolApprovalSecret, a.options.ToolApprovalSecret),
 		tools:               a.options.Tools,
 		toolChoice:          cmp.Or(options.ToolChoice, a.options.ToolChoice),
 		activeTools:         orNil(options.ActiveTools, a.options.ActiveTools),
@@ -422,6 +424,7 @@ type run struct {
 	repair         ai.ToolCallRepairFunction
 	download       ai.DownloadFunction
 	telemetry      *telemetry.Options
+	approvalSecret *ToolApprovalSecret
 	// stopTimeout disarms the Timeout once the call ends.
 	stopTimeout    func() error
 	tools          ToolSet
@@ -660,8 +663,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 
 		// Split the local calls into those to execute now and those that pause
 		// the loop: client tools and calls that need approval.
-		var executable, paused []ToolCall
-		var approvalRequests []ContentPart
+		var executable, paused, approvalCalls []ToolCall
 		hasLocalCalls := false
 		for _, call := range calls {
 			if call.ProviderExecuted {
@@ -682,11 +684,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 			switch {
 			case needsApproval:
-				request, err := r.approvalRequest(call)
-				if err != nil {
-					return r.result(nil, nil), err
-				}
-				approvalRequests = append(approvalRequests, request)
+				approvalCalls = append(approvalCalls, call)
 				paused = append(paused, call)
 			case tool.Execute == nil:
 				paused = append(paused, call)
@@ -695,7 +693,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 		}
 
-		results, err := r.executeTools(ctx, stepNumber, executable, history)
+		results, err := r.executeTools(ctx, stepNumber, executable, history, nil)
 		if err != nil {
 			return r.result(nil, nil), err
 		}
@@ -715,6 +713,10 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			// Calls that wait for the provider's approval have no result yet.
 			provider := r.providerResults(calls, providerResults, providerApprovals)
 			step.ToolResults = slices.Concat(executedResults(results), provider)
+			approvalRequests, err := r.approvalRequests(ctx, approvalCalls)
+			if err != nil {
+				return r.result(nil, nil), err
+			}
 			added = addApprovalRequests(added, approvalRequests)
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
@@ -815,9 +817,11 @@ func (r *run) toolCallOptions(call ToolCall, messages []ModelMessage) ToolCallOp
 }
 
 // executeTools executes calls, at most r.concurrency at once when it is set,
-// and returns their results in call order. Calls start in order, and a call starts when an earlier one settles
+// and returns their results in call order. A call with an entry in checks is
+// an approved call from client-supplied messages, which runs only after its
+// approval passes checkApproval. Calls start in order, and a call starts when an earlier one settles
 // in recorded order, so replay starts them the same way.
-func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall, messages []ModelMessage) ([]toolResult, error) {
+func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall, messages []ModelMessage, checks map[string]ai.CollectedToolApproval) ([]toolResult, error) {
 	results := make([]toolResult, len(calls))
 	var running []int
 	var pending []*workflow.Result[any]
@@ -834,8 +838,16 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 				results[i] = errorResult(call, fmt.Sprintf("tool %q not found", call.ToolName))
 				results[i].invalid = true
 			default:
-				r.callbacks.OnToolExecutionStart(ctx, ToolExecutionStartEvent{StepNumber: stepNumber, ToolCall: call})
-				result := tool.Execute.Execute(ctx, call.Input, r.toolCallOptions(call, messages))
+				start := func() *workflow.Result[any] {
+					r.callbacks.OnToolExecutionStart(ctx, ToolExecutionStartEvent{StepNumber: stepNumber, ToolCall: call})
+					return tool.Execute.Execute(ctx, call.Input, r.toolCallOptions(call, messages))
+				}
+				var result *workflow.Result[any]
+				if approval, ok := checks[call.ToolCallID]; ok {
+					result = r.checkApproval(ctx, call, approval, start)
+				} else {
+					result = start()
+				}
 				if result == nil {
 					result = workflow.NewResult[any](nil, workflow.ErrNilResult)
 				}
@@ -852,7 +864,13 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 			return nil, err
 		}
 		output, err := pending[j].Value(ctx)
-		results[running[j]] = r.finishTool(ctx, stepNumber, calls[running[j]], output, err)
+		var rejection *approvalRejection
+		if errors.As(err, &rejection) {
+			results[running[j]] = errorResult(calls[running[j]], rejection.reason)
+			results[running[j]].rejected = true
+		} else {
+			results[running[j]] = r.finishTool(ctx, stepNumber, calls[running[j]], output, err)
+		}
 		running = slices.Delete(running, j, j+1)
 		pending = slices.Delete(pending, j, j+1)
 	}
@@ -870,19 +888,35 @@ func (r *run) finishTool(ctx context.Context, stepNumber int, call ToolCall, out
 	return toolResult{call: call, output: jsonOutput(output), raw: marshalRaw(output)}
 }
 
-// approvalRequest returns the approval request of a call, signed when the
-// agent has a ToolApprovalSecret.
-func (r *run) approvalRequest(call ToolCall) (ContentPart, error) {
-	request := ContentPart{Type: PartToolApprovalRequest, ApprovalID: "approval-" + call.ToolCallID, ToolCallID: call.ToolCallID}
-	if r.agent.options.ToolApprovalSecret == nil {
-		return request, nil
+// approvalRequests returns the approval requests of calls. With a
+// ToolApprovalSecret, each is signed in a signWorkflowToolApproval step, and
+// the steps run concurrently.
+func (r *run) approvalRequests(ctx context.Context, calls []ToolCall) ([]ContentPart, error) {
+	requests := make([]ContentPart, len(calls))
+	signatures := make([]*workflow.Result[string], len(calls))
+	for i, call := range calls {
+		requests[i] = ContentPart{Type: PartToolApprovalRequest, ApprovalID: "approval-" + call.ToolCallID, ToolCallID: call.ToolCallID}
+		if r.approvalSecret != nil {
+			signatures[i] = workflow.Background(ctx, signWorkflowToolApproval, toolApprovalSignatureInput{
+				Secret:     *r.approvalSecret,
+				ApprovalID: requests[i].ApprovalID,
+				ToolCallID: call.ToolCallID,
+				ToolName:   call.ToolName,
+				Input:      call.Input,
+			})
+		}
 	}
-	input, err := decodeInput(call.Input)
-	if err != nil {
-		return request, err
+	for i, signature := range signatures {
+		if signature == nil {
+			continue
+		}
+		value, err := signature.Value(ctx)
+		if err != nil {
+			return nil, err
+		}
+		requests[i].Signature = value
 	}
-	request.Signature, err = ai.SignToolApproval(r.agent.options.ToolApprovalSecret, request.ApprovalID, call.ToolCallID, call.ToolName, input)
-	return request, err
+	return requests, nil
 }
 
 // resumeApprovals executes the approved calls and reports the denied calls
@@ -899,10 +933,11 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 	}
 
 	// Approved calls to a tool that is gone or runs on the client get no
-	// result, as in the Workflow SDK. Calls that fail validation get an error
-	// result the model sees and the stream does not.
-	var results []toolResult
+	// result, as in the Workflow SDK. The others are checked as they start,
+	// and a call that fails its check gets an error result the model sees and
+	// the stream does not.
 	var executable []ToolCall
+	checks := map[string]ai.CollectedToolApproval{}
 	for _, approval := range approved {
 		call := approvedCall(approval)
 		if call.ProviderExecuted {
@@ -911,20 +946,18 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 		if tool, known := r.tools[call.ToolName]; !known || tool.Execute == nil {
 			continue
 		}
-		if reason := r.validateApproval(approval.ApprovalRequest, call); reason != "" {
-			results = append(results, errorResult(call, reason))
-			continue
-		}
 		executable = append(executable, call)
+		checks[call.ToolCallID] = approval
 	}
-	executed, err := r.executeTools(ctx, 0, executable, r.messages)
+	results, err := r.executeTools(ctx, 0, executable, r.messages, checks)
 	if err != nil {
 		return err
 	}
-	results = append(results, executed...)
 	var approvedResults []ToolResult
-	for _, result := range executed {
-		approvedResults = append(approvedResults, ToolResult{ToolCallID: result.call.ToolCallID, ToolName: result.call.ToolName, Input: result.call.Input, Output: result.raw})
+	for _, result := range results {
+		if !result.rejected {
+			approvedResults = append(approvedResults, ToolResult{ToolCallID: result.call.ToolCallID, ToolName: result.call.ToolName, Input: result.call.Input, Output: result.raw})
+		}
 	}
 	var deniedResults []deniedResult
 	for _, denial := range denied {
@@ -976,24 +1009,71 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 	return err
 }
 
-// validateApproval returns why an approved call must not execute, or "".
-func (r *run) validateApproval(request types.ToolApprovalRequestContent, call ToolCall) string {
-	if r.tools[call.ToolName].NeedsApproval == nil {
-		return fmt.Sprintf("Tool %q does not require approval", call.ToolName)
+// checkApproval checks an approved call from client-supplied messages, as
+// the Workflow SDK does before it executes one: the tool must still need
+// approval, the signature must be valid when the agent has a
+// ToolApprovalSecret, which a verifyWorkflowToolApprovalSignature step
+// checks, and the input must still match the tool's schema. It returns the
+// result of start when the call passes, and an approvalRejection otherwise.
+func (r *run) checkApproval(ctx context.Context, call ToolCall, approval ai.CollectedToolApproval, start func() *workflow.Result[any]) *workflow.Result[any] {
+	tool := r.tools[call.ToolName]
+	if tool.NeedsApproval == nil {
+		return rejectApproval(fmt.Sprintf("Tool %q does not require approval", call.ToolName))
 	}
-	if r.agent.options.ToolApprovalSecret == nil {
-		return ""
+	execute := func() *workflow.Result[any] {
+		if reason := r.revalidateApproval(ctx, call, approval); reason != "" {
+			return rejectApproval(reason)
+		}
+		return start()
 	}
+	if r.approvalSecret == nil {
+		return execute()
+	}
+	request := approval.ApprovalRequest
 	if request.Signature == "" {
-		return fmt.Sprintf("Invalid tool approval signature for %q: missing signature", request.ApprovalID)
+		return rejectApproval((&ai.InvalidToolApprovalSignatureError{ApprovalID: request.ApprovalID, ToolCallID: call.ToolCallID, Reason: "missing signature"}).Error())
 	}
-	input, err := decodeInput(call.Input)
-	if err != nil {
+	verified := workflow.Background(ctx, verifyWorkflowToolApprovalSignature, toolApprovalSignatureInput{
+		Secret:     *r.approvalSecret,
+		Signature:  request.Signature,
+		ApprovalID: request.ApprovalID,
+		ToolCallID: call.ToolCallID,
+		ToolName:   call.ToolName,
+		Input:      call.Input,
+	})
+	return workflow.Then(ctx, verified, func(valid bool, err error) *workflow.Result[any] {
+		if err != nil {
+			return rejectApproval(err.Error())
+		}
+		if !valid {
+			return rejectApproval((&ai.InvalidToolApprovalSignatureError{ApprovalID: request.ApprovalID, ToolCallID: call.ToolCallID, Reason: "invalid signature"}).Error())
+		}
+		return execute()
+	})
+}
+
+// revalidateApproval returns why an approved call's input no longer matches
+// its tool's schema, or "".
+func (r *run) revalidateApproval(ctx context.Context, call ToolCall, approval ai.CollectedToolApproval) string {
+	tool := types.Tool{
+		Name:       call.ToolName,
+		Parameters: r.tools[call.ToolName].inputSchema(),
+		Execute:    func(context.Context, map[string]any, types.ToolExecutionOptions) (any, error) { return nil, nil },
+	}
+	validated, err := ai.ValidateApprovedToolApprovals(ctx, ai.ValidateApprovedToolApprovalsOptions{
+		ApprovedToolApprovals: []ai.CollectedToolApproval{approval},
+		Tools:                 []types.Tool{tool},
+		Messages:              toProviderMessages(r.messages),
+		ToolsContext:          r.toolsContext,
+		RuntimeContext:        r.runtimeContext,
+	})
+	switch {
+	case err != nil:
 		return err.Error()
-	}
-	valid, err := ai.VerifyToolApprovalSignature(r.agent.options.ToolApprovalSecret, request.Signature, request.ApprovalID, call.ToolCallID, call.ToolName, input)
-	if err != nil || !valid {
-		return fmt.Sprintf("Invalid tool approval signature for %q: invalid signature", request.ApprovalID)
+	case len(validated.InvalidToolApprovals) > 0:
+		return validated.InvalidToolApprovals[0].Error.Error()
+	case len(validated.DeniedToolApprovals) > 0:
+		return cmp.Or(validated.DeniedToolApprovals[0].ApprovalResponse.Reason, "Tool approval denied")
 	}
 	return ""
 }
@@ -1186,4 +1266,15 @@ func addUsage(a, b types.Usage) types.Usage {
 		OutputTokens: add(a.OutputTokens, b.OutputTokens),
 		TotalTokens:  add(a.TotalTokens, b.TotalTokens),
 	}
+}
+
+// approvalRejection is why an approved call from client-supplied messages
+// did not pass checkApproval.
+type approvalRejection struct{ reason string }
+
+func (e *approvalRejection) Error() string { return e.reason }
+
+// rejectApproval returns a settled result that rejects an approved call.
+func rejectApproval(reason string) *workflow.Result[any] {
+	return workflow.NewResult[any](nil, &approvalRejection{reason: reason})
 }
