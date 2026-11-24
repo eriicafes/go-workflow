@@ -23,6 +23,9 @@ type HookOption struct {
 	// failing with a *HookConflictError. Awaiting the displaced hook returns
 	// a *HookForceClaimedError.
 	Force bool
+	// Metadata is recorded with the hook, encoded as a payload, for callers
+	// that look the hook up by its token. A nil Metadata records none.
+	Metadata any
 }
 
 // HookDefinition is a hook declared with DefineHook but not yet created in a
@@ -31,6 +34,7 @@ type HookDefinition[T any] struct {
 	token        string
 	minRetention time.Duration
 	force        bool
+	metadata     any
 }
 
 // DefineHook declares a hook that receives a payload of type T. The last of
@@ -40,7 +44,7 @@ func DefineHook[T any](options ...HookOption) HookDefinition[T] {
 	if len(options) != 0 {
 		option = options[len(options)-1]
 	}
-	return HookDefinition[T]{token: option.Token, minRetention: option.MinRetention, force: option.Force}
+	return HookDefinition[T]{token: option.Token, minRetention: option.MinRetention, force: option.Force, metadata: option.Metadata}
 }
 
 // Create creates a hook handle in workflow context without claiming its token.
@@ -61,6 +65,13 @@ func (d HookDefinition[T]) Create(ctx context.Context) *Hook[T] {
 	}
 	if hook.token == "" {
 		hook.token = execution.NextHookToken()
+	}
+	if d.metadata != nil {
+		encoded, err := execution.EncodePayload(d.metadata)
+		if err != nil {
+			hook.err = fmt.Errorf("workflow: encode hook metadata: %w", err)
+		}
+		hook.metadata = encoded
 	}
 	if id, ok := execution.OpenStartHook(hook.token); ok {
 		// The run's start hook was created with the run, so nothing is
@@ -104,6 +115,10 @@ type Hook[T any] struct {
 
 func (h *Hook[T]) create(execution *core.Execution, token string) {
 	h.registered, h.executionState = true, execution
+	if h.err != nil {
+		// Metadata that failed to encode is reported without a write.
+		return
+	}
 	result := core.DurableHook[T](core.DurableHookOptions{
 		Execution:    execution,
 		ID:           h.declared,

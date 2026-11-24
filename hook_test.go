@@ -665,6 +665,41 @@ func TestGetHookAndResumeHookDeliverTheTypedValue(t *testing.T) {
 	}
 }
 
+func TestHookRecordsItsMetadata(t *testing.T) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
+		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token, Metadata: map[string]string{"customData": "data"}})
+		value, err := hook.Next(ctx)
+		return hookResumeOutput{Value: value}, err
+	})))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, hookResumeInput{Token: "metadata-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored worlds.Hook
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline) && stored.Token == ""; time.Sleep(time.Millisecond) {
+		page, err := world.HooksList(ctx, worlds.HooksListInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Data) != 0 {
+			stored = page.Data[0]
+		}
+	}
+	var metadata map[string]string
+	if err := worlds.DecodePayload(stored.Metadata, nil, &metadata); err != nil || metadata["customData"] != "data" {
+		t.Fatalf("metadata = %#v, err=%v", metadata, err)
+	}
+	if err := workflow.ResumeHook(ctx, stored.Token, "resumed"); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := run.Value(ctx); err != nil || output.Value != "resumed" {
+		t.Fatalf("output = %#v, %v", output, err)
+	}
+}
+
 func TestHookLookupAndResumeRequireStepOrExternalContext(t *testing.T) {
 	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input hookResumeInput) (hookResumeOutput, error) {
 		hook := workflow.CreateHook[string](ctx, workflow.HookOption{Token: input.Token})
