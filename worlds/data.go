@@ -275,6 +275,9 @@ const (
 	ExecutionContextTraceCarrier        = "traceCarrier"
 	ExecutionContextWorkflowCoreVersion = "workflowCoreVersion"
 	ExecutionContextFeatures            = "features"
+	// ExecutionContextNodeVersion is the executionContext key a Workflow
+	// SDK run records the Node.js version of its creating deployment under.
+	ExecutionContextNodeVersion = "nodeVersion"
 )
 
 // RunCreatedData returns the Data of the run_created event of input.

@@ -1156,7 +1156,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey, RunSpecVersion: run.view.SpecVersion}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, IsSystem: data.IsSystem, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: run.view.HookResumeContext(), HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, IsSystem: data.IsSystem, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -1411,7 +1411,7 @@ func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRun
 		return nil, &worlds.HookConflictError{Token: start.Token, RunID: token.cur.runID, Start: true}
 	}
 	id := worlds.StartHookID(input.RunID)
-	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now})
+	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: input.HookResumeContext(), SpecVersion: worlds.SpecVersion, CreatedAt: now})
 	if err != nil {
 		return nil, err
 	}

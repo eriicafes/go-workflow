@@ -126,8 +126,11 @@ DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
 fields to select work, route pinned runs, and bound recovery. Do not reset them
 while wrapping or serializing a message. A World that chooses a queue by
 WorkflowName persists it too. Every World copies
-the run's deployment and workflow name onto the hooks it creates
-(Hook.ResumeContext), which ResumeHook uses instead of reading the run.
+the run's resume context onto the hooks it creates (Hook.ResumeContext, built
+with Run.HookResumeContext, or EventsCreateRunInput.HookResumeContext for a
+start hook), which ResumeHook uses instead of reading the run. A Workflow SDK
+resume reads the runtime versions in it to choose the payload formats it
+writes, so a World stores every field.
 
 ## Streams
 

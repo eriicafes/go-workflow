@@ -275,7 +275,12 @@ type HookResumeContext struct {
 	WorkflowName        string
 	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
 	RunSpecVersion      int
+	WorkflowCoreVersion string // from the run's ExecutionContext: the runtime that started it
+	NodeVersion         string // from the run's ExecutionContext
 }
+
+// Run.HookResumeContext and EventsCreateRunInput.HookResumeContext return the
+// resume context a hook copies from its run.
 
 // Wait is returned by a wait_created or wait_completed write.
 type Wait struct {

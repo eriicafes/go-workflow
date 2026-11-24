@@ -52,3 +52,21 @@ func TestAttrSetDataUsesWorkflowSDKShape(t *testing.T) {
 		t.Fatalf("AttrSetData with step writer = %s, want %s", data, want)
 	}
 }
+
+// A hook's resume context carries the versions of the runtime that started
+// its run, from the run's execution context.
+func TestHookResumeContextCopiesTheRunsRuntimeVersions(t *testing.T) {
+	execution := map[string]any{worlds.ExecutionContextWorkflowCoreVersion: "5.7.1", worlds.ExecutionContextNodeVersion: "24.12.0"}
+	run := worlds.Run{DeploymentID: "dpl_1", WorkflowName: "flow", EncryptionPublicKey: "key", SpecVersion: 9, ExecutionContext: execution}
+	want := worlds.HookResumeContext{DeploymentID: "dpl_1", WorkflowName: "flow", EncryptionPublicKey: "key", RunSpecVersion: 9, WorkflowCoreVersion: "5.7.1", NodeVersion: "24.12.0"}
+	if got := run.HookResumeContext(); got != want {
+		t.Fatalf("run's resume context = %+v, want %+v", got, want)
+	}
+	input := worlds.EventsCreateRunInput{DeploymentID: "dpl_1", WorkflowName: "flow", EncryptionPublicKey: "key", ExecutionContext: execution}
+	if got := input.HookResumeContext(); got != want {
+		t.Fatalf("start hook's resume context = %+v, want %+v", got, want)
+	}
+	if got := (worlds.Run{}).HookResumeContext(); got.WorkflowCoreVersion != "" || got.NodeVersion != "" {
+		t.Fatalf("resume context of a run without versions = %+v", got)
+	}
+}

@@ -187,7 +187,7 @@ func (w *World) admitStartHook(ctx context.Context, tx pgx.Tx, input worlds.Even
 		// metadata_slot 1 joins run_created, which holds the hook's metadata.
 		// The other copy of this candidate inserts the same hook as well as
 		// the same claim, so any conflict is left to the checks below.
-		resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion})
+		resume := encodeResumeContext(input.HookResumeContext())
 		tag, err := tx.Exec(ctx, w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, created_at, token_retention_until, spec_version)
 			VALUES ($1, $2, $3, $4, true, 1, false, $5, $6, $7)
 			ON CONFLICT DO NOTHING`), worlds.StartHookID(input.RunID), input.RunID, resume, start.Token, at, start.TokenRetentionUntil, worlds.SpecVersion)
@@ -934,7 +934,7 @@ func (a *appender) createHook(ctx context.Context, event worlds.Event, slot int6
 	}
 	// The token had no holder when admission checked it, so a concurrent
 	// claimant may have claimed it since. Losing that race is a conflict.
-	resume := encodeResumeContext(worlds.HookResumeContext{DeploymentID: a.run.DeploymentID, WorkflowName: a.run.WorkflowName, EncryptionPublicKey: a.run.EncryptionPublicKey, RunSpecVersion: a.run.SpecVersion})
+	resume := encodeResumeContext(a.run.HookResumeContext())
 	tag, err := a.tx.Exec(ctx, a.w.q(`INSERT INTO workflow.workflow_hooks (hook_id, run_id, resume_context, token, claims_token, metadata_slot, is_webhook, is_system, created_at, token_retention_until, claimed_from, spec_version)
 		VALUES ($1, $2, $3, $4, $12, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (token) WHERE claims_token DO NOTHING`),

@@ -367,6 +367,45 @@ type HookResumeContext struct {
 	EncryptionPublicKey string
 	// RunSpecVersion is the spec version of the hook's run.
 	RunSpecVersion int
+	// WorkflowCoreVersion and NodeVersion are the workflowCoreVersion and
+	// nodeVersion of the run's ExecutionContext, the versions of the
+	// runtime that started it, which tell a Workflow SDK resume the payload
+	// formats the run reads. Empty when the run did not record them.
+	WorkflowCoreVersion string
+	NodeVersion         string
+}
+
+// HookResumeContext returns the resume context a hook of the run copies
+// from it.
+func (run Run) HookResumeContext() HookResumeContext {
+	return HookResumeContext{
+		DeploymentID:        run.DeploymentID,
+		WorkflowName:        run.WorkflowName,
+		EncryptionPublicKey: run.EncryptionPublicKey,
+		RunSpecVersion:      run.SpecVersion,
+		WorkflowCoreVersion: executionString(run.ExecutionContext, ExecutionContextWorkflowCoreVersion),
+		NodeVersion:         executionString(run.ExecutionContext, ExecutionContextNodeVersion),
+	}
+}
+
+// HookResumeContext returns the resume context of the start hook created
+// with the run.
+func (input EventsCreateRunInput) HookResumeContext() HookResumeContext {
+	return HookResumeContext{
+		DeploymentID:        input.DeploymentID,
+		WorkflowName:        input.WorkflowName,
+		EncryptionPublicKey: input.EncryptionPublicKey,
+		RunSpecVersion:      SpecVersion,
+		WorkflowCoreVersion: executionString(input.ExecutionContext, ExecutionContextWorkflowCoreVersion),
+		NodeVersion:         executionString(input.ExecutionContext, ExecutionContextNodeVersion),
+	}
+}
+
+// executionString returns the string value of key in executionContext, or
+// "" when it has none.
+func executionString(executionContext map[string]any, key string) string {
+	value, _ := executionContext[key].(string)
+	return value
 }
 
 // Hook is the view of one hook derived from its run's event log. A hook

@@ -319,6 +319,8 @@ type resumeContext struct {
 	WorkflowName        string `cbor:"workflowName"`
 	EncryptionPublicKey string `cbor:"encryptionPublicKey,omitempty"`
 	RunSpecVersion      int    `cbor:"runSpecVersion,omitempty"`
+	WorkflowCoreVersion string `cbor:"workflowCoreVersion,omitempty"`
+	NodeVersion         string `cbor:"nodeVersion,omitempty"`
 }
 
 // encodeResumeContext returns a hook's resume_context.

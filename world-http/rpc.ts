@@ -138,7 +138,7 @@ export namespace RPC {
 	};
 	export type Hook = {
 		runId: string;
-		resumeContext: { deploymentId: string; workflowName: string; encryptionPublicKey?: string; runSpecVersion: number };
+		resumeContext: { deploymentId: string; workflowName: string; encryptionPublicKey?: string; runSpecVersion: number; workflowCoreVersion?: string; nodeVersion?: string };
 		specVersion: number;
 		hookId: string;
 		token: string;
