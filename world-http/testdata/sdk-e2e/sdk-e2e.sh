@@ -7,14 +7,22 @@
 #   sdk-e2e.sh run       starts the harness and the app, then runs the suite
 #
 # SDK_DIR is a checkout of github.com/vercel/workflow, at the commit in
-# .github/workflows/main.yml. HARNESS_WORLD selects the Go World, as in the
-# harness, and DATABASE_URL is the postgres World's database. Arguments after
-# the command are passed to vitest, such as -t to select tests.
+# .github/workflows/main.yml. It must be outside this repository, whose
+# node_modules holds published SDK packages that the app's build would
+# otherwise pick up beside the checkout's own. HARNESS_WORLD selects the Go
+# World, as in the harness, and DATABASE_URL is the postgres World's database.
+# Arguments after the command are passed to vitest, such as -t to select tests.
 set -euo pipefail
 
 : "${SDK_DIR:?SDK_DIR must be a checkout of github.com/vercel/workflow}"
 SDK_DIR="$(cd "$SDK_DIR" && pwd)"
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+case "$SDK_DIR/" in
+"$ROOT"/*)
+	echo "SDK_DIR must be outside $ROOT" >&2
+	exit 2
+	;;
+esac
 APP_DIR="$SDK_DIR/workbench/nitro-v3"
 APP_PORT="${APP_PORT:-3000}"
 HARNESS_PORT="${HARNESS_PORT:-4100}"

@@ -131,14 +131,22 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    # The SDK is checked out beside this repository, not inside it, so its
+    # packages never resolve to the published ones in this repository's
+    # node_modules.
+    defaults:
+      run:
+        working-directory: go-workflow
     env:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-      SDK_DIR: sdk
+      SDK_DIR: ${{ github.workspace }}/sdk
       # The vercel/workflow commit whose e2e suite and workbench app run.
       SDK_COMMIT: f717314b6fa8e91d653f56f90b9a1facf36a5f38
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: go-workflow
       - uses: actions/checkout@v7
         with:
           repository: vercel/workflow
@@ -148,6 +156,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
       - uses: actions/setup-node@v6
         with:
           node-version: 24.x
