@@ -527,6 +527,8 @@ func conformEventsSubscribe(t *testing.T, world worlds.World) {
 // return: every event and entity carries its spec version, a
 // hook its run's, a wait write returns the wait, a run's attributes are never
 // nil, and no writer may append a noop.
+//
+// SDK: packages/world/src/events.test.ts > sealed-log noop events > is not user-creatable
 func conformEventShapes(t *testing.T, world worlds.World) {
 	ctx := context.Background()
 	runID := conformCreateRun(t, world, "shapes")

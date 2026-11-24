@@ -69,6 +69,12 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"RunAheadStopsForAnotherTime", conformRunAheadStopsForAnotherTime},
 		{"RunAheadRepairsTwiceInARow", conformRunAheadRepairsTwiceInARow},
 		{"RunAheadRepairsFromAnIncompleteReport", conformRunAheadRepairsFromAnIncompleteReport},
+		{"SDKAttributeLimits", conformSDKAttributeLimits},
+		{"SDKAttributeChanges", conformSDKAttributeChanges},
+		{"SDKAttributeEventDataSize", conformSDKAttributeEventDataSize},
+		{"SDKRetention", conformSDKRetention},
+		{"SDKStartHook", conformSDKStartHook},
+		{"SDKEventData", conformSDKEventData},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

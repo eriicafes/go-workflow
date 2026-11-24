@@ -80,6 +80,10 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 }
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	// A start hook without a token is refused before it is sent.
+	if input.StartHook != nil && input.StartHook.Token == "" {
+		return worlds.EventResult{}, fmt.Errorf("%w: start hook without a token", worlds.ErrEventInvalid)
+	}
 	meta := w.runCreationMeta(input, worlds.EventTypeRunCreated)
 	response, err := retryEventWrite(ctx, true, false, func() (createResponse, error) {
 		return w.postEvent(ctx, input.RunID, worlds.EventTypeRunCreated, meta, input.Input)

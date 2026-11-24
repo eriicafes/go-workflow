@@ -429,6 +429,8 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 // which echoes its start hook, and a rejected one is refused again, naming
 // the same run, even once the token is free. A candidate too old to create is
 // refused, and the start hook's ID is the start hook's alone.
+//
+// SDK: packages/world/src/start-hook.test.ts > start Hook schemas > round-trips the echo on a run
 func conformStartHookDecisions(t *testing.T, world worlds.World) {
 	if !world.Capabilities().StartHook {
 		return
