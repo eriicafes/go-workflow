@@ -35,15 +35,3 @@ export function durationMilliseconds(nanoseconds: number | undefined): number {
 	}
 	return Number(nanoseconds) / 1_000_000;
 }
-
-// present returns value without its null, empty and zero fields, which Go
-// sends for the ones it leaves unset.
-export function present<T extends object>(value: T): T {
-	return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null && item !== "" && item !== 0)) as T;
-}
-
-// payload returns stored payload bytes as the Workflow SDK reads them, or
-// undefined when there are none.
-export function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
-	return data && data.byteLength > 0 ? data : undefined;
-}

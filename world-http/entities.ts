@@ -1,7 +1,6 @@
 import type { Hook, Step, Wait, WorkflowRun } from "@workflow/world";
 import { HOOK_RESUME_DEDUP_VERSION } from "@workflow/world";
 import type { RPC } from "./rpc.js";
-import { payload, present } from "./utils.js";
 
 // toRun exposes a run as the Workflow SDK reads one. It reports the spec
 // version the World recorded on the run, which decides how the SDK wakes and
@@ -69,4 +68,16 @@ export function toHook(hook: RPC.Hook): Hook {
 		...(claimedFrom ? { claimedFrom: present(claimedFrom) } : {}),
 		...(resumeDedup ? { resumeCapabilities: { hookResumeDedupVersion: HOOK_RESUME_DEDUP_VERSION } } : {}),
 	} as Hook;
+}
+
+// present returns value without its null, empty and zero fields, which Go
+// sends for the ones it leaves unset.
+function present<T extends object>(value: T): T {
+	return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null && item !== "" && item !== 0)) as T;
+}
+
+// payload returns stored payload bytes as the Workflow SDK reads them, or
+// undefined when there are none.
+function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
+	return data && data.byteLength > 0 ? data : undefined;
 }
