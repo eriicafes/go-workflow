@@ -27,6 +27,7 @@
     "abortViaHookWorkflow",
     "abortVoidSleepTimeoutWorkflow",
     "addTenWorkflow",
+    "distributedAbortControllerWorkflow",
     "errorFatalCatchable",
     "errorRetryCustomDelay",
     "errorRetryDisabled",

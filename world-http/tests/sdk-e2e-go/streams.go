@@ -138,6 +138,65 @@ func writableForwardedFromStepRun(ctx context.Context, input writableForwardedFr
 	return childRunID{ChildRunID: child}, err
 }
 
+// abortMessage is the chunk distributedAbortControllerWorkflow writes when
+// it aborts.
+type abortMessage struct {
+	Type    string `json:"type"`
+	Reason  string `json:"reason,omitempty"`
+	Expired bool   `json:"expired"`
+}
+
+type abortOutcome struct {
+	Aborted bool   `json:"aborted"`
+	Reason  string `json:"reason,omitempty"`
+	Expired bool   `json:"expired"`
+}
+
+type abortReason struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type distributedAbortControllerWorkflow struct {
+	workflow.Struct[abortOutcome]
+	workflow.Args
+	ID      string
+	TTLMs   int
+	GraceMs int
+}
+
+func distributedAbortControllerRun(ctx context.Context, input distributedAbortControllerWorkflow) (abortOutcome, error) {
+	startTime := workflow.Now(ctx)
+	hook := workflow.CreateHook[abortReason](ctx, workflow.HookOption{Token: "distributed-abort:" + input.ID})
+	timer := workflow.Timer(ctx, time.Duration(input.TTLMs)*time.Millisecond)
+	winner, err := workflow.Select(ctx, hook, timer)
+	if err != nil {
+		return abortOutcome{}, err
+	}
+	message := abortMessage{Type: "abort", Reason: "Controller expired", Expired: true}
+	if winner == hook {
+		payload, err := hook.Next(ctx)
+		if err != nil {
+			return abortOutcome{}, err
+		}
+		message = abortMessage{Type: "abort", Reason: payload.Reason}
+	}
+	if _, err := workflow.Step(ctx, writeAbortSignal, message); err != nil {
+		return abortOutcome{}, err
+	}
+	// After a TTL expiration, the hook stays alive through the grace period
+	// for late subscribers.
+	if message.Expired {
+		elapsed := workflow.Now(ctx).Sub(startTime)
+		remaining := time.Duration(input.GraceMs)*time.Millisecond - (elapsed - time.Duration(input.TTLMs)*time.Millisecond)
+		if remaining > 0 {
+			if err := workflow.Sleep(ctx, remaining); err != nil {
+				return abortOutcome{}, err
+			}
+		}
+	}
+	return abortOutcome{Aborted: true, Reason: message.Reason, Expired: message.Expired}, nil
+}
+
 // streamWrite is the arguments of a step that writes Value as one chunk of
 // the stream Name.
 type streamWrite struct {
@@ -216,4 +275,15 @@ func startChildWithStepWritable(ctx context.Context, payload string) (string, er
 		return "", err
 	}
 	return child.ID(), writer.CloseStream()
+}
+
+func writeAbortSignal(ctx context.Context, message abortMessage) (struct{}, error) {
+	writer, err := workflow.Writer(ctx)
+	if err != nil {
+		return struct{}{}, err
+	}
+	if err := writer.WriteValue(message); err != nil {
+		return struct{}{}, err
+	}
+	return struct{}{}, writer.CloseStream()
 }

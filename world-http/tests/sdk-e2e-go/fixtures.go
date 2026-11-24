@@ -96,6 +96,7 @@ var fixtures = []worlds.Runner{
 	workflow.Use(hookForceClaimRetainedVictimRun),
 	workflow.Use(hookForceClaimOwnHookRun),
 	workflow.Use(hookForceClaimTolerantClaimerRun),
+	workflow.Use(distributedAbortControllerRun),
 }
 
 type addTenWorkflow struct {
