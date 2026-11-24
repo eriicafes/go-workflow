@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [testworld, local, postgres, aws, vercel]
+        world: [testworld, local, postgres, aws]
     services:
       postgres:
         image: postgres:17.10
@@ -108,12 +108,7 @@ jobs:
     env:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-      # The Vercel World runs on Vercel's workflow backend, so its entry runs
-      # only where these secrets are set.
-      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
-    steps:
+    steps: &world-testing-steps
       - uses: actions/checkout@v7
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -124,7 +119,6 @@ jobs:
           node-version: 24.x
       - run: npm ci
       - name: Run the Workflow SDK's World test suite
-        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: npm run test:world-testing
 
   sdk-e2e:
@@ -134,7 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [testworld, local, postgres, aws, vercel]
+        world: [testworld, local, postgres, aws]
     services:
       postgres:
         image: postgres:17.10
@@ -167,14 +161,9 @@ jobs:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
       SDK_DIR: ${{ github.workspace }}/sdk
-      # The Vercel World runs on Vercel's workflow backend, so its entry runs
-      # only where these secrets are set.
-      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
       # The vercel/workflow commit whose e2e suite and workbench app run.
-      SDK_COMMIT: f717314b6fa8e91d653f56f90b9a1facf36a5f38
-    steps:
+      SDK_COMMIT: &sdk-commit f717314b6fa8e91d653f56f90b9a1facf36a5f38
+    steps: &sdk-e2e-steps
       - uses: actions/checkout@v7
         with:
           path: go-workflow
@@ -202,11 +191,53 @@ jobs:
           key: sdk-cargo-${{ env.SDK_COMMIT }}
       - run: npm ci
       - name: Build the Workflow SDK's workbench app
-        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
       - name: Run the Workflow SDK's e2e suite
-        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: npm run test:sdk-e2e
+
+  # The Vercel World runs on Vercel's workflow backend, so its jobs run only
+  # where the repository has Vercel credentials. A job's condition cannot read
+  # secrets, so this job reports whether they are set.
+  vercel-credentials:
+    name: Vercel Credentials
+    runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
+        run: echo "available=$([ -n "$TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  world-testing-vercel:
+    name: World Testing (vercel)
+    needs: vercel-credentials
+    if: needs.vercel-credentials.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    env:
+      HARNESS_WORLD: vercel
+      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+    steps: *world-testing-steps
+
+  sdk-e2e-vercel:
+    name: SDK E2E (vercel)
+    needs: vercel-credentials
+    if: needs.vercel-credentials.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: go-workflow
+    env:
+      HARNESS_WORLD: vercel
+      SDK_DIR: ${{ github.workspace }}/sdk
+      SDK_COMMIT: *sdk-commit
+      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+    steps: *sdk-e2e-steps
 
   release:
     name: Version Releases
