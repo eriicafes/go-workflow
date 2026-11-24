@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -38,6 +42,10 @@ const (
 // connection that was never made, doubling with each retry.
 var streamAppendRetryBase = 500 * time.Millisecond
 
+// streamNotFoundBudget is how long a stream append is sent again while the
+// backend does not find its run yet.
+var streamNotFoundBudget = 5 * time.Second
+
 // streamCloseMinBackoff is the wait before a stream close's first retry,
 // doubling with each retry.
 var streamCloseMinBackoff = 500 * time.Millisecond
@@ -57,11 +65,23 @@ func (w *World) streamsPath(runID worlds.RunID, name, suffix string) string {
 // sent again only when the backend cannot have stored it: after a connection
 // that was never made, each after streamAppendRetryBase doubled per retry,
 // and after a rate limit, waited out within the rate limit budget. It is
-// sent again at most streamAppendMaxRetries times.
+// sent again at most streamAppendMaxRetries times. An append the backend
+// answers with a run it does not find yet, as it can for a run created a
+// moment before, is sent again within streamNotFoundBudget.
 func (w *World) putStream(ctx context.Context, runID worlds.RunID, name string, body []byte, header http.Header) error {
 	var throttle throttleWaiter
+	notFoundUntil := time.Now().Add(streamNotFoundBudget)
+	notFoundWait := streamAppendRetryBase
 	for retry := 0; ; retry++ {
 		err := w.putStreamRetrying(ctx, runID, name, body, header, 0)
+		if errors.Is(err, worlds.ErrRunNotFound) && time.Now().Add(notFoundWait).Before(notFoundUntil) {
+			if sleep(ctx, notFoundWait) != nil {
+				return err
+			}
+			notFoundWait = min(2*notFoundWait, time.Second)
+			retry--
+			continue
+		}
 		if err == nil || retry == streamAppendMaxRetries {
 			return err
 		}
@@ -283,6 +303,9 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 			start = 0
 		}
 	}
+	if !backendRunID(input.RunID) {
+		return w.readWhole(ctx, input.RunID, input.Name, start, input.Wait)
+	}
 	limit := input.Limit
 	if limit <= 0 {
 		limit = streamPageSize
@@ -351,6 +374,47 @@ func (w *World) readChunks(ctx context.Context, runID worlds.RunID, name string,
 			return result, nil
 		}
 	}
+}
+
+// backendRunID reports whether runID is one the backend's chunk routes take:
+// wrun_ and a ULID. A stream can also belong to an ID that names no run, such
+// as a Workflow SDK health check's wrun_hc_<id>.
+func backendRunID(runID worlds.RunID) bool {
+	id, ok := strings.CutPrefix(string(runID), "wrun_")
+	if !ok {
+		return false
+	}
+	_, err := ulid.ParseStrict(id)
+	return err == nil
+}
+
+// readWhole reads a stream of an ID the chunk routes refuse through the
+// stream route, which answers with the stream's bytes from start once it is
+// closed. They are one chunk, and the stream is done. A stream not closed
+// within wait, or for a second when wait is zero, has nothing to read yet.
+func (w *World) readWhole(ctx context.Context, runID worlds.RunID, name string, start int, wait time.Duration) (worlds.StreamChunksResult, error) {
+	result := worlds.StreamChunksResult{Cursor: strconv.Itoa(start), RetryAfter: streamPollMax}
+	ctx, cancel := context.WithTimeout(ctx, max(wait, time.Second))
+	defer cancel()
+	header := http.Header{}
+	header.Set("Accept", "*/*")
+	response, err := w.api.request(ctx, streamRequest, http.MethodGet, w.streamPath(runID, name), url.Values{"startIndex": {itoa(start)}}, nil, header)
+	if err == nil {
+		defer response.Body.Close()
+		var data []byte
+		if data, err = io.ReadAll(response.Body); err == nil {
+			if len(data) > 0 {
+				result.Data = []worlds.StreamChunk{{Index: start, Data: data}}
+				result.Cursor = strconv.Itoa(start + 1)
+			}
+			result.Done, result.RetryAfter = true, 0
+			return result, nil
+		}
+	}
+	if statusOf(err) == http.StatusNotFound || errors.Is(err, context.DeadlineExceeded) {
+		return result, nil
+	}
+	return worlds.StreamChunksResult{}, streamReadError(err)
 }
 
 func (w *World) StreamsGetInfo(ctx context.Context, input worlds.StreamsGetInfoInput) (worlds.StreamInfo, error) {

@@ -220,7 +220,35 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		writeCBOR(writer, map[string]any{"data": data, "cursor": nilIfEmpty(page.Cursor), "hasMore": page.HasMore})
 	case len(parts) == 5 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "stream" && request.Method == http.MethodPut:
 		f.writeStream(ctx, writer, request, worlds.RunID(parts[2]), parts[4])
+	case len(parts) == 5 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "stream" && request.Method == http.MethodGet:
+		// The stream route answers with the stream's bytes from startIndex
+		// once it is closed, whatever ID it belongs to.
+		start, _ := strconv.Atoi(query.Get("startIndex"))
+		for {
+			info, err := f.store.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: worlds.RunID(parts[2]), Name: parts[4]})
+			if err == nil && info.Done {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		chunks, err := f.store.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(parts[2]), Name: parts[4], StartIndex: start, Limit: 1000})
+		if err != nil {
+			writeGoError(writer, err)
+			return
+		}
+		for _, chunk := range chunks.Data {
+			_, _ = writer.Write(chunk.Data)
+		}
 	case len(parts) == 6 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "streams" && parts[5] == "chunks":
+		// The chunk routes take only a run's ID.
+		if !backendRunID(worlds.RunID(parts[2])) {
+			writeError(writer, http.StatusBadRequest, "validation-error", "runId must be wrun_ and a ULID")
+			return
+		}
 		input := worlds.StreamsGetChunksInput{RunID: worlds.RunID(parts[2]), Name: parts[4], Cursor: query.Get("cursor")}
 		input.Limit, _ = strconv.Atoi(query.Get("limit"))
 		chunks, err := f.store.StreamsGetChunks(ctx, input)
