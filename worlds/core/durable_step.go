@@ -277,10 +277,27 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 		err = returnErr
 	}
 	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
-		err = worlds.FatalError{Cause: context.Canceled}
+		err = worlds.FatalError{Cause: cancellation(stepCtx)}
 	}
 	return value, err
 }
+
+// cancellation returns the error of a step attempt whose context is done:
+// context.Canceled, which also wraps the cancellation's cause when it has
+// another, so the runner can read why the step was cancelled.
+func cancellation(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(cause, context.Canceled) {
+		return context.Canceled
+	}
+	return canceledError{cause: cause}
+}
+
+// canceledError is context.Canceled with the cancellation's cause.
+type canceledError struct{ cause error }
+
+func (e canceledError) Error() string   { return context.Canceled.Error() }
+func (e canceledError) Unwrap() []error { return []error{context.Canceled, e.cause} }
 
 type stepReturnKey struct{}
 

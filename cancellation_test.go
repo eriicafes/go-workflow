@@ -67,14 +67,16 @@ func TestDurableCancellationFailsStepWithoutRetry(t *testing.T) {
 			<-ctx.Done()
 			return context.Cause(ctx).Error(), ctx.Err()
 		}, struct{}{})
-		if err := cancel(errors.New("stop work")); err != nil {
+		stopWork := errors.New("stop work")
+		if err := cancel(stopWork); err != nil {
 			return cancellationOutput{}, err
 		}
 		if err := cancel(errors.New("ignored")); err != nil {
 			return cancellationOutput{}, err
 		}
+		// The step's error also wraps the cause.
 		_, err = result.Value(ctx)
-		return cancellationOutput{Cause: context.Cause(cancelCtx).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled))}, nil
+		return cancellationOutput{Cause: context.Cause(cancelCtx).Error(), Cancelled: errors.Is(err, context.Canceled) && errors.Is(err, workflow.FatalError(context.Canceled)) && errors.Is(err, stopWork)}, nil
 	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 2*time.Second)

@@ -76,7 +76,8 @@ suitable points. Cancellation cannot forcibly stop a Go goroutine.
 
 A cancelled attempt fails without retrying. Its error wraps `context.Canceled`
 with `workflow.FatalError`, even if the step body returns nil after
-cancellation. Pending timers using the context also fail with a fatal
+cancellation. It also wraps the cancellation's cause, when one was given, so
+`errors.Is` and `errors.As` find it. Pending timers using the context also fail with a fatal
 cancellation error. The runner can handle these errors and continue.
 
 A step can request cancellation through `workflow.CancelFunc(ctx)`. It reports
