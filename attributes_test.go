@@ -108,6 +108,40 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 	}
 }
 
+// A World may correlate a step's attribute write with the run, as the Vercel
+// backend does. Replay does not take that write for one of the workflow's own.
+func TestStepAttributeWriteCorrelatedWithTheRunReplays(t *testing.T) {
+	var world *testworld.World
+	world = testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
+			step := workflow.GetStepMetadata(ctx)
+			runID := worlds.RunID(workflow.GetWorkflowMetadata(ctx).RunID)
+			data, err := json.Marshal(worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "phase", Value: ptrTo("step")}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterStep, StepID: worlds.StepID(step.ID), Attempt: step.Attempt}})
+			if err != nil {
+				return struct{}{}, err
+			}
+			_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, CorrelationID: string(runID), Data: data}})
+			return struct{}{}, err
+		}, struct{}{})
+		if err != nil {
+			return attributesOutput{}, err
+		}
+		// A second step makes the run replay past the attribute write.
+		_, err = workflow.Step(ctx, tagFromStep, "after")
+		return attributesOutput{}, err
+	})))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, attributesInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+}
+
 func TestSetAttributesPastTheRunLimitFailsTheRun(t *testing.T) {
 	batch := func(prefix string) map[string]*string {
 		attributes := map[string]*string{}

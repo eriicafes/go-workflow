@@ -266,7 +266,15 @@ func (e *Execution) trackEvent(index int, event worlds.Event) {
 		if !worlds.StartCreatesStep(event.Data) {
 			return
 		}
-	case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeHookCreated, worlds.EventTypeAttrSet:
+	case worlds.EventTypeAttrSet:
+		// Only the workflow's own attribute writes are declarations. A step
+		// writes attributes outside the replay, and a World may correlate
+		// that write with the run.
+		var data worlds.DataAttrSet
+		if json.Unmarshal(event.Data, &data) == nil && data.Writer.Type == worlds.AttributeWriterStep {
+			return
+		}
+	case worlds.EventTypeStepCreated, worlds.EventTypeWaitCreated, worlds.EventTypeHookCreated:
 	default:
 		return
 	}
