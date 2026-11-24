@@ -82,6 +82,8 @@ var fixtures = []worlds.Runner{
 	workflow.Use(abortDeterministicBranchFromStepRun),
 	workflow.Use(abortAnyInWorkflowRun),
 	workflow.Use(abortAnyInStepRun),
+	workflow.Use(webhookRun),
+	workflow.Use(parallelStepsThenWebhookRun),
 }
 
 type addTenWorkflow struct {

@@ -57,6 +57,7 @@
     "outputStreamWorkflow",
     "parallelBranchesAdvanceIndependentlyWorkflow",
     "parallelSleepWorkflow",
+    "parallelStepsThenWebhookWorkflow",
     "promiseAllWorkflow",
     "promiseAnyWorkflow",
     "promiseRaceStressTestWorkflow",
@@ -72,6 +73,7 @@
     "spawnWorkflowFromStepWorkflow",
     "stepWinsRaceWorkflow",
     "utf8StreamWorkflow",
+    "webhookWorkflow",
     "writableForwardedFromStepWorkflow",
     "writableForwardedFromWorkflowWorkflow"
   ],
