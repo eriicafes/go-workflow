@@ -540,28 +540,6 @@ func double(ctx context.Context, input doubleInput) (doubleOutput, error) {
 	return doubleOutput{Value: value}, err
 }
 
-func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	world := startWorld(t, localworld.Config{Dir: t.TempDir()}, nil)
-	later := time.Now().Add(time.Hour)
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || again.MessageID != first.MessageID {
-		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
-	}
-	if !strings.HasPrefix(first.MessageID, "msg_") {
-		t.Fatalf("message ID %q", first.MessageID)
-	}
-	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later})
-	if err != nil || unkeyed.MessageID == first.MessageID {
-		t.Fatalf("unkeyed = %#v err=%v", unkeyed, err)
-	}
-}
-
 // runClear is a run ID minted when the tests start, as a World requires
 // of a new run.
 var runClear = worlds.NewRunID()

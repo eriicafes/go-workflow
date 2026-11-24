@@ -16,7 +16,7 @@ type Queue interface {
 	//
 	// A message with an IdempotencyKey is stored once: a Queue with the key
 	// of a message that lives, sent within MinDeduplicationWindow of its
-	// first, stores nothing more and may return either message's ID.
+	// first, stores nothing more and returns the first message's ID.
 	//
 	// A delivery whose Runtime.Execute returns a *Redelivery is delivered
 	// again, with the same MessageID and the next DeliveryCount. A World

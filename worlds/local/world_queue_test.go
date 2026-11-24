@@ -3,6 +3,7 @@ package localworld
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -381,6 +382,9 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	result, err := world.Queue(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.MessageID, "msg_") {
+		t.Fatalf("message ID %q, want msg_<ULID>", result.MessageID)
 	}
 	got := receive(t, deliveries)
 	want := input
