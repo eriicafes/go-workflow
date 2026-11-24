@@ -24,17 +24,19 @@ func WorkflowName[In Workflow[Out], Out any]() string {
 
 // StepName returns the name the step function fn is recorded under, in the
 // Workflow SDK's form "step//<package path>//<name>", from fn's Go name. The
-// package path ends at the first dot after its last slash, and a nested
-// name, such as a closure's or a method's, joins its parts with a slash: the
+// package path ends at the first dot after its last slash, and the name is
+// the rest of the Go name, without the -fm suffix of a method value: the
 // closure example.com/app/flows.Publish.func1 is
-// "step//example.com/app/flows//Publish/func1". Dots in a generic function's
-// type arguments are kept.
+// "step//example.com/app/flows//Publish.func1", and the method value
+// example.com/app/flows.(*Report).publish-fm is
+// "step//example.com/app/flows//(*Report).publish".
 func StepName(fn any) string {
 	return stepName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 }
 
 // stepName returns StepName of the function with the Go name function.
 func stepName(function string) string {
+	function = strings.TrimSuffix(function, "-fm")
 	// Type arguments, in brackets, may hold slashes and dots of their own.
 	head := function
 	if bracket := strings.IndexByte(head, '['); bracket >= 0 {
@@ -46,20 +48,7 @@ func stepName(function string) string {
 		return "step//" + function
 	}
 	dot += slash
-	var name strings.Builder
-	depth := 0
-	for _, r := range function[dot+1:] {
-		switch {
-		case r == '[':
-			depth++
-		case r == ']':
-			depth--
-		case r == '.' && depth == 0:
-			r = '/'
-		}
-		name.WriteRune(r)
-	}
-	return "step//" + function[:dot] + "//" + name.String()
+	return "step//" + function[:dot] + "//" + function[dot+1:]
 }
 
 // QueueRoute routes the deliveries of one workflow's runs to a named queue.

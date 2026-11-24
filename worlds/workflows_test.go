@@ -45,6 +45,15 @@ func (namedFlow) Workflow(struct{}) {}
 
 func (namedFlow) report(context.Context, int) (int, error) { return 0, nil }
 
+func (*namedFlow) publish(context.Context, int) (int, error) { return 0, nil }
+
+// nested is not inlined, so its closure keeps the name it is compiled under.
+//
+//go:noinline
+func (namedFlow) nested() func(context.Context, int) (int, error) {
+	return func(context.Context, int) (int, error) { return 0, nil }
+}
+
 func plainStep(context.Context, int) (int, error) { return 0, nil }
 
 func genericStep[T any](context.Context, T) (T, error) {
@@ -53,7 +62,7 @@ func genericStep[T any](context.Context, T) (T, error) {
 }
 
 // Workflows and steps are named in the Workflow SDK's form, with a step's
-// nested name joined by slashes and a generic step's type arguments kept.
+// Go name after its package path, without a method value's -fm suffix.
 func TestNamesTakeTheWorkflowSDKsForm(t *testing.T) {
 	const pkg = "github.com/eriicafes/go-workflow/worlds_test"
 	if got := worlds.WorkflowName[namedFlow](); got != "workflow//"+pkg+"//namedFlow" {
@@ -65,8 +74,10 @@ func TestNamesTakeTheWorkflowSDKsForm(t *testing.T) {
 		want string
 	}{
 		{plainStep, "step//" + pkg + "//plainStep"},
-		{closure, "step//" + pkg + "//TestNamesTakeTheWorkflowSDKsForm/func1"},
-		{namedFlow{}.report, "step//" + pkg + "//namedFlow/report-fm"},
+		{closure, "step//" + pkg + "//TestNamesTakeTheWorkflowSDKsForm.func1"},
+		{namedFlow{}.report, "step//" + pkg + "//namedFlow.report"},
+		{(&namedFlow{}).publish, "step//" + pkg + "//(*namedFlow).publish"},
+		{namedFlow{}.nested(), "step//" + pkg + "//namedFlow.nested.func1"},
 		{genericStep[time.Duration], "step//" + pkg + "//genericStep[...]"},
 	} {
 		if got := worlds.StepName(test.fn); got != test.want {

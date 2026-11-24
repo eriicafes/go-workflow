@@ -44,7 +44,7 @@ test("passes workflow and step names through as written", async () => {
 					return rpcResponse({
 						Data: [
 							{ StepID: "step_01", StepName: "step//example.com/app/flows//writeDraft" },
-							{ StepID: "step_02", StepName: "step//example.com/app/flows//PublishReport/func1" },
+							{ StepID: "step_02", StepName: "step//example.com/app/flows//PublishReport.func1" },
 							{ StepID: "step_03", StepName: "step//./src/jobs//send" },
 						],
 						HasMore: false,
@@ -61,7 +61,7 @@ test("passes workflow and step names through as written", async () => {
 	const steps = await world.steps.list({ runId: "wrun_01" } as never);
 	expect(steps.data.map((step) => step.stepName)).toEqual([
 		"step//example.com/app/flows//writeDraft",
-		"step//example.com/app/flows//PublishReport/func1",
+		"step//example.com/app/flows//PublishReport.func1",
 		"step//./src/jobs//send",
 	]);
 
