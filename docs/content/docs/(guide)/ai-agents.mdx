@@ -536,11 +536,13 @@ otel.SetTracerProvider(provider)
 ```
 
 Create the processor in every process that runs agents, before they run.
-Without it, the call draws a root span that starts and ends when the call
-starts, and go-ai's operation, step, and `chat` spans for each model call as
-it happens. Integrations other than `OpenTelemetry` and `LegacyOpenTelemetry`
-listed in `Integrations` always get the spans of each model call as it
-happens, and the reported events when the call ends.
+Without it, as in `@ai-sdk/workflow` without its durable telemetry bridge,
+the call reports nothing, and each model call draws go-ai's operation, step,
+and `chat` spans as it happens, under its step's span. Integrations other than
+`OpenTelemetry` and `LegacyOpenTelemetry` listed in `Integrations`, and
+integrations registered globally, which go-ai does not list, always get the
+spans of each model call as it happens, and the reported events when the call
+ends.
 
 ## Instructions and settings
 

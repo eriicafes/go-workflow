@@ -16,7 +16,6 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/provider/types"
 	"github.com/digitallysavvy/go-ai/pkg/telemetry"
 	"github.com/eriicafes/go-workflow"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -399,6 +398,7 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 
 	// Like the Workflow SDK, the call resumes the approvals in its messages,
 	// then starts, then records its root span.
+	r.startedAt = workflow.Now(ctx)
 	result := r.result(nil, nil)
 	err = r.resumeApprovals(ctx)
 	if err == nil {
@@ -490,8 +490,9 @@ type run struct {
 	steps          []StepResult
 	// trace is what prepareWorkflowAgentTelemetry recorded, and events are
 	// the telemetry events the call reports when it ends.
-	trace  *agentTelemetry
-	events []telemetryEvent
+	trace     *agentTelemetry
+	events    []telemetryEvent
+	startedAt time.Time
 	// pendingResults are the provider calls whose deferred results have not
 	// arrived.
 	pendingResults map[string]bool
@@ -561,24 +562,26 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 }
 
 // startTrace runs the prepareWorkflowAgentTelemetry inline step when
-// telemetry is enabled, and returns ctx with the trace context of the call's
-// root span, which every step the call starts after it gets.
+// telemetry is enabled. When the call is reported, it returns ctx with the
+// trace context of the call's root span, which every step the call starts
+// after it gets.
 func (r *run) startTrace(ctx context.Context) (context.Context, error) {
 	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) {
 		return ctx, nil
 	}
-	startedAt := workflow.Now(ctx)
-	prepared, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), prepareWorkflowAgentTelemetry, prepareTelemetryInput{Operation: r.operation(), Instructions: r.instructions})
+	prepared, err := workflow.InlineStep(ctx, prepareWorkflowAgentTelemetry, struct{}{})
 	if err != nil {
 		return ctx, err
 	}
 	r.trace = &prepared
 	if !prepared.Reported {
-		carrier := propagation.MapCarrier{"traceparent": prepared.Traceparent}
-		r.modelCtx = propagation.TraceContext{}.Extract(r.modelCtx, carrier)
-		return propagation.TraceContext{}.Extract(ctx, carrier), nil
+		r.events = nil
+		return ctx, nil
 	}
-	r.events = append(r.events, telemetryEvent{Type: eventStart, Time: startedAt, ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()})
+	// The call started before it resumed the approvals in its messages, whose
+	// tool events were recorded before this step.
+	start := telemetryEvent{Type: eventStart, Timestamp: r.startedAt.UnixMilli(), ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()}
+	r.events = append([]telemetryEvent{start}, r.events...)
 	root := prepared.rootContext()
 	r.modelCtx = trace.ContextWithRemoteSpanContext(r.modelCtx, root)
 	return trace.ContextWithRemoteSpanContext(ctx, root), nil
@@ -593,12 +596,13 @@ func (r *run) operation() string {
 }
 
 // record records a telemetry event of a call whose telemetry is reported
-// when it ends.
+// when it ends. Events before prepareWorkflowAgentTelemetry are recorded in
+// case it reports the call.
 func (r *run) record(ctx context.Context, event telemetryEvent) {
-	if r.trace == nil || !r.trace.Reported {
+	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) || r.trace != nil && !r.trace.Reported {
 		return
 	}
-	event.Time = workflow.Now(ctx)
+	event.Timestamp = workflow.Now(ctx).UnixMilli()
 	r.events = append(r.events, event)
 }
 

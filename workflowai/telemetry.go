@@ -15,7 +15,6 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/telemetry"
 	"github.com/eriicafes/go-workflow"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -32,8 +31,8 @@ import (
 // OpenTelemetry cannot be told the IDs and times of the spans go-ai draws,
 // so the tracer provider that draws them needs TelemetryIDGenerator and
 // NewTelemetrySpanProcessor, which apply the reserved IDs and the recorded
-// times. Without them the agent draws a root span when the call starts and
-// the spans of each model call as it happens.
+// times. Without them, like the Workflow SDK without its durable telemetry
+// bridge, the agent only draws the spans of each model call as it happens.
 
 // TelemetryIDGenerator is an OpenTelemetry ID generator that gives the spans
 // of a workflow agent's telemetry the IDs the agent reserved for them, and
@@ -99,7 +98,7 @@ func (p *telemetrySpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 		}
 	}
 	if start, end, ok := telemetryClock.end(span.SpanContext()); ok {
-		span = reportedSpan{ReadOnlySpan: span, start: start, end: end}
+		span = reportedSpan{ReadOnlySpan: span, start: start, end: end, events: reportedEvents(span, start, end)}
 	}
 	p.next.OnEnd(span)
 }
@@ -115,10 +114,36 @@ func (p *telemetrySpanProcessor) ForceFlush(ctx context.Context) error { return 
 type reportedSpan struct {
 	sdktrace.ReadOnlySpan
 	start, end time.Time
+	events     []sdktrace.Event
 }
 
-func (s reportedSpan) StartTime() time.Time { return s.start }
-func (s reportedSpan) EndTime() time.Time   { return s.end }
+func (s reportedSpan) StartTime() time.Time     { return s.start }
+func (s reportedSpan) EndTime() time.Time       { return s.end }
+func (s reportedSpan) Events() []sdktrace.Event { return s.events }
+
+// reportedEvents returns the events of span, which were added while it was
+// reported, moved from the span's time in the report to its recorded times.
+func reportedEvents(span sdktrace.ReadOnlySpan, start, end time.Time) []sdktrace.Event {
+	events := span.Events()
+	if len(events) == 0 {
+		return events
+	}
+	reportStart, reportEnd := span.StartTime(), span.EndTime()
+	moved := make([]sdktrace.Event, len(events))
+	for i, event := range events {
+		moved[i] = event
+		switch {
+		case !event.Time.After(reportStart):
+			moved[i].Time = start
+		case !event.Time.Before(reportEnd):
+			moved[i].Time = end
+		default:
+			fraction := float64(event.Time.Sub(reportStart)) / float64(reportEnd.Sub(reportStart))
+			moved[i].Time = start.Add(time.Duration(fraction * float64(end.Sub(start))))
+		}
+	}
+	return moved
+}
 
 // telemetryClock holds the recorded time of the event each reported trace
 // is at, which the spans it starts and ends take.
@@ -169,9 +194,6 @@ type agentTelemetry struct {
 	RootSpanID string      `json:"rootSpanId,omitempty"`
 	TraceFlags byte        `json:"traceFlags,omitempty"`
 	Parent     *spanParent `json:"parent,omitempty"`
-	// Traceparent is the trace context of the root span a call that is not
-	// reported draws when it starts.
-	Traceparent string `json:"traceparent,omitempty"`
 }
 
 // spanParent is the span context of a root span's parent.
@@ -221,42 +243,13 @@ func (t *agentTelemetry) stepSpanID(stepNumber int) trace.SpanID {
 	return id
 }
 
-// prepareTelemetryInput is the input of prepareWorkflowAgentTelemetry.
-type prepareTelemetryInput struct {
-	Operation    string `json:"operation"`
-	Instructions string `json:"instructions,omitempty"`
-}
-
 // prepareWorkflowAgentTelemetry reserves the IDs of a call's root span when
-// the process reports telemetry, as the Workflow SDK's step of the same name
-// does. Otherwise it draws a root span that starts and ends at once, and
-// records its trace context. The model and telemetry settings come from the
-// modelCall in ctx.
-func prepareWorkflowAgentTelemetry(ctx context.Context, input prepareTelemetryInput) (agentTelemetry, error) {
-	m, err := modelCallFrom(ctx)
-	if err != nil {
-		return agentTelemetry{}, err
-	}
+// the process has a NewTelemetrySpanProcessor, as the Workflow SDK's step of
+// the same name does for its durable telemetry integrations.
+func prepareWorkflowAgentTelemetry(ctx context.Context, input struct{}) (agentTelemetry, error) {
 	callID := workflow.StepID(ctx)
 	if reportedTelemetry.Load() == 0 {
-		ctx = telemetry.FireOnStart(ctx, telemetry.TelemetryStartEvent{
-			CallID:        callID,
-			OperationType: input.Operation,
-			ModelProvider: m.model.Provider(),
-			ModelID:       m.model.ModelID(),
-			Settings:      m.telemetry,
-			System:        input.Instructions,
-		})
-		carrier := propagation.MapCarrier{}
-		propagation.TraceContext{}.Inject(ctx, carrier)
-		telemetry.FireOnEnd(ctx, telemetry.TelemetryFinishEvent{
-			CallID:        callID,
-			OperationType: input.Operation,
-			ModelProvider: m.model.Provider(),
-			ModelID:       m.model.ModelID(),
-			Settings:      m.telemetry,
-		})
-		return agentTelemetry{CallID: callID, Traceparent: carrier["traceparent"]}, nil
+		return agentTelemetry{CallID: callID}, nil
 	}
 	// The root span is in this step's trace, as a child of the span this
 	// step's span is a child of: the span of the code that started the run,
@@ -280,8 +273,10 @@ func prepareWorkflowAgentTelemetry(ctx context.Context, input prepareTelemetryIn
 // telemetryEvent is a telemetry event the agent records in workflow code and
 // reports when the call ends.
 type telemetryEvent struct {
-	Type          string          `json:"type"`
-	Time          time.Time       `json:"time"`
+	Type string `json:"type"`
+	// Timestamp is when the event happened, in milliseconds since the Unix
+	// epoch, as the Workflow SDK records it.
+	Timestamp     int64           `json:"timestamp"`
 	StepNumber    int             `json:"stepNumber,omitempty"`
 	ModelProvider string          `json:"modelProvider,omitempty"`
 	ModelID       string          `json:"modelId,omitempty"`
@@ -333,7 +328,7 @@ func reportWorkflowAgentTelemetry(ctx context.Context, input reportTelemetryInpu
 	root := t.parentContext(ctx)
 	steps := map[int]context.Context{}
 	for _, event := range input.Events {
-		telemetryClock.set(traceID, event.Time)
+		telemetryClock.set(traceID, time.UnixMilli(event.Timestamp))
 		stepCtx := steps[event.StepNumber]
 		if stepCtx == nil {
 			stepCtx = root

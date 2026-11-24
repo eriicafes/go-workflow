@@ -859,13 +859,14 @@ func languageModelCallStart(settings *telemetry.Settings, callID, modelProvider,
 }
 
 // splitIntegrations splits the integrations of settings into the
-// OpenTelemetry integrations, which draw a call's spans when it is reported,
-// and the others, which draw the spans of each model call as it happens. The
-// globally registered integrations of settings without integrations count as
-// OpenTelemetry integrations. A nil result has no integrations.
+// OpenTelemetry integrations, which draw a model call's chat span under the
+// span of its agent step, and the others, which draw the spans of each model
+// call as it happens. go-ai does not list its globally registered
+// integrations, so with no integrations in settings they all count as others.
+// A nil result has no integrations.
 func splitIntegrations(settings *telemetry.Settings) (otel, others *telemetry.Settings) {
 	if len(settings.Integrations) == 0 {
-		return settings, nil
+		return nil, settings
 	}
 	var otelIntegrations, otherIntegrations []telemetry.TelemetryIntegration
 	for _, integration := range settings.Integrations {
