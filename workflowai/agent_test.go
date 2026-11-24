@@ -725,3 +725,127 @@ func TestStreamResumesApprovalsBeforeStart(t *testing.T) {
 		}
 	})
 }
+
+// A call runs the Workflow SDK's WorkflowAgent steps, in the SDK's order.
+func TestStreamStepOrder(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	signed := func(t *testing.T) {
+		t.Setenv("TOOL_APPROVAL_SECRET", secret)
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
+	}
+	// signature runs the approval turn and returns its request's signature.
+	signature := func(t *testing.T) string {
+		first := approvalTurn(t)
+		return first.Messages[len(first.Messages)-1].Content[1].Signature
+	}
+	tests := []struct {
+		name string
+		run  func(t *testing.T) []workflowai.ModelMessage
+		want []string
+	}{
+		{
+			name: "text",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(text("Hi!"))
+				return []workflowai.ModelMessage{user("hi")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "tool calls",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("21 degrees."))
+				return []workflowai.ModelMessage{user("weather in Lagos?")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "getWeather", "writeToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "signed approval request",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`), call("c2", "bookFlight", `{"flightId":"LH123"}`), call("c3", "getLocation", `{}`)))
+				signed(t)
+				return []workflowai.ModelMessage{user("weather and book LH123")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "getWeather", "signWorkflowToolApproval", "writeToolResults", "writeApprovalRequests", "closeStream"},
+		},
+		{
+			name: "client tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getLocation", `{}`)))
+				return []workflowai.ModelMessage{user("where am I?")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "signed approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked."))
+				signed(t)
+				return respond(t, signature(t), true, `{"flightId":"LH123"}`)
+			},
+			want: []string{"verifyWorkflowToolApprovalSignature", "bookFlight", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "tampered approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Not booked."))
+				signed(t)
+				return respond(t, signature(t), true, `{"flightId":"XX999"}`)
+			},
+			want: []string{"verifyWorkflowToolApprovalSignature", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "denied approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Not booked."))
+				approvalTurn(t)
+				return respond(t, "", false, `{"flightId":"LH123"}`)
+			},
+			want: []string{"writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "approval for a removed tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Done."))
+				approvalTurn(t)
+				delete(testOptions.Tools, "bookFlight")
+				return respond(t, "", true, `{"flightId":"LH123"}`)
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "provider tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				search := providerSearch("p1")
+				setup(func() ([]provider.StreamChunk, error) {
+					return []provider.StreamChunk{
+						{Type: provider.ChunkTypeToolCall, ToolCall: &search},
+						providerResult("p1"),
+						{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonStop},
+					}, nil
+				})
+				return []workflowai.ModelMessage{user("search flights")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "writeToolResults", "closeStream"},
+		},
+		{
+			name: "failed model call",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(failWith(errors.New("model down")))
+				return []workflowai.ModelMessage{user("hi")}
+			},
+			want: []string{"doStreamStep", "closeStream"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				messages := tt.run(t)
+				_, _, steps, _ := chatWithSteps(t, messages)
+				if !slices.Equal(steps, tt.want) {
+					t.Fatalf("steps = %v, want %v", steps, tt.want)
+				}
+			})
+		})
+	}
+}

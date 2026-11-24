@@ -416,9 +416,10 @@ Every client feature of `@ai-sdk/workflow` works against the Go server:
 | Tool approvals with `addToolApprovalResponse` | `tool-approval-request` chunks, and approval responses resumed from the next turn's messages |
 | Signed approvals | `WorkflowAgentOptions.ToolApprovalSecret`, verified before an approved call executes |
 | Denied approvals | `tool-output-denied` chunks and an `execution-denied` result for the model |
+| Approval policy (`toolApproval`) | `ToolApproval` and `ToolApprovals`, which approve or deny calls in code |
 | Client-side tools with `addToolOutput` | A tool without `Execute` ends the turn, and its output arrives in the next turn's messages |
 | Discarding output of an interrupted model call | A `reset-step` chunk before every model call execution |
-| Stream errors | An `error` chunk, and `Result.Error` on the server |
+| Stream errors | An `error` chunk for an error in the model's stream, and `Result.Error` on the server |
 
 To resume a turn after a page reload, save the run ID from the
 `x-workflow-run-id` response header with `onChatSendMessage`, pass
@@ -553,9 +554,9 @@ support, inside the model call's step. Without one, URLs are sent as they are.
   before it writes its tool results and approval requests.
 
 <Callout type="warn" title="Callbacks replay">
-`PrepareCall`, `PrepareStep`, `NeedsApproval`, `ToolApproval`, `Execute`, and callbacks run
-in workflow context, so they run again on every replay and must be
-deterministic. They get the workflow `ctx`, so they can call `workflow.Step`
+`PrepareCall`, `PrepareStep`, `NeedsApproval`, `ToolApproval`, `Execute`, and
+callbacks run in workflow context, so they run again on every replay and must
+be deterministic. They get the workflow `ctx`, so they can call `workflow.Step`
 or `workflow.InlineStep` themselves to record side effects and external
 reads, and replays reuse the recorded results. Plain logging in a callback
 may repeat on replay, which is usually fine.

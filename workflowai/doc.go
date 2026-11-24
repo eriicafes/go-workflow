@@ -31,7 +31,13 @@
 //
 // A tool with NeedsApproval ends the turn with an approval request. The
 // user's response arrives with the next turn's messages, and the next Stream
-// executes or denies the call before it calls the model.
+// executes or denies the call before it calls the model. ToolApproval and
+// ToolApprovals approve or deny calls in code, in place of NeedsApproval.
+//
+// The agent runs the same steps as the Workflow SDK's WorkflowAgent, in the
+// same order: doStreamStep or doGenerateStep for each model call, and
+// writeToolResults, writeApprovalRequests, closeStream and the SDK's other
+// steps for the parts it writes to the stream.
 //
 // # Messages and streams
 //
