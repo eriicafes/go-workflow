@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [testworld, local, postgres]
+        world: [testworld, local, postgres, aws, vercel]
     services:
       postgres:
         image: postgres:17.10
@@ -95,9 +95,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # DynamoDB Local and ElasticMQ, an SQS stand-in, back the AWS World. An
+      # empty image skips the service for the other Worlds.
+      dynamodb:
+        image: ${{ matrix.world == 'aws' && 'amazon/dynamodb-local:3.3.1' || '' }}
+        ports:
+          - 8000:8000
+      elasticmq:
+        image: ${{ matrix.world == 'aws' && 'softwaremill/elasticmq-native:1.7.1' || '' }}
+        ports:
+          - 9324:9324
     env:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      # The Vercel World runs on Vercel's workflow backend, so its entry runs
+      # only where these secrets are set.
+      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
     steps:
       - uses: actions/checkout@v7
       - name: Setup Go
@@ -109,6 +124,7 @@ jobs:
           node-version: 24.x
       - run: npm ci
       - name: Run the Workflow SDK's World test suite
+        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: npm run test:world-testing
 
   sdk-e2e:
@@ -118,7 +134,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        world: [testworld, local, postgres]
+        world: [testworld, local, postgres, aws, vercel]
     services:
       postgres:
         image: postgres:17.10
@@ -131,6 +147,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # DynamoDB Local and ElasticMQ, an SQS stand-in, back the AWS World. An
+      # empty image skips the service for the other Worlds.
+      dynamodb:
+        image: ${{ matrix.world == 'aws' && 'amazon/dynamodb-local:3.3.1' || '' }}
+        ports:
+          - 8000:8000
+      elasticmq:
+        image: ${{ matrix.world == 'aws' && 'softwaremill/elasticmq-native:1.7.1' || '' }}
+        ports:
+          - 9324:9324
     # The SDK is checked out beside this repository, not inside it, so its
     # packages never resolve to the published ones in this repository's
     # node_modules.
@@ -141,6 +167,11 @@ jobs:
       HARNESS_WORLD: ${{ matrix.world }}
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
       SDK_DIR: ${{ github.workspace }}/sdk
+      # The Vercel World runs on Vercel's workflow backend, so its entry runs
+      # only where these secrets are set.
+      WORKFLOW_VERCEL_LIVE_TOKEN: ${{ secrets.WORKFLOW_VERCEL_LIVE_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
       # The vercel/workflow commit whose e2e suite and workbench app run.
       SDK_COMMIT: f717314b6fa8e91d653f56f90b9a1facf36a5f38
     steps:
@@ -171,8 +202,10 @@ jobs:
           key: sdk-cargo-${{ env.SDK_COMMIT }}
       - run: npm ci
       - name: Build the Workflow SDK's workbench app
+        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
       - name: Run the Workflow SDK's e2e suite
+        if: ${{ matrix.world != 'vercel' || env.WORKFLOW_VERCEL_LIVE_TOKEN != '' }}
         run: npm run test:sdk-e2e
 
   release:

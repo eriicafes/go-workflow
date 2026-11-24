@@ -5,10 +5,12 @@
 // app listens. HARNESS_ADDR sets the address it listens on, which is
 // 127.0.0.1 on a free port by default.
 //
-// HARNESS_WORLD selects the World: testworld (the default), local, in a
-// temporary directory, or postgres, in a fresh schema of the database at
-// WORKFLOW_POSTGRES_URL, or DATABASE_URL. WORKFLOW_HTTP_TOKEN, when set, protects the client
-// endpoints and authenticates the deliveries. HARNESS_DEBUG, when set, logs
+// HARNESS_WORLD selects the World: testworld (the default); local, in a
+// temporary directory; postgres, in a fresh schema of the database at
+// WORKFLOW_POSTGRES_URL, or DATABASE_URL; aws, on DynamoDB Local and
+// ElasticMQ (see openAWS); or vercel, on Vercel's workflow backend (see
+// openVercel). WORKFLOW_HTTP_TOKEN, when set, protects the client endpoints
+// and authenticates the deliveries. HARNESS_DEBUG, when set, logs
 // each delivery and, on exit, every run's events; set to a path, it appends
 // the log to that file.
 //
@@ -283,6 +285,10 @@ func open(ctx context.Context, kind, baseURL string, executor worlds.Executor) (
 			world.Close()
 			dropSchema(schema)
 		}, nil
+	case "aws":
+		return openAWS(ctx, baseURL, executor)
+	case "vercel":
+		return openVercel(ctx, baseURL, executor)
 	default:
 		return nil, nil, fmt.Errorf("harness: unknown HARNESS_WORLD %q", kind)
 	}
