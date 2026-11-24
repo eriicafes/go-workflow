@@ -16,8 +16,7 @@ type supersedeResult struct {
 }
 
 type hookSupersedeOwnerWorkflow struct {
-	workflow.Struct[supersedeResult]
-	workflow.Args
+	workflow.StructArgs[supersedeResult]
 	Token string
 }
 
@@ -56,8 +55,7 @@ type forceClaimed struct {
 }
 
 type hookForceClaimVictimWorkflow struct {
-	workflow.Struct[forceClaimed]
-	workflow.Args
+	workflow.StructArgs[forceClaimed]
 	Token string
 }
 
@@ -66,8 +64,7 @@ func hookForceClaimVictimRun(ctx context.Context, input hookForceClaimVictimWork
 }
 
 type hookForceClaimVictimWorkflowForced struct {
-	workflow.Struct[forceClaimed]
-	workflow.Args
+	workflow.StructArgs[forceClaimed]
 	Token string
 }
 
@@ -82,8 +79,7 @@ type claimerResult struct {
 }
 
 type hookForceClaimClaimerWorkflow struct {
-	workflow.Struct[claimerResult]
-	workflow.Args
+	workflow.StructArgs[claimerResult]
 	Token string
 }
 
@@ -112,8 +108,7 @@ type iteratingResult struct {
 }
 
 type hookForceClaimIteratingVictimWorkflow struct {
-	workflow.Struct[iteratingResult]
-	workflow.Args
+	workflow.StructArgs[iteratingResult]
 	Token string
 }
 
@@ -140,8 +135,7 @@ type collected struct {
 }
 
 type hookForceClaimCollectorWorkflow struct {
-	workflow.Struct[collected]
-	workflow.Args
+	workflow.StructArgs[collected]
 	Token string
 	Count int
 }
@@ -167,8 +161,7 @@ type receivedMessage struct {
 }
 
 type hookForceClaimRetainedVictimWorkflow struct {
-	workflow.Struct[receivedMessage]
-	workflow.Args
+	workflow.StructArgs[receivedMessage]
 	Token string
 }
 
@@ -191,8 +184,7 @@ type ownHookResult struct {
 }
 
 type hookForceClaimOwnHookWorkflow struct {
-	workflow.Struct[ownHookResult]
-	workflow.Args
+	workflow.StructArgs[ownHookResult]
 	Token string
 }
 
@@ -229,8 +221,7 @@ type tolerantResult struct {
 }
 
 type hookForceClaimTolerantClaimerWorkflow struct {
-	workflow.Struct[tolerantResult]
-	workflow.Args
+	workflow.StructArgs[tolerantResult]
 	Token string
 }
 

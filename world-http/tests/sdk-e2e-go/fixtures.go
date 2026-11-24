@@ -112,8 +112,7 @@ var fixtures = []worlds.Runner{
 }
 
 type addTenWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	Input int
 }
 
@@ -161,8 +160,7 @@ func nullByteRun(ctx context.Context, _ nullByteWorkflow) (string, error) {
 }
 
 type sleepingWorkflow struct {
-	workflow.Struct[span]
-	workflow.Args
+	workflow.StructArgs[span]
 	DurationMs *int
 }
 

@@ -97,8 +97,7 @@ type childRunID struct {
 // writableForwardedChildWorkflow writes to its parent's stream, which it
 // names by the parent's run ID, as a Go workflow cannot pass a writable.
 type writableForwardedChildWorkflow struct {
-	workflow.Struct[string]
-	workflow.Args
+	workflow.StructArgs[string]
 	ParentRunID string
 	Payload     string
 }
@@ -111,8 +110,7 @@ func writableForwardedChildRun(ctx context.Context, input writableForwardedChild
 }
 
 type writableForwardedFromWorkflowWorkflow struct {
-	workflow.Struct[childRunID]
-	workflow.Args
+	workflow.StructArgs[childRunID]
 	Payload string
 }
 
@@ -128,8 +126,7 @@ func writableForwardedFromWorkflowRun(ctx context.Context, input writableForward
 }
 
 type writableForwardedFromStepWorkflow struct {
-	workflow.Struct[childRunID]
-	workflow.Args
+	workflow.StructArgs[childRunID]
 	Payload string
 }
 
@@ -157,8 +154,7 @@ type abortReason struct {
 }
 
 type distributedAbortControllerWorkflow struct {
-	workflow.Struct[abortOutcome]
-	workflow.Args
+	workflow.StructArgs[abortOutcome]
 	ID      string
 	TTLMs   int
 	GraceMs int

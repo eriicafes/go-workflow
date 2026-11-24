@@ -6,24 +6,46 @@ import (
 	"github.com/eriicafes/go-workflow/internal/devalue"
 )
 
-// Args, embedded in a workflow's input struct, makes the struct's exported
-// fields the workflow's arguments, in the order they are declared, as a
-// Workflow SDK caller passes them: start(workflow, [a, b]) sets the first
-// field to a and the second to b. Missing arguments leave their fields zero,
-// and extra ones are ignored, as JavaScript treats a function's arguments.
-// Without Args, the whole input is the workflow's one argument.
+// Struct declares a workflow's output type when embedded in the workflow
+// struct, in place of writing its Workflow(Out) method:
+//
+//	type GenerateReport struct {
+//		workflow.Struct[GenerateReportResult]
+//		Topic string
+//	}
+//
+// It has no fields, so it adds nothing to the workflow's JSON input. The
+// whole struct is the workflow's one argument.
+type Struct[Out any] struct{}
+
+// Workflow declares Out as the output of the workflow that embeds Struct.
+func (Struct[Out]) Workflow(Out) {}
+
+// StructArgs, embedded in a workflow struct in place of Struct, declares the
+// workflow's output type and makes the struct's exported fields the
+// workflow's arguments, in the order they are declared, as a Workflow SDK
+// caller passes them: start(workflow, [a, b]) sets the first field to a and
+// the second to b. Missing arguments leave their fields zero, and extra ones
+// are ignored.
 //
 //	type Add struct {
-//		workflow.Struct[int]
-//		workflow.Args
+//		workflow.StructArgs[int]
 //		A, B int
 //	}
-type Args struct{}
+type StructArgs[Out any] struct{}
 
-var argsType = reflect.TypeFor[Args]()
+// Workflow declares Out as the output of the workflow that embeds
+// StructArgs.
+func (StructArgs[Out]) Workflow(Out) {}
+
+func (StructArgs[Out]) structArgs() {}
+
+// structArgsType is the interface every StructArgs implements, which marks
+// a workflow struct that embeds one.
+var structArgsType = reflect.TypeFor[interface{ structArgs() }]()
 
 // argumentFields returns the indexes of the fields of the struct type t that
-// are its arguments, when t embeds Args, and false when it does not.
+// are its arguments, when t embeds StructArgs, and false when it does not.
 func argumentFields(t reflect.Type) ([]int, bool) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -36,7 +58,7 @@ func argumentFields(t reflect.Type) ([]int, bool) {
 	for i := range t.NumField() {
 		field := t.Field(i)
 		switch {
-		case field.Anonymous && field.Type == argsType:
+		case field.Anonymous && field.Type.Implements(structArgsType):
 			embeds = true
 		case field.Anonymous || !field.IsExported():
 		default:
@@ -47,7 +69,7 @@ func argumentFields(t reflect.Type) ([]int, bool) {
 }
 
 // arguments returns the argument list a run of input is created with: the
-// fields of an input that embeds Args, and otherwise [input].
+// fields of an input that embeds StructArgs, and otherwise [input].
 func arguments[In any](input In) any {
 	fields, ok := argumentFields(reflect.TypeFor[In]())
 	if !ok {

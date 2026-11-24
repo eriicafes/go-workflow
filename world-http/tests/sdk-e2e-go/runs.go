@@ -100,8 +100,7 @@ type helperMetadata struct {
 }
 
 type metadataFromHelperWorkflow struct {
-	workflow.Struct[helperMetadata]
-	workflow.Args
+	workflow.StructArgs[helperMetadata]
 	Label string
 }
 
@@ -115,8 +114,7 @@ type childResult struct {
 }
 
 type childWorkflow struct {
-	workflow.Struct[childResult]
-	workflow.Args
+	workflow.StructArgs[childResult]
 	Value int
 }
 
@@ -132,8 +130,7 @@ type spawnResult struct {
 }
 
 type spawnWorkflowFromStepWorkflow struct {
-	workflow.Struct[spawnResult]
-	workflow.Args
+	workflow.StructArgs[spawnResult]
 	InputValue int
 }
 
@@ -154,8 +151,7 @@ type processedValue struct {
 }
 
 type childWorkflowWithHookSignal struct {
-	workflow.Struct[processedValue]
-	workflow.Args
+	workflow.StructArgs[processedValue]
 	HookToken string
 	Value     int
 }
@@ -171,8 +167,7 @@ type startFromResult struct {
 }
 
 type startFromWorkflow struct {
-	workflow.Struct[startFromResult]
-	workflow.Args
+	workflow.StructArgs[startFromResult]
 	InputValue int
 }
 
@@ -197,8 +192,7 @@ func startFromRun(ctx context.Context, input startFromWorkflow) (startFromResult
 // fibonacciWorkflow starts runs for fib(n-1) and fib(n-2) and waits for
 // both, suspended on its child-run completion hook.
 type fibonacciWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	N int
 }
 
@@ -224,8 +218,7 @@ func fibonacciRun(ctx context.Context, input fibonacciWorkflow) (int, error) {
 // slowChildWorkflow sleeps first, so its parent reads it unfinished and
 // waits on its completion hook, then doubles Value or fails.
 type slowChildWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	Value int
 	Fail  bool
 }
@@ -251,8 +244,7 @@ type childReturnValue struct {
 // code. A failed child's Value is a *RunFailedError, the SDK's
 // WorkflowRunFailedError, with the child's error as its cause.
 type awaitChildReturnValueWorkflow struct {
-	workflow.Struct[childReturnValue]
-	workflow.Args
+	workflow.StructArgs[childReturnValue]
 	Value int
 	Fail  bool
 }
@@ -279,8 +271,7 @@ func awaitChildReturnValueRun(ctx context.Context, input awaitChildReturnValueWo
 // gatedChildWorkflow finishes once its hook, Token, is resumed, then doubles
 // Value.
 type gatedChildWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	Token string
 	Value int
 }
@@ -303,8 +294,7 @@ type fanOutResult struct {
 // all. Every child resumes the parent's one completion hook. Child i waits
 // on the hook TokenPrefix:i.
 type awaitChildrenFanOutWorkflow struct {
-	workflow.Struct[fanOutResult]
-	workflow.Args
+	workflow.StructArgs[fanOutResult]
 	Values      []int
 	TokenPrefix string
 }

@@ -179,8 +179,7 @@ type viaHookResult struct {
 }
 
 type abortViaHookWorkflow struct {
-	workflow.Struct[viaHookResult]
-	workflow.Args
+	workflow.StructArgs[viaHookResult]
 	HookToken string
 }
 

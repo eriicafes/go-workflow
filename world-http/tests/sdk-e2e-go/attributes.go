@@ -12,8 +12,7 @@ import (
 )
 
 type setAttributesWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	Input int
 }
 
@@ -33,8 +32,7 @@ func setAttributesRun(ctx context.Context, input setAttributesWorkflow) (int, er
 }
 
 type setAttributesInsideStepWorkflow struct {
-	workflow.Struct[int]
-	workflow.Args
+	workflow.StructArgs[int]
 	Input int
 }
 

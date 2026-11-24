@@ -19,8 +19,7 @@ type customData struct {
 }
 
 type hookWorkflow struct {
-	workflow.Struct[[]hookPayload]
-	workflow.Args
+	workflow.StructArgs[[]hookPayload]
 	Token      string
 	CustomData string
 }
@@ -53,8 +52,7 @@ type cleanupResult struct {
 }
 
 type hookCleanupTestWorkflow struct {
-	workflow.Struct[cleanupResult]
-	workflow.Args
+	workflow.StructArgs[cleanupResult]
 	Token      string
 	CustomData string
 }
@@ -77,8 +75,7 @@ type disposeResult struct {
 }
 
 type hookDisposeTestWorkflow struct {
-	workflow.Struct[disposeResult]
-	workflow.Args
+	workflow.StructArgs[disposeResult]
 	Token      string
 	CustomData string
 }
@@ -107,8 +104,7 @@ type conflictResult struct {
 }
 
 type hookGetConflictWorkflow struct {
-	workflow.Struct[conflictResult]
-	workflow.Args
+	workflow.StructArgs[conflictResult]
 	Token      string
 	CustomData string
 }
@@ -136,8 +132,7 @@ func hookGetConflictRun(ctx context.Context, input hookGetConflictWorkflow) (con
 }
 
 type hookGetConflictWithPriorStepWorkflow struct {
-	workflow.Struct[conflictResult]
-	workflow.Args
+	workflow.StructArgs[conflictResult]
 	Token      string
 	CustomData string
 }
@@ -164,8 +159,7 @@ func hookGetConflictWithPriorStepRun(ctx context.Context, input hookGetConflictW
 }
 
 type hookGetConflictWithParallelStepWorkflow struct {
-	workflow.Struct[conflictResult]
-	workflow.Args
+	workflow.StructArgs[conflictResult]
 	Token      string
 	CustomData string
 }
@@ -202,8 +196,7 @@ type parallelConflictResult struct {
 }
 
 type hookGetConflictThenStepParallelWorkflow struct {
-	workflow.Struct[parallelConflictResult]
-	workflow.Args
+	workflow.StructArgs[parallelConflictResult]
 	Token      string
 	CustomData string
 }
@@ -240,8 +233,7 @@ type retentionResult struct {
 }
 
 type hookMinRetentionWorkflow struct {
-	workflow.Struct[retentionResult]
-	workflow.Args
+	workflow.StructArgs[retentionResult]
 	Token          string
 	MinRetentionMs int
 }
@@ -270,8 +262,7 @@ type mutexResult struct {
 }
 
 type hookClaimOnlyMutexWorkflow struct {
-	workflow.Struct[mutexResult]
-	workflow.Args
+	workflow.StructArgs[mutexResult]
 	Token  string
 	HoldMs int
 }
@@ -306,8 +297,7 @@ type adoptResult struct {
 }
 
 type hookAdoptOwnerResultWorkflow struct {
-	workflow.Struct[adoptResult]
-	workflow.Args
+	workflow.StructArgs[adoptResult]
 	Token  string
 	Marker string
 }
@@ -344,8 +334,7 @@ type signalResult struct {
 }
 
 type hookSignalOwnerWorkflow struct {
-	workflow.Struct[signalResult]
-	workflow.Args
+	workflow.StructArgs[signalResult]
 	Token   string
 	Message string
 }
@@ -376,8 +365,7 @@ type reuseResult struct {
 }
 
 type hookTokenReuseLoopWorkflow struct {
-	workflow.Struct[reuseResult]
-	workflow.Args
+	workflow.StructArgs[reuseResult]
 	Token  string
 	Rounds int
 }
@@ -410,8 +398,7 @@ type sleepHookPayload struct {
 }
 
 type hookWithSleepWorkflow struct {
-	workflow.Struct[[]processed]
-	workflow.Args
+	workflow.StructArgs[[]processed]
 	Token string
 }
 
@@ -443,8 +430,7 @@ type finalStepResult struct {
 }
 
 type hookWithSleepFinalStepWorkflow struct {
-	workflow.Struct[finalStepResult]
-	workflow.Args
+	workflow.StructArgs[finalStepResult]
 	Token string
 }
 
@@ -489,8 +475,7 @@ type deltaPayload struct {
 }
 
 type retainedInterleavingWorkflow struct {
-	workflow.Struct[interleaved]
-	workflow.Args
+	workflow.StructArgs[interleaved]
 	Token string
 }
 
@@ -550,8 +535,7 @@ type raceOutcome struct {
 }
 
 type hookRaceAfterLostRaceWorkflow struct {
-	workflow.Struct[raceOutcome]
-	workflow.Args
+	workflow.StructArgs[raceOutcome]
 	Token string
 }
 
@@ -576,8 +560,7 @@ type lostRaces struct {
 }
 
 type hookRaceLoopAfterLostRacesWorkflow struct {
-	workflow.Struct[lostRaces]
-	workflow.Args
+	workflow.StructArgs[lostRaces]
 	Token string
 }
 
@@ -601,8 +584,7 @@ func hookRaceLoopAfterLostRacesRun(ctx context.Context, input hookRaceLoopAfterL
 }
 
 type hookRaceOncePromiseWorkflow struct {
-	workflow.Struct[raceOutcome]
-	workflow.Args
+	workflow.StructArgs[raceOutcome]
 	Token string
 }
 

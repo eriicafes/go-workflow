@@ -61,8 +61,7 @@ func webhookRun(ctx context.Context, _ webhookWorkflow) ([]webhookPayload, error
 }
 
 type parallelStepsThenWebhookWorkflow struct {
-	workflow.Struct[[]string]
-	workflow.Args
+	workflow.StructArgs[[]string]
 	Iterations int
 }
 

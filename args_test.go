@@ -11,13 +11,12 @@ import (
 )
 
 type addArgs struct {
-	Struct[int]
-	Args
+	StructArgs[int]
 	A, B int
 	note string
 }
 
-// A workflow whose input embeds Args takes its fields as an argument list,
+// A workflow whose input embeds StructArgs takes its fields as an argument list,
 // as a Workflow SDK caller passes them.
 func TestArgsAreTheWorkflowsArgumentList(t *testing.T) {
 	world := testworld.New(worlds.Runners(Use(func(_ context.Context, input addArgs) (int, error) {
@@ -63,7 +62,7 @@ func TestArgsDecodeLikeJavaScriptArguments(t *testing.T) {
 			t.Errorf("decode %v = %+v, %v, want A=%d B=%d", test.list, got, err, test.want.A, test.want.B)
 		}
 	}
-	// An input without Args is the one argument.
+	// An input without StructArgs is the one argument.
 	raw, _ := worlds.EncodePayload(arguments(structWorkflowArg{Topic: "go"}), worlds.PayloadOptions{})
 	got, err := decodeArguments[structWorkflowArg](raw, decode)
 	if err != nil || got.Topic != "go" {
