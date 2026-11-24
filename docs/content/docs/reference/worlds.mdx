@@ -632,6 +632,16 @@ checking ownership.
 | `*InBandSupersededError` | An in-band write's count is stale because another flow wrote to the run first. |
 | `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
 
+These are fatal, as the Workflow SDK's classes of the same names are, and
+are recorded as Errors named after them:
+
+| Error | Meaning | Recorded as |
+| --- | --- | --- |
+| `*SerializationError` | A value, such as a step's arguments or return value, could not be encoded. | `SerializationError` |
+| `*RunFailedError` | Awaiting a failed run. | `WorkflowRunFailedError` |
+| `*RunCancelledError` | Awaiting a cancelled run. Matches `ErrRunCancelled`. | `WorkflowRunCancelledError` |
+| `*EncryptionKeyLookupError` | A run's encryption key could not be resolved for good. | `EncryptionKeyLookupError` |
+
 ```go
 type Error struct {
 	// Error chain fields omitted.
@@ -640,7 +650,13 @@ type Error struct {
 func NewError(err error) *Error
 func DecodeError(data []byte) *Error
 func DeliveryError(cause error) error
+func IsFatal(err error) bool
 ```
+
+`IsFatal` reports whether a step failing with `err` fails without retrying:
+whether its chain holds a `FatalError` or an error whose `Fatal() bool`
+method returns true. Read back from a record, only a `FatalError` is still
+fatal, as the SDK revives errors.
 
 `DeliveryError` marks a World error that a step function hit while doing the
 runtime's own work, such as recording a hook's disposal. The delivery is

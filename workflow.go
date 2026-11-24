@@ -269,9 +269,12 @@ func runWakeUp(ctx context.Context, input worlds.ClientRunsWakeInput) (int, erro
 	return client.RunsWake(ctx, input)
 }
 
-// Value returns the output of the run once it has finished. It returns the
-// run's error as an *Error when the run failed, ErrRunCancelled when it was
-// cancelled, and a *RunExpiredError when its data was deleted.
+// Value returns the output of the run once it has finished. It returns a
+// *RunFailedError, wrapping the run's error as an *Error, when the run
+// failed, a *RunCancelledError, which matches ErrRunCancelled, when it was
+// cancelled, and a *RunExpiredError when its data was deleted. A failed or
+// cancelled run's error is fatal, so a step that awaits the run fails
+// without retrying.
 //
 // In workflow context, Value reads the run once and returns ErrRunNotFinished
 // when the run had not finished, so replay stays deterministic. In step context
@@ -313,9 +316,9 @@ func (r *Run[Out]) Value(ctx context.Context) (Out, error) {
 	switch {
 	case run.Status == worlds.StatusCompleted:
 	case len(run.Error) != 0:
-		return zero, worlds.DecodeErrorPayload(run.Error, keys)
+		return zero, &RunFailedError{RunID: run.RunID, ErrorCode: run.ErrorCode, Cause: worlds.DecodeErrorPayload(run.Error, keys)}
 	default:
-		return zero, ErrRunCancelled
+		return zero, &RunCancelledError{RunID: run.RunID}
 	}
 	if err := worlds.DecodePayload(run.Output, keys, &zero); err != nil {
 		return zero, fmt.Errorf("workflow: decode run output: %w", err)
@@ -401,7 +404,9 @@ func (r *Run[Out]) Reader(ctx context.Context, options ...ReaderOption) (StreamR
 // outside a run. Writers of a stream do not wait for each other. Close
 // stores what is buffered and gives up the writer, leaving the stream open,
 // while CloseStream closes the stream for every writer. Writer returns
-// ErrNotInStep in workflow context.
+// ErrNotInStep in workflow context, and an *EncryptionKeyLookupError, which
+// is fatal, when the run's encryption key cannot be resolved for good, such
+// as for a run that does not exist.
 func (r *Run[Out]) Writer(ctx context.Context, options ...WriterOption) (StreamWriter, error) {
 	if _, ok := workflowExecutionFromContext(ctx); ok {
 		return nil, ErrNotInStep

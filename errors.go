@@ -16,7 +16,8 @@ var (
 	ErrNilResult = errors.New("workflow: nil result")
 	// ErrNotInStep reports that an operation cannot be called in workflow context.
 	ErrNotInStep = errors.New("workflow: must be called inside a step")
-	// ErrRunCancelled is returned when awaiting a run that was cancelled.
+	// ErrRunCancelled is matched by the *RunCancelledError returned when
+	// awaiting a run that was cancelled.
 	ErrRunCancelled = worlds.ErrRunCancelled
 	// ErrInvalidStartOptions is returned by Start for StartOptions it cannot
 	// use, such as a ReplayedFromRunID that is not a run ID.
@@ -60,7 +61,25 @@ type (
 	// StreamExpiredError is returned when reading a stream whose data the
 	// World deleted.
 	StreamExpiredError = worlds.StreamExpiredError
+	// SerializationError is the error of a step whose arguments or return
+	// value could not be encoded. It is fatal.
+	SerializationError = worlds.SerializationError
+	// RunFailedError is returned when awaiting a run that failed, with the
+	// run's error as its cause. It is fatal.
+	RunFailedError = worlds.RunFailedError
+	// RunCancelledError is returned when awaiting a run that was cancelled.
+	// It matches ErrRunCancelled, and is fatal.
+	RunCancelledError = worlds.RunCancelledError
+	// EncryptionKeyLookupError reports that a run's encryption key could
+	// not be resolved for good. It is fatal.
+	EncryptionKeyLookupError = worlds.EncryptionKeyLookupError
 )
+
+// IsFatal reports whether err fails a step without retrying: whether its
+// chain holds an error made by FatalError, or another fatal error, such as a
+// *SerializationError, *RunFailedError, *RunCancelledError or
+// *EncryptionKeyLookupError.
+func IsFatal(err error) bool { return worlds.IsFatal(err) }
 
 // FatalError wraps cause so that a step returning it fails without retrying.
 // It returns nil when cause is nil.

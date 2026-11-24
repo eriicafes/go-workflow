@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -169,7 +168,7 @@ func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID w
 		}
 		output, err := execution.EncodePayload(value)
 		if err != nil {
-			return worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
+			return worlds.DataStepResult{Error: execution.encodeError(stepReturnSerializationError(err))}, nil
 		}
 		return worlds.DataStepResult{Result: output}, nil
 	}

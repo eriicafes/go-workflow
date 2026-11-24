@@ -137,7 +137,7 @@ func TestDeferredDisposalSurvivesSuspensionAndRunsOnApplicationPanic(t *testing.
 			if err := workflow.ResumeHookWithRetries(ctx, "deferred-disposal", "received", 5, 100*time.Millisecond); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := run.Value(ctx); err == nil || err.Error() != "application failure" {
+			if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "application failure" {
 				t.Fatalf("run error=%v", err)
 			}
 			if _, found, err := workflow.GetHook[string](ctx, "deferred-disposal"); err != nil || found {

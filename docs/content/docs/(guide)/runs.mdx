@@ -122,9 +122,11 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | `Reader` | Reads a stream from a chunk index. See [Streams](/docs/streams). |
 | `Writer` | Writes a stream from outside the run. |
 
-`Value` returns a failed run's error as a
-[`*workflow.Error`](/docs/errors) and a cancelled run's as
-`workflow.ErrRunCancelled`. `Status` and `WorkflowName` return
+`Value` returns a failed run's error as a `*workflow.RunFailedError` whose
+cause is the run's [`*workflow.Error`](/docs/errors), and a cancelled run's
+as a `*workflow.RunCancelledError`, which matches `workflow.ErrRunCancelled`.
+A run's terminal state never changes, so both are fatal: a step that awaits
+a failed or cancelled run fails without retrying. `Status` and `WorkflowName` return
 `worlds.ErrRunNotFound` for a missing run.
 
 ### Statuses
@@ -153,7 +155,8 @@ return `workflow.ErrNotInStep` there. Use them in a step.
 ## Cancelling a run
 
 `Run.Cancel` stops new work and leaves already-running steps to finish.
-Reading a cancelled run returns `workflow.ErrRunCancelled`. A managed context
+Reading a cancelled run returns a `*workflow.RunCancelledError`, which
+matches `workflow.ErrRunCancelled`. A managed context
 passed to `Start` does not control the run's lifetime. See
 [Cancellation](/docs/cancellation#cancelling-a-run) for examples and step
 cancellation behavior.

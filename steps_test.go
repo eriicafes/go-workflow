@@ -32,6 +32,8 @@ type retryInput struct{}
 type retryOutput struct{}
 type stepErrorInput struct{}
 type stepErrorOutput struct{}
+type serializationInput struct{}
+type serializationOutput struct{ Arguments, ReturnValue string }
 type collectionInput struct{}
 
 type collectionOutput struct {
@@ -47,12 +49,13 @@ type collectionStepInput struct {
 	Fail  bool
 }
 
-func (joinedInput) Workflow(joinedOutput)         {}
-func (rollbackInput) Workflow(rollbackOutput)     {}
-func (nowInput) Workflow(nowOutput)               {}
-func (retryInput) Workflow(retryOutput)           {}
-func (stepErrorInput) Workflow(stepErrorOutput)   {}
-func (collectionInput) Workflow(collectionOutput) {}
+func (joinedInput) Workflow(joinedOutput)               {}
+func (rollbackInput) Workflow(rollbackOutput)           {}
+func (nowInput) Workflow(nowOutput)                     {}
+func (retryInput) Workflow(retryOutput)                 {}
+func (stepErrorInput) Workflow(stepErrorOutput)         {}
+func (serializationInput) Workflow(serializationOutput) {}
+func (collectionInput) Workflow(collectionOutput)       {}
 
 func increment(_ context.Context, value int) (int, error) { return value + 1, nil }
 
@@ -200,7 +203,7 @@ func TestRollbackRunsInDeferOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+	if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	mutex.Lock()
@@ -229,7 +232,7 @@ func TestRollbackRunsAfterPriorDurableStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+	if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	if calls.Load() != 1 {
@@ -268,7 +271,7 @@ func TestRollbackDirectCallsRegisterWithoutExecuting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+	if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	mutex.Lock()
@@ -302,7 +305,7 @@ func TestRollbackRunsOnApplicationPanics(t *testing.T) {
 			}
 			_, err = run.Value(ctx)
 			if stringPanic {
-				if err == nil || err.Error() != "workflow: panic: application panic" {
+				if err == nil || errors.Unwrap(err).Error() != "workflow: panic: application panic" {
 					t.Fatalf("panic error=%v", err)
 				}
 			} else if !errors.Is(err, failure) {
@@ -429,7 +432,7 @@ func TestRollbackFailureIsRecordedAsStepFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+			if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "primary failure" {
 				t.Fatalf("failure = %v", err)
 			}
 			events, err := world.EventsList(ctx, worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
@@ -490,7 +493,7 @@ func TestRollbackRegistersAroundDurableSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Value(ctx); err == nil || err.Error() != "primary failure" {
+	if _, err := run.Value(ctx); err == nil || errors.Unwrap(err).Error() != "primary failure" {
 		t.Fatalf("failure = %v", err)
 	}
 	mutex.Lock()
@@ -646,7 +649,7 @@ func TestStepErrorKeepsIdentityAcrossReplayAndRuns(t *testing.T) {
 	_, err = run.Value(ctx)
 	var stepErr *workflow.Error
 	var declined *declinedError
-	if !errors.As(err, &stepErr) || err.Error() != "payment: charge: declined: insufficient_funds" {
+	if !errors.As(err, &stepErr) || errors.Unwrap(err).Error() != "payment: charge: declined: insufficient_funds" {
 		t.Fatalf("run error = %#v", err)
 	}
 	if !errors.Is(err, errCardDeclined) || !errors.As(err, &declined) || declined.Code != "insufficient_funds" {
@@ -1199,5 +1202,39 @@ func TestRandReaderReplaysTheSameBytes(t *testing.T) {
 	}
 	if _, err := workflow.RandReader(ctx).Read(make([]byte, 1)); !errors.Is(err, workflow.ErrNoWorkflow) {
 		t.Fatalf("RandReader outside workflow = %v, want ErrNoWorkflow", err)
+	}
+}
+
+func TestStepValuesThatDoNotEncodeFailWithASerializationError(t *testing.T) {
+	var returns atomic.Int32
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ serializationInput) (serializationOutput, error) {
+		var output serializationOutput
+		var serialization *workflow.SerializationError
+		_, err := workflow.Step(ctx, func(context.Context, any) (struct{}, error) { return struct{}{}, nil }, any(make(chan int)), workflow.StepOptions{MaxRetries: 3})
+		if errors.As(err, &serialization) {
+			output.Arguments = serialization.Message
+		}
+		_, err = workflow.Step(ctx, func(context.Context, struct{}) (any, error) {
+			returns.Add(1)
+			return make(chan int), nil
+		}, struct{}{}, workflow.StepOptions{MaxRetries: 3})
+		if errors.As(err, &serialization) {
+			output.ReturnValue = serialization.Message
+		}
+		return output, nil
+	})))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, serializationInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := run.Value(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Arguments != "Failed to serialize step arguments" || output.ReturnValue != "Failed to serialize step return value" || returns.Load() != 1 {
+		t.Fatalf("output = %+v, step attempts = %d, want both serialization errors after one attempt", output, returns.Load())
 	}
 }

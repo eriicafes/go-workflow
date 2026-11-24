@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"github.com/eriicafes/go-workflow/worlds"
 	"io"
 	"testing"
@@ -276,5 +277,21 @@ func TestWritersDoNotWaitForEachOther(t *testing.T) {
 	}
 	if data, err := io.ReadAll(again); err != nil || string(data) != "abc" {
 		t.Fatalf("stream after a late write = %q, %v", data, err)
+	}
+}
+
+func TestWriterOfAMissingRunIsAFatalKeyLookupError(t *testing.T) {
+	world := testworld.New(nil)
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Get[streamOutput](ctx, string(worlds.NewRunID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = run.Writer(ctx)
+	var lookup *workflow.EncryptionKeyLookupError
+	if !errors.As(err, &lookup) || lookup.RunID != worlds.RunID(run.ID()) || !errors.Is(err, worlds.ErrRunNotFound) || !workflow.IsFatal(err) {
+		t.Fatalf("writer error = %v, want a fatal EncryptionKeyLookupError wrapping ErrRunNotFound", err)
 	}
 }

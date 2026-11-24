@@ -41,6 +41,7 @@ func SetMaxInlineStepsDuration(ctx context.Context, d time.Duration) context.Con
 func Rollback[In any](ctx context.Context, fn func(context.Context, In) error, input In, options ...StepOptions)
 func FatalError(cause error) error
 func RetryableError(cause error, after time.Duration) error
+func IsFatal(err error) bool
 func StepID(ctx context.Context) string
 func GetStepMetadata(ctx context.Context) StepMetadata
 func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
@@ -60,6 +61,7 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata
 | `Rollback` | W | Defer after successful work to register compensation on exit. Runs only if the workflow fails; invalid context panics. |
 | `FatalError` | S | Wraps an error a step returns so the step fails without retrying. Has no effect on a runner's error. |
 | `RetryableError` | S | Wraps an error a step returns so the step retries no sooner than `after`. Has no effect on a runner's error. |
+| `IsFatal` | — | Reports whether a step failing with an error fails without retrying: one made by `FatalError`, or another fatal error, such as a `*SerializationError` or `*RunFailedError`, or one whose `Fatal() bool` method returns true. |
 | `StepID` | S | Stable step ID, usable as an idempotency key. |
 | `GetStepMetadata` | S | ID, name, start time, and attempt of the current step. |
 | `GetWorkflowMetadata` | W, S | Workflow name, run ID, and start time. |
@@ -431,7 +433,11 @@ Match a variable with `errors.Is`, and a `*...Error` type with `errors.As`.
 | `ErrNoClient` | No Client in the context, outside a run. |
 | `ErrNoWorkflow` | Workflow-context function called elsewhere, or stream function outside a run. |
 | `ErrNotInStep` | I/O function called in workflow context. |
-| `ErrRunCancelled` | Run was cancelled. |
+| `ErrRunCancelled` | Run was cancelled. Matched by `*RunCancelledError`. |
+| `*RunFailedError` | `Run.Value` on a failed run, with the run's error as `Cause` and its `ErrorCode`. Fatal. |
+| `*RunCancelledError` | `Run.Value` on a cancelled run. Fatal. |
+| `*SerializationError` | A step's arguments or return value could not be encoded. Fatal. |
+| `*EncryptionKeyLookupError` | `Run.Writer` could not resolve the run's encryption key for good. Fatal. |
 | `ErrRunNotFinished` | `Run.Value` in workflow context on an unfinished run. |
 | `ErrHookNotActive` | Hook was disposed and no longer receives. |
 | `*HookNotFoundError` | No active hook has the token. |

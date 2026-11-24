@@ -371,11 +371,14 @@ func (r *streamReader) resolveKeys() error {
 
 // outsideStreamFrame returns how a writer outside the run writes its stream
 // frames: sealed to the run's public key, or, for a run that published none,
-// encrypted with its key, or plain when it has none.
+// encrypted with its key, or plain when it has none. A lookup of the run or
+// its key that fails for good, such as for a run that does not exist,
+// returns an *EncryptionKeyLookupError; a transient failure is returned as
+// it is.
 func outsideStreamFrame(ctx context.Context, client Client, runID worlds.RunID) (func(any) ([]byte, error), error) {
 	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if err != nil {
-		return nil, err
+		return nil, keyLookupError(runID, err)
 	}
 	if publicKey := envelope.DecodePublicKey(run.EncryptionPublicKey); publicKey != nil {
 		sealer, err := envelope.NewSealer(publicKey)
@@ -386,7 +389,17 @@ func outsideStreamFrame(ctx context.Context, client Client, runID worlds.RunID) 
 	}
 	keys, err := client.RunKeys(ctx, worlds.RunKeysInput{RunID: runID, DeploymentID: run.DeploymentID})
 	if err != nil {
-		return nil, err
+		return nil, keyLookupError(runID, err)
 	}
 	return func(value any) ([]byte, error) { return worlds.EncodeStreamFrame(value, keys, nil) }, nil
+}
+
+// keyLookupError returns the error of a failed lookup of run runID's
+// encryption key: err when it is transient, and otherwise an
+// *EncryptionKeyLookupError.
+func keyLookupError(runID worlds.RunID, err error) error {
+	if worlds.IsRetryableWorldError(err) || errors.Is(err, context.Canceled) {
+		return err
+	}
+	return &EncryptionKeyLookupError{RunID: runID, Cause: err}
 }

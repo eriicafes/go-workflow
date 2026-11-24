@@ -71,7 +71,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 		}
 		encoded, err := execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
-			err = fmt.Errorf("workflow: encode step input: %w", err)
+			err = &worlds.SerializationError{Message: "Failed to serialize step arguments", Cause: err}
 		}
 		// An inline attempt runs with the input decoded from what is recorded,
 		// as a step delivery does, not with the workflow's own value.
@@ -207,7 +207,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 
 	output, err := execution.EncodePayload(value)
 	if err != nil {
-		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))})
+		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(stepReturnSerializationError(err))})
 	} else {
 		execution.SetTargetResult(worlds.DataStepResult{Result: output})
 	}
@@ -380,8 +380,7 @@ const stepRetryExpirySlack = time.Minute
 // the step without an outcome, so the step fails instead. Either keeps cause
 // as its cause. A zero sent is a message whose age is not known.
 func stepRetry(cause error, name string, maxRetries, attempt int, sent time.Time) (error, *time.Time) {
-	var fatal worlds.FatalError
-	if errors.As(cause, &fatal) {
+	if worlds.IsFatal(cause) {
 		return cause, nil
 	}
 	if attempt > maxRetries {
@@ -442,4 +441,10 @@ func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.Step
 		attribute.String("workflow.step.name", name),
 		attribute.Int("workflow.step.attempt", attempt),
 	))
+}
+
+// stepReturnSerializationError returns the error of a step whose return
+// value did not encode with err.
+func stepReturnSerializationError(err error) error {
+	return &worlds.SerializationError{Message: "Failed to serialize step return value", Cause: err}
 }

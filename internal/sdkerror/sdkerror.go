@@ -118,6 +118,21 @@ func appendChain(nodes []*Error, err error) []*Error {
 // Error returns the error's message.
 func (e *Error) Error() string { return e.Message }
 
+// Fatal reports whether the error was recorded as an SDK type whose Go type
+// is fatal, such as FatalError. An Error recorded with a class name is
+// revived by the SDK as a plain Error, so it is not fatal, whatever its Go
+// type.
+func (e *Error) Fatal() bool {
+	registered, ok := e.registration()
+	if !ok || registered.named {
+		return false
+	}
+	value := reflect.New(registered.goType)
+	registered.restore(value.Interface(), e)
+	fatal, ok := value.Elem().Interface().(interface{ Fatal() bool })
+	return ok && fatal.Fatal()
+}
+
 // Unwrap returns the next error of the chain, or nil at its end.
 func (e *Error) Unwrap() error {
 	if e.Cause == nil {
