@@ -14,6 +14,11 @@
 // each delivery and, on exit, every run's events; set to a path, it appends
 // the log to that file.
 //
+// HARNESS_APP=go runs the Go ports of the SDK's e2e fixtures in
+// world-http/tests/sdk-e2e-go in process instead, and serves the routes the
+// suite reads from the app beside the World: the manifest and the webhook
+// route.
+//
 // It prints one line of JSON with its base URL, then serves. When its standard
 // input is a pipe, it exits once the pipe closes, which happens when the
 // process that started it exits.
@@ -37,6 +42,7 @@ import (
 	"syscall"
 	"time"
 
+	sdke2e "github.com/eriicafes/go-workflow/world-http/tests/sdk-e2e-go"
 	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 	postgresworld "github.com/eriicafes/go-workflow/worlds/postgres"
@@ -77,9 +83,14 @@ func main() {
 	}
 	baseURL := "http://" + listener.Addr().String() + worlds.HTTPPrefixPath("")
 	token := os.Getenv("WORKFLOW_HTTP_TOKEN")
-	executor := &remote{token: token}
+	remote := &remote{token: token}
 	if url := os.Getenv("HARNESS_REMOTE_URL"); url != "" {
-		executor.url.Store(&url)
+		remote.url.Store(&url)
+	}
+	var executor worlds.Executor = remote
+	goApp := os.Getenv("HARNESS_APP") == "go"
+	if goApp {
+		executor = sdke2e.Runners()
 	}
 	world, closeWorld, err := open(ctx, os.Getenv("HARNESS_WORLD"), baseURL, executor)
 	if err != nil {
@@ -116,9 +127,13 @@ func main() {
 			return
 		}
 		url := string(body)
-		executor.url.Store(&url)
+		remote.url.Store(&url)
 		w.WriteHeader(http.StatusNoContent)
 	})
+	if goApp {
+		mux.Handle("GET "+sdke2e.ManifestPath, sdke2e.Manifest())
+		mux.Handle("/.well-known/workflow/v1/webhook/", worlds.WebhookHandler(world))
+	}
 	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"baseURL": baseURL}); err != nil {
 		log.Fatal(err)
 	}

@@ -1,0 +1,31 @@
+{
+  "$comment": [
+    "The workflows/99_e2e fixtures ported to Go in this directory, and the tests",
+    "the Go runtime cannot pass yet. Format: packages/core/e2e/e2e-conformance.example.json",
+    "in the Workflow SDK. Add a fixture once its tests pass."
+  ],
+  "language": "go",
+  "maxSpecVersion": 9,
+  "fixtures": [
+    "addTenWorkflow",
+    "errorFatalCatchable",
+    "errorRetryCustomDelay",
+    "errorRetryDisabled",
+    "errorRetryFatal",
+    "errorRetrySuccess",
+    "nullByteWorkflow",
+    "parallelSleepWorkflow",
+    "promiseAllWorkflow",
+    "promiseAnyWorkflow",
+    "promiseRaceWorkflow",
+    "sleepWinsRaceWorkflow",
+    "sleepWithSequentialStepsWorkflow",
+    "sleepingWorkflow",
+    "stepWinsRaceWorkflow"
+  ],
+  "unsupported": {
+    "health check endpoint (HTTP) - workflow endpoint responds to __health query parameter": "A Go app has no flow route: its World runs its workflows in process.",
+    "health check (queue-based) - workflow endpoint responds to health check messages": "Go Worlds acknowledge a health check message without writing its response stream.",
+    "health check (CLI) - workflow health command reports healthy endpoints": "Go Worlds acknowledge a health check message without writing its response stream."
+  }
+}

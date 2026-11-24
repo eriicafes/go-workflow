@@ -2,7 +2,9 @@
 # Runs the Workflow SDK's e2e suite against a Go World. The SDK's nitro-v3
 # workbench app runs with world-http as its World, backed by the harness in
 # world-http/testdata/harness, which delivers to the app with a
-# worlds.RemoteExecutor.
+# worlds.RemoteExecutor. With SDK_APP=go, the suite runs the Go ports of its
+# fixtures in world-http/tests/sdk-e2e-go instead, which the harness runs in
+# process and declares in their e2e-conformance.json.
 #
 #   sdk-e2e.sh prepare   installs and builds the app in SDK_DIR
 #   sdk-e2e.sh run       starts the harness and the app, then runs the suite
@@ -24,7 +26,12 @@ case "$SDK_DIR/" in
 	exit 2
 	;;
 esac
-APP_DIR="$SDK_DIR/workbench/nitro-v3"
+SDK_APP="${SDK_APP:-nitro}"
+NITRO_DIR="$SDK_DIR/workbench/nitro-v3"
+# The suite runs the workflow CLI from the app's directory, so the Go app's
+# directory holds its conformance declaration beside the nitro app's
+# node_modules.
+GO_APP_DIR="$SDK_DIR/workbench/go"
 APP_PORT="${APP_PORT:-3000}"
 HARNESS_PORT="${HARNESS_PORT:-4100}"
 
@@ -42,7 +49,11 @@ prepare() {
 	pnpm turbo run build --filter "@workflow/example-nitro^..."
 	# The workbench apps link their workflows from workbench/example.
 	CI=true ./scripts/resolve-symlinks.sh workbench/nitro-v3
-	(cd "$APP_DIR" && pnpm build)
+	mkdir -p "$GO_APP_DIR"
+	ln -sfn "$NITRO_DIR/node_modules" "$GO_APP_DIR/node_modules"
+	if [ "$SDK_APP" != go ]; then
+		(cd "$NITRO_DIR" && pnpm build)
+	fi
 }
 
 run() {
@@ -53,18 +64,28 @@ run() {
 
 	(cd "$ROOT" && npm run build >/dev/null && go build -o "$bin/harness" ./world-http/testdata/harness)
 
-	HARNESS_ADDR="127.0.0.1:$HARNESS_PORT" \
-		HARNESS_REMOTE_URL="http://localhost:$APP_PORT/.well-known/workflow/v1/flow" \
-		"$bin/harness" </dev/null &
-	pids+=($!)
-	(cd "$APP_DIR" && PORT="$APP_PORT" exec node .output/server/index.mjs) &
-	pids+=($!)
+	if [ "$SDK_APP" = go ]; then
+		cp "$ROOT/world-http/tests/sdk-e2e-go/e2e-conformance.json" "$GO_APP_DIR/"
+		HARNESS_ADDR="127.0.0.1:$HARNESS_PORT" HARNESS_APP=go "$bin/harness" </dev/null &
+		pids+=($!)
+		app_url="http://127.0.0.1:$HARNESS_PORT"
+		app_dir="$GO_APP_DIR"
+	else
+		HARNESS_ADDR="127.0.0.1:$HARNESS_PORT" \
+			HARNESS_REMOTE_URL="http://localhost:$APP_PORT/.well-known/workflow/v1/flow" \
+			"$bin/harness" </dev/null &
+		pids+=($!)
+		(cd "$NITRO_DIR" && PORT="$APP_PORT" exec node .output/server/index.mjs) &
+		pids+=($!)
+		app_url="http://localhost:$APP_PORT"
+		app_dir="$NITRO_DIR"
+	fi
 
 	curl -sf -o /dev/null --retry 30 --retry-connrefused --retry-delay 1 \
-		"http://localhost:$APP_PORT/.well-known/workflow/v1/manifest.json"
+		"$app_url/.well-known/workflow/v1/manifest.json"
 
 	cd "$SDK_DIR"
-	APP_NAME=nitro-v3 WORKBENCH_APP_PATH="$APP_DIR" DEPLOYMENT_URL="http://localhost:$APP_PORT" \
+	APP_NAME="$(basename "$app_dir")" WORKBENCH_APP_PATH="$app_dir" DEPLOYMENT_URL="$app_url" \
 		pnpm vitest run packages/core/e2e/e2e.test.ts "$@"
 }
 
