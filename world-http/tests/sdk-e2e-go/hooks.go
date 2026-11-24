@@ -544,6 +544,97 @@ func retainedInterleavingRun(ctx context.Context, input retainedInterleavingWork
 	return out, nil
 }
 
+type raceOutcome struct {
+	First  string `json:"first"`
+	Second string `json:"second"`
+}
+
+type hookRaceAfterLostRaceWorkflow struct {
+	workflow.Struct[raceOutcome]
+	workflow.Args
+	Token string
+}
+
+func hookRaceAfterLostRaceRun(ctx context.Context, input hookRaceAfterLostRaceWorkflow) (raceOutcome, error) {
+	hook := workflow.CreateHook[valuePayload](ctx, workflow.HookOption{Token: input.Token})
+	defer hook.Dispose(ctx)
+	first, err := raceHook(ctx, hook, time.Second, "sleep")
+	if err != nil {
+		return raceOutcome{}, err
+	}
+	if first != "sleep" {
+		first = "hook"
+	}
+	second, err := raceHook(ctx, hook, 30*time.Second, "timeout")
+	return raceOutcome{First: first, Second: second}, err
+}
+
+type lostRaces struct {
+	Lost      []string `json:"lost"`
+	Delivered string   `json:"delivered"`
+	Next      string   `json:"next"`
+}
+
+type hookRaceLoopAfterLostRacesWorkflow struct {
+	workflow.Struct[lostRaces]
+	workflow.Args
+	Token string
+}
+
+func hookRaceLoopAfterLostRacesRun(ctx context.Context, input hookRaceLoopAfterLostRacesWorkflow) (lostRaces, error) {
+	hook := workflow.CreateHook[valuePayload](ctx, workflow.HookOption{Token: input.Token})
+	defer hook.Dispose(ctx)
+	var result lostRaces
+	for range 2 {
+		lost, err := raceHook(ctx, hook, time.Second, "sleep")
+		if err != nil {
+			return lostRaces{}, err
+		}
+		result.Lost = append(result.Lost, lost)
+	}
+	var err error
+	if result.Delivered, err = raceHook(ctx, hook, 30*time.Second, "timeout"); err != nil {
+		return lostRaces{}, err
+	}
+	result.Next, err = raceHook(ctx, hook, 30*time.Second, "timeout")
+	return result, err
+}
+
+type hookRaceOncePromiseWorkflow struct {
+	workflow.Struct[raceOutcome]
+	workflow.Args
+	Token string
+}
+
+func hookRaceOncePromiseRun(ctx context.Context, input hookRaceOncePromiseWorkflow) (raceOutcome, error) {
+	hook := workflow.CreateHook[valuePayload](ctx, workflow.HookOption{Token: input.Token})
+	defer hook.Dispose(ctx)
+	first, err := raceHook(ctx, hook, time.Second, "timeout")
+	if err != nil {
+		return raceOutcome{}, err
+	}
+	if _, err := workflow.Step(ctx, hookRaceReminderStep, struct{}{}); err != nil {
+		return raceOutcome{}, err
+	}
+	second, err := raceHook(ctx, hook, 30*time.Second, "timeout")
+	return raceOutcome{First: first, Second: second}, err
+}
+
+// raceHook returns the hook's next payload value when it arrives before a
+// sleep of d, and timeout otherwise.
+func raceHook(ctx context.Context, hook *workflow.Hook[valuePayload], d time.Duration, timeout string) (string, error) {
+	timer := workflow.Timer(ctx, d)
+	winner, err := workflow.Select(ctx, hook, timer)
+	if err != nil {
+		return "", err
+	}
+	if winner == timer {
+		return timeout, nil
+	}
+	payload, err := hook.Next(ctx)
+	return payload.Value, err
+}
+
 // raceSleep returns the step's value when it settles before a sleep of d,
 // and "sleep" otherwise.
 func raceSleep(ctx context.Context, step *workflow.Result[string], d time.Duration) (string, error) {

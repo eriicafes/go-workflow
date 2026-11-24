@@ -147,6 +147,67 @@ func processPayload(_ context.Context, payload sleepHookPayload) (processed, err
 	return processed{Processed: true, Type: payload.Type, ID: payload.ID}, nil
 }
 
+func hookRaceReminderStep(ctx context.Context, _ struct{}) (struct{}, error) {
+	// Long enough for the test to resume the hook while this step runs.
+	return struct{}{}, wait(ctx, 5*time.Second)
+}
+
+// raceDelay is the arguments of a step that waits Dur milliseconds, then
+// returns Resp.
+type raceDelay struct {
+	Dur  int
+	Resp int
+}
+
+type iterationTime struct {
+	Iteration int   `json:"iteration"`
+	Ts        int64 `json:"ts"`
+}
+
+func noopStep(_ context.Context, iteration int) (iterationTime, error) {
+	return iterationTime{Iteration: iteration, Ts: time.Now().UnixMilli()}, nil
+}
+
+func promiseRaceStressTestDelayStep(ctx context.Context, in raceDelay) (int, error) {
+	if err := wait(ctx, time.Duration(in.Dur)*time.Millisecond); err != nil {
+		return 0, err
+	}
+	return in.Resp, nil
+}
+
+func timedDelayStep(ctx context.Context, in delayed) (timedStep, error) {
+	startedAt := time.Now().UnixMilli()
+	if err := wait(ctx, time.Duration(in.Ms)*time.Millisecond); err != nil {
+		return timedStep{}, err
+	}
+	return timedStep{Label: in.Label, StartedAt: startedAt, EndedAt: time.Now().UnixMilli()}, nil
+}
+
+func metadataHelperStep(ctx context.Context, label string) (helperMetadata, error) {
+	run, step := strictMetadata(ctx)
+	return helperMetadata{Label: label, WorkflowRunID: run.RunID, StepID: step.ID, Attempt: step.Attempt}, nil
+}
+
+// strictMetadata reads the metadata from a helper outside the step body.
+func strictMetadata(ctx context.Context) (workflow.WorkflowMetadata, workflow.StepMetadata) {
+	return workflow.GetWorkflowMetadata(ctx), workflow.GetStepMetadata(ctx)
+}
+
+func doubleValue(_ context.Context, value int) (int, error) { return value * 2, nil }
+
+func spawnChildWorkflow(ctx context.Context, value int) (string, error) {
+	child, err := workflow.Start(ctx, childWorkflow{Value: value})
+	if err != nil {
+		return "", err
+	}
+	return child.ID(), nil
+}
+
+func throwFatalErrorWithCause(context.Context, struct{}) (struct{}, error) {
+	cause := &workflow.Error{Type: "TypeError", Message: "underlying type error"}
+	return struct{}{}, workflow.FatalError(causedError{message: "fatal with cause", cause: cause})
+}
+
 // wait sleeps for d, or until ctx is done.
 func wait(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
