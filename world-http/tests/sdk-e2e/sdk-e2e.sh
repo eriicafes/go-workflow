@@ -85,7 +85,11 @@ run() {
 		"$app_url/.well-known/workflow/v1/manifest.json"
 
 	cd "$SDK_DIR"
-	APP_NAME="$(basename "$app_dir")" WORKBENCH_APP_PATH="$app_dir" DEPLOYMENT_URL="$app_url" \
+	# The suite mints a GitHub Actions OIDC token for the trusted-source
+	# headers of an app deployed on Vercel. The app here is local, and the
+	# minting's retries can outlast the suite's manifest request.
+	env -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
+		APP_NAME="$(basename "$app_dir")" WORKBENCH_APP_PATH="$app_dir" DEPLOYMENT_URL="$app_url" \
 		pnpm vitest run packages/core/e2e/e2e.test.ts "$@"
 }
 
