@@ -101,6 +101,9 @@ type modelCall struct {
 	repair     ai.ToolCallRepairFunction
 	download   ai.DownloadFunction
 	transforms []ai.StreamTransformFunc
+	// trace is the call's telemetry, and operation its telemetry operation.
+	trace     *agentTelemetry
+	operation string
 }
 
 func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider.GenerateOptions, error) {
@@ -284,20 +287,70 @@ func (m modelCall) transform(ctx context.Context, chunk provider.StreamChunk) []
 	return chunks
 }
 
-// startSpans starts the spans of a model call under the span in ctx:
-// an operation span, a step span, and the model call span, whose context
-// the model call uses. The returned function ends them with the call's
-// result.
+// startSpans starts the spans of a model call. When the call's telemetry is
+// reported when it ends, OpenTelemetry integrations draw only the model
+// call's chat span, as a child of the agent step's span, and the others draw
+// the spans of the model call alone, as when it is not. The returned
+// function ends them with the call's result.
 func (m modelCall) startSpans(ctx context.Context, input modelCallInput, options *provider.GenerateOptions) (context.Context, func(modelCallResult, error)) {
 	if m.telemetry == nil || !telemetry.Enabled(m.telemetry) {
 		return ctx, func(modelCallResult, error) {}
 	}
+	if m.trace == nil || !m.trace.Reported {
+		return m.operationSpans(ctx, input, options, m.telemetry)
+	}
+	otel, others := splitIntegrations(m.telemetry)
+	if otel == nil {
+		return m.operationSpans(ctx, input, options, others)
+	}
+	callCtx, endChat := m.chatSpan(ctx, input, options, otel)
+	if others == nil {
+		return callCtx, endChat
+	}
+	_, endOperation := m.operationSpans(ctx, input, options, others)
+	return callCtx, func(result modelCallResult, err error) {
+		endChat(result, err)
+		endOperation(result, err)
+	}
+}
+
+// chatSpan draws a model call's chat span as a child of the reserved span of
+// its agent step, through stand-ins for the call's root and step spans.
+func (m modelCall) chatSpan(ctx context.Context, input modelCallInput, options *provider.GenerateOptions, settings *telemetry.Settings) (context.Context, func(modelCallResult, error)) {
+	callID, modelProvider, modelID := m.trace.CallID, m.model.Provider(), m.model.ModelID()
+	endStandIns := m.trace.startStandIns(ctx, settings, m.operation, input.StepNumber, m)
+	callCtx := telemetry.FireOnLanguageModelCallStart(ctx, languageModelCallStart(settings, callID, modelProvider, modelID, input, options))
+	start := time.Now()
+	return callCtx, func(result modelCallResult, err error) {
+		defer endStandIns()
+		if err != nil {
+			telemetry.FireOnStepError(callCtx, telemetry.TelemetryErrorEvent{Settings: settings, CallID: callID, Error: err})
+			return
+		}
+		telemetry.FireOnLanguageModelCallEnd(ctx, telemetry.LanguageModelCallEndEvent{
+			Settings:      settings,
+			CallID:        callID,
+			ModelProvider: modelProvider,
+			ModelID:       modelID,
+			FinishReason:  result.FinishReason,
+			Usage:         telemetryUsage(result.Usage),
+			ResponseID:    result.Response.ID,
+			Performance:   telemetry.LanguageModelCallPerformance{ResponseTimeMs: time.Since(start).Milliseconds()},
+		})
+	}
+}
+
+// operationSpans starts the spans of a model call alone under the span in
+// ctx: an operation span, a step span, and the model call span, whose context
+// the model call uses. The returned function ends them with the call's
+// result.
+func (m modelCall) operationSpans(ctx context.Context, input modelCallInput, options *provider.GenerateOptions, settings *telemetry.Settings) (context.Context, func(modelCallResult, error)) {
 	callID := workflow.StepID(ctx)
 	operation := "ai.generateText"
 	if input.Streaming {
 		operation = "ai.streamText"
 	}
-	settings, modelProvider, modelID := m.telemetry, m.model.Provider(), m.model.ModelID()
+	modelProvider, modelID := m.model.Provider(), m.model.ModelID()
 	ctx = telemetry.FireOnStart(ctx, telemetry.TelemetryStartEvent{
 		CallID:        callID,
 		OperationType: operation,
@@ -315,23 +368,7 @@ func (m modelCall) startSpans(ctx context.Context, input modelCallInput, options
 		ModelProvider: modelProvider,
 		ModelID:       modelID,
 	})
-	callCtx := telemetry.FireOnLanguageModelCallStart(ctx, telemetry.LanguageModelCallStartEvent{
-		Settings:         settings,
-		CallID:           callID,
-		ModelProvider:    modelProvider,
-		ModelID:          modelID,
-		Prompt:           options.Prompt,
-		Tools:            options.Tools,
-		System:           input.Instructions,
-		Temperature:      options.Temperature,
-		MaxOutputTokens:  options.MaxTokens,
-		TopP:             options.TopP,
-		TopK:             options.TopK,
-		PresencePenalty:  options.PresencePenalty,
-		FrequencyPenalty: options.FrequencyPenalty,
-		StopSequences:    options.StopSequences,
-		Seed:             options.Seed,
-	})
+	callCtx := telemetry.FireOnLanguageModelCallStart(ctx, languageModelCallStart(settings, callID, modelProvider, modelID, input, options))
 	start := time.Now()
 	return callCtx, func(result modelCallResult, err error) {
 		if err != nil {
@@ -793,6 +830,57 @@ func promptMessages(messages []ModelMessage) []types.Message {
 		prompt[i] = message
 	}
 	return toProviderMessages(prompt)
+}
+
+// languageModelCallStart returns the telemetry event that starts a model
+// call.
+func languageModelCallStart(settings *telemetry.Settings, callID, modelProvider, modelID string, input modelCallInput, options *provider.GenerateOptions) telemetry.LanguageModelCallStartEvent {
+	return telemetry.LanguageModelCallStartEvent{
+		Settings:         settings,
+		CallID:           callID,
+		ModelProvider:    modelProvider,
+		ModelID:          modelID,
+		Prompt:           options.Prompt,
+		Tools:            options.Tools,
+		System:           input.Instructions,
+		Temperature:      options.Temperature,
+		MaxOutputTokens:  options.MaxTokens,
+		TopP:             options.TopP,
+		TopK:             options.TopK,
+		PresencePenalty:  options.PresencePenalty,
+		FrequencyPenalty: options.FrequencyPenalty,
+		StopSequences:    options.StopSequences,
+		Seed:             options.Seed,
+	}
+}
+
+// splitIntegrations splits the integrations of settings into the
+// OpenTelemetry integrations, which draw a call's spans when it is reported,
+// and the others, which draw the spans of each model call as it happens. The
+// globally registered integrations of settings without integrations count as
+// OpenTelemetry integrations. A nil result has no integrations.
+func splitIntegrations(settings *telemetry.Settings) (otel, others *telemetry.Settings) {
+	if len(settings.Integrations) == 0 {
+		return settings, nil
+	}
+	var otelIntegrations, otherIntegrations []telemetry.TelemetryIntegration
+	for _, integration := range settings.Integrations {
+		switch integration.(type) {
+		case telemetry.OpenTelemetry, *telemetry.OpenTelemetry, telemetry.LegacyOpenTelemetry, *telemetry.LegacyOpenTelemetry:
+			otelIntegrations = append(otelIntegrations, integration)
+		default:
+			otherIntegrations = append(otherIntegrations, integration)
+		}
+	}
+	with := func(integrations []telemetry.TelemetryIntegration) *telemetry.Settings {
+		if len(integrations) == 0 {
+			return nil
+		}
+		copied := *settings
+		copied.Integrations = integrations
+		return &copied
+	}
+	return with(otelIntegrations), with(otherIntegrations)
 }
 
 // telemetryUsage converts token usage to its telemetry form.

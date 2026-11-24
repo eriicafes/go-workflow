@@ -498,15 +498,35 @@ Telemetry: &telemetry.Options{
 },
 ```
 
-A call runs across many processes and replays, so its spans cannot share one
-in-memory parent. Instead each `Stream` or `Generate` call records one trace.
-An inline step at the start of the call starts and ends the root span and
-records its trace context, and the agent puts that context in the `ctx` it
-passes to every step. Each step's [span](/docs/steps#tracing) nests under the
-root: the model call steps, with go-ai's operation, step, and `chat` spans and
-the model's usage inside them, and the tool steps, with anything your tools
-trace. Replays reuse the recorded steps, so no span is recorded twice. The
-root span is short, since a span can only end in the process that started it.
+A call runs across many processes and replays, so no process can draw its
+root span, or a span for each of its agent steps, as they happen. Like
+`@ai-sdk/workflow`, the agent records the call's telemetry events in workflow
+code and reports them when the call ends. The `prepareWorkflowAgentTelemetry`
+inline step reserves the IDs of the call's root span and step spans when the
+call starts, and the `reportWorkflowAgentTelemetry` step sends the recorded
+events to go-ai's integrations, which draw the root span, a span for each
+agent step, and the tool execution spans. The `chat` span of each model call
+is drawn as it happens, as a child of its agent step's span, and each step's
+[span](/docs/steps#tracing) nests under the root.
+
+OpenTelemetry cannot be told the IDs and times of the spans go-ai draws, so
+the tracer provider needs workflowai's ID generator and span processor. The
+processor gives the reported spans the times of their recorded events:
+
+```go
+provider := sdktrace.NewTracerProvider(
+	sdktrace.WithIDGenerator(workflowai.TelemetryIDGenerator{}),
+	sdktrace.WithSpanProcessor(workflowai.NewTelemetrySpanProcessor(sdktrace.NewBatchSpanProcessor(exporter))),
+)
+otel.SetTracerProvider(provider)
+```
+
+Create the processor in every process that runs agents, before they run.
+Without it, the call draws a root span that starts and ends when the call
+starts, and go-ai's operation, step, and `chat` spans for each model call as
+it happens. Integrations other than `OpenTelemetry` and `LegacyOpenTelemetry`
+listed in `Integrations` always get the spans of each model call as it
+happens, and the reported events when the call ends.
 
 ## Instructions and settings
 

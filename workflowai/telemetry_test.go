@@ -92,3 +92,76 @@ func TestStreamDisabledTelemetryRecordsNoSpans(t *testing.T) {
 		}
 	})
 }
+
+// With TelemetryIDGenerator and NewTelemetrySpanProcessor, the call reports
+// its root, step, and tool spans when it ends, and the chat spans of its
+// model calls, drawn as they happen, are children of its step spans.
+func TestStreamReportedTelemetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		exporter := tracetest.NewInMemoryExporter()
+		provider := sdktrace.NewTracerProvider(
+			sdktrace.WithIDGenerator(workflowai.TelemetryIDGenerator{}),
+			sdktrace.WithSpanProcessor(workflowai.NewTelemetrySpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter))),
+		)
+		defer provider.Shutdown(t.Context())
+		previous := otel.GetTracerProvider()
+		otel.SetTracerProvider(provider)
+		defer otel.SetTracerProvider(previous)
+		setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("It is 21 degrees."))
+		testOptions.Telemetry = &telemetry.Options{
+			RecordInputs:  true,
+			RecordOutputs: true,
+			Integrations:  []telemetry.TelemetryIntegration{telemetry.NewOpenTelemetry(telemetry.OpenTelemetryOptions{Tracer: provider.Tracer("test")})},
+		}
+		_, _, steps, err := chatWithSteps(t, []workflowai.ModelMessage{user("weather in Lagos?")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"prepareWorkflowAgentTelemetry", "doStreamStep", "writeDeferredToolCalls", "getWeather", "writeToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream", "reportWorkflowAgentTelemetry"}
+		if !slices.Equal(steps, want) {
+			t.Fatalf("steps = %v, want %v", steps, want)
+		}
+
+		spans := map[trace.SpanID]tracetest.SpanStub{}
+		byName := map[string][]tracetest.SpanStub{}
+		for _, span := range exporter.GetSpans() {
+			spans[span.SpanContext.SpanID()] = span
+			byName[span.Name] = append(byName[span.Name], span)
+			for _, attr := range span.Attributes {
+				if attr.Key == "workflowai.stand_in" {
+					t.Fatalf("stand-in span %q was exported", span.Name)
+				}
+			}
+		}
+		parent := func(span tracetest.SpanStub) string { return spans[span.Parent.SpanID()].Name }
+		roots := byName["ai.workflowAgent.stream fake-model"]
+		if len(roots) != 1 || len(byName["step 1"]) != 1 || len(byName["step 2"]) != 1 || len(byName["chat fake-model"]) != 2 || len(byName["execute_tool getWeather"]) != 1 {
+			t.Fatalf("spans = %v", byName)
+		}
+		root := roots[0]
+		for _, span := range exporter.GetSpans() {
+			if span.SpanContext.TraceID() != root.SpanContext.TraceID() {
+				t.Fatalf("span %q is in another trace", span.Name)
+			}
+		}
+		if parent(byName["step 1"][0]) != root.Name || parent(byName["step 2"][0]) != root.Name || parent(byName["execute_tool getWeather"][0]) != "step 1" {
+			t.Fatalf("step 1 parent %q, step 2 parent %q, tool parent %q", parent(byName["step 1"][0]), parent(byName["step 2"][0]), parent(byName["execute_tool getWeather"][0]))
+		}
+		if chats := byName["chat fake-model"]; parent(chats[0]) != "step 1" || parent(chats[1]) != "step 2" {
+			t.Fatalf("chat parents %q, %q", parent(chats[0]), parent(chats[1]))
+		}
+		// The runtime's step spans are children of the root span too.
+		for _, span := range byName["step doStreamStep"] {
+			if span.Parent.SpanID() != root.SpanContext.SpanID() {
+				t.Fatalf("step doStreamStep has parent %q", parent(span))
+			}
+		}
+		// The reported spans take the times of their recorded events, so
+		// the root span covers its steps.
+		for _, step := range slices.Concat(byName["step 1"], byName["step 2"]) {
+			if step.StartTime.Before(root.StartTime) || step.EndTime.After(root.EndTime) {
+				t.Fatalf("%s %v..%v is outside the root %v..%v", step.Name, step.StartTime, step.EndTime, root.StartTime, root.EndTime)
+			}
+		}
+	})
+}

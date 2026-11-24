@@ -16,6 +16,7 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/telemetry"
 	"github.com/eriicafes/go-workflow"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WorkflowAgentOptions configures a WorkflowAgent.
@@ -417,24 +418,29 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	if r.stopTimeout != nil {
 		err = errors.Join(err, r.stopTimeout())
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
 		// A cancelled context or the Timeout aborted the call. The steps
 		// before it stay in the result, and the stream ends normally.
 		r.callbacks.OnAbort(ctx, AbortEvent{Steps: r.steps})
-		return result, errors.Join(err, r.closeWriter(ctx))
-	}
-	if err != nil {
+		r.record(ctx, telemetryEvent{Type: eventAbort, Error: err.Error()})
+	case err != nil:
 		r.callbacks.OnError(ctx, err)
-		// End the stream, so readers do not wait for parts that never come.
-		return result, errors.Join(err, r.closeWriter(ctx))
+		r.record(ctx, telemetryEvent{Type: eventError, Error: err.Error()})
+	default:
+		if result.Error != "" {
+			r.callbacks.OnError(ctx, errors.New(result.Error))
+			r.record(ctx, telemetryEvent{Type: eventError, Error: result.Error})
+		}
+		if !r.ended {
+			r.end(ctx, result)
+		}
 	}
-	if result.Error != "" {
-		r.callbacks.OnError(ctx, errors.New(result.Error))
-	}
-	if !r.ended {
-		r.callbacks.OnEnd(ctx, result)
-	}
-	return result, r.closeWriter(ctx)
+	// End the stream, so readers do not wait for parts that never come, then
+	// report the call's telemetry, as the Workflow SDK does.
+	err = errors.Join(err, r.closeWriter(ctx))
+	r.reportTelemetry(ctx)
+	return result, err
 }
 
 // run holds the state of one Stream or Generate call.
@@ -480,6 +486,10 @@ type run struct {
 	prepareStep    PrepareStepFunc
 	messages       []ModelMessage
 	steps          []StepResult
+	// trace is what prepareWorkflowAgentTelemetry recorded, and events are
+	// the telemetry events the call reports when it ends.
+	trace  *agentTelemetry
+	events []telemetryEvent
 }
 
 // prepare applies the agent's PrepareCall to the call's settings and
@@ -545,24 +555,73 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 	return ctx, nil
 }
 
-// startTrace records the call's root span in the traceStartStep inline step,
-// when telemetry is enabled, and returns ctx with its trace context, which
-// every step the call starts after it gets.
+// startTrace runs the prepareWorkflowAgentTelemetry inline step when
+// telemetry is enabled, and returns ctx with the trace context of the call's
+// root span, which every step the call starts after it gets.
 func (r *run) startTrace(ctx context.Context) (context.Context, error) {
 	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) {
 		return ctx, nil
 	}
-	operation := "ai.workflowAgent.generate"
-	if r.streaming {
-		operation = "ai.workflowAgent.stream"
-	}
-	traceparent, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), traceStartStep, traceStartInput{Operation: operation, Instructions: r.instructions})
+	startedAt := workflow.Now(ctx)
+	prepared, err := workflow.InlineStep(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), prepareWorkflowAgentTelemetry, prepareTelemetryInput{Operation: r.operation(), Instructions: r.instructions})
 	if err != nil {
 		return ctx, err
 	}
-	carrier := propagation.MapCarrier{"traceparent": traceparent}
-	r.modelCtx = propagation.TraceContext{}.Extract(r.modelCtx, carrier)
-	return propagation.TraceContext{}.Extract(ctx, carrier), nil
+	r.trace = &prepared
+	if !prepared.Reported {
+		carrier := propagation.MapCarrier{"traceparent": prepared.Traceparent}
+		r.modelCtx = propagation.TraceContext{}.Extract(r.modelCtx, carrier)
+		return propagation.TraceContext{}.Extract(ctx, carrier), nil
+	}
+	r.events = append(r.events, telemetryEvent{Type: eventStart, Time: startedAt, ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()})
+	root := prepared.rootContext()
+	r.modelCtx = trace.ContextWithRemoteSpanContext(r.modelCtx, root)
+	return trace.ContextWithRemoteSpanContext(ctx, root), nil
+}
+
+// operation returns the telemetry operation of the call.
+func (r *run) operation() string {
+	if r.streaming {
+		return "ai.workflowAgent.stream"
+	}
+	return "ai.workflowAgent.generate"
+}
+
+// record records a telemetry event of a call whose telemetry is reported
+// when it ends.
+func (r *run) record(ctx context.Context, event telemetryEvent) {
+	if r.trace == nil || !r.trace.Reported {
+		return
+	}
+	event.Time = workflow.Now(ctx)
+	r.events = append(r.events, event)
+}
+
+// reportTelemetry runs the reportWorkflowAgentTelemetry step with the call's
+// recorded events. Like in the Workflow SDK, telemetry never changes the
+// outcome of the call, so its error is ignored.
+func (r *run) reportTelemetry(ctx context.Context) {
+	if r.trace == nil || !r.trace.Reported {
+		return
+	}
+	input := reportTelemetryInput{Telemetry: *r.trace, Operation: r.operation(), Instructions: r.instructions, Events: r.events}
+	_, _ = workflow.Step(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), reportWorkflowAgentTelemetry, input)
+}
+
+// endStep ends an agent step.
+func (r *run) endStep(ctx context.Context, step StepResult) {
+	r.callbacks.OnStepEnd(ctx, step)
+	r.record(ctx, telemetryEvent{Type: eventStepEnd, StepNumber: step.StepNumber, FinishReason: step.FinishReason, Usage: step.Usage, Text: step.Text, ResponseID: step.Response.ID})
+}
+
+// end ends the call.
+func (r *run) end(ctx context.Context, result Result) {
+	r.callbacks.OnEnd(ctx, result)
+	var usage types.Usage
+	for _, step := range r.steps {
+		usage = addUsage(usage, step.Usage)
+	}
+	r.record(ctx, telemetryEvent{Type: eventEnd, FinishReason: result.FinishReason, Usage: usage, Text: result.Text, ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()})
 }
 
 // parseOutput parses the last step's text with the call's Output. It parses
@@ -614,6 +673,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 		}
 		r.callbacks.OnStepStart(ctx, StepStartEvent{StepNumber: stepNumber, Messages: messages})
+		r.record(ctx, telemetryEvent{Type: eventStepStart, StepNumber: stepNumber, ModelProvider: model.Provider(), ModelID: model.ModelID()})
 
 		input := modelCallInput{
 			Instructions:     instructions,
@@ -632,7 +692,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		if r.streaming {
 			call = doStreamStep
 		}
-		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform})
+		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform, trace: r.trace, operation: r.operation()})
 		// The model call retries opening the model itself, so the step is not
 		// retried: a retry would repeat a model call whose stream failed
 		// partway.
@@ -679,7 +739,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.callbacks.OnStepEnd(ctx, step)
+			r.endStep(ctx, step)
 			result := r.result(step.ToolCalls, nil)
 			result.Error = response.Error
 			return result, nil
@@ -695,7 +755,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.callbacks.OnStepEnd(ctx, step)
+			r.endStep(ctx, step)
 			return r.result(step.ToolCalls, nil), nil
 		}
 		// When the finish reason does not allow tool execution, only invalid
@@ -779,11 +839,11 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.callbacks.OnStepEnd(ctx, step)
+			r.endStep(ctx, step)
 			// Like the Workflow SDK, a paused turn ends before it writes its
 			// results and approval requests.
 			result := r.result(step.ToolCalls, step.ToolResults)
-			r.callbacks.OnEnd(ctx, result)
+			r.end(ctx, result)
 			r.ended = true
 			if r.options.Writer != nil {
 				if len(step.ToolResults) > 0 {
@@ -830,7 +890,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				return r.result(nil, nil), err
 			}
 		}
-		r.callbacks.OnStepEnd(ctx, step)
+		r.endStep(ctx, step)
 		// The loop continues only after local calls, and stop conditions are
 		// only checked when it could continue.
 		if !toolExecutionAllowed || !hasLocalCalls {
@@ -920,6 +980,7 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 			default:
 				start := func() *workflow.Result[any] {
 					r.callbacks.OnToolExecutionStart(ctx, ToolExecutionStartEvent{StepNumber: stepNumber, ToolCall: call})
+					r.record(ctx, telemetryEvent{Type: eventToolStart, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input})
 					return tool.Execute.Execute(ctx, call.Input, r.toolCallOptions(call, messages))
 				}
 				var result *workflow.Result[any]
@@ -960,6 +1021,11 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 // finishTool reports the end of a call's execution and returns its result.
 func (r *run) finishTool(ctx context.Context, stepNumber int, call ToolCall, output any, err error) toolResult {
 	r.callbacks.OnToolExecutionEnd(ctx, ToolExecutionEndEvent{StepNumber: stepNumber, ToolCall: call, Output: output, Error: err})
+	toolEnd := telemetryEvent{Type: eventToolEnd, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input, Output: marshalRaw(output)}
+	if err != nil {
+		toolEnd.Error = err.Error()
+	}
+	r.record(ctx, toolEnd)
 	if err != nil {
 		// Report tool errors to the model so it can recover, instead of
 		// failing the run.
