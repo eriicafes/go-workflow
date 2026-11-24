@@ -61,7 +61,7 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	}
 	var startHook []byte
 	if echo := worlds.RunEchoStartHook(payload); echo != nil {
-		if startHook, err = cbor.Marshal(echo); err != nil {
+		if startHook, err = cborEncoding.Marshal(echo); err != nil {
 			return worlds.EventResult{}, err
 		}
 	}
