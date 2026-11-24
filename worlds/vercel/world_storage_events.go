@@ -135,6 +135,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	meta["inBand"] = input.Options.InBandCount != nil
 	if input.Options.InBandCount != nil {
 		meta["expectedSeqInBand"] = *input.Options.InBandCount
+		if !hasHeld {
+			// The backend refuses an in-band write without maxSlot. A writer
+			// that holds no count of the log is given its in-band count,
+			// which no current log is shorter than, and is not told what
+			// the backend reports.
+			meta["maxSlot"] = *input.Options.InBandCount
+		}
 	}
 	if created := input.Options.StepCreatedAt; !created.IsZero() && input.Event.EventType == worlds.EventTypeStepStarted && meta["attempt"] == 1 && payload == nil {
 		// The backend reads the step's creation time, in milliseconds, only
@@ -297,6 +304,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		meta["inBand"] = input.InBandCount != nil
 		if input.InBandCount != nil {
 			meta["expectedSeqInBand"] = *input.InBandCount
+			// The backend refuses an in-band write without maxSlot, which is
+			// the writer's in-band count when it holds no count of the log.
+			meta["maxSlot"] = *input.InBandCount
 			if input.EventCount != nil {
 				meta["maxSlot"] = *input.EventCount
 			}

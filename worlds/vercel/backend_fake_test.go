@@ -348,8 +348,9 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 // fence returns the in-band count a write on route version is fenced with,
 // and the slot it reports skipped events after. /v5 fences a frame with
 // inBand, refuses a write to a spec 9 run without inBand and an in-band
-// write without expectedSeqInBand, and reports the events after its maxSlot. /v4 refuses a write to a spec 9 run, and fences and reports
-// nothing.
+// write without expectedSeqInBand or maxSlot, and reports the events after
+// its maxSlot. /v4 refuses a write to a spec 9 run, and fences an in-band
+// write to an earlier run without reporting skipped events.
 func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version string, in frame) (*int, *int, *outcome) {
 	spec, _ := asInt(in.Meta["specVersion"])
 	if worlds.EventType(str(in.Meta, "eventType")) != worlds.EventTypeRunCreated {
@@ -359,7 +360,14 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 		if spec >= 9 {
 			return nil, nil, &outcome{status: http.StatusBadRequest, code: "spec-version", message: "a spec 9 run is written through /v5"}
 		}
-		return nil, nil, nil
+		if inBand, _ := in.Meta["inBand"].(bool); !inBand {
+			return nil, nil, nil
+		}
+		count, ok := asInt(in.Meta["expectedSeqInBand"])
+		if !ok {
+			return nil, nil, &outcome{status: http.StatusBadRequest, code: "bad-request", message: "an in-band write needs expectedSeqInBand"}
+		}
+		return &count, nil, nil
 	}
 	// inBand is required on every write to a spec 9 run.
 	inBand, declared := in.Meta["inBand"].(bool)
@@ -373,11 +381,11 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 	if !ok {
 		return nil, nil, &outcome{status: http.StatusBadRequest, code: "bad-request", message: "an in-band write needs expectedSeqInBand"}
 	}
-	var report *int
-	if slot, ok := asInt(in.Meta["maxSlot"]); ok {
-		report = &slot
+	slot, ok := asInt(in.Meta["maxSlot"])
+	if !ok {
+		return nil, nil, &outcome{status: http.StatusBadRequest, code: "v5-missing-max-slot", message: "An in-band write must declare meta.maxSlot."}
 	}
-	return &count, report, nil
+	return &count, &slot, nil
 }
 
 // specVersion returns the spec version run_created stamped on runID.

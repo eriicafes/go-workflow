@@ -45,7 +45,7 @@ func TestEncryptionKeysMatchWorldVercel(t *testing.T) {
 			writer.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		if request.URL.Path != "/dpl_other" || request.URL.Query().Get("projectId") != "prj_1" || request.URL.Query().Get("runId") != "wrun_1" || request.Header.Get("Authorization") != "Bearer test-oidc" {
+		if request.URL.Path != "/dpl_other" || request.URL.Query().Get("projectId") != "prj_1" || request.URL.Query().Get("runId") == "" || request.Header.Get("Authorization") != "Bearer test-oidc" {
 			http.Error(writer, "unexpected request "+request.URL.String(), http.StatusBadRequest)
 			return
 		}
@@ -60,6 +60,22 @@ func TestEncryptionKeysMatchWorldVercel(t *testing.T) {
 	if key, err := world.EncryptionKeyForRun(ctx, "wrun_1", "dpl_other"); err != nil || !bytes.Equal(key, other) || calls != 2 {
 		t.Fatalf("fetched key = %x err=%v calls=%d", key, err, calls)
 	}
+
+	// Outside a function, a key asked for without a deployment is the one of
+	// the deployment the run is pinned to.
+	t.Setenv("VERCEL", "")
+	pinned := worlds.NewRunID()
+	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: pinned, WorkflowName: "flow", Input: []byte(`[1]`), DeploymentID: "dpl_other"}); err != nil {
+		t.Fatal(err)
+	}
+	calls = 1
+	if key, err := world.EncryptionKeyForRun(ctx, pinned, ""); err != nil || !bytes.Equal(key, other) || calls != 2 {
+		t.Fatalf("key of the run's deployment = %x err=%v calls=%d", key, err, calls)
+	}
+	if key, err := world.EncryptionKeyForRun(ctx, worlds.NewRunID(), ""); err != nil || key != nil {
+		t.Fatalf("key of a missing run = %x err=%v", key, err)
+	}
+	t.Setenv("VERCEL", "1")
 
 	// A rate limit is Vercel's answer, and is not asked about again.
 	limited := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

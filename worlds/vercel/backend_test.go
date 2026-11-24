@@ -198,7 +198,23 @@ func contractRun(t *testing.T, world *World, version string, spec int) worlds.Ru
 	if _, err := contractPost(t, world, version, runID, "run_created", meta, []byte(`"input"`)); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
+	// The backend takes events only for a running run, which run_started,
+	// fenced on run_created, makes it.
+	started := map[string]any{"specVersion": spec, "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": 1, "maxSlot": 1}
+	if _, err := contractPost(t, world, version, runID, "run_started", started, nil); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
 	return runID
+}
+
+// fenceAt marks meta as an in-band write decided from the run's current log,
+// as the World writes one: expecting its in-band count and holding its last
+// slot.
+func fenceAt(t *testing.T, world *World, runID worlds.RunID, meta map[string]any) map[string]any {
+	t.Helper()
+	seq, seqInBand, _ := contractCounters(t, world, runID)
+	meta["inBand"], meta["expectedSeqInBand"], meta["maxSlot"] = true, seqInBand, seq
+	return meta
 }
 
 // contractPost writes one event frame through version's route and decodes
@@ -299,7 +315,7 @@ func backendContract(t *testing.T, live bool) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		// A write without inBand is refused.
-		meta := wait("wait_01UNDECLARED")
+		meta := wait("wait_01000000000000000000000011")
 		delete(meta, "inBand")
 		_, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil)
 		var api *apiError
@@ -311,16 +327,16 @@ func backendContract(t *testing.T, live bool) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		seq, _, _ := contractCounters(t, world, runID)
-		if seq != 1 {
-			t.Fatalf("seq = %d after run_created, want 1", seq)
+		if seq != 2 {
+			t.Fatalf("seq = %d after run_created and run_started, want 2", seq)
 		}
 	})
 	t.Run("StaleInBandWriteIsRefused", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
 		seq, seqInBand, _ := contractCounters(t, world, runID)
-		meta := wait("wait_01STALE")
-		meta["inBand"], meta["expectedSeqInBand"] = true, seqInBand+1
+		meta := wait("wait_01000000000000000000000010")
+		meta["inBand"], meta["expectedSeqInBand"], meta["maxSlot"] = true, seqInBand+1, seq
 		_, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil)
 		var refusal *apiError
 		if !errors.As(err, &refusal) || refusal.Status != http.StatusPreconditionFailed || refusal.Code != "in-band-superseded" {
@@ -339,7 +355,7 @@ func backendContract(t *testing.T, live bool) {
 	t.Run("InBandWriteNeedsExpectedCount", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
-		meta := wait("wait_01NOCOUNT")
+		meta := wait("wait_01000000000000000000000007")
 		meta["inBand"] = true
 		_, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil)
 		var refusal *apiError
@@ -352,14 +368,14 @@ func backendContract(t *testing.T, live bool) {
 		runID := contractRun(t, world, "v5", 9)
 		seq, seqInBand, _ := contractCounters(t, world, runID)
 		// An out-of-band write moves seq only.
-		if _, err := contractPost(t, world, "v5", runID, "wait_created", wait("wait_01OUTOFBAND"), nil); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "wait_created", wait("wait_01000000000000000000000009"), nil); err != nil {
 			t.Fatal(err)
 		}
 		if after, afterInBand, _ := contractCounters(t, world, runID); after != seq+1 || afterInBand != seqInBand {
 			t.Fatalf("out-of-band write moved the counters to %d, %d from %d, %d", after, afterInBand, seq, seqInBand)
 		}
 		// An in-band write decided from slot seq reports the event it skipped.
-		meta := wait("wait_01INBAND")
+		meta := wait("wait_01000000000000000000000006")
 		meta["inBand"], meta["expectedSeqInBand"], meta["maxSlot"] = true, seqInBand, seq
 		answer, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil)
 		if err != nil {
@@ -369,7 +385,7 @@ func backendContract(t *testing.T, live bool) {
 			t.Errorf("allocated = %v, want 1", answer["allocated"])
 		}
 		skipped, _ := answer["events"].([]any)
-		if len(skipped) != 1 || str(skipped[0].(map[string]any), "correlationId") != "wait_01OUTOFBAND" {
+		if len(skipped) != 1 || str(skipped[0].(map[string]any), "correlationId") != "wait_01000000000000000000000009" {
 			t.Errorf("skipped-slot report = %v, want the out-of-band wait", answer["events"])
 		}
 		if more, _ := answer["hasMore"].(bool); more {
@@ -388,12 +404,12 @@ func backendContract(t *testing.T, live bool) {
 			meta["inBand"], meta["expectedSeqInBand"], meta["maxSlot"] = true, count, seq
 			return meta
 		}
-		_, err := contractBatch(t, world, "v5", runID, fenced("wait_01BATCHA", seqInBand+1), fenced("wait_01BATCHB", seqInBand+1))
+		_, err := contractBatch(t, world, "v5", runID, fenced("wait_01000000000000000000000004", seqInBand+1), fenced("wait_01000000000000000000000005", seqInBand+1))
 		var refusal *apiError
 		if !errors.As(err, &refusal) || refusal.Status != http.StatusPreconditionFailed {
 			t.Fatalf("stale batch err = %v, want 412", err)
 		}
-		answer, err := contractBatch(t, world, "v5", runID, fenced("wait_01BATCHA", seqInBand), fenced("wait_01BATCHB", seqInBand))
+		answer, err := contractBatch(t, world, "v5", runID, fenced("wait_01000000000000000000000004", seqInBand), fenced("wait_01000000000000000000000005", seqInBand))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,7 +423,7 @@ func backendContract(t *testing.T, live bool) {
 	t.Run("Spec9RunsAreWrittenThroughV5", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
-		_, err := contractPost(t, world, "v4", runID, "wait_created", wait("wait_01V4"), nil)
+		_, err := contractPost(t, world, "v4", runID, "wait_created", wait("wait_01000000000000000000000012"), nil)
 		var refusal *apiError
 		if !errors.As(err, &refusal) || refusal.Status != http.StatusBadRequest {
 			t.Fatalf("/v4 write to a spec 9 run err = %v, want 400", err)
@@ -423,21 +439,23 @@ func TestBackendAssumptionsLive(t *testing.T) { backendAssumptions(t, true) }
 // them, or with live set against a real project. Each subtest is one
 // assumption the Vercel World's documentation lists.
 func backendAssumptions(t *testing.T, live bool) {
-	t.Run("FenceOnlyOnV5", func(t *testing.T) {
-		// A /v4 write to a run below spec 9 is never refused by the fence.
+	t.Run("FenceOnV4", func(t *testing.T) {
+		// A stale in-band /v4 write to a run below spec 9 is refused by the
+		// fence, as on /v5.
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v4", 8)
-		meta := map[string]any{"specVersion": 8, "correlationId": "wait_01V4FENCE", "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": 1000}
-		if _, err := contractPost(t, world, "v4", runID, "wait_created", meta, nil); err != nil {
-			t.Fatalf("stale /v4 in-band write err = %v, want it accepted", err)
+		meta := map[string]any{"specVersion": 8, "correlationId": "wait_01000000000000000000000013", "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": 1000, "maxSlot": 2}
+		_, err := contractPost(t, world, "v4", runID, "wait_created", meta, nil)
+		var refusal *apiError
+		if !errors.As(err, &refusal) || refusal.Status != http.StatusPreconditionFailed {
+			t.Fatalf("stale /v4 in-band write err = %v, want 412", err)
 		}
 	})
 	t.Run("CreatedAtIsOccurredAt", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
-		_, seqInBand, _ := contractCounters(t, world, runID)
 		occurred := time.Now().Add(-time.Minute).Truncate(time.Millisecond).UTC()
-		meta := map[string]any{"specVersion": 9, "correlationId": "wait_01OCCURRED", "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": occurred, "inBand": true, "expectedSeqInBand": seqInBand}
+		meta := fenceAt(t, world, runID, map[string]any{"specVersion": 9, "correlationId": "wait_01000000000000000000000008", "resumeAt": time.Now().Add(time.Hour).UTC(), "occurredAt": occurred})
 		if _, err := contractPost(t, world, "v5", runID, "wait_created", meta, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -450,8 +468,7 @@ func backendAssumptions(t *testing.T, live bool) {
 	t.Run("StepCreationFieldsArePersisted", func(t *testing.T) {
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
-		_, seqInBand, _ := contractCounters(t, world, runID)
-		meta := map[string]any{"specVersion": 9, "correlationId": "step_01PERSISTED", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract", "occurredAt": time.Now().UTC(), "inBand": true, "expectedSeqInBand": seqInBand}
+		meta := fenceAt(t, world, runID, map[string]any{"specVersion": 9, "correlationId": "step_01000000000000000000000003", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract", "occurredAt": time.Now().UTC()})
 		if _, err := contractPost(t, world, "v5", runID, "step_created", meta, []byte(`{"args":[1]}`)); err != nil {
 			t.Fatal(err)
 		}
@@ -466,29 +483,26 @@ func backendAssumptions(t *testing.T, live bool) {
 		// accepts its result.
 		world := contractBackend(t, live)
 		runID := contractRun(t, world, "v5", 9)
-		_, seqInBand, _ := contractCounters(t, world, runID)
 		fenced := func(meta map[string]any) map[string]any {
-			meta["specVersion"], meta["occurredAt"], meta["inBand"], meta["expectedSeqInBand"] = 9, time.Now().UTC(), true, seqInBand
-			return meta
+			meta["specVersion"], meta["occurredAt"] = 9, time.Now().UTC()
+			return fenceAt(t, world, runID, meta)
 		}
-		if _, err := contractPost(t, world, "v5", runID, "step_created", fenced(map[string]any{"correlationId": "step_01CHECKS", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract"}), []byte(`{"args":[1]}`)); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_created", fenced(map[string]any{"correlationId": "step_01000000000000000000000001", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract"}), []byte(`{"args":[1]}`)); err != nil {
 			t.Fatal(err)
 		}
-		seqInBand++
-		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 1, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01000000000000000000000001", "stepName": "contract", "attempt": 1, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := contractPost(t, world, "v5", runID, "run_completed", fenced(map[string]any{}), []byte(`"done"`)); err != nil {
 			t.Fatal(err)
 		}
-		seqInBand++
-		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "attempt": 2, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err == nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_started", map[string]any{"specVersion": 9, "correlationId": "step_01000000000000000000000001", "stepName": "contract", "attempt": 2, "occurredAt": time.Now().UTC(), "inBand": false}, nil); err == nil {
 			t.Error("step_started on a finished run was accepted")
 		}
-		if _, err := contractPost(t, world, "v5", runID, "step_created", fenced(map[string]any{"correlationId": "step_01LATE", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract"}), []byte(`{"args":[1]}`)); err == nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_created", fenced(map[string]any{"correlationId": "step_01000000000000000000000002", "stepName": "contract", "inline": false, "creatorMessageId": "msg_contract"}), []byte(`{"args":[1]}`)); err == nil {
 			t.Error("step_created on a finished run was accepted")
 		}
-		if _, err := contractPost(t, world, "v5", runID, "step_completed", map[string]any{"specVersion": 9, "correlationId": "step_01CHECKS", "stepName": "contract", "occurredAt": time.Now().UTC(), "inBand": false}, []byte(`1`)); err != nil {
+		if _, err := contractPost(t, world, "v5", runID, "step_completed", map[string]any{"specVersion": 9, "correlationId": "step_01000000000000000000000001", "stepName": "contract", "occurredAt": time.Now().UTC(), "inBand": false}, []byte(`1`)); err != nil {
 			t.Errorf("step_completed on a finished run err = %v, want it accepted", err)
 		}
 	})

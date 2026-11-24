@@ -229,7 +229,7 @@ correlation ID stays on `/v4/events` for every run. On `/v5`:
 The World also relies on what the client cannot see, which
 `TestBackendAssumptionsLive` checks against a real project:
 
-- The backend enforces the fence only on `/v5`.
+- The backend enforces the fence on `/v4` too, for runs below spec 9.
 - An in-band write's stored `createdAt` is the `occurredAt` it was sent with.
 - `step_created` keeps `inline` and `creatorMessageId` in the event's data.
 - On a spec 9 run, a finished run refuses `step_created` and `step_started`,

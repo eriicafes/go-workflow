@@ -352,9 +352,10 @@ func (c *consumer) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 // failure.
 func (c *consumer) handle(ctx context.Context, delivery vqsDelivery) (int, error) {
 	var message queueMessage
-	if err := json.Unmarshal(delivery.Body, &message); err != nil || message.ID == "" || message.RunID == "" {
+	if err := json.Unmarshal(delivery.Body, &message); err != nil || message.ID == "" || (message.RunID == "" && len(message.SDKMessage) == 0) {
 		// This is not a message this World published, so drop it rather than
-		// retry.
+		// retry. A Workflow SDK message without a run, such as a health
+		// check, is delivered.
 		return http.StatusOK, c.world.acknowledge(ctx, delivery, 0)
 	}
 	if message.NotBefore != nil {
