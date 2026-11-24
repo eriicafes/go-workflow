@@ -17,6 +17,15 @@ func TestConformance(t *testing.T) {
 	})
 }
 
+func TestConformanceDelivery(t *testing.T) {
+	t.Parallel()
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		world := testworld.New(executor)
+		t.Cleanup(world.Close)
+		return world
+	})
+}
+
 func TestConformanceShared(t *testing.T) {
 	t.Parallel()
 	workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {

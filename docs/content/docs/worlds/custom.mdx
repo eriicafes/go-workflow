@@ -195,6 +195,12 @@ func TestConformanceShared(t *testing.T) {
 		return a, b
 	})
 }
+
+func TestConformanceDelivery(t *testing.T) {
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		return newIsolatedWorldDeliveringTo(t, executor) // its queue delivers to executor
+	})
+}
 ```
 
 - **`Conformance`** gives each subtest a fresh World from `newWorld`. Worlds
@@ -206,6 +212,11 @@ func TestConformanceShared(t *testing.T) {
 - **`ConformanceShared`** covers behavior across instances: concurrent appends,
   hook claims, and stream writers. `newPair` returns two Worlds backed by the
   same storage, as two processes would be.
+- **`ConformanceDelivery`** covers your queue's deliveries: redeliveries,
+  handoffs, attempts, retries of failed deliveries, delays, deduplication
+  while a message lives, and one flow of a run at a time. `newWorld` returns
+  a World whose queue delivers each message to `executor`, as it would in
+  production.
 
 ## Using it from JavaScript
 

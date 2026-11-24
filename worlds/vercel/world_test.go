@@ -44,6 +44,8 @@ type fakeMessage struct {
 	visibleAt                                 time.Time
 	deliveries, handoffs                      int
 	receipt                                   string
+	// createdAt is when the message was published.
+	createdAt time.Time
 	// coalesced counts the messages coalesced into this one.
 	coalesced int
 	// pushing is set while a delivery of the message is being pushed.
@@ -73,7 +75,7 @@ func (f *fakeVQS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			}
 		}
 		f.sequence++
-		message := &fakeMessage{id: fmt.Sprintf("msg_%d", f.sequence), topic: topic, idempotencyKey: key, concurrencyKey: header.Get("Vqs-Experimental-Concurrency-Key"), body: body, visibleAt: time.Now()}
+		message := &fakeMessage{id: fmt.Sprintf("msg_%d", f.sequence), topic: topic, idempotencyKey: key, concurrencyKey: header.Get("Vqs-Experimental-Concurrency-Key"), body: body, visibleAt: time.Now(), createdAt: time.Now().UTC()}
 		if seconds, err := strconv.Atoi(header.Get("Vqs-Delay-Seconds")); err == nil {
 			message.visibleAt = message.visibleAt.Add(time.Duration(seconds) * time.Second)
 		}
@@ -179,6 +181,7 @@ func (f *fakeVQS) next() (*fakeMessage, *http.Request) {
 		request.Header.Set("Ce-Vqsmessageid", message.id)
 		request.Header.Set("Ce-Vqsreceipthandle", message.receipt)
 		request.Header.Set("Ce-Vqsdeliverycount", strconv.Itoa(message.deliveries))
+		request.Header.Set("Ce-Vqscreatedat", message.createdAt.Format(time.RFC3339Nano))
 		if message.handoffs > 0 {
 			request.Header.Set("Ce-Vqsexperimentalhandoffcount", strconv.Itoa(message.handoffs))
 		}
@@ -242,6 +245,23 @@ func newWorlds(t *testing.T, count int) ([]*World, *fakeVQS, *fakeBackend) {
 func TestConformance(t *testing.T) {
 	workflowtest.Conformance(t, func(t *testing.T) worlds.World {
 		all, _, _ := newWorlds(t, 1)
+		return all[0]
+	})
+}
+
+func TestConformanceDelivery(t *testing.T) {
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		all, queue, _ := newWorlds(t, 1)
+		ctx, stop := context.WithCancel(context.Background())
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			deliverAll(ctx, t, queue, Queue(all[0], executor))
+		}()
+		t.Cleanup(func() {
+			stop()
+			<-stopped
+		})
 		return all[0]
 	})
 }

@@ -36,7 +36,9 @@ cleanup for every created resource.
 
 For storage shared between processes, also run
 `workflowtest.ConformanceShared` with two independent World instances pointing
-at the same isolated data.
+at the same isolated data. Run `workflowtest.ConformanceDelivery` with a World
+whose queue delivers each message to the given executor, to check
+redeliveries, handoffs, attempts, retries, delays, and serialized flows.
 
 Add targeted tests for changed semantics: concurrent fenced appends, contested
 hook claims, concurrent stream writers, and delivery failures after a committed

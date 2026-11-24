@@ -33,6 +33,10 @@ func (m *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if len(input.Chunks) == 0 {
+		// No chunks write nothing, not even the stream.
+		return nil
+	}
 	defer m.notify()
 	m.mu.Lock()
 	defer m.mu.Unlock()

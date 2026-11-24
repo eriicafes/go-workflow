@@ -75,6 +75,22 @@ func Conformance(t *testing.T, newWorld func(t *testing.T) worlds.World) {
 		{"SDKRetention", conformSDKRetention},
 		{"SDKStartHook", conformSDKStartHook},
 		{"SDKEventData", conformSDKEventData},
+		{"SDKQueueDedupesSimultaneousSends", conformSDKQueueDedupesSimultaneousSends},
+		{"SDKQueueDedupesKeyedMessages", conformSDKQueueDedupesKeyedMessages},
+		{"SDKStreamsRoundTrip", conformSDKStreamsRoundTrip},
+		{"SDKStreamsResume", conformSDKStreamsResume},
+		{"SDKStreamsWriteMulti", conformSDKStreamsWriteMulti},
+		{"SDKStreamsGroupForAReaderOpeningMidWrite", conformSDKStreamsGroupForAReaderOpeningMidWrite},
+		{"SDKStreamsClose", conformSDKStreamsClose},
+		{"SDKStreamsReadFromAnIndex", conformSDKStreamsReadFromAnIndex},
+		{"SDKStreamsLiveReadFromAnIndex", conformSDKStreamsLiveReadFromAnIndex},
+		{"SDKStreamsOrder", conformSDKStreamsOrder},
+		{"SDKStreamsBacklog", conformSDKStreamsBacklog},
+		{"SDKStreamsList", conformSDKStreamsList},
+		{"SDKStreamsListConcurrentFirstWrites", conformSDKStreamsListConcurrentFirstWrites},
+		{"SDKStreamsGetChunks", conformSDKStreamsGetChunks},
+		{"SDKStreamsGetInfo", conformSDKStreamsGetInfo},
+		{"SDKStreamsDropWritesAfterClose", conformSDKStreamsDropWritesAfterClose},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -101,6 +117,55 @@ func ConformanceShared(t *testing.T, newPair func(t *testing.T) (worlds.World, w
 		a, b := newPair(t)
 		conformSharedStreams(t, a, b)
 	})
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T, worlds.World, worlds.World)
+	}{
+		{"SDKSharedStreamsReadFromEveryInstance", conformSDKSharedStreamsReadFromEveryInstance},
+		{"SDKSharedStreamsCloseTwice", conformSDKSharedStreamsCloseTwice},
+		{"SDKSharedStreamsGroupsStayWhole", conformSDKSharedStreamsGroupsStayWhole},
+		{"SDKSharedStreamsCommitOrder", conformSDKSharedStreamsCommitOrder},
+		{"SDKSharedStreamsListNames", conformSDKSharedStreamsListNames},
+		{"SDKSharedStreamsAnotherInstanceWrites", conformSDKSharedStreamsAnotherInstanceWrites},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, b := newPair(t)
+			test.run(t, a, b)
+		})
+	}
+}
+
+// ConformanceDelivery runs the delivery contract: redeliveries, handoffs,
+// attempts, retries of failed deliveries, delays, deduplication while a
+// message lives, and one flow of a run at a time. newWorld returns a World
+// whose queue delivers each message it stores to executor, as the World
+// delivers them in production. Each subtest creates its own Worlds.
+func ConformanceDelivery(t *testing.T, newWorld func(t *testing.T, executor worlds.Executor) worlds.World) {
+	t.Helper()
+	tests := []struct {
+		name string
+		run  func(*testing.T, sdkOpen)
+	}{
+		{"SDKDeliveryRedelivers", conformSDKDeliveryRedelivers},
+		{"SDKDeliveryDedupesWhileRetrying", conformSDKDeliveryDedupesWhileRetrying},
+		{"SDKDeliveryUnkeyedWakes", conformSDKDeliveryUnkeyedWakes},
+		{"SDKDeliveryRetriesFailures", conformSDKDeliveryRetriesFailures},
+		{"SDKDeliveryHandoff", conformSDKDeliveryHandoff},
+		{"SDKDeliveryHonorsDelay", conformSDKDeliveryHonorsDelay},
+		{"SDKDeliveryWithoutDelay", conformSDKDeliveryWithoutDelay},
+		{"SDKDeliverySerializesFlows", conformSDKDeliverySerializesFlows},
+		{"SDKDeliveryRunsAndStepsInParallel", conformSDKDeliveryRunsAndStepsInParallel},
+		{"SDKDeliveryFreesTheRunDuringARedeliveryDelay", conformSDKDeliveryFreesTheRunDuringARedeliveryDelay},
+		{"SDKDeliveryKeepsTheFirstSchedule", conformSDKDeliveryKeepsTheFirstSchedule},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			test.run(t, func(execute func(context.Context, worlds.QueueInput) error) worlds.World {
+				return newWorld(t, sdkExecutor(execute))
+			})
+		})
+	}
 }
 
 // conformRunID returns a new run ID, a ULID minted now, as a World requires

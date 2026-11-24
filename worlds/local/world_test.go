@@ -26,6 +26,22 @@ func TestConformance(t *testing.T) {
 	})
 }
 
+func TestConformanceDelivery(t *testing.T) {
+	t.Parallel()
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		world, err := localworld.Open(localworld.Config{Dir: t.TempDir(), SkipRecovery: true}, executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := world.Prepare(context.Background()); err != nil {
+			_ = world.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = world.Close() })
+		return world
+	})
+}
+
 // TestConformanceShared runs the concurrency contract against two Worlds on
 // one data directory, as two processes would share it.
 func TestConformanceShared(t *testing.T) {
