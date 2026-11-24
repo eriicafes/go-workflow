@@ -269,7 +269,8 @@ turn executes the approved calls or reports the denied ones to the model as
 tools it names, in place of their `NeedsApproval`. A call they approve runs
 without asking the user, a call they deny reaches the model as
 `execution-denied` and the client as `tool-output-denied`, and a call that
-needs the user's approval ends the turn as above. The policy also runs when an
+needs the user's approval ends the turn as above. `ToolApprovalAlways(status)`
+decides every call of a tool with a fixed status. The policy also runs when an
 approved call resumes, so it can deny a call the user approved:
 
 ```go

@@ -12,13 +12,10 @@ import (
 	"github.com/eriicafes/go-workflow/workflowai"
 )
 
-func approve(context.Context, workflowai.ToolCall, workflowai.ToolApprovalOptions) (workflowai.ToolApprovalStatus, error) {
-	return workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalApproved}, nil
-}
-
-func deny(context.Context, workflowai.ToolCall, workflowai.ToolApprovalOptions) (workflowai.ToolApprovalStatus, error) {
-	return workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalDenied, Reason: "no weather today"}, nil
-}
+var (
+	approve = workflowai.ToolApprovalAlways(workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalApproved})
+	deny    = workflowai.ToolApprovalAlways(workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalDenied, Reason: "no weather today"})
+)
 
 // The approval policy runs approved calls without asking the user, even when
 // their tool needs approval, and reports denied calls to the model.

@@ -104,6 +104,18 @@ const (
 	ToolApprovalUserApproval ToolApprovalType = "user-approval"
 )
 
+// ToolApprovalAlways returns a ToolApprovalFunc that decides every call with
+// status, like a fixed per-tool value of the Workflow SDK's toolApproval:
+//
+//	ToolApprovals: map[string]workflowai.ToolApprovalFunc{
+//		"getWeather": workflowai.ToolApprovalAlways(workflowai.ToolApprovalStatus{Type: workflowai.ToolApprovalApproved}),
+//	},
+func ToolApprovalAlways(status ToolApprovalStatus) ToolApprovalFunc {
+	return func(context.Context, ToolCall, ToolApprovalOptions) (ToolApprovalStatus, error) {
+		return status, nil
+	}
+}
+
 // resolveApproval returns the approval status of a call, as the Workflow SDK
 // resolves it: the agent's ToolApproval decides when it is set, otherwise the
 // tool's entry in ToolApprovals, otherwise the tool's NeedsApproval.

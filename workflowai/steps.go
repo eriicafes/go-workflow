@@ -3,8 +3,10 @@ package workflowai
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 
+	"github.com/digitallysavvy/go-ai/pkg/ai"
+	"github.com/digitallysavvy/go-ai/pkg/provider/types"
 	"github.com/eriicafes/go-workflow"
 )
 
@@ -149,10 +151,19 @@ type defaultStepLimitWarning struct {
 }
 
 // logDefaultStepLimitWarning logs that Generate stopped at its default step
-// limit. It runs as a step so replays do not log the warning again.
+// limit, through go-ai's warning logger, as the Workflow SDK does. It runs as
+// a step so replays do not log the warning again.
 func logDefaultStepLimitWarning(ctx context.Context, input defaultStepLimitWarning) (struct{}, error) {
-	log.Printf("workflowai: warning (%s / %s): The tool loop stopped because it reached the default StopWhen condition, IsStepCount(%d). "+
-		"To allow more steps, set StopWhen to IsStepCount(...) with a higher limit or provide a custom stop condition.", input.Provider, input.ModelID, input.StepCount)
+	ai.LogWarnings(ai.LogWarningsOptions{
+		Provider: input.Provider,
+		Model:    input.ModelID,
+		Warnings: []types.Warning{{
+			Type: "other",
+			Message: fmt.Sprintf("The tool loop stopped because it reached the default stopWhen condition, isStepCount(%d). ", input.StepCount) +
+				"To allow more steps, set stopWhen to isStepCount(...) with a higher limit or provide a custom stop condition. " +
+				"Learn more: https://ai-sdk.dev/docs/agents/loop-control",
+		}},
+	})
 	return struct{}{}, nil
 }
 
