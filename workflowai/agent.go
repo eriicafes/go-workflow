@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -358,6 +359,7 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		toolsContext:        options.ToolsContext,
 		prepareStep:         options.PrepareStep,
 		messages:            slices.Clone(options.Messages),
+		pendingResults:      map[string]bool{},
 	}
 	if r.runtimeContext == nil {
 		r.runtimeContext = a.options.RuntimeContext
@@ -490,6 +492,9 @@ type run struct {
 	// the telemetry events the call reports when it ends.
 	trace  *agentTelemetry
 	events []telemetryEvent
+	// pendingResults are the provider calls whose deferred results have not
+	// arrived.
+	pendingResults map[string]bool
 }
 
 // prepare applies the agent's PrepareCall to the call's settings and
@@ -692,7 +697,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		if r.streaming {
 			call = doStreamStep
 		}
-		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform, trace: r.trace, operation: r.operation()})
+		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform, trace: r.trace, operation: r.operation(), providerTools: r.providerTools(activeTools)})
 		// The model call retries opening the model itself, so the step is not
 		// retried: a retry would repeat a model call whose stream failed
 		// partway.
@@ -749,6 +754,16 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		// provider reported results of the tools it executes.
 		toolExecutionAllowed := step.FinishReason == string(types.FinishReasonToolCalls) || step.FinishReason == string(types.FinishReasonStop)
 		providerResults := providerToolResults(response.Content)
+		// A provider tool with deferred results may deliver a call's result
+		// in a later model call, which the loop waits for.
+		for _, call := range step.ToolCalls {
+			if _, ok := providerResults[call.ToolCallID]; !ok && call.ProviderExecuted && r.defersResults(call.ToolName) {
+				r.pendingResults[call.ToolCallID] = true
+			}
+		}
+		for id := range providerResults {
+			delete(r.pendingResults, id)
+		}
 		processTools := (toolExecutionAllowed && (len(step.ToolCalls) > 0 || len(providerResults) > 0)) ||
 			(step.FinishReason == string(types.FinishReasonLength) && len(providerResults) > 0)
 		if !processTools {
@@ -766,6 +781,28 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				_, hasResult := providerResults[call.ToolCallID]
 				return !(call.Invalid && !call.ProviderExecuted) && !(call.ProviderExecuted && hasResult)
 			})
+		}
+
+		// A provider approval request also pauses the loop, since the
+		// provider waits for the user's response.
+		providerApprovals := map[string]bool{}
+		for _, part := range response.Content {
+			if part.Type == PartToolApprovalRequest && part.ProviderExecuted {
+				providerApprovals[part.ToolCallID] = true
+			}
+		}
+		// Like in the Workflow SDK, a provider call without a result, whose
+		// tool does not defer results, gets an empty one.
+		for _, call := range calls {
+			_, reported := providerResults[call.ToolCallID]
+			if !call.ProviderExecuted || call.Invalid || reported || providerApprovals[call.ToolCallID] || r.defersResults(call.ToolName) {
+				continue
+			}
+			log.Printf("[WorkflowAgent] Provider-executed tool %q (%s) did not receive a result from the stream. This may indicate a provider issue.", call.ToolName, call.ToolCallID)
+			part := ContentPart{Type: PartToolResult, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Output: &ToolResultOutput{Type: "text", Value: marshalRaw("")}, ProviderExecuted: true}
+			step.Content = append(slices.Clone(step.Content), part)
+			added[0].Content = append(slices.Clone(added[0].Content), part)
+			providerResults[call.ToolCallID] = providerResult{ToolResult: ToolResult{ToolCallID: call.ToolCallID, ToolName: call.ToolName, Output: marshalRaw("")}, order: len(response.Content)}
 		}
 
 		// Split the local calls into those to execute now and those that pause
@@ -811,14 +848,6 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			return r.result(nil, nil), err
 		}
 
-		// A provider approval request also pauses the loop, since the
-		// provider waits for the user's response.
-		providerApprovals := map[string]bool{}
-		for _, part := range response.Content {
-			if part.Type == PartToolApprovalRequest && part.ProviderExecuted {
-				providerApprovals[part.ToolCallID] = true
-			}
-		}
 		var deniedResults []deniedResult
 		for _, result := range denied {
 			deniedResults = append(deniedResults, deniedResult{ToolCallID: result.call.ToolCallID})
@@ -899,9 +928,10 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 		}
 		r.endStep(ctx, step)
-		// The loop continues only after local calls, and stop conditions are
-		// only checked when it could continue.
-		if !toolExecutionAllowed || !hasLocalCalls {
+		// The loop continues after local calls, or to wait for deferred
+		// provider results, and stop conditions are only checked when it
+		// could continue.
+		if !toolExecutionAllowed || (!hasLocalCalls && len(r.pendingResults) == 0) {
 			return r.result(step.ToolCalls, step.ToolResults), nil
 		}
 		if slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
@@ -944,11 +974,12 @@ func (r *run) providerResults(calls []ToolCall, reported map[string]providerResu
 	return out
 }
 
-// toolDefinitions returns the definitions of the active tools in name order.
+// toolDefinitions returns the definitions of the active tools other than
+// provider tools, in name order.
 func (r *run) toolDefinitions(activeTools []string) []toolDefinition {
 	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		if activeTools == nil || slices.Contains(activeTools, name) {
+	for name, tool := range r.tools {
+		if tool.Provider == nil && (activeTools == nil || slices.Contains(activeTools, name)) {
 			names = append(names, name)
 		}
 	}
@@ -958,6 +989,29 @@ func (r *run) toolDefinitions(activeTools []string) []toolDefinition {
 		definitions[i] = toolDefinition{Name: name, Description: r.tools[name].Description, InputSchema: r.tools[name].inputSchema()}
 	}
 	return definitions
+}
+
+// defersResults reports whether the tool named name is a provider tool that
+// may deliver results in a later model call.
+func (r *run) defersResults(name string) bool {
+	provider := r.tools[name].Provider
+	return provider != nil && provider.ProviderExecuted && provider.SupportsDeferredResults
+}
+
+// providerTools returns the active provider tools, in name order.
+func (r *run) providerTools(activeTools []string) []types.Tool {
+	var names []string
+	for name, tool := range r.tools {
+		if tool.Provider != nil && (activeTools == nil || slices.Contains(activeTools, name)) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	tools := make([]types.Tool, len(names))
+	for i, name := range names {
+		tools[i] = *r.tools[name].Provider
+	}
+	return tools
 }
 
 func (r *run) toolCallOptions(call ToolCall, messages []ModelMessage) ToolCallOptions {

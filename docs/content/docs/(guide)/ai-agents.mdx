@@ -301,10 +301,23 @@ tool's schema. A call that fails a check reaches the model as an error and
 writes nothing to the stream. Set the variable to at least 32 random bytes,
 the same in every process that runs the workflow.
 
-Tools the provider executes itself, such as Anthropic's web search, report
-their results in the model's stream, sometimes in a later step than their
-call. The agent keeps those results in the assistant message, streams them to
-the client, and sends them back to the provider in later model calls.
+Tools the provider executes itself, such as Anthropic's web search, go in
+`Tools` with `Provider` set to go-ai's tool, which the agent sends to the
+model as it is:
+
+```go
+Tools: workflowai.ToolSet{
+	"web_search": {Provider: &search}, // search := anthropictools.WebSearch20260209(...)
+},
+```
+
+They report their results in the model's stream, sometimes in a later step
+than their call. The agent keeps those results in the assistant message,
+streams them to the client, and sends them back to the provider in later
+model calls. When a provider tool has `SupportsDeferredResults`, the loop
+continues until its result arrives. A provider call that gets no result and
+whose tool does not defer results gets an empty result and logs a warning, as
+in `@ai-sdk/workflow`.
 
 A provider can also ask for approval of a tool it executes itself, such as an
 MCP tool. Its `tool-approval-request` reaches the client and ends the turn the

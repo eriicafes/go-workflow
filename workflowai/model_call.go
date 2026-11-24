@@ -104,6 +104,9 @@ type modelCall struct {
 	// trace is the call's telemetry, and operation its telemetry operation.
 	trace     *agentTelemetry
 	operation string
+	// providerTools are the active provider tools, sent to the model as they
+	// are.
+	providerTools []types.Tool
 }
 
 func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider.GenerateOptions, error) {
@@ -127,6 +130,7 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 	for _, tool := range input.Tools {
 		options.Tools = append(options.Tools, types.Tool{Name: tool.Name, Description: tool.Description, Parameters: tool.InputSchema})
 	}
+	options.Tools = append(options.Tools, m.providerTools...)
 	if input.ToolChoice != nil {
 		options.ToolChoice = *input.ToolChoice
 	} else if len(options.Tools) > 0 {

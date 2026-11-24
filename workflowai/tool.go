@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/digitallysavvy/go-ai/pkg/ai"
+	"github.com/digitallysavvy/go-ai/pkg/provider/types"
 	"github.com/eriicafes/go-workflow"
 )
 
@@ -43,6 +44,12 @@ type Tool struct {
 	// to it ends the stream, and the client sends the result in the next
 	// Stream's messages.
 	Execute Executor
+	// Provider is a tool the model's provider executes, such as Anthropic's
+	// web search, which the agent sends to the model as it is. Its results
+	// arrive in the model's stream. A provider tool with
+	// SupportsDeferredResults may deliver a result in a later model call, and
+	// the loop continues until it does. A provider tool needs no other field.
+	Provider *types.Tool
 }
 
 // inputSchema returns the tool's input schema.
