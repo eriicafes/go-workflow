@@ -30,8 +30,9 @@ type queueRecord struct {
 	expiresAt *time.Time
 }
 
-// Queue returns an error for a delivery due more than 15 minutes ahead, or
-// delayed at all on a FIFO queue, unless Config.Scheduler is set. It routes the
+// Queue sends a delivery due more than 15 minutes ahead through
+// Config.Scheduler when it is set, and otherwise sends it again on each early
+// arrival until it is due. It routes the
 // delivery to the queue Config.Routes names for its workflow. A delivery with
 // an IdempotencyKey is stored once while its message lives, for
 // worlds.MinDeduplicationWindow from its first send: a repeat returns the
@@ -54,9 +55,8 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 	}
 	publishDelay := delay
 	if w.scheduler == nil {
-		// Without Scheduler the queue is a standard one, as New requires: a
-		// delivery due later than SQS's longest delay arrives after it, early,
-		// and deliver sends it again for the rest.
+		// Without Scheduler a delivery due later than SQS's longest delay
+		// arrives after it, early, and deliver sends it again for the rest.
 		publishDelay = min(delay, maxSQSDelay)
 	}
 	id := ulid.Make().String()
@@ -75,7 +75,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 		expiresAt := now.Add(max(delay, 0) + input.Retention)
 		setTime(item, "expiresAt", &expiresAt)
 	}
-	if scheduled(queue, publishDelay) {
+	if scheduled(publishDelay) {
 		item["schedule"] = avs(scheduleName(id))
 	}
 	if queue.name != "" {
@@ -104,7 +104,7 @@ func (w *World) Queue(ctx context.Context, input worlds.QueueInput) (worlds.Queu
 			return worlds.QueueResult{}, err
 		}
 	}
-	if err := w.publish(ctx, queue, id, input, publishDelay, scheduleName(id), true); err != nil {
+	if err := w.publish(ctx, queue, id, input, publishDelay, scheduleName(id)); err != nil {
 		cleanup := w.deleteQueueRecord(context.WithoutCancel(ctx), id)
 		if input.IdempotencyKey != "" {
 			cleanup = errors.Join(cleanup, w.releaseKey(context.WithoutCancel(ctx), input.RunID, input.IdempotencyKey, id))

@@ -545,9 +545,6 @@ func TestNewValidatesQueues(t *testing.T) {
 	tests := map[string]Config{
 		"unknown route queue": {Routes: worlds.Routes(worlds.Route[routedWorkflow]("missing"))},
 		"queue without URL":   {Queues: map[string]QueueConfig{"backfill": {ARN: backfillARN}}},
-		"FIFO without Scheduler": {
-			Queues: map[string]QueueConfig{"ordered": {URL: orderedURL, ARN: orderedARN, FIFO: true}},
-		},
 		"queue without ARN under Scheduler": {
 			Queues:    map[string]QueueConfig{"backfill": {URL: backfillURL}},
 			Scheduler: scheduler,

@@ -82,9 +82,8 @@ variable "api_role_name" {
 }
 
 variable "queues" {
-  description = "Further queues, by name, that awsworld.Config.Routes routes workflows to. Each gets a dead-letter queue and, with worker_function_name, its own event source mapping. Unset settings use the task queue's. A FIFO queue gets the .fifo suffix and content-based deduplication, and needs the Scheduler."
+  description = "Further queues, by name, that awsworld.Config.Routes routes workflows to. Each gets a dead-letter queue and, with worker_function_name, its own event source mapping. Unset settings use the task queue's."
   type = map(object({
-    fifo                       = optional(bool, false)
     batch_size                 = optional(number, 10)
     maximum_concurrency        = optional(number)
     visibility_timeout_seconds = optional(number)
