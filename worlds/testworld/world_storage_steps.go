@@ -38,5 +38,5 @@ func (w *World) StepsList(ctx context.Context, input worlds.StepsListInput) (wor
 	if input.Pagination.SortOrder == worlds.SortOrderDescending {
 		slices.Reverse(values)
 	}
-	return page(values, input.Pagination), nil
+	return keysetPage(values, input.Pagination, func(step worlds.Step) string { return entityKey(step.CreatedAt, string(step.StepID)) }), nil
 }

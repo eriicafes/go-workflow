@@ -571,11 +571,16 @@ func (m *World) expireTokenLocked(token string, now time.Time) {
 	if id == "" {
 		return
 	}
-	hook := m.hooks[id]
-	if m.runs[hook.RunID].Status.Terminal() && hook.TokenRetentionUntil != nil && !hook.TokenRetentionUntil.After(now) {
+	if m.lapsedLocked(m.hooks[id], now) {
 		delete(m.tokens, token)
 		delete(m.hooks, id)
 	}
+}
+
+// lapsedLocked reports whether hook outlived its run only for its token's
+// retention, which has passed at now, so it is no longer read.
+func (m *World) lapsedLocked(hook worlds.Hook, now time.Time) bool {
+	return m.runs[hook.RunID].Status.Terminal() && hook.TokenRetentionUntil != nil && !hook.TokenRetentionUntil.After(now)
 }
 
 func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {

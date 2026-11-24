@@ -13,7 +13,7 @@ func (w *World) HooksGet(ctx context.Context, input worlds.HooksGetInput) (world
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	value, ok := w.hooks[input.HookID]
-	if !ok {
+	if !ok || w.lapsedLocked(value, time.Now()) {
 		return worlds.Hook{}, &worlds.HookNotFoundError{Token: string(input.HookID)}
 	}
 	return w.hookPayloadLocked(cloneHook(value), input.ResolveData), nil
@@ -39,8 +39,9 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	values := make([]worlds.Hook, 0, len(w.hooks))
+	now := time.Now()
 	for _, hook := range w.hooks {
-		if input.RunID != "" && hook.RunID != input.RunID {
+		if input.RunID != "" && hook.RunID != input.RunID || w.lapsedLocked(hook, now) {
 			continue
 		}
 		values = append(values, w.hookPayloadLocked(cloneHook(hook), input.ResolveData))
@@ -54,5 +55,5 @@ func (w *World) HooksList(ctx context.Context, input worlds.HooksListInput) (wor
 	if input.Pagination.SortOrder == worlds.SortOrderDescending {
 		slices.Reverse(values)
 	}
-	return page(values, input.Pagination), nil
+	return keysetPage(values, input.Pagination, func(hook worlds.Hook) string { return entityKey(hook.CreatedAt, string(hook.HookID)) }), nil
 }
