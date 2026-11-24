@@ -25,31 +25,26 @@ import (
 // Vercel Queues leases one for.
 const vercelLease = 5 * time.Minute
 
-// openVercel returns the Vercel World on Vercel's workflow backend, reached
-// with WORKFLOW_VERCEL_LIVE_TOKEN, a Vercel access token, or
-// WORKFLOW_VERCEL_LIVE_OIDC_TOKEN, a deployment's OIDC token, for the project
-// VERCEL_PROJECT_ID of the team VERCEL_TEAM_ID. WORKFLOW_VERCEL_LIVE_BACKEND_URL
-// overrides the backend URL. Vercel Queues, which push deliveries to a
-// deployment, are played by a local queue that pushes them to the World's
-// queue handler.
+// openVercel returns the Vercel World on Vercel's workflow backend, from the
+// variables the Workflow SDK's tests use: WORKFLOW_VERCEL_AUTH_TOKEN, a Vercel
+// access token, and WORKFLOW_VERCEL_PROJECT and WORKFLOW_VERCEL_TEAM, the
+// project and team to use. The World reads WORKFLOW_VERCEL_BACKEND_URL itself.
+// Vercel Queues, which push deliveries to a deployment, are played by a local
+// queue that pushes them to the World's queue handler.
 func openVercel(ctx context.Context, baseURL string, executor worlds.Executor) (worlds.World, func(), error) {
-	token, oidc := os.Getenv("WORKFLOW_VERCEL_LIVE_TOKEN"), os.Getenv("WORKFLOW_VERCEL_LIVE_OIDC_TOKEN")
-	if token == "" && oidc == "" {
-		return nil, nil, errors.New("harness: set WORKFLOW_VERCEL_LIVE_TOKEN or WORKFLOW_VERCEL_LIVE_OIDC_TOKEN for the Vercel World")
+	token := os.Getenv("WORKFLOW_VERCEL_AUTH_TOKEN")
+	if token == "" {
+		return nil, nil, errors.New("harness: set WORKFLOW_VERCEL_AUTH_TOKEN for the Vercel World")
 	}
 	queue := &localQueue{}
 	server := httptest.NewServer(queue)
 	config := vercelworld.Config{
-		BaseURL:    baseURL,
-		QueueURL:   server.URL + "/api/v3",
-		Topic:      "workflow",
-		Token:      token,
-		ProjectID:  os.Getenv("VERCEL_PROJECT_ID"),
-		TeamID:     os.Getenv("VERCEL_TEAM_ID"),
-		BackendURL: os.Getenv("WORKFLOW_VERCEL_LIVE_BACKEND_URL"),
-	}
-	if oidc != "" {
-		config.OIDCToken = func(context.Context) (string, error) { return oidc, nil }
+		BaseURL:   baseURL,
+		QueueURL:  server.URL + "/api/v3",
+		Topic:     "workflow",
+		Token:     token,
+		ProjectID: os.Getenv("WORKFLOW_VERCEL_PROJECT"),
+		TeamID:    os.Getenv("WORKFLOW_VERCEL_TEAM"),
 	}
 	world, err := vercelworld.New(config)
 	if err != nil {

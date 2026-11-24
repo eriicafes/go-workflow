@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"reflect"
 	"strconv"
 	"sync/atomic"
@@ -183,19 +182,7 @@ func contractBackend(t *testing.T, live bool) *World {
 		all, _, _ := newWorlds(t, 1)
 		return all[0]
 	}
-	oidc, token := os.Getenv("WORKFLOW_VERCEL_LIVE_OIDC_TOKEN"), os.Getenv("WORKFLOW_VERCEL_LIVE_TOKEN")
-	if oidc == "" && token == "" {
-		t.Skip("set WORKFLOW_VERCEL_LIVE_OIDC_TOKEN or WORKFLOW_VERCEL_LIVE_TOKEN to run against Vercel")
-	}
-	world, err := New(Config{
-		BaseURL:    "http://localhost/v1/workflow",
-		Topic:      "workflow",
-		OIDCToken:  staticOIDCToken(oidc),
-		Token:      token,
-		ProjectID:  os.Getenv("VERCEL_PROJECT_ID"),
-		TeamID:     os.Getenv("VERCEL_TEAM_ID"),
-		BackendURL: os.Getenv("WORKFLOW_VERCEL_LIVE_BACKEND_URL"),
-	})
+	world, err := New(liveConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

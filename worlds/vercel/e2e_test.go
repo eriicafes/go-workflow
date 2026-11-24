@@ -79,29 +79,15 @@ func TestWorkflowsRunEndToEndEncrypted(t *testing.T) {
 }
 
 // TestWorkflowsRunEndToEndLive runs the same workflows against Vercel's
-// workflow backend, with Vercel Queues played locally. It needs either
-// WORKFLOW_VERCEL_LIVE_OIDC_TOKEN, a deployment's OIDC token, or
-// WORKFLOW_VERCEL_LIVE_TOKEN, a Vercel access token, with VERCEL_PROJECT_ID
-// and VERCEL_TEAM_ID for the project to use. WORKFLOW_VERCEL_LIVE_BACKEND_URL
-// overrides the backend URL.
+// workflow backend, with Vercel Queues played locally. It needs the
+// variables liveConfig reads.
 func TestWorkflowsRunEndToEndLive(t *testing.T) {
-	oidc, token := os.Getenv("WORKFLOW_VERCEL_LIVE_OIDC_TOKEN"), os.Getenv("WORKFLOW_VERCEL_LIVE_TOKEN")
-	if oidc == "" && token == "" {
-		t.Skip("set WORKFLOW_VERCEL_LIVE_OIDC_TOKEN or WORKFLOW_VERCEL_LIVE_TOKEN to run against Vercel")
-	}
 	queue := &fakeVQS{}
 	server := httptest.NewServer(queue)
 	t.Cleanup(server.Close)
-	world, err := New(Config{
-		BaseURL:    "http://localhost/v1/workflow",
-		QueueURL:   server.URL + "/api/v3",
-		Topic:      "workflow",
-		OIDCToken:  staticOIDCToken(oidc),
-		Token:      token,
-		ProjectID:  os.Getenv("VERCEL_PROJECT_ID"),
-		TeamID:     os.Getenv("VERCEL_TEAM_ID"),
-		BackendURL: os.Getenv("WORKFLOW_VERCEL_LIVE_BACKEND_URL"),
-	})
+	config := liveConfig(t)
+	config.QueueURL = server.URL + "/api/v3"
+	world, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,5 +258,26 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 		if err := json.Unmarshal(event.Data, &data); err != nil || data.ResumeAt.IsZero() {
 			t.Fatalf("wait as the backend keeps it = %s err=%v", event.Data, err)
 		}
+	}
+}
+
+// liveConfig returns the configuration of a World on Vercel's workflow
+// backend, from the variables the Workflow SDK's tests use:
+// WORKFLOW_VERCEL_AUTH_TOKEN, a Vercel access token, and WORKFLOW_VERCEL_PROJECT
+// and WORKFLOW_VERCEL_TEAM, the project and team to use. The World reads
+// WORKFLOW_VERCEL_BACKEND_URL itself, which overrides the backend URL. It
+// skips the test without a token.
+func liveConfig(t *testing.T) Config {
+	t.Helper()
+	token := os.Getenv("WORKFLOW_VERCEL_AUTH_TOKEN")
+	if token == "" {
+		t.Skip("set WORKFLOW_VERCEL_AUTH_TOKEN to run against Vercel")
+	}
+	return Config{
+		BaseURL:   "http://localhost/v1/workflow",
+		Topic:     "workflow",
+		Token:     token,
+		ProjectID: os.Getenv("WORKFLOW_VERCEL_PROJECT"),
+		TeamID:    os.Getenv("WORKFLOW_VERCEL_TEAM"),
 	}
 }

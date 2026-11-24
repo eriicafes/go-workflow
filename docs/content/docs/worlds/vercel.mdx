@@ -426,8 +426,8 @@ go test -race ./worlds/vercel/...
 
 The tests run the conformance suites and end-to-end workflows against an
 in-process imitation of the workflow API, which keeps an event only as the
-backend does. Set `WORKFLOW_VERCEL_LIVE_OIDC_TOKEN` (a deployment's OIDC
-token), or `WORKFLOW_VERCEL_LIVE_TOKEN` with `VERCEL_PROJECT_ID` and
-`VERCEL_TEAM_ID`, to also run the end-to-end workflows against Vercel's
-storage, the backend contract tests against its `/v5` routes, and the
-backend assumptions.
+backend does. Set `WORKFLOW_VERCEL_AUTH_TOKEN`, a Vercel access token, with
+`WORKFLOW_VERCEL_PROJECT` and `WORKFLOW_VERCEL_TEAM`, the variables the
+Workflow SDK's tests use, to also run the end-to-end workflows against
+Vercel's storage, the backend contract tests against its `/v5` routes, and
+the backend assumptions.
