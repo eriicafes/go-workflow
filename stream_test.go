@@ -79,6 +79,43 @@ func TestRunStreamsReadFromAChunkIndex(t *testing.T) {
 	}
 }
 
+func TestWriteValueWritesAValueChunk(t *testing.T) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
+		return streamOutput{Value: input.Value}, nil
+	})))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, streamInput{Value: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := run.Writer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []any{map[string]string{"foo": "bar"}, "text", []byte("bytes")} {
+		if err := writer.WriteValue(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.CloseStream(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := run.Reader(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`{"foo":"bar"}`, "text", "bytes"} {
+		if chunk, err := reader.Next(); err != nil || string(chunk.Data) != want {
+			t.Fatalf("chunk = %q, %v, want %q", chunk.Data, err, want)
+		}
+	}
+	if _, err := reader.Next(); err != io.EOF {
+		t.Fatalf("Next after the last chunk = %v, want io.EOF", err)
+	}
+}
+
 func TestNamedStreamReadsLastChunksAndClosedWritersRejectWrites(t *testing.T) {
 	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input streamInput) (streamOutput, error) {
 		return streamOutput{Value: input.Value}, nil

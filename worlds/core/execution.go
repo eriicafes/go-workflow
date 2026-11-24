@@ -1272,10 +1272,10 @@ func (e *Execution) runFailedData(err error) []byte {
 	return data
 }
 
-// StreamFrame returns chunk as a frame of the run's stream, encrypted when
-// the run's payloads are.
-func (e *Execution) StreamFrame(chunk []byte) ([]byte, error) {
-	return worlds.EncodeStreamFrame(chunk, e.keys, nil)
+// StreamFrame returns value as a frame of the run's stream, encrypted when
+// the run's payloads are. A chunk of bytes is a []byte.
+func (e *Execution) StreamFrame(value any) ([]byte, error) {
+	return worlds.EncodeStreamFrame(value, e.keys, nil)
 }
 
 // WriteWebhookResponse writes response as the response to request, a manual
