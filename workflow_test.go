@@ -685,7 +685,15 @@ func (optionsChildInput) Workflow(string)        {}
 func (optionsParentInput) Workflow(worlds.RunID) {}
 
 func TestStartOptions(t *testing.T) {
-	child := func(_ context.Context, input optionsChildInput) (string, error) { return input.Data, nil }
+	// The run with data waits for release, since a RetainNone run's input is
+	// deleted when it completes.
+	release := make(chan struct{})
+	child := func(_ context.Context, input optionsChildInput) (string, error) {
+		if input.Data != "" {
+			<-release
+		}
+		return input.Data, nil
+	}
 	parent := func(ctx context.Context, _ optionsParentInput) (worlds.RunID, error) {
 		run, err := workflow.Start(ctx, optionsChildInput{}, workflow.StartOptions{Attributes: map[string]string{"tier": "child"}, Retention: workflow.RetainNone})
 		if err != nil {
@@ -695,6 +703,9 @@ func TestStartOptions(t *testing.T) {
 	}
 	world := testworld.New(worlds.Runners(workflow.Use(child), workflow.Use(parent)))
 	defer world.Close()
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
+	defer unblock()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
 
@@ -720,6 +731,7 @@ func TestStartOptions(t *testing.T) {
 	if label := envelope.Peek(created.Input); label != envelope.PrefixDevalue {
 		t.Fatalf("uncompressed input label = %q", label)
 	}
+	unblock()
 	_, err = run.Value(ctx)
 	if _, ok := errors.AsType[*workflow.RunExpiredError](err); !ok {
 		t.Fatalf("RetainNone run error = %v", err)
