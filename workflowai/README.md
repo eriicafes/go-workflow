@@ -263,9 +263,10 @@ Every client feature of `@ai-sdk/workflow` works against a Go server:
 | Tool approvals with `addToolApprovalResponse` | `tool-approval-request` chunks, and approval responses resumed from the next turn's messages |
 | Signed approvals | `WorkflowAgentOptions.ToolApprovalSecret`, verified before an approved call executes |
 | Denied approvals | `tool-output-denied` chunks and an `execution-denied` result for the model |
+| Approval policy (`toolApproval`) | `ToolApproval` and `ToolApprovals`, which approve or deny calls in code |
 | Client-side tools with `addToolOutput` | A tool without `Execute` ends the turn, and its output arrives in the next turn's messages |
 | Discarding output of an interrupted model call | A `reset-step` chunk before every model call execution |
-| Stream errors | An `error` chunk, and `Result.Error` on the server |
+| Stream errors | An `error` chunk for an error in the model's stream, and `Result.Error` on the server |
 
 [`examples/durable-agent`](../examples/durable-agent) is a complete chat app
 built this way, with a React client that resumes its run after a reload.

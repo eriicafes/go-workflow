@@ -46,7 +46,7 @@ inside the bubble so its workers and timers use the fake clock:
 ```go
 func TestGreeting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(Greeting))
+		world := testworld.New(worlds.Runners(workflow.Use(Greeting)))
 		defer world.Close()
 
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))

@@ -43,7 +43,9 @@ go-workflow's.
 
 Set `AI_GATEWAY_API_KEY` to use the AI Gateway, or `ANTHROPIC_API_KEY` to use
 the Anthropic API. `MODEL` picks the model, and `TOOL_APPROVAL_SECRET` signs
-approvals.
+approvals. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export the agent's traces over
+OTLP: each chat turn reports its root, step, and tool spans when it ends, and
+the chat span of each model call as it happens.
 
 ```sh
 export ANTHROPIC_API_KEY=...

@@ -20,12 +20,22 @@ const (
 
 // Content part types.
 const (
-	PartText                 = "text"
-	PartReasoning            = "reasoning"
-	PartFile                 = "file"
-	PartToolCall             = "tool-call"
-	PartToolResult           = "tool-result"
-	PartToolApprovalRequest  = "tool-approval-request"
+	PartText       = "text"
+	PartReasoning  = "reasoning"
+	PartFile       = "file"
+	PartToolCall   = "tool-call"
+	PartToolResult = "tool-result"
+	// PartToolError is the failed result of a tool call in a step's
+	// content. Messages carry a failed result as a tool-result part with an
+	// error output.
+	PartToolError           = "tool-error"
+	PartToolApprovalRequest = "tool-approval-request"
+	// PartSource is a source the model cited. Steps keep sources in their
+	// content; messages do not carry them.
+	PartSource = "source"
+	// PartCustom is provider-specific content, such as a compaction, which
+	// messages carry back to the provider.
+	PartCustom               = "custom"
 	PartToolApprovalResponse = "tool-approval-response"
 )
 
@@ -56,18 +66,29 @@ type ContentPart struct {
 	MediaType string `json:"mediaType,omitempty"`
 	Filename  string `json:"filename,omitempty"`
 
-	ToolCallID       string            `json:"toolCallId,omitempty"`
-	ToolName         string            `json:"toolName,omitempty"`
-	Input            json.RawMessage   `json:"input,omitempty"`
-	Output           *ToolResultOutput `json:"output,omitempty"`
-	ProviderExecuted bool              `json:"providerExecuted,omitempty"`
-	ThoughtSignature string            `json:"thoughtSignature,omitempty"`
+	ToolCallID string            `json:"toolCallId,omitempty"`
+	ToolName   string            `json:"toolName,omitempty"`
+	Input      json.RawMessage   `json:"input,omitempty"`
+	Output     *ToolResultOutput `json:"output,omitempty"`
+	// Kind names the kind of a custom part.
+	Kind string `json:"kind,omitempty"`
+	// SourceType, SourceID, URL and Title describe a source part.
+	SourceType string `json:"sourceType,omitempty"`
+	SourceID   string `json:"id,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Title      string `json:"title,omitempty"`
+	// Error is the message of a tool-error part.
+	Error            string `json:"error,omitempty"`
+	ProviderExecuted bool   `json:"providerExecuted,omitempty"`
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 
 	// ApprovalID identifies tool-approval-request and tool-approval-response
-	// parts. Approved and Reason are set on responses.
+	// parts. Approved and Reason are set on responses. Automatic marks the
+	// request of a call the approval policy decided without the user.
 	ApprovalID string `json:"approvalId,omitempty"`
 	Approved   bool   `json:"approved,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	Automatic  bool   `json:"isAutomatic,omitempty"`
 
 	ProviderOptions  map[string]any  `json:"providerOptions,omitempty"`
 	ProviderMetadata json.RawMessage `json:"providerMetadata,omitempty"`
@@ -184,6 +205,10 @@ func fromContentPart(content types.ContentPart) (ContentPart, bool) {
 			part.Output = jsonOutput(c.Result)
 		}
 		return part, true
+	case types.CustomContent:
+		return ContentPart{Type: PartCustom, Kind: c.Kind, ProviderOptions: c.ProviderOptions, ProviderMetadata: c.ProviderMetadata}, true
+	case types.SourceContent:
+		return ContentPart{Type: PartSource, SourceType: c.SourceType, SourceID: c.ID, URL: c.URL, Title: c.Title, MediaType: c.MediaType, Filename: c.Filename}, true
 	case types.ToolApprovalRequestContent:
 		toolCallID := c.ToolCallID
 		if toolCallID == "" {
@@ -260,6 +285,8 @@ func toContentPart(part ContentPart) (types.ContentPart, bool) {
 			result.Output = output
 		}
 		return result, true
+	case PartCustom:
+		return types.CustomContent{Kind: part.Kind, ProviderOptions: part.ProviderOptions, ProviderMetadata: part.ProviderMetadata}, true
 	case PartToolApprovalRequest:
 		return types.ToolApprovalRequestContent{ApprovalID: part.ApprovalID, ToolCallID: part.ToolCallID, Signature: part.Signature}, true
 	case PartToolApprovalResponse:

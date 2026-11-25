@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"github.com/eriicafes/go-workflow/worlds"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,7 +22,7 @@ type metadataOutput struct {
 func (metadataInput) Workflow(metadataOutput) {}
 
 func TestMiddlewareAddsClientToRequestContext(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	handler := workflow.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if _, err := workflow.Start(request.Context(), metadataInput{}); err != nil {
@@ -39,7 +40,7 @@ func TestMiddlewareAddsClientToRequestContext(t *testing.T) {
 }
 
 func TestWorkflowAndStepMetadataAreAvailableDuringExecution(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ metadataInput) (metadataOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ metadataInput) (metadataOutput, error) {
 		value, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (metadataOutput, error) {
 			return metadataOutput{Step: workflow.GetStepMetadata(ctx), StepID: workflow.StepID(ctx)}, nil
 		}, struct{}{})
@@ -48,7 +49,7 @@ func TestWorkflowAndStepMetadataAreAvailableDuringExecution(t *testing.T) {
 		}
 		value.Workflow = workflow.GetWorkflowMetadata(ctx)
 		return value, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()

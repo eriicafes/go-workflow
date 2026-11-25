@@ -2,8 +2,10 @@ package workflowai_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eriicafes/go-workflow/worlds"
 	"io"
 	"slices"
 	"strings"
@@ -249,7 +251,15 @@ func user(content string) workflowai.ModelMessage {
 // chat runs one turn and returns its result and the UI chunks of its stream.
 func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []ai.UIMessageChunk, error) {
 	t.Helper()
-	world := testworld.New(workflow.Use(ChatRunner))
+	result, chunks, _, err := chatWithSteps(t, messages)
+	return result, chunks, err
+}
+
+// chatWithSteps runs one turn and returns its result, the UI chunks of its
+// stream, and the names of the steps it ran.
+func chatWithSteps(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []ai.UIMessageChunk, []string, error) {
+	t.Helper()
+	world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
 	defer world.Close()
 	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, Chat{Messages: messages})
@@ -265,7 +275,52 @@ func chat(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, 
 		chunks = append(chunks, chunk)
 	}
 	result, err := run.Value(ctx)
-	return result, chunks, err
+	return result, chunks, stepNames(t, world, run.ID()), err
+}
+
+// stepNames returns the names of run runID's steps in the order the run
+// created them, without their package path.
+func stepNames(t *testing.T, world worlds.World, runID string) []string {
+	t.Helper()
+	var names []string
+	seen := map[string]bool{}
+	var cursor worlds.Pagination
+	for {
+		page, err := world.EventsList(t.Context(), worlds.EventsListInput{RunID: worlds.RunID(runID), Pagination: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range page.Data {
+			if event.EventType != worlds.EventTypeStepCreated && event.EventType != worlds.EventTypeStepStarted || seen[event.CorrelationID] {
+				continue
+			}
+			var data struct{ StepName string }
+			if err := json.Unmarshal(event.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			seen[event.CorrelationID] = true
+			names = append(names, data.StepName[strings.LastIndex(data.StepName, "//")+2:])
+		}
+		if !page.HasMore {
+			return names
+		}
+		cursor = worlds.Pagination{Cursor: page.Cursor}
+	}
+}
+
+// chatSteps runs one turn without reading its stream and returns its result
+// and the names of the steps it ran.
+func chatSteps(t *testing.T, messages []workflowai.ModelMessage) (workflowai.Result, []string, error) {
+	t.Helper()
+	world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
+	defer world.Close()
+	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
+	run, err := workflow.Start(ctx, Chat{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := run.Value(ctx)
+	return result, stepNames(t, world, run.ID()), err
 }
 
 func chunkTypes(chunks []ai.UIMessageChunk) []string {
@@ -368,8 +423,10 @@ func TestStreamFailureEndsStream(t *testing.T) {
 		if len(testModel.calls) != 1 {
 			t.Fatalf("model called %d times", len(testModel.calls))
 		}
+		// The stream ends with a finish part and no error part, as in the
+		// Workflow SDK.
 		types := chunkTypes(chunks)
-		if !slices.Contains(types, "error") || types[len(types)-1] != "finish" {
+		if slices.Contains(types, "error") || types[len(types)-1] != "finish" {
 			t.Fatalf("chunks = %v", types)
 		}
 	})
@@ -432,13 +489,14 @@ func TestStreamRejectsNegativeToolCallConcurrency(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(text("unused"))
 		testOptions.ToolCallConcurrency = -1
-		_, chunks, err := chat(t, []workflowai.ModelMessage{user("hi")})
+		// The call fails before it starts, and like in the Workflow SDK it
+		// leaves the stream untouched.
+		_, steps, err := chatSteps(t, []workflowai.ModelMessage{user("hi")})
 		if err == nil {
 			t.Fatal("expected an error")
 		}
-		// The stream reports the error and closes, so readers do not wait.
-		if !slices.Contains(chunkTypes(chunks), "error") || len(testModel.calls) != 0 {
-			t.Fatalf("chunks = %v after %d model calls", chunkTypes(chunks), len(testModel.calls))
+		if len(steps) != 0 || len(testModel.calls) != 0 {
+			t.Fatalf("steps = %v after %d model calls", steps, len(testModel.calls))
 		}
 	})
 }
@@ -503,7 +561,7 @@ func TestStreamTimeoutAbortsModelCall(t *testing.T) {
 			defer mu.Unlock()
 			abortedSteps = len(event.Steps)
 		}
-		testOptions.OnEnd = func(context.Context, workflowai.Result) {
+		testOptions.OnEnd = func(context.Context, workflowai.EndEvent) {
 			mu.Lock()
 			defer mu.Unlock()
 			ends++
@@ -514,9 +572,11 @@ func TestStreamTimeoutAbortsModelCall(t *testing.T) {
 			errs++
 		}
 		start := time.Now()
-		_, chunks, err := chat(t, []workflowai.ModelMessage{user("weather in Lagos?")})
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("err = %v", err)
+		// Like the Workflow SDK's stream, the aborted Stream resolves with
+		// the steps that finished.
+		result, chunks, err := chat(t, []workflowai.ModelMessage{user("weather in Lagos?")})
+		if err != nil || len(result.Steps) != 1 {
+			t.Fatalf("err = %v, %d steps", err, len(result.Steps))
 		}
 		if elapsed := time.Since(start); elapsed != 30*time.Second {
 			t.Fatalf("aborted after %v", elapsed)
@@ -574,7 +634,7 @@ func TestStreamRejectsInvalidSystemMessages(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				setup(text("Hi!"))
 				tt.prepare()
-				_, _, err := chat(t, tt.messages)
+				_, _, err := chatSteps(t, tt.messages)
 				if (err != nil) != tt.wantErr {
 					t.Fatalf("err = %v, want error %v", err, tt.wantErr)
 				}
@@ -589,7 +649,7 @@ func TestStreamRejectsInvalidSystemMessages(t *testing.T) {
 func TestGenerate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("21 degrees."))
-		world := testworld.New(workflow.Use(GenerateRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})
@@ -618,4 +678,177 @@ func GenerateRunner(ctx context.Context, input Generate) (workflowai.Result, err
 	callOptions := testCallOptions
 	callOptions.Prompt = input.Prompt
 	return workflowai.NewWorkflowAgent(options).Generate(ctx, callOptions)
+}
+
+// Generate stops at its default step limit and logs a warning in a step, so
+// replays do not log it again.
+func TestGenerateDefaultStepLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		responses := make([]func() ([]provider.StreamChunk, error), 21)
+		for i := range responses {
+			responses[i] = toolCalls(call(fmt.Sprintf("c%d", i), "getWeather", `{"city":"Lagos"}`))
+		}
+		setup(responses...)
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
+		defer world.Close()
+		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
+		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := run.Value(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps := stepNames(t, world, run.ID())
+		if len(result.Steps) != 20 || len(steps) != 41 || steps[len(steps)-1] != "logDefaultStepLimitWarning" {
+			t.Fatalf("%d agent steps, steps = %v", len(result.Steps), steps)
+		}
+	})
+}
+
+// A call resumes the approvals in its messages before OnStart, as the
+// Workflow SDK does, so OnStart sees the conversation with their results.
+func TestStreamResumesApprovalsBeforeStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked."))
+		approvalTurn(t)
+		var started []workflowai.ModelMessage
+		testOptions.Callbacks.OnStart = func(_ context.Context, event workflowai.StartEvent) { started = event.Messages }
+		_, _, steps, err := chatWithSteps(t, respond(t, "", true, `{"flightId":"LH123"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"bookFlight", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"}; !slices.Equal(steps, want) {
+			t.Fatalf("steps = %v, want %v", steps, want)
+		}
+		if len(started) == 0 || started[len(started)-1].Role != workflowai.RoleTool {
+			t.Fatalf("OnStart messages = %+v", started)
+		}
+	})
+}
+
+// A call runs the Workflow SDK's WorkflowAgent steps, in the SDK's order.
+func TestStreamStepOrder(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	signed := func(t *testing.T) {
+		t.Setenv("TOOL_APPROVAL_SECRET", secret)
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
+	}
+	// signature runs the approval turn and returns its request's signature.
+	signature := func(t *testing.T) string {
+		first := approvalTurn(t)
+		return first.Messages[len(first.Messages)-1].Content[1].Signature
+	}
+	tests := []struct {
+		name string
+		run  func(t *testing.T) []workflowai.ModelMessage
+		want []string
+	}{
+		{
+			name: "text",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(text("Hi!"))
+				return []workflowai.ModelMessage{user("hi")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "tool calls",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("21 degrees."))
+				return []workflowai.ModelMessage{user("weather in Lagos?")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "getWeather", "writeToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "signed approval request",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`), call("c2", "bookFlight", `{"flightId":"LH123"}`), call("c3", "getLocation", `{}`)))
+				signed(t)
+				return []workflowai.ModelMessage{user("weather and book LH123")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "getWeather", "signWorkflowToolApproval", "writeToolResults", "writeApprovalRequests", "closeStream"},
+		},
+		{
+			name: "client tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "getLocation", `{}`)))
+				return []workflowai.ModelMessage{user("where am I?")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "signed approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked."))
+				signed(t)
+				return respond(t, signature(t), true, `{"flightId":"LH123"}`)
+			},
+			want: []string{"verifyWorkflowToolApprovalSignature", "bookFlight", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "tampered approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Not booked."))
+				signed(t)
+				return respond(t, signature(t), true, `{"flightId":"XX999"}`)
+			},
+			want: []string{"verifyWorkflowToolApprovalSignature", "writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "denied approval",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Not booked."))
+				approvalTurn(t)
+				return respond(t, "", false, `{"flightId":"LH123"}`)
+			},
+			want: []string{"writeApprovalToolResults", "doStreamStep", "writeDeferredToolCalls", "closeStream"},
+		},
+		{
+			name: "approval for a removed tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Done."))
+				approvalTurn(t)
+				delete(testOptions.Tools, "bookFlight")
+				return respond(t, "", true, `{"flightId":"LH123"}`)
+			},
+			// The call has no result, so the call fails, as in the AI SDK.
+			want: []string{"closeStream"},
+		},
+		{
+			name: "provider tool",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				search := providerSearch("p1")
+				setup(func() ([]provider.StreamChunk, error) {
+					return []provider.StreamChunk{
+						{Type: provider.ChunkTypeToolCall, ToolCall: &search},
+						providerResult("p1"),
+						{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonStop},
+					}, nil
+				})
+				return []workflowai.ModelMessage{user("search flights")}
+			},
+			want: []string{"doStreamStep", "writeDeferredToolCalls", "writeToolResults", "closeStream"},
+		},
+		{
+			name: "failed model call",
+			run: func(t *testing.T) []workflowai.ModelMessage {
+				setup(failWith(errors.New("model down")))
+				return []workflowai.ModelMessage{user("hi")}
+			},
+			want: []string{"doStreamStep", "closeStream"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				messages := tt.run(t)
+				_, _, steps, _ := chatWithSteps(t, messages)
+				if !slices.Equal(steps, tt.want) {
+					t.Fatalf("steps = %v, want %v", steps, tt.want)
+				}
+			})
+		})
+	}
 }

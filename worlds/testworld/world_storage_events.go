@@ -169,7 +169,7 @@ func (m *World) createRunLocked(input worlds.EventsCreateRunInput) (worlds.Event
 	m.events[input.RunID] = []worlds.Event{{RunID: input.RunID, EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, Data: payload, CreatedAt: now, SpecVersion: worlds.SpecVersion}}
 	if hook := input.StartHook; hook != nil {
 		id := worlds.StartHookID(input.RunID)
-		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now}
+		m.hooks[id] = worlds.Hook{RunID: input.RunID, HookID: id, Token: hook.Token, TokenRetentionUntil: hook.TokenRetentionUntil, ResumeContext: run.HookResumeContext(), SpecVersion: worlds.SpecVersion, CreatedAt: now}
 		m.tokens[hook.Token] = id
 	}
 	return worlds.EventResult{EventID: worlds.EventIDForSlot(1), EventType: worlds.EventTypeRunCreated, CreatedAt: now, AllocatedEventCount: 1, InBandCount: 1}, nil
@@ -531,7 +531,7 @@ func (m *World) materializeLocked(event worlds.Event) {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := worlds.Hook{RunID: event.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}
+		hook := worlds.Hook{RunID: event.RunID, ResumeContext: run.HookResumeContext(), HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}
 		m.hooks[id], m.tokens[value.Token] = hook, id
 	case worlds.EventTypeHookDisposed:
 		id := worlds.HookID(event.CorrelationID)
@@ -571,11 +571,16 @@ func (m *World) expireTokenLocked(token string, now time.Time) {
 	if id == "" {
 		return
 	}
-	hook := m.hooks[id]
-	if m.runs[hook.RunID].Status.Terminal() && hook.TokenRetentionUntil != nil && !hook.TokenRetentionUntil.After(now) {
+	if m.lapsedLocked(m.hooks[id], now) {
 		delete(m.tokens, token)
 		delete(m.hooks, id)
 	}
+}
+
+// lapsedLocked reports whether hook outlived its run only for its token's
+// retention, which has passed at now, so it is no longer read.
+func (m *World) lapsedLocked(hook worlds.Hook, now time.Time) bool {
+	return m.runs[hook.RunID].Status.Terminal() && hook.TokenRetentionUntil != nil && !hook.TokenRetentionUntil.After(now)
 }
 
 func (m *World) updateStepLocked(event worlds.Event, status worlds.Status) {

@@ -37,7 +37,7 @@ func (q shortQueue) QueueBatch(ctx context.Context, input worlds.QueueBatchInput
 
 func TestQueueBatchReportsEachItemsOutcome(t *testing.T) {
 	ctx := context.Background()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	items := []worlds.QueueInput{{RunID: "wrun_a"}, {RunID: "wrun_b"}, {RunID: "wrun_c"}}
 

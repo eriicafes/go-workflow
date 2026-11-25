@@ -138,7 +138,7 @@ export namespace RPC {
 	};
 	export type Hook = {
 		runId: string;
-		resumeContext: { deploymentId: string; workflowName: string; encryptionPublicKey?: string; runSpecVersion: number };
+		resumeContext: { deploymentId: string; workflowName: string; encryptionPublicKey?: string; runSpecVersion: number; workflowCoreVersion?: string; nodeVersion?: string };
 		specVersion: number;
 		hookId: string;
 		token: string;
@@ -220,7 +220,7 @@ export namespace RPC {
 	};
 
 	export type WireStreamChunksResult = {
-		data: { index: number; data: Uint8Array }[];
+		data: { index: number; data: Uint8Array }[] | null;
 		cursor: string;
 		hasMore: boolean;
 		done: boolean;
@@ -410,35 +410,6 @@ export class RPCClient {
 
 const opaqueMapKeys = new Set(["attributes", "header", "executionContext"]);
 
-// Go names workflows and steps by package path and identifier, such as
-// "example.com/app/flows.Publish", while the Workflow SDK parses names shaped
-// "workflow//<module>//<function>". These fields carry such names.
-const nameKinds: Record<string, "workflow" | "step"> = { workflowName: "workflow", stepName: "step" };
-
-// devkitName maps a Go name to the Workflow SDK form, splitting the package
-// path from the identifier at the first dot after the last slash. Nested
-// identifiers, such as "Publish.func1", use the SDK's "/" separator.
-export function devkitName(kind: "workflow" | "step", name: string): string {
-	if (name.includes("//")) {
-		return name;
-	}
-	const dot = name.indexOf(".", name.lastIndexOf("/") + 1);
-	if (dot <= 0 || dot === name.length - 1) {
-		return name;
-	}
-	return `${kind}//${name.slice(0, dot)}//${name.slice(dot + 1).replaceAll(".", "/")}`;
-}
-
-// goName reverses devkitName. Names whose module is a relative path or carries
-// a version came from JavaScript and are kept as they are.
-export function goName(kind: "workflow" | "step", name: string): string {
-	const [prefix, module, ...identifier] = name.split("//");
-	if (prefix !== kind || !module || identifier.length === 0 || module.startsWith(".") || module.includes("@")) {
-		return name;
-	}
-	return `${module}.${identifier.join("//").replaceAll("/", ".")}`;
-}
-
 function toWire(value: unknown, preserveKeys = false): unknown {
 	// cbor-x writes an integer of 2^32 or more as a float, which Go does not
 	// decode into an integer such as a duration's nanoseconds, so it is sent
@@ -446,7 +417,12 @@ function toWire(value: unknown, preserveKeys = false): unknown {
 	if (typeof value === "number" && Number.isInteger(value) && Math.abs(value) >= 2 ** 32) {
 		return BigInt(value);
 	}
-	if (value == null || value instanceof Date || value instanceof Uint8Array || value instanceof ArrayBuffer) {
+	// cbor-x writes a Date as float seconds, which loses milliseconds that a
+	// float cannot hold, so a Date is sent as its exact ISO 8601 text.
+	if (value instanceof Date) {
+		return value.toISOString();
+	}
+	if (value == null || value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return value;
 	}
 	if (Array.isArray(value)) {
@@ -458,8 +434,7 @@ function toWire(value: unknown, preserveKeys = false): unknown {
 	const result: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) {
 		const nextKey = preserveKeys ? key : goFieldName(key);
-		const kind = preserveKeys ? undefined : nameKinds[key];
-		result[nextKey] = kind && typeof item === "string" ? goName(kind, item) : toWire(item, preserveKeys || opaqueMapKeys.has(key));
+		result[nextKey] = toWire(item, preserveKeys || opaqueMapKeys.has(key));
 	}
 	return result;
 }
@@ -482,8 +457,7 @@ function fromWire(value: unknown, preserveKeys = false): unknown {
 	const result: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(value)) {
 		const nextKey = preserveKeys ? key : javascriptFieldName(key);
-		const kind = preserveKeys ? undefined : nameKinds[nextKey];
-		result[nextKey] = kind && typeof item === "string" ? devkitName(kind, item) : fromWire(item, preserveKeys || opaqueMapKeys.has(nextKey));
+		result[nextKey] = fromWire(item, preserveKeys || opaqueMapKeys.has(nextKey));
 	}
 	return result;
 }

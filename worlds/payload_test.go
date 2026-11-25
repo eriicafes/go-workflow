@@ -350,6 +350,22 @@ func TestWriteGoPayloadVectors(t *testing.T) {
 		}
 		result["stream"][mode] = base64.StdEncoding.EncodeToString(encoded)
 	}
+	// The messages a RemoteExecutor builds for deliveries the Go World queued
+	// itself, which carry no SDK message.
+	stepID := StepID("step_01")
+	result["queue"] = map[string]string{}
+	for name, input := range map[string]QueueInput{
+		"flow":     {RunID: "wrun_01", RunSpecVersion: SpecVersion},
+		"recovery": {RunID: "wrun_01", RunSpecVersion: SpecVersion, Recovery: true, CompleteWaits: []string{"wait_01"}, DeploymentMismatchRetryCount: 1},
+		"step":     {RunID: "wrun_01", RunSpecVersion: SpecVersion, StepID: &stepID, StepName: "step//example.com/app//send", StepAttempt: 2, StepResent: true},
+	} {
+		input.WorkflowName = "workflow//example.com/app//Report"
+		_, body, err := remoteDelivery(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result["queue"][name] = string(body)
+	}
 	data, _ := json.MarshalIndent(result, "", "\t")
 	if err := os.WriteFile(out, data, 0o644); err != nil {
 		t.Fatal(err)

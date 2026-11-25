@@ -51,6 +51,14 @@ that consumes its result instead of running the step. A non-nil error means the 
 should be retried. `Execute` filters managed cancellation bindings and removes any Client put in the context with
 `NewClientContext`, so a run never uses a Client it inherited.
 
+A delivery without a run ID holds nothing for Go workflows and returns nil,
+except a Workflow SDK health check queued through world-http, the probe of the
+SDK's `healthCheck` and `workflow health`: `Execute` answers it as an SDK app
+does, writing `{"healthy": true, "correlationId": ..., "specVersion": ...}` to
+the stream `HealthCheckStreamName(id)` of `HealthCheckRunID(id)` and closing
+it. `ParseHealthCheck` reads one from a delivery and `AnswerHealthCheck`
+answers it.
+
 Set `QueueInput.MessageID` to the ID `Queue` returned for the message before
 calling `Execute`, and keep it the same when the message is redelivered. A
 flow records it as the owner of each step it starts inline, so the
@@ -275,7 +283,12 @@ type HookResumeContext struct {
 	WorkflowName        string
 	EncryptionPublicKey string // the run's public key, which payloads sent to the hook are sealed to
 	RunSpecVersion      int
+	WorkflowCoreVersion string // from the run's ExecutionContext: the runtime that started it
+	NodeVersion         string // from the run's ExecutionContext
 }
+
+// Run.HookResumeContext and EventsCreateRunInput.HookResumeContext return the
+// resume context a hook copies from its run.
 
 // Wait is returned by a wait_created or wait_completed write.
 type Wait struct {
@@ -384,7 +397,8 @@ func Routes(routes ...QueueRoute) map[string]string
 
 `Workflow` is satisfied by a workflow type, such as one embedding
 `workflow.Struct`. `WorkflowName` returns the name its runs are recorded under,
-its package path and type name. `Routes(Route[W](queue), ...)` builds the
+`workflow//<package path>//<type name>`, and `StepName(fn)` the name a step
+function is recorded under, `step//<package path>//<name>`. `Routes(Route[W](queue), ...)` builds the
 `Config.Routes` of a World that routes deliveries by workflow.
 
 ### Retention
@@ -518,8 +532,14 @@ func ClientFromContext(ctx context.Context) (Client, bool)
 func HTTPHandler(world World, prefix string) http.Handler // empty prefix is /v1/workflow
 func RPCHandler(world World) http.Handler
 func WebhookHandler(world World) http.Handler
+func WithHealthCheck(handler http.Handler) http.Handler
 func NormalizeBaseURL(value string) (string, error)
 ```
+
+`WithHealthCheck` wraps an app's flow route, `/.well-known/workflow/v1/flow`,
+to answer a request with a `__health` query parameter as a Workflow SDK app
+does: `{"healthy": true, "endpoint": <path>, "specVersion": ...}` with CORS
+headers. A nil handler answers other requests with 404.
 
 See [HTTP Endpoints](/docs/reference/http).
 
@@ -626,6 +646,16 @@ checking ownership.
 | `*InBandSupersededError` | An in-band write's count is stale because another flow wrote to the run first. |
 | `ErrWebhookRequestTooLarge` | Webhook body over 128 KiB (`413`). |
 
+These are fatal, as the Workflow SDK's classes of the same names are, and
+are recorded as Errors named after them:
+
+| Error | Meaning | Recorded as |
+| --- | --- | --- |
+| `*SerializationError` | A value, such as a step's arguments or return value, could not be encoded. | `SerializationError` |
+| `*RunFailedError` | Awaiting a failed run. | `WorkflowRunFailedError` |
+| `*RunCancelledError` | Awaiting a cancelled run. Matches `ErrRunCancelled`. | `WorkflowRunCancelledError` |
+| `*EncryptionKeyLookupError` | A run's encryption key could not be resolved for good. | `EncryptionKeyLookupError` |
+
 ```go
 type Error struct {
 	// Error chain fields omitted.
@@ -634,7 +664,13 @@ type Error struct {
 func NewError(err error) *Error
 func DecodeError(data []byte) *Error
 func DeliveryError(cause error) error
+func IsFatal(err error) bool
 ```
+
+`IsFatal` reports whether a step failing with `err` fails without retrying:
+whether its chain holds a `FatalError` or an error whose `Fatal() bool`
+method returns true. Read back from a record, only a `FatalError` is still
+fatal, as the SDK revives errors.
 
 `DeliveryError` marks a World error that a step function hit while doing the
 runtime's own work, such as recording a hook's disposal. The delivery is

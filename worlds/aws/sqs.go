@@ -36,16 +36,13 @@ const (
 )
 
 // queueMessage is the SQS and Scheduler message body. The queue item stays
-// authoritative, and the body only identifies it. Publish is set on a
-// Scheduler publish to a FIFO queue, so its content-based deduplication ID
-// differs from an earlier publish of the same delivery.
+// authoritative, and the body only identifies it.
 type queueMessage struct {
-	ID      string            `json:"id"`
-	Input   worlds.QueueInput `json:"input"`
-	Publish string            `json:"publish,omitempty"`
+	ID    string            `json:"id"`
+	Input worlds.QueueInput `json:"input"`
 }
 
-// executor executes deliveries, as *core.Runtime does.
+// executor executes deliveries, as worlds.BoundExecutor does.
 type executor interface {
 	Execute(context.Context, worlds.QueueInput) error
 }
@@ -56,13 +53,12 @@ type target struct {
 	name string
 	url  string
 	arn  string
-	fifo bool
 }
 
 // target returns the queue named name, or the default queue for "".
 func (w *World) target(name string) target {
 	if queue, ok := w.config.Queues[name]; ok && name != "" {
-		return target{name: name, url: queue.URL, arn: queue.ARN, fifo: queue.FIFO}
+		return target{name: name, url: queue.URL, arn: queue.ARN}
 	}
 	defaultTarget := target{url: w.config.QueueURL}
 	if w.config.Scheduler != nil {
@@ -83,33 +79,21 @@ func (w *World) sourceURL(eventSourceARN string) string {
 }
 
 // publish sends the delivery id to queue: through SQS when it is due within
-// 15 minutes on a standard queue or due now on a FIFO queue, and otherwise
-// through a one-time schedule named schedule. first marks a delivery's first
-// send: a FIFO queue deduplicates a send again of the same delivery by its
-// ID, so a later one gets a distinct deduplication ID.
-func (w *World) publish(ctx context.Context, queue target, id string, input worlds.QueueInput, delay time.Duration, schedule string, first bool) error {
-	if !scheduled(queue, delay) {
+// 15 minutes, and otherwise through a one-time schedule named schedule.
+func (w *World) publish(ctx context.Context, queue target, id string, input worlds.QueueInput, delay time.Duration, schedule string) error {
+	if !scheduled(delay) {
 		body, err := json.Marshal(queueMessage{ID: id, Input: input})
 		if err != nil {
 			return err
 		}
-		send := &sqs.SendMessageInput{
-			QueueUrl:    awsv2.String(queue.url),
-			MessageBody: awsv2.String(string(body)),
-		}
-		if queue.fifo {
-			send.MessageGroupId = awsv2.String(string(input.RunID))
-			send.MessageDeduplicationId = awsv2.String(id)
-			if !first {
-				send.MessageDeduplicationId = awsv2.String(id + "-" + ulid.Make().String())
-			}
-		} else {
-			send.DelaySeconds = delaySeconds(delay)
-		}
-		_, err = w.sqs.SendMessage(ctx, send)
+		_, err = w.sqs.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl:     awsv2.String(queue.url),
+			MessageBody:  awsv2.String(string(body)),
+			DelaySeconds: delaySeconds(delay),
+		})
 		return err
 	}
-	return w.createSchedule(ctx, schedule, time.Now().Add(delay), scheduleBody(id, input, queue.fifo), queue, input.RunID)
+	return w.createSchedule(ctx, schedule, time.Now().Add(delay), scheduleBody(id, input), queue)
 }
 
 // maxScheduleInput is the longest target input a schedule takes.
@@ -117,13 +101,9 @@ const maxScheduleInput = 8192
 
 // scheduleBody is the body a schedule sends: the delivery with its input, or
 // only its ID when the input does not fit a schedule, since the queue record
-// holds it either way. A FIFO body carries a unique publish field, so the
-// queue's content-based deduplication never drops it.
-func scheduleBody(id string, input worlds.QueueInput, fifo bool) string {
+// holds it either way.
+func scheduleBody(id string, input worlds.QueueInput) string {
 	message := queueMessage{ID: id, Input: input}
-	if fifo {
-		message.Publish = ulid.Make().String()
-	}
 	body, err := json.Marshal(message)
 	if err != nil || len(body) > maxScheduleInput {
 		message.Input = worlds.QueueInput{}
@@ -133,9 +113,9 @@ func scheduleBody(id string, input worlds.QueueInput, fifo bool) string {
 }
 
 // scheduled reports whether a delivery due after delay is published through
-// Scheduler: beyond the SQS delay limit, or delayed at all on a FIFO queue.
-func scheduled(queue target, delay time.Duration) bool {
-	return delay > maxSQSDelay || (queue.fifo && delay > 0)
+// Scheduler: beyond the SQS delay limit.
+func scheduled(delay time.Duration) bool {
+	return delay > maxSQSDelay
 }
 
 // consume handles one SQS batch. Records whose queue item is gone were
@@ -297,10 +277,10 @@ func (w *World) deliver(ctx context.Context, runtime executor, body string) erro
 // already fired.
 func (w *World) resend(ctx context.Context, id string, record queueRecord, delay time.Duration) error {
 	queue := w.target(record.queue)
-	if !queue.fifo && w.scheduler == nil {
+	if w.scheduler == nil {
 		delay = min(delay, maxSQSDelay)
 	}
-	return w.publish(ctx, queue, id, record.input, max(delay, 0), scheduleName(ulid.Make().String()), false)
+	return w.publish(ctx, queue, id, record.input, max(delay, 0), scheduleName(ulid.Make().String()))
 }
 
 // delaySeconds rounds delay up to whole seconds within SQS's range.

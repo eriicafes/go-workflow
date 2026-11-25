@@ -1,0 +1,22 @@
+# @ai-sdk/workflow tests workflowai does not port, one per line:
+#
+#   <upstream file>[ > <describe or test name>] -- <reason>
+#
+# A file skips all its tests, and a describe block all the tests in it. Every
+# other test of internal/sdkdrift.AISDK.TrackedDirs is ported to a Go test
+# that names it in an `// AI SDK: <file> > <test name>` comment.
+
+# The AI SDK's own client, which Go servers serve unchanged.
+packages/workflow/src/workflow-chat-transport.test.ts -- WorkflowChatTransport is the AI SDK's client; Go servers serve it unchanged and test its protocol in workflowai's stream tests.
+packages/workflow/src/workflow-chat-transport.stream-repair.test.ts -- WorkflowChatTransport is the AI SDK's client; Go servers serve it unchanged.
+
+# JavaScript concerns Go has no counterpart of.
+packages/workflow/src/serializable-schema.test.ts -- moving zod and Standard Schema validators across the step boundary; Go tools describe their input with JSON schema.
+
+# Features workflowai does not have.
+packages/workflow/src/generate-video.test.ts -- video generation; workflowai has no video steps.
+packages/workflow/src/generate-video.integration.test.ts -- video generation; workflowai has no video steps.
+packages/workflow/src/workflow-agent-refine-tool-input.test.ts -- experimental_refineToolInput; workflowai does not refine tool input.
+packages/workflow/src/workflow-agent-async-generator-tools.test.ts -- tools that stream preliminary output from async generators; a Go tool returns one value.
+packages/workflow/src/workflow-agent-tool-input-hooks.test.ts -- onInputStart, onInputDelta and onInputAvailable tool hooks; workflowai tools have none.
+packages/workflow/src/workflow-agent-tool-order.test.ts -- toolOrder; workflowai sends tools in name order.

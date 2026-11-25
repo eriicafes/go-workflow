@@ -71,7 +71,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 		}
 		encoded, err := execution.EncodePayload(stepArgs[In]{Args: [1]In{input}})
 		if err != nil {
-			err = fmt.Errorf("workflow: encode step input: %w", err)
+			err = &worlds.SerializationError{Message: "Failed to serialize step arguments", Cause: err}
 		}
 		// An inline attempt runs with the input decoded from what is recorded,
 		// as a step delivery does, not with the workflow's own value.
@@ -181,7 +181,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 	if result.EventID == "" {
 		panic(execution.exit(errReplaySuspended))
 	}
-	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: time.Now(), Attempt: attempt})
+	ctx = context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: options.Name, StartedAt: stepStartedAt(execution.events, stepID, time.Now()), Attempt: attempt, MaxAttempts: options.MaxRetries + 1})
 	stepCtx, stop := StepCancelContext(ctx, execution, CancellationReferences(ctx))
 	defer stop()
 	stepCtx, span := startStepSpan(stepCtx, execution, stepID, options.Name, attempt)
@@ -207,7 +207,7 @@ func durableStep[In, Out any](ctx context.Context, options DurableStepOptions, e
 
 	output, err := execution.EncodePayload(value)
 	if err != nil {
-		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))})
+		execution.SetTargetResult(worlds.DataStepResult{Error: execution.encodeError(stepReturnSerializationError(err))})
 	} else {
 		execution.SetTargetResult(worlds.DataStepResult{Result: output})
 	}
@@ -247,9 +247,10 @@ func lastStepStart(events []worlds.Event, stepID worlds.StepID) time.Time {
 
 // invoke calls fn with input in stepCtx. A panic in fn becomes its error,
 // except, when inReplay is set, the panic that ends a suspended replay, which
-// passes on. A cancelled stepCtx makes the error fatal, unless the delivery
-// itself stopped. A World that records step executions is told right before
-// fn is called.
+// passes on. What fn returns is its result whether or not stepCtx is
+// cancelled, except that an aborted error becomes a FatalError "Aborted:
+// ...", unless the delivery itself stopped. A World that records step
+// executions is told right before fn is called.
 func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay bool, fn func(context.Context, In) (Out, error), input In) (value Out, err error) {
 	returned := &stepReturn{}
 	stepCtx = context.WithValue(stepCtx, stepReturnKey{}, returned)
@@ -276,10 +277,18 @@ func invoke[In, Out any](stepCtx context.Context, execution *Execution, inReplay
 	if returnErr := returned.run(); returnErr != nil && err == nil {
 		err = returnErr
 	}
-	if stepCtx.Err() != nil && execution.ctx.Err() == nil {
-		err = worlds.FatalError{Cause: context.Canceled}
+	if aborted(err) && execution.ctx.Err() == nil {
+		err = worlds.FatalError{Cause: fmt.Errorf("Aborted: %w", err)}
 	}
 	return value, err
+}
+
+// aborted reports whether err, a step's error, is the abort itself: an
+// error matching context.Canceled, as the Workflow SDK promotes an
+// AbortError. Any other error, such as a cancellation's cause or
+// context.DeadlineExceeded (the SDK's TimeoutError), is retried as usual.
+func aborted(err error) bool {
+	return errors.Is(err, context.Canceled) && !errors.As(err, new(worlds.FatalError))
 }
 
 type stepReturnKey struct{}
@@ -363,8 +372,7 @@ const stepRetryExpirySlack = time.Minute
 // the step without an outcome, so the step fails instead. Either keeps cause
 // as its cause. A zero sent is a message whose age is not known.
 func stepRetry(cause error, name string, maxRetries, attempt int, sent time.Time) (error, *time.Time) {
-	var fatal worlds.FatalError
-	if errors.As(cause, &fatal) {
+	if worlds.IsFatal(cause) {
 		return cause, nil
 	}
 	if attempt > maxRetries {
@@ -405,7 +413,7 @@ func stepMessageSent(events []worlds.Event, stepID worlds.StepID) time.Time {
 // ctx, the step's span continues the trace the run was started in, which the
 // run's execution context carries.
 func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.StepID, name string, attempt int) (context.Context, trace.Span) {
-	short := strings.TrimSuffix(name[strings.LastIndex(name, "/")+1:], "-fm")
+	short := name[strings.LastIndex(name, "//")+2:]
 	run := execution.Run()
 	if !trace.SpanContextFromContext(ctx).IsValid() {
 		if recorded, ok := run.ExecutionContext[worlds.ExecutionContextTraceCarrier].(map[string]any); ok {
@@ -425,4 +433,10 @@ func startStepSpan(ctx context.Context, execution *Execution, stepID worlds.Step
 		attribute.String("workflow.step.name", name),
 		attribute.Int("workflow.step.attempt", attempt),
 	))
+}
+
+// stepReturnSerializationError returns the error of a step whose return
+// value did not encode with err.
+func stepReturnSerializationError(err error) error {
+	return &worlds.SerializationError{Message: "Failed to serialize step return value", Cause: err}
 }

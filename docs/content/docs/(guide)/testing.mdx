@@ -18,7 +18,7 @@ production:
 ```go
 func TestGenerateReport(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(flows.GenerateReport))
+		world := testworld.New(worlds.Runners(workflow.Use(flows.GenerateReport)))
 		defer world.Close()
 
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -72,7 +72,7 @@ func Monthly(ctx context.Context, input workflows.Monthly) (workflows.MonthlyRes
 ```go
 func TestMonthly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		world := testworld.New(workflow.Use(flows.Monthly))
+		world := testworld.New(worlds.Runners(workflow.Use(flows.Monthly)))
 		defer world.Close()
 
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -122,7 +122,7 @@ means the run has suspended on its hook. Resume it right after:
 
 ```go
 synctest.Test(t, func(t *testing.T) {
-	world := testworld.New(workflow.Use(flows.ReviewOrder))
+	world := testworld.New(worlds.Runners(workflow.Use(flows.ReviewOrder)))
 	defer world.Close()
 
 	ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
@@ -171,7 +171,7 @@ Wrap your handlers with `workflow.Middleware` and the test World's client:
 
 ```go
 synctest.Test(t, func(t *testing.T) {
-	world := testworld.New(workflow.Use(flows.GenerateReport))
+	world := testworld.New(worlds.Runners(workflow.Use(flows.GenerateReport)))
 	defer world.Close()
 
 	handler := workflow.Middleware(routes(), workflow.NewClient(world))
@@ -192,13 +192,14 @@ records deliveries without executing them, so the test executes and
 acknowledges them one at a time:
 
 ```go
-world := testworld.NewManual(workflow.Use(flows.GenerateReport))
-runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(flows.GenerateReport)))
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+world := testworld.NewManual(runners)
+runtime := core.NewRuntime(world)
 
 // ... start a run ...
 
 for _, message := range world.QueuedMessages() {
-	if err := runtime.Execute(ctx, message.Input); err != nil {
+	if err := runtime.Execute(ctx, runners, message.Input); err != nil {
 		t.Fatal(err)
 	}
 

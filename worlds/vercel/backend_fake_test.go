@@ -51,7 +51,7 @@ type fakeBackend struct {
 }
 
 func newFakeBackend(t testing.TB) *fakeBackend {
-	fake := &fakeBackend{t: t, store: testworld.NewManual(), requests: map[string]int{}, specs: map[worlds.RunID]int{}}
+	fake := &fakeBackend{t: t, store: testworld.NewManual(nil), requests: map[string]int{}, specs: map[worlds.RunID]int{}}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(func() {
 		fake.server.Close()
@@ -220,7 +220,35 @@ func (f *fakeBackend) serve(writer http.ResponseWriter, request *http.Request) {
 		writeCBOR(writer, map[string]any{"data": data, "cursor": nilIfEmpty(page.Cursor), "hasMore": page.HasMore})
 	case len(parts) == 5 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "stream" && request.Method == http.MethodPut:
 		f.writeStream(ctx, writer, request, worlds.RunID(parts[2]), parts[4])
+	case len(parts) == 5 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "stream" && request.Method == http.MethodGet:
+		// The stream route answers with the stream's bytes from startIndex
+		// once it is closed, whatever ID it belongs to.
+		start, _ := strconv.Atoi(query.Get("startIndex"))
+		for {
+			info, err := f.store.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: worlds.RunID(parts[2]), Name: parts[4]})
+			if err == nil && info.Done {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		chunks, err := f.store.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: worlds.RunID(parts[2]), Name: parts[4], StartIndex: start, Limit: 1000})
+		if err != nil {
+			writeGoError(writer, err)
+			return
+		}
+		for _, chunk := range chunks.Data {
+			_, _ = writer.Write(chunk.Data)
+		}
 	case len(parts) == 6 && parts[0] == "v2" && parts[1] == "runs" && parts[3] == "streams" && parts[5] == "chunks":
+		// The chunk routes take only a run's ID.
+		if !backendRunID(worlds.RunID(parts[2])) {
+			writeError(writer, http.StatusBadRequest, "validation-error", "runId must be wrun_ and a ULID")
+			return
+		}
 		input := worlds.StreamsGetChunksInput{RunID: worlds.RunID(parts[2]), Name: parts[4], Cursor: query.Get("cursor")}
 		input.Limit, _ = strconv.Atoi(query.Get("limit"))
 		chunks, err := f.store.StreamsGetChunks(ctx, input)
@@ -348,8 +376,9 @@ func (f *fakeBackend) createEvent(ctx context.Context, writer http.ResponseWrite
 // fence returns the in-band count a write on route version is fenced with,
 // and the slot it reports skipped events after. /v5 fences a frame with
 // inBand, refuses a write to a spec 9 run without inBand and an in-band
-// write without expectedSeqInBand, and reports the events after its maxSlot. /v4 refuses a write to a spec 9 run, and fences and reports
-// nothing.
+// write without expectedSeqInBand or maxSlot, and reports the events after
+// its maxSlot. /v4 refuses a write to a spec 9 run, and fences an in-band
+// write to an earlier run without reporting skipped events.
 func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version string, in frame) (*int, *int, *outcome) {
 	spec, _ := asInt(in.Meta["specVersion"])
 	if worlds.EventType(str(in.Meta, "eventType")) != worlds.EventTypeRunCreated {
@@ -359,7 +388,14 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 		if spec >= 9 {
 			return nil, nil, &outcome{status: http.StatusBadRequest, code: "spec-version", message: "a spec 9 run is written through /v5"}
 		}
-		return nil, nil, nil
+		if inBand, _ := in.Meta["inBand"].(bool); !inBand {
+			return nil, nil, nil
+		}
+		count, ok := asInt(in.Meta["expectedSeqInBand"])
+		if !ok {
+			return nil, nil, &outcome{status: http.StatusBadRequest, code: "bad-request", message: "an in-band write needs expectedSeqInBand"}
+		}
+		return &count, nil, nil
 	}
 	// inBand is required on every write to a spec 9 run.
 	inBand, declared := in.Meta["inBand"].(bool)
@@ -373,11 +409,11 @@ func (f *fakeBackend) fence(ctx context.Context, runID worlds.RunID, version str
 	if !ok {
 		return nil, nil, &outcome{status: http.StatusBadRequest, code: "bad-request", message: "an in-band write needs expectedSeqInBand"}
 	}
-	var report *int
-	if slot, ok := asInt(in.Meta["maxSlot"]); ok {
-		report = &slot
+	slot, ok := asInt(in.Meta["maxSlot"])
+	if !ok {
+		return nil, nil, &outcome{status: http.StatusBadRequest, code: "v5-missing-max-slot", message: "An in-band write must declare meta.maxSlot."}
 	}
-	return &count, report, nil
+	return &count, &slot, nil
 }
 
 // specVersion returns the spec version run_created stamped on runID.

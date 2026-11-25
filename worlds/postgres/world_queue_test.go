@@ -76,23 +76,11 @@ func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, IdempotencyKey: "key"})
-	if err != nil || again.MessageID != first.MessageID {
-		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
-	}
-	batch, err := world.QueueBatch(ctx, worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: runA, IdempotencyKey: "key"}, {RunID: runA, IdempotencyKey: "other"}}})
-	if err != nil || len(batch) != 2 || batch[0].MessageID != first.MessageID || batch[1].MessageID == first.MessageID {
-		t.Fatalf("batch = %#v err=%v", batch, err)
-	}
+	// The key belongs to its run, and conformance checks the rest of the
+	// contract.
 	other, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_b", IdempotencyKey: "key"})
 	if err != nil || other.MessageID == first.MessageID {
 		t.Fatalf("same key in another run = %#v err=%v", other, err)
-	}
-	// Without a key nothing is deduplicated.
-	a, errA := world.Queue(ctx, worlds.QueueInput{RunID: runA})
-	b, errB := world.Queue(ctx, worlds.QueueInput{RunID: runA})
-	if errA != nil || errB != nil || a.MessageID == b.MessageID {
-		t.Fatalf("unkeyed = %s, %s err=%v %v", a.MessageID, b.MessageID, errA, errB)
 	}
 	// An executing message still deduplicates.
 	claimed, err := world.claim(ctx, 10, nil)

@@ -15,22 +15,25 @@ processes and is not meant for production. Its base URL is
 
 ## Automatic delivery
 
-`testworld.New` executes deliveries in-process, each in its own goroutine once
-it is due. A failing delivery is tried at most three times and then left
-queued.
+`testworld.New` executes deliveries in-process with an executor, each in its own
+goroutine once it is due. A failing delivery is tried at most three times and
+then left queued.
 
 ```go
-world := testworld.New(
+world := testworld.New(worlds.Runners(
 	workflow.Use(flows.GenerateReport),
 	workflow.Use(flows.PublishReport),
-)
+))
 defer world.Close()
 
 ctx = workflow.NewContext(ctx, workflow.NewClient(world))
 run, err := workflow.Start(ctx, workflows.GenerateReport{Topic: "go"})
 ```
 
-Note that `New` takes runners directly, not a `RunnerSet`.
+`New` takes any `worlds.Executor`: a `worlds.RunnerSet` runs deliveries with Go
+workflows, and a `worlds.RemoteExecutor` sends them to a Workflow SDK app (see
+[world-http](/docs/tooling/world-http)). `New(nil)` fails every run as
+unregistered.
 
 Waiting for runs and stream chunks blocks on a change notification rather than
 polling, and delayed deliveries wait on ordinary timers. Create the World inside
@@ -51,13 +54,13 @@ it before starting runs.
 executes them with a `core.Runtime` and acknowledges each with `Acknowledge`.
 
 ```go
-runners := []worlds.Runner{workflow.Use(flows.GenerateReport)}
-world := testworld.NewManual(runners...)
-runtime := core.NewRuntime(world, worlds.Runners(runners...))
+runners := worlds.Runners(workflow.Use(flows.GenerateReport))
+world := testworld.NewManual(runners)
+runtime := core.NewRuntime(world)
 
 for len(world.QueuedMessages()) > 0 {
 	message := world.QueuedMessages()[0]
-	if err := runtime.Execute(ctx, message.Input); err != nil {
+	if err := runtime.Execute(ctx, runners, message.Input); err != nil {
 		t.Fatal(err)
 	}
 

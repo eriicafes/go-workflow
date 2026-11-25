@@ -22,7 +22,7 @@ type World struct {
 	encryptionScope string
 	ctx             context.Context
 	cancel          context.CancelFunc
-	runtime         *core.Runtime
+	executor        worlds.BoundExecutor
 	runs            map[worlds.RunID]worlds.Run
 	events          map[worlds.RunID][]worlds.Event
 	steps           map[worlds.RunID]map[worlds.StepID]worlds.Step
@@ -61,23 +61,25 @@ func (w *World) Capabilities() worlds.Capabilities {
 	return worlds.Capabilities{Analytics: true, SetAttributes: true, DeleteData: true, StartHook: true, HookResumeDedup: true}
 }
 
-// New returns a World that executes deliveries for the workflows of runners
-// in-process, each in its own goroutine once it is due.
-func New(runners ...worlds.Runner) *World {
-	return newWorld(true, runners...)
+// New returns a World that executes deliveries with executor in-process, each
+// in its own goroutine once it is due: a worlds.RunnerSet runs them with Go
+// workflows, and a worlds.RemoteExecutor sends them to a Workflow SDK app. A
+// nil executor fails each run as unregistered.
+func New(executor worlds.Executor) *World {
+	return newWorld(true, executor)
 }
 
 // NewManual returns a World that records deliveries without executing them.
-// Tests execute them through QueuedMessages and acknowledge each with
-// Acknowledge.
-func NewManual(runners ...worlds.Runner) *World {
-	return newWorld(false, runners...)
+// Tests execute them with executor through QueuedMessages and acknowledge
+// each with Acknowledge.
+func NewManual(executor worlds.Executor) *World {
+	return newWorld(false, executor)
 }
 
-func newWorld(autoRun bool, runners ...worlds.Runner) *World {
+func newWorld(autoRun bool, executor worlds.Executor) *World {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &World{ctx: ctx, cancel: cancel, runs: make(map[worlds.RunID]worlds.Run), events: make(map[worlds.RunID][]worlds.Event), steps: make(map[worlds.RunID]map[worlds.StepID]worlds.Step), hooks: make(map[worlds.HookID]worlds.Hook), disposals: make(map[worlds.HookID]hookDisposal), tokens: make(map[string]worlds.HookID), streams: make(map[worlds.RunID]map[string]*memoryStream), autoRun: autoRun, handedOff: make(map[string]int), resumes: make(map[string]resumeClaim), startDecisions: make(map[worlds.RunID]worlds.StartHookDecision), flowGates: make(map[worlds.RunID]chan struct{}), changes: make(chan struct{})}
-	w.runtime = core.NewRuntime(w, worlds.Runners(runners...))
+	w.executor = worlds.BoundExecutor{Executor: executor, Runtime: core.NewRuntime(w)}
 	return w
 }
 

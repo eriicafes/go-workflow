@@ -2,8 +2,10 @@ package testworld
 
 import (
 	"bytes"
+	"fmt"
 	"maps"
 	"strconv"
+	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -98,6 +100,43 @@ func cloneHook(value worlds.Hook) worlds.Hook {
 		value.TokenRetentionUntil = &until
 	}
 	return value
+}
+
+// keysetPage pages values, which are sorted in pagination's order by key, a
+// string that sorts as the values do ascending. Its cursor is the last
+// value's key, so a page after it starts after that value however many
+// values were added since.
+func keysetPage[T any](values []T, pagination worlds.Pagination, key func(T) string) worlds.Page[T] {
+	limit := pagination.Limit
+	if limit <= 0 {
+		limit = len(values)
+	}
+	start := 0
+	if pagination.Cursor != "" {
+		descending := pagination.SortOrder == worlds.SortOrderDescending
+		start = len(values)
+		for index, value := range values {
+			if k := key(value); descending && k < pagination.Cursor || !descending && k > pagination.Cursor {
+				start = index
+				break
+			}
+		}
+	}
+	end := min(start+limit, len(values))
+	result := worlds.Page[T]{Data: values[start:end], HasMore: end < len(values)}
+	// The last page's cursor resumes after it.
+	if end > start {
+		result.Cursor = key(values[end-1])
+	} else {
+		result.Cursor = pagination.Cursor
+	}
+	return result
+}
+
+// entityKey returns the keysetPage key of an entity created at createdAt
+// with id.
+func entityKey(createdAt time.Time, id string) string {
+	return fmt.Sprintf("%020d|%s", createdAt.UnixNano(), id)
 }
 
 func page[T any](values []T, pagination worlds.Pagination) worlds.Page[T] {

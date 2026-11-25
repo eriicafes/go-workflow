@@ -38,11 +38,13 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 		"specVersion": specVersion,
 		// inBand is required on every write. A creation is out-of-band;
 		// EventsCreate overwrites it for a first delivery's run_started.
-		"inBand":            false,
-		"workflowName":      input.WorkflowName,
-		"deploymentId":      input.DeploymentID,
-		"occurredAt":        time.Now().UTC(),
-		"remoteRefBehavior": "lazy",
+		"inBand":       false,
+		"workflowName": input.WorkflowName,
+		"deploymentId": input.DeploymentID,
+		"occurredAt":   time.Now().UTC(),
+		// The answer holds the run with its input, which a caller reads at
+		// once, as the Workflow SDK's Vercel World asks for it.
+		"remoteRefBehavior": "resolve",
 	}
 	if input.EncryptionPublicKey != "" {
 		meta["encryptionPublicKey"] = input.EncryptionPublicKey
@@ -80,6 +82,10 @@ func (w *World) runCreationMeta(input worlds.EventsCreateRunInput, eventType wor
 }
 
 func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRunInput) (worlds.EventResult, error) {
+	// A start hook without a token is refused before it is sent.
+	if input.StartHook != nil && input.StartHook.Token == "" {
+		return worlds.EventResult{}, fmt.Errorf("%w: start hook without a token", worlds.ErrEventInvalid)
+	}
 	meta := w.runCreationMeta(input, worlds.EventTypeRunCreated)
 	response, err := retryEventWrite(ctx, true, false, func() (createResponse, error) {
 		return w.postEvent(ctx, input.RunID, worlds.EventTypeRunCreated, meta, input.Input)
@@ -87,9 +93,16 @@ func (w *World) EventsCreateRun(ctx context.Context, input worlds.EventsCreateRu
 	if err != nil {
 		return worlds.EventResult{}, classify(err, worlds.EventTypeRunCreated)
 	}
-	event := wireEventFromMap(response.Event)
+	event, err := toEvent(input.RunID, wireEventFromMap(response.Event), worlds.EventsResolveDataAll)
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
+	run, err := responseRun(response)
+	if err != nil {
+		return worlds.EventResult{}, err
+	}
 	// run_created takes the first position, which counts as in-band.
-	return worlds.EventResult{EventID: worlds.EventID(event.EventID), EventType: worlds.EventTypeRunCreated, CreatedAt: event.CreatedAt, AllocatedEventCount: 1, InBandCount: 1}, nil
+	return worlds.EventResult{EventID: event.EventID, EventType: worlds.EventTypeRunCreated, CreatedAt: event.CreatedAt, Data: event.Data, Event: &event, Run: run, AllocatedEventCount: 1, InBandCount: 1}, nil
 }
 
 func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput) (worlds.EventResult, error) {
@@ -135,6 +148,13 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	meta["inBand"] = input.Options.InBandCount != nil
 	if input.Options.InBandCount != nil {
 		meta["expectedSeqInBand"] = *input.Options.InBandCount
+		if !hasHeld {
+			// The backend refuses an in-band write without maxSlot. A writer
+			// that holds no count of the log is given its in-band count,
+			// which no current log is shorter than, and is not told what
+			// the backend reports.
+			meta["maxSlot"] = *input.Options.InBandCount
+		}
 	}
 	if created := input.Options.StepCreatedAt; !created.IsZero() && input.Event.EventType == worlds.EventTypeStepStarted && meta["attempt"] == 1 && payload == nil {
 		// The backend reads the step's creation time, in milliseconds, only
@@ -157,7 +177,10 @@ func (w *World) EventsCreate(ctx context.Context, input worlds.EventsCreateInput
 	if response.Allocated != nil {
 		allocated = *response.Allocated
 	}
-	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, AllocatedEventCount: allocated}
+	result := worlds.EventResult{EventID: event.EventID, EventType: event.EventType, CreatedAt: event.CreatedAt, Data: event.Data, Event: &event, AllocatedEventCount: allocated}
+	if result.Run, err = responseRun(response); err != nil {
+		return worlds.EventResult{}, err
+	}
 	if input.Options.InBandCount != nil {
 		result.InBandCount = *input.Options.InBandCount + allocated
 	}
@@ -297,6 +320,9 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		meta["inBand"] = input.InBandCount != nil
 		if input.InBandCount != nil {
 			meta["expectedSeqInBand"] = *input.InBandCount
+			// The backend refuses an in-band write without maxSlot, which is
+			// the writer's in-band count when it holds no count of the log.
+			meta["maxSlot"] = *input.InBandCount
 			if input.EventCount != nil {
 				meta["maxSlot"] = *input.EventCount
 			}
@@ -348,7 +374,10 @@ func (w *World) EventsCreateBatch(ctx context.Context, input worlds.EventsCreate
 		if err != nil {
 			return worlds.EventBatchResult{}, err
 		}
-		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, CreatedAt: appended.CreatedAt, Data: appended.Data, AllocatedEventCount: 1}
+		one := worlds.EventResult{EventID: appended.EventID, EventType: appended.EventType, CreatedAt: appended.CreatedAt, Data: appended.Data, Event: &appended, AllocatedEventCount: 1}
+		if one.Run, err = responseRun(item.createResponse); err != nil {
+			return worlds.EventBatchResult{}, err
+		}
 		result.AllocatedEventCount++
 		if item.Step != nil {
 			step, err := toStep(item.Step, worlds.ResolveDataAll)
@@ -604,3 +633,16 @@ func listQuery(pagination worlds.Pagination) url.Values {
 // carry them, because the payload of step_created and hook_created also holds
 // their metadata; ResolveEventData strips them afterwards.
 func refBehavior(worlds.EventsResolveData) string { return "resolve" }
+
+// responseRun returns the run a write's answer holds, or nil when it holds
+// none.
+func responseRun(response createResponse) (*worlds.Run, error) {
+	if response.Run == nil {
+		return nil, nil
+	}
+	run, err := toRun(response.Run, worlds.ResolveDataAll)
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}

@@ -112,14 +112,11 @@ resource "aws_sqs_queue_redrive_allow_policy" "dead_letter" {
   })
 }
 
-# Further queues that awsworld.Config.Routes routes workflows to. A FIFO queue
-# uses content-based deduplication, since Scheduler can't set a message's
-# deduplication ID.
+# Further queues that awsworld.Config.Routes routes workflows to.
 resource "aws_sqs_queue" "routed_dead_letter" {
   for_each = var.queues
 
-  name                      = each.value.fifo ? "${var.name}-${each.key}-dlq.fifo" : "${var.name}-${each.key}-dlq"
-  fifo_queue                = each.value.fifo ? true : null
+  name                      = "${var.name}-${each.key}-dlq"
   message_retention_seconds = var.message_retention_seconds
   sqs_managed_sse_enabled   = true
   tags                      = var.tags
@@ -128,24 +125,15 @@ resource "aws_sqs_queue" "routed_dead_letter" {
 resource "aws_sqs_queue" "routed" {
   for_each = var.queues
 
-  name                        = each.value.fifo ? "${var.name}-${each.key}.fifo" : "${var.name}-${each.key}"
-  fifo_queue                  = each.value.fifo ? true : null
-  content_based_deduplication = each.value.fifo ? true : null
-  visibility_timeout_seconds  = coalesce(each.value.visibility_timeout_seconds, var.visibility_timeout_seconds)
-  message_retention_seconds   = var.message_retention_seconds
-  sqs_managed_sse_enabled     = true
+  name                       = "${var.name}-${each.key}"
+  visibility_timeout_seconds = coalesce(each.value.visibility_timeout_seconds, var.visibility_timeout_seconds)
+  message_retention_seconds  = var.message_retention_seconds
+  sqs_managed_sse_enabled    = true
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.routed_dead_letter[each.key].arn
     maxReceiveCount     = coalesce(each.value.max_receive_count, var.max_receive_count)
   })
   tags = var.tags
-
-  lifecycle {
-    precondition {
-      condition     = !each.value.fifo || var.enable_scheduler
-      error_message = "FIFO queues need enable_scheduler, since every delayed delivery to them goes through Scheduler."
-    }
-  }
 }
 
 resource "aws_sqs_queue_redrive_allow_policy" "routed_dead_letter" {

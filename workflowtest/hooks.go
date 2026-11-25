@@ -322,6 +322,7 @@ func conformHookDisposal(t *testing.T, world worlds.World) {
 	}
 }
 
+// SDK: packages/world-local/src/storage/atomic-start-hook.test.ts > atomic start Hook (world-local) > writes the start Hook with its run, so it resolves at once
 func conformStartHook(t *testing.T, world worlds.World) {
 	if !world.Capabilities().StartHook {
 		return
@@ -367,6 +368,11 @@ func conformStartHook(t *testing.T, world worlds.World) {
 	conformExpectType[*worlds.HookConflictError](t, err, "start during the token's retention")
 }
 
+// SDK: packages/world-local/src/storage/hook-resume-dedup.test.ts > world-local hook_received resume dedup > collapses the two writers of ONE resume onto a single event
+// SDK: packages/world-local/src/storage/hook-resume-dedup.test.ts > world-local hook_received resume dedup > keeps distinct resumes of a reusable hook as separate events
+// SDK: packages/world-local/src/storage/hook-resume-dedup.test.ts > world-local hook_received resume dedup > rejects a reused resumeId that carries a different payload
+// SDK: packages/world-local/src/storage/hook-resume-dedup.test.ts > world-local hook_received resume dedup > rejects a reused resumeId + digest that belongs to a DIFFERENT hook
+//
 // conformResumeDedup checks a World that deduplicates resumes: a repeat of a
 // resume returns the event it committed and appends nothing, a repeat with
 // another payload is refused, and the event records its resume.
@@ -424,11 +430,15 @@ func conformResumeDedup(t *testing.T, world worlds.World) {
 	}
 }
 
+// SDK: packages/world-local/src/storage/atomic-start-hook.test.ts > atomic start Hook (world-local) > records a refusal, and answers it again once the token is free
+//
 // conformStartHookDecisions checks that a World's decision on a start hook
 // candidate is permanent: a repeat of an accepted candidate returns its run,
 // which echoes its start hook, and a rejected one is refused again, naming
 // the same run, even once the token is free. A candidate too old to create is
 // refused, and the start hook's ID is the start hook's alone.
+//
+// SDK: packages/world/src/start-hook.test.ts > start Hook schemas > round-trips the echo on a run
 func conformStartHookDecisions(t *testing.T, world worlds.World) {
 	if !world.Capabilities().StartHook {
 		return

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -24,7 +23,7 @@ const (
 	maxRerouteDelay = 8 * time.Second
 )
 
-// Runtime executes deliveries. It replays the runners in its worlds.RunnerSet
+// Runtime executes deliveries. It replays the runners each delivery is given
 // against a World as flows and steps and records their results as events.
 //
 // A flow is the run's orchestrator: it makes every decision, and its writes
@@ -47,7 +46,8 @@ const (
 // or when that deployment is unavailable, the run fails with a
 // deploymentMismatchError.
 type Runtime struct {
-	world   worlds.World
+	world worlds.World
+	// runners is the delivery's RunnerSet, set on the copy Execute makes.
 	runners worlds.RunnerSet
 	// runAheadDepth is how many inline steps' results a flow hands to the
 	// runner ahead of their writes.
@@ -60,16 +60,18 @@ type Runtime struct {
 const fenceRefusalRedelivery = time.Second
 
 // NewRuntime returns a Runtime that executes deliveries for runs recorded in
-// world using runners. It copies runners.
-func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...RuntimeOption) *Runtime {
-	runtime := &Runtime{world: world, runners: maps.Clone(runners), runAheadDepth: DefaultRunAheadDepth}
+// world. It implements worlds.Runtime.
+func NewRuntime(world worlds.World, options ...RuntimeOption) *Runtime {
+	runtime := &Runtime{world: world, runAheadDepth: DefaultRunAheadDepth}
 	for _, option := range options {
 		option(runtime)
 	}
 	return runtime
 }
 
-// Execute handles one delivery. With a nil StepID it executes a flow, which
+// Execute handles one delivery with the Runner runners holds for the run's
+// workflow. A run whose workflow runners does not hold fails with
+// worlds.ErrWorkflowNotRegistered. With a nil StepID it executes a flow, which
 // replays the run's runner and, when the runner returns instead of suspending,
 // appends run_completed or run_failed. With StepID set it executes a step,
 // which replays the runner up to that step, executes the step function, and
@@ -83,7 +85,22 @@ func NewRuntime(world worlds.World, runners worlds.RunnerSet, options ...Runtime
 //
 // Execute removes any Client NewClientContext put in ctx, so a run never uses a
 // Client it inherited from the context its delivery runs in.
-func (r *Runtime) Execute(ctx context.Context, input worlds.QueueInput) error {
+func (r *Runtime) Execute(ctx context.Context, runners worlds.RunnerSet, input worlds.QueueInput) error {
+	with := *r
+	with.runners = runners
+	return with.execute(ctx, input)
+}
+
+// execute handles one delivery with r's runners.
+func (r *Runtime) execute(ctx context.Context, input worlds.QueueInput) error {
+	if input.RunID == "" {
+		// A delivery that names no run holds nothing for Go workflows,
+		// except a Workflow SDK health check, which is answered.
+		if check, ok := worlds.ParseHealthCheck(input); ok {
+			return worlds.AnswerHealthCheck(ctx, r.world, check)
+		}
+		return nil
+	}
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	ctx = worlds.NewClientContext(ctx, nil)
@@ -283,6 +300,9 @@ func (r *Runtime) failSetup(ctx context.Context, run worlds.Run, cause error) er
 	_, err = r.world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: run.RunID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeRunFailed, Data: data}})
 	if is[*worlds.RunExpiredError](err) || errors.Is(err, worlds.ErrEntityConflict) {
 		return nil
+	}
+	if err == nil {
+		worlds.NotifyRunEnd(ctx, r.world, run.RunID, runExecutionContext(run), worlds.StatusFailed)
 	}
 	return err
 }
@@ -654,6 +674,11 @@ func (r *Runtime) recordRunEnd(execution *Execution, eventType worlds.EventType,
 		}
 	}()
 	execution.CreateEvent(worlds.EventsCreateEvent{EventType: eventType, Data: data}, nil)
+	status := worlds.StatusFailed
+	if eventType == worlds.EventTypeRunCompleted {
+		status = worlds.StatusCompleted
+	}
+	worlds.NotifyRunEnd(execution.ctx, r.world, execution.run.RunID, runExecutionContext(execution.run), status)
 	return nil
 }
 
@@ -967,6 +992,9 @@ func (r *Runtime) recoverDivergence(ctx context.Context, input worlds.QueueInput
 		if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 			return nil
 		}
+		if err == nil {
+			worlds.NotifyRunEnd(ctx, r.world, input.RunID, nil, worlds.StatusFailed)
+		}
 		return err
 	}
 	// The recovery is a new message, which the key of the one being
@@ -1014,6 +1042,9 @@ func (r *Runtime) reroute(ctx context.Context, run worlds.Run, input worlds.Queu
 	})
 	if _, ok := errors.AsType[*worlds.RunExpiredError](err); ok {
 		return nil
+	}
+	if err == nil {
+		worlds.NotifyRunEnd(ctx, r.world, run.RunID, runExecutionContext(run), worlds.StatusFailed)
 	}
 	return err
 }
@@ -1123,4 +1154,13 @@ func (r *Runtime) runFailedData(ctx context.Context, runID worlds.RunID, deploym
 		return nil, keysErr
 	}
 	return worlds.EncodeRunFailed(err, worlds.PayloadOptions{Keys: keys})
+}
+
+// runExecutionContext returns run's executionContext, or an empty one when it
+// has none, so NotifyRunEnd does not read the run again.
+func runExecutionContext(run worlds.Run) map[string]any {
+	if run.ExecutionContext == nil {
+		return map[string]any{}
+	}
+	return run.ExecutionContext
 }

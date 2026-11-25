@@ -74,9 +74,33 @@ func fetchDocument(ctx context.Context, url string) ([]byte, error) {
 For work without a context-aware API, check `ctx.Done()` or `ctx.Err()` at
 suitable points. Cancellation cannot forcibly stop a Go goroutine.
 
-A cancelled attempt fails without retrying. Its error wraps `context.Canceled`
-with `workflow.FatalError`, even if the step body returns nil after
-cancellation. Pending timers using the context also fail with a fatal
+The step decides how a cancelled attempt ends, and what it returns is
+recorded. A step can return a value saying it stopped early:
+
+```go
+func pollJob(ctx context.Context, jobID string) (string, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "aborted", nil
+		case <-time.After(time.Second):
+		}
+		if done, err := jobDone(ctx, jobID); err != nil || done {
+			return "completed", err
+		}
+	}
+}
+```
+
+A step started with a context that is already cancelled still runs, and sees
+`ctx.Err()` at once. `context.Cause(ctx)` reports the cancellation's cause.
+
+An error that wraps `context.Canceled`, such as `ctx.Err()` or the error of an
+HTTP request whose context was cancelled, fails the step without retrying. It
+is recorded as a `workflow.FatalError` whose message is `Aborted: ` and the
+error's, and `errors.Is` still finds `context.Canceled`. Any other error is
+retried as usual, including the cancellation's cause returned by
+`context.Cause(ctx)` and `context.DeadlineExceeded`. Pending timers using the context fail with a fatal
 cancellation error. The runner can handle these errors and continue.
 
 A step can request cancellation through `workflow.CancelFunc(ctx)`. It reports

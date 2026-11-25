@@ -49,9 +49,8 @@ output "queues" {
   description = "Routed queues by name, for awsworld.Config.Queues."
   value = {
     for name, queue in aws_sqs_queue.routed : name => {
-      url  = queue.id
-      arn  = queue.arn
-      fifo = var.queues[name].fifo
+      url = queue.id
+      arn = queue.arn
     }
   }
 }
@@ -62,12 +61,11 @@ output "environment" {
     tomap({
       WORKFLOW_TABLE     = aws_dynamodb_table.workflows.name
       WORKFLOW_QUEUE_URL = aws_sqs_queue.tasks.id
-      # {"<name>":{"url":"...","arn":"...","fifo":false}}, for awsworld.Config.Queues.
+      # {"<name>":{"url":"...","arn":"..."}}, for awsworld.Config.Queues.
       WORKFLOW_QUEUES = jsonencode({
         for name, queue in aws_sqs_queue.routed : name => {
-          url  = queue.id
-          arn  = queue.arn
-          fifo = var.queues[name].fifo
+          url = queue.id
+          arn = queue.arn
         }
       })
     }),

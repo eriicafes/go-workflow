@@ -3,8 +3,8 @@ import type { AddressInfo } from "node:net";
 import { decode, encode } from "cbor-x";
 import { afterEach, expect, test } from "vitest";
 import { WebSocketServer } from "ws";
-import { RPCClient } from "./rpc.js";
-import { HTTPStreamWriteSession, streamSocketThrottle, streamSocketURL } from "./stream-socket.js";
+import { RPCClient } from "../rpc.js";
+import { HTTPStreamWriteSession, streamSocketThrottle, streamSocketURL } from "../stream-socket.js";
 
 type Frame = { meta: Record<string, unknown>; chunks: string[] };
 

@@ -36,7 +36,9 @@ cleanup for every created resource.
 
 For storage shared between processes, also run
 `workflowtest.ConformanceShared` with two independent World instances pointing
-at the same isolated data.
+at the same isolated data. Run `workflowtest.ConformanceDelivery` with a World
+whose queue delivers each message to the given executor, to check
+redeliveries, handoffs, attempts, retries, delays, and serialized flows.
 
 Add targeted tests for changed semantics: concurrent fenced appends, contested
 hook claims, concurrent stream writers, and delivery failures after a committed
@@ -47,7 +49,9 @@ invariants rather than exactly-once callback execution.
 Exercise runtime integration with `testworld.NewManual` when precise delivery
 control is needed. A consumer sets `input.MessageID` to the message's ID,
 `input.DeliveryCount` and `input.Attempt` to its 1-based delivery counts,
-calls `Runtime.Execute(ctx, input)`, acknowledges on nil, delivers the same
+calls `executor.Execute(ctx, runtime, input)` with the World's
+`worlds.Executor` and its one `core.NewRuntime(world)` (`worlds.BoundExecutor`
+pairs them), acknowledges on nil, delivers the same
 message again on a `*worlds.Redelivery` (`World.Redeliver` on a manual
 testworld), and retries on any other error.
 Persist and redeliver the original QueueInput including its recovery counters

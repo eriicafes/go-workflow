@@ -26,6 +26,22 @@ func TestConformance(t *testing.T) {
 	})
 }
 
+func TestConformanceDelivery(t *testing.T) {
+	t.Parallel()
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		world, err := localworld.Open(localworld.Config{Dir: t.TempDir(), SkipRecovery: true}, executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := world.Prepare(context.Background()); err != nil {
+			_ = world.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = world.Close() })
+		return world
+	})
+}
+
 // TestConformanceShared runs the concurrency contract against two Worlds on
 // one data directory, as two processes would share it.
 func TestConformanceShared(t *testing.T) {
@@ -538,28 +554,6 @@ func queryInt(t *testing.T, dir, query string) int {
 func double(ctx context.Context, input doubleInput) (doubleOutput, error) {
 	value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) { return value * 2, nil }, input.Value)
 	return doubleOutput{Value: value}, err
-}
-
-func TestQueueDeduplicatesByIdempotencyKey(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	world := startWorld(t, localworld.Config{Dir: t.TempDir()}, nil)
-	later := time.Now().Add(time.Hour)
-	first, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later, IdempotencyKey: "k"})
-	if err != nil || again.MessageID != first.MessageID {
-		t.Fatalf("duplicate key = %#v err=%v, want %s", again, err, first.MessageID)
-	}
-	if !strings.HasPrefix(first.MessageID, "msg_") {
-		t.Fatalf("message ID %q", first.MessageID)
-	}
-	unkeyed, err := world.Queue(ctx, worlds.QueueInput{RunID: runA, NotBefore: &later})
-	if err != nil || unkeyed.MessageID == first.MessageID {
-		t.Fatalf("unkeyed = %#v err=%v", unkeyed, err)
-	}
 }
 
 // runClear is a run ID minted when the tests start, as a World requires

@@ -75,12 +75,264 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Check Go-written payloads with the Workflow SDK
+        working-directory: worlds/testdata/payload
+        run: |
+          npm ci
+          WORKFLOW_PAYLOAD_VECTORS_OUT="$PWD/go-vectors.json" go test ../.. -run TestWriteGoPayloadVectors -count=1
+          npm run verify
+
+  world-testing:
+    name: World Testing (${{ matrix.world }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        world: [testworld, local, postgres, aws]
+    services:
+      postgres:
+        image: postgres:17.10
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # DynamoDB Local and ElasticMQ, an SQS stand-in, back the AWS World. An
+      # empty image skips the service for the other Worlds.
+      dynamodb:
+        image: ${{ matrix.world == 'aws' && 'amazon/dynamodb-local:3.3.1' || '' }}
+        ports:
+          - 8000:8000
+      elasticmq:
+        image: ${{ matrix.world == 'aws' && 'softwaremill/elasticmq-native:1.7.1' || '' }}
+        ports:
+          - 9324:9324
+    env:
+      HARNESS_WORLD: ${{ matrix.world }}
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - run: npm ci
+      - name: Run the Workflow SDK's World test suite
+        run: npm run test:world-testing
+
+  # The Vercel World runs on Vercel's workflow backend, with the variables the
+  # Workflow SDK's tests use, which the vercel environment holds. Its jobs run
+  # in this repository only, never for a fork or a pull request from one, and
+  # the environment's protection rules decide which runs may use them.
+  world-testing-vercel:
+    name: World Testing (vercel)
+    if: &vercel ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: vercel
+    env:
+      HARNESS_WORLD: vercel
+      WORKFLOW_VERCEL_AUTH_TOKEN: ${{ secrets.WORKFLOW_VERCEL_AUTH_TOKEN }}
+      WORKFLOW_VERCEL_PROJECT: ${{ vars.WORKFLOW_VERCEL_PROJECT }}
+      WORKFLOW_VERCEL_TEAM: ${{ vars.WORKFLOW_VERCEL_TEAM }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      # The Go live tests run first, so a backend that refuses the project
+      # fails the job in a minute, before the suite waits out its timeouts.
+      - name: Run the Vercel World's live tests
+        run: go test ./worlds/vercel -run Live -count=1 -timeout 10m -v
+      - run: npm ci
+      - name: Run the Workflow SDK's World test suite
+        run: npm run test:world-testing
+
+  sdk-e2e:
+    name: SDK E2E (${{ matrix.world }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        world: [testworld, local, postgres, aws]
+    services:
+      postgres:
+        image: postgres:17.10
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # DynamoDB Local and ElasticMQ, an SQS stand-in, back the AWS World. An
+      # empty image skips the service for the other Worlds.
+      dynamodb:
+        image: ${{ matrix.world == 'aws' && 'amazon/dynamodb-local:3.3.1' || '' }}
+        ports:
+          - 8000:8000
+      elasticmq:
+        image: ${{ matrix.world == 'aws' && 'softwaremill/elasticmq-native:1.7.1' || '' }}
+        ports:
+          - 9324:9324
+    # The SDK is checked out beside this repository, not inside it, so its
+    # packages never resolve to the published ones in this repository's
+    # node_modules.
+    defaults:
+      run:
+        working-directory: go-workflow
+    env:
+      HARNESS_WORLD: ${{ matrix.world }}
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      SDK_DIR: ${{ github.workspace }}/sdk
+      # The vercel/workflow commit whose e2e suite and workbench app run.
+      SDK_COMMIT: &sdk-commit f717314b6fa8e91d653f56f90b9a1facf36a5f38
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: go-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/workflow
+          ref: ${{ env.SDK_COMMIT }}
+          path: sdk
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk/package.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            sdk/target
+          key: sdk-cargo-${{ env.SDK_COMMIT }}
+      - run: npm ci
+      - name: Build the Workflow SDK's workbench app
+        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
+      - name: Run the Workflow SDK's e2e suite
+        run: npm run test:sdk-e2e
+      - name: Run the Workflow SDK's e2e suite on the Go fixtures
+        run: npm run test:sdk-e2e
+        env:
+          SDK_APP: go
+
+  sdk-e2e-vercel:
+    name: SDK E2E (vercel)
+    if: *vercel
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: vercel
+    defaults:
+      run:
+        working-directory: go-workflow
+    env:
+      HARNESS_WORLD: vercel
+      SDK_DIR: ${{ github.workspace }}/sdk
+      SDK_COMMIT: *sdk-commit
+      WORKFLOW_VERCEL_AUTH_TOKEN: ${{ secrets.WORKFLOW_VERCEL_AUTH_TOKEN }}
+      WORKFLOW_VERCEL_PROJECT: ${{ vars.WORKFLOW_VERCEL_PROJECT }}
+      WORKFLOW_VERCEL_TEAM: ${{ vars.WORKFLOW_VERCEL_TEAM }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: go-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/workflow
+          ref: ${{ env.SDK_COMMIT }}
+          path: sdk
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk/package.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            sdk/target
+          key: sdk-cargo-${{ env.SDK_COMMIT }}
+      - run: npm ci
+      - name: Build the Workflow SDK's workbench app
+        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
+      # parallelStepsThenWebhookWorkflow polls the backend's hook listing,
+      # which shows a new hook about 20 seconds after it is created, for 10
+      # hooks in a row: more than the test's 180 seconds.
+      - name: Run the Workflow SDK's e2e suite
+        run: npm run test:sdk-e2e -- -t '^(?!.*parallelStepsThenWebhookWorkflow)'
+      - name: Run the Workflow SDK's e2e suite on the Go fixtures
+        run: npm run test:sdk-e2e -- -t '^(?!.*parallelStepsThenWebhookWorkflow)'
+        env:
+          SDK_APP: go
+
+  # Every test of the Workflow SDK packages and @ai-sdk/workflow that
+  # go-workflow mirrors is ported to a Go test that names it, or skipped with
+  # a reason, in internal/sdkdrift.
+  sdk-drift:
+    name: SDK Drift
+    runs-on: ubuntu-latest
+    env:
+      SDK_COMMIT: *sdk-commit
+      SDK_DIR: ${{ github.workspace }}/sdk
+      # The AI SDK commit whose @ai-sdk/workflow tests workflowai accounts for.
+      AI_SDK_COMMIT: 7fffff9f023882dc1e1f019aaaee0fbcf90539a5
+      AI_SDK_DIR: ${{ github.workspace }}/ai-sdk
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: go-workflow
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/workflow
+          ref: ${{ env.SDK_COMMIT }}
+          path: sdk
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/ai
+          ref: ${{ env.AI_SDK_COMMIT }}
+          path: ai-sdk
+          sparse-checkout: packages/workflow/src
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: go-workflow/go.sum
+      - name: Check every SDK test is ported or skipped
+        working-directory: go-workflow
+        run: go test ./internal/sdkdrift/ -run TestSDKTestsAreAccountedFor -count=1 -v
 
   release:
     name: Version Releases
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' }}
-    needs: [test, test-js]
+    needs: [test, test-js, world-testing, sdk-e2e, sdk-drift]
     steps:
       - uses: actions/checkout@v7
 

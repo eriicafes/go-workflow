@@ -393,40 +393,23 @@ report, err := GenerateReport(ctx, workflows.GenerateReport{Topic: input.Topic})
 ```
 
 `workflow.Start` in workflow context starts a child run, which carries the
-`$parentRunId` and `$rootRunId` attributes. In workflow context `Run.Value`
-returns `workflow.ErrRunNotFinished` instead of waiting, so to wait for a child,
-pass it a hook token and have it resume the hook when it finishes.
+`$parentRunId` and `$rootRunId` attributes. `Run.Value` waits for the child:
+the parent suspends on a system hook that the child resumes when it finishes,
+so a waiting parent holds no worker.
 
 ```go
 func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
-	hook := workflow.CreateHook[string](ctx)
-	defer hook.Dispose(ctx)
-
-	if owner, err := hook.GetConflict(ctx); err != nil {
-		return workflows.ParentResult{}, err
-	} else if owner != nil {
-		return workflows.ParentResult{}, &workflow.HookConflictError{}
-	}
-	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()}); err != nil {
-		return workflows.ParentResult{}, err
-	}
-	value, err := hook.Next(ctx)
-	return workflows.ParentResult{Value: value}, err
-}
-
-func Child(ctx context.Context, input workflows.Child) (workflows.ChildResult, error) {
-	value, err := workflow.Step(ctx, work, input)
+	child, err := workflow.Start(ctx, workflows.Child{Item: input.Item})
 	if err != nil {
-		return workflows.ChildResult{}, err
+		return workflows.ParentResult{}, err
 	}
-	_, err = workflow.Step(ctx, resumeParent, completion{Token: input.Token, Value: value})
-	return workflows.ChildResult{Value: value}, err
-}
-
-func resumeParent(ctx context.Context, c completion) (struct{}, error) {
-	return struct{}{}, workflow.ResumeHook(ctx, c.Token, c.Value)
+	result, err := child.Value(ctx)
+	return workflows.ParentResult{Value: result.Value}, err
 }
 ```
+
+`Run.ReturnValue` returns the wait as a promise, to wait for several children
+together with `workflow.JoinOk`.
 
 ## AI agents
 

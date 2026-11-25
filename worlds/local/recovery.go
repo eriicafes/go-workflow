@@ -61,16 +61,28 @@ func (w *World) recoverActiveRuns(ctx context.Context) error {
 			if wait.ResumeAt != nil {
 				resumeAt = *wait.ResumeAt
 			}
-			if resumeAt.Sub(now) > maxBackstopDelay {
+			delay, ok := backstopWakeDelay(resumeAt, now)
+			if !ok {
 				continue
 			}
-			wake := worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, RunSpecVersion: run.SpecVersion, NotBefore: &resumeAt, IdempotencyKey: fmt.Sprintf("recovery-wait:%s:%s:%d", run.RunID, wait.WaitID, resumeAt.UnixMilli())}
+			due := now.Add(delay)
+			wake := worlds.QueueInput{RunID: run.RunID, WorkflowName: run.WorkflowName, DeploymentID: run.DeploymentID, RunSpecVersion: run.SpecVersion, NotBefore: &due, IdempotencyKey: fmt.Sprintf("recovery-wait:%s:%s:%d", run.RunID, wait.WaitID, resumeAt.UnixMilli())}
 			if _, err := w.Queue(ctx, wake); err != nil {
 				log.Printf("workflow/local: re-arm wait %s of run %s: %v", wait.WaitID, run.RunID, err)
 			}
 		}
 	}
 	return nil
+}
+
+// backstopWakeDelay returns the delay of a recovered wait's backstop wake:
+// until the wait is due, or none for an overdue wait. A wait due after the
+// longest timer, maxBackstopDelay, gets no wake, and ok is false: a plain
+// wake would fire early and re-arm nothing, and the run's recovery flow arms
+// that wait's timer.
+func backstopWakeDelay(resumeAt, now time.Time) (delay time.Duration, ok bool) {
+	delay = max(resumeAt.Sub(now), 0)
+	return delay, delay <= maxBackstopDelay
 }
 
 // stepOwnership is what a run's events record of a step's inline ownership.
@@ -147,9 +159,12 @@ func (w *World) releaseOrphanedSteps(ctx context.Context, runID worlds.RunID) er
 		}
 	}
 	payload := orphanedStepError()
+	// Event times are milliseconds, so the boot is compared in milliseconds
+	// too: a step started in the millisecond the process booted is its own.
+	booted := bootedAt.Truncate(time.Millisecond)
 	for _, id := range running {
 		step := owned[id]
-		if step == nil || !step.inline || step.retried || step.finished || step.startedAt.IsZero() || !step.startedAt.Before(bootedAt) {
+		if step == nil || !step.inline || step.retried || step.finished || step.startedAt.IsZero() || !step.startedAt.Before(booted) {
 			continue
 		}
 		// The event names the step and its error alone, so the step retries

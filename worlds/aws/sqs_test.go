@@ -305,27 +305,6 @@ func TestDeliverSchedulesALongRedelivery(t *testing.T) {
 	}
 }
 
-func TestDeliverHandsOffOnAFIFOQueueWithANewDeduplicationID(t *testing.T) {
-	ctx := context.Background()
-	queue := &fakeSQS{}
-	world := routingWorld(t, queue, newFakeScheduler())
-	stepID := worlds.StepID("step_1")
-	queued, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: worlds.WorkflowName[orderedWorkflow](), StepID: &stepID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := world.deliver(ctx, &fakeExecutor{results: []error{worlds.Redeliver(0)}}, lastBody(t, queue)); err != nil {
-		t.Fatal(err)
-	}
-	sent := queue.sent()
-	if len(sent) != 2 || awsv2.ToString(sent[1].QueueUrl) != orderedURL || awsv2.ToString(sent[1].MessageGroupId) != "wrun_ordered" {
-		t.Fatalf("handoff sent %+v", sent)
-	}
-	if dedupe := awsv2.ToString(sent[1].MessageDeduplicationId); dedupe == queued.MessageID || !strings.HasPrefix(dedupe, queued.MessageID) {
-		t.Fatalf("handoff deduplication ID = %q, want one apart from the first send's", dedupe)
-	}
-}
-
 func TestQueueDropsAMessagePastItsRetention(t *testing.T) {
 	ctx := context.Background()
 	dynamo, queue := newFakeDynamo(), &fakeSQS{}

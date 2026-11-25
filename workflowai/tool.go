@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/digitallysavvy/go-ai/pkg/ai"
+	"github.com/digitallysavvy/go-ai/pkg/provider/types"
 	"github.com/eriicafes/go-workflow"
 )
 
@@ -43,6 +44,19 @@ type Tool struct {
 	// to it ends the stream, and the client sends the result in the next
 	// Stream's messages.
 	Execute Executor
+	// ToModelOutput converts a call's output to what the model sees of it.
+	// Results and the stream keep the raw output. It runs in workflow
+	// context.
+	ToModelOutput func(ctx context.Context, options ToolModelOutputOptions) (ToolResultOutput, error)
+	// ContextSchema is the JSON schema of the tool's entry in ToolsContext,
+	// which a call fails without.
+	ContextSchema map[string]any
+	// Provider is a tool the model's provider executes, such as Anthropic's
+	// web search, which the agent sends to the model as it is. Its results
+	// arrive in the model's stream. A provider tool with
+	// SupportsDeferredResults may deliver a result in a later model call, and
+	// the loop continues until it does. A provider tool needs no other field.
+	Provider *types.Tool
 }
 
 // inputSchema returns the tool's input schema.
@@ -54,6 +68,14 @@ func (t Tool) inputSchema() map[string]any {
 		return described.InputSchema()
 	}
 	return map[string]any{"type": "object"}
+}
+
+// ToolModelOutputOptions describes the output a Tool's ToModelOutput
+// converts.
+type ToolModelOutputOptions struct {
+	ToolCallID string
+	Input      json.RawMessage
+	Output     any
 }
 
 // ToolCallOptions describes the tool call an Executor or NeedsApprovalFunc
@@ -73,10 +95,16 @@ type ToolCall struct {
 	Input            json.RawMessage `json:"input"`
 	ProviderExecuted bool            `json:"providerExecuted,omitempty"`
 	ThoughtSignature string          `json:"thoughtSignature,omitempty"`
+	// ProviderMetadata is the provider's metadata of the call, which the
+	// assistant message sends back to it as provider options.
+	ProviderMetadata json.RawMessage `json:"providerMetadata,omitempty"`
 	// Invalid marks a call to an unknown tool or with input that does not
 	// match the tool's schema. Error explains why. Invalid calls are reported
 	// to the model as errors and not executed.
-	Invalid bool   `json:"invalid,omitempty"`
+	Invalid bool `json:"invalid,omitempty"`
+	// Dynamic marks a call whose input is not typed by its tool, as the
+	// Workflow SDK marks an invalid call.
+	Dynamic bool   `json:"dynamic,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -88,6 +116,7 @@ func (c ToolCall) contentPart() ContentPart {
 		Input:            c.Input,
 		ProviderExecuted: c.ProviderExecuted,
 		ThoughtSignature: c.ThoughtSignature,
+		ProviderMetadata: c.ProviderMetadata,
 	}
 }
 
@@ -99,6 +128,10 @@ type ToolResult struct {
 	Input      json.RawMessage `json:"input"`
 	Output     json.RawMessage `json:"output"`
 	IsError    bool            `json:"isError,omitempty"`
+	// ProviderExecuted marks the result of a tool the provider executed, and
+	// ProviderMetadata holds the provider's metadata of the result.
+	ProviderExecuted bool           `json:"providerExecuted,omitempty"`
+	ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
 }
 
 // toolResult is a tool call's result for the model and its stream part.
@@ -110,15 +143,9 @@ type toolResult struct {
 	// invalid marks the result of an invalid call, which the client already
 	// received as a tool-input-error.
 	invalid bool
-}
-
-func (t toolResult) streamPart() ModelCallStreamPart {
-	if t.isError {
-		var message string
-		_ = json.Unmarshal(t.raw, &message)
-		return ModelCallStreamPart{Type: "tool-error", ToolCallID: t.call.ToolCallID, ToolName: t.call.ToolName, Input: t.call.Input, Error: message}
-	}
-	return ModelCallStreamPart{Type: "tool-result", ToolCallID: t.call.ToolCallID, ToolName: t.call.ToolName, Input: t.call.Input, Output: t.raw}
+	// rejected marks the result of an approved call that failed its check,
+	// which the stream does not report.
+	rejected bool
 }
 
 // Executor executes tool calls. It may also describe its input with an

@@ -38,7 +38,7 @@ func (panicStepInput) Workflow(panicStepOutput)     {}
 
 func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	var attempts atomic.Int32
-	world := testworld.New(workflow.Use(func(ctx context.Context, input durableStepInput) (durableStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input durableStepInput) (durableStepOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) {
 			if attempts.Add(1) == 1 {
 				return 0, workflow.RetryableError(errors.New("retry"), time.Millisecond)
@@ -46,7 +46,7 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 			return value + 1, nil
 		}, input.Value, workflow.StepOptions{MaxRetries: 1})
 		return durableStepOutput{Value: value}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -76,16 +76,56 @@ func TestDurableStepRecordsRetryAndCompletionEvents(t *testing.T) {
 	}
 }
 
+// A retry reports the step's first start, as the Workflow SDK's
+// stepStartedAt does, so it can tell how long the step has been trying.
+func TestStepMetadataStartedAtIsTheFirstAttemptsStart(t *testing.T) {
+	for _, inline := range []bool{true, false} {
+		t.Run(fmt.Sprintf("inline=%v", inline), func(t *testing.T) {
+			var mu sync.Mutex
+			var starts []time.Time
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input exhaustedInput) (exhaustedOutput, error) {
+				step := workflow.Step[int, int]
+				if input.Inline {
+					step = workflow.InlineStep[int, int]
+				}
+				_, err := step(ctx, func(ctx context.Context, _ int) (int, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					starts = append(starts, workflow.GetStepMetadata(ctx).StartedAt)
+					if len(starts) == 1 {
+						return 0, workflow.RetryableError(errors.New("retry"), 20*time.Millisecond)
+					}
+					return 0, nil
+				}, 0)
+				return exhaustedOutput{}, err
+			})))
+			defer world.Close()
+			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+			defer cancel()
+			run, err := workflow.Start(ctx, exhaustedInput{Inline: inline})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run.Value(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if len(starts) != 2 || !starts[1].Equal(starts[0]) && starts[1].Sub(starts[0]).Abs() > 10*time.Millisecond {
+				t.Fatalf("starts = %v, want the retry to report the first attempt's start", starts)
+			}
+		})
+	}
+}
+
 func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 	var attempts atomic.Int32
 	original := errors.New("fatal")
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ fatalStepInput) (fatalStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ fatalStepInput) (fatalStepOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			attempts.Add(1)
 			return struct{}{}, workflow.FatalError(original)
 		}, struct{}{}, workflow.StepOptions{MaxRetries: 3})
 		return fatalStepOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -127,12 +167,12 @@ func TestFatalStepFailureDoesNotScheduleARetry(t *testing.T) {
 }
 
 func TestTargetedStepErrorPanicIsRecordedAsStepFailure(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ panicStepInput) (panicStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ panicStepInput) (panicStepOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			panic(errors.New("step panic"))
 		}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
 		return panicStepOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -169,14 +209,14 @@ func TestRedeliveredStepRunsAsANewAttempt(t *testing.T) {
 		}, struct{}{})
 		return redeliveredStepOutput{}, err
 	})
-	world := testworld.NewManual(runner)
+	world := testworld.NewManual(worlds.Runners(runner))
 	defer world.Close()
 	ctx := workflow.NewContext(queuedSteps(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, redeliveredStepInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 	if err := runtime.Execute(ctx, world.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
@@ -232,10 +272,10 @@ func TestDurableStepContinuesTheTraceTheRunWasStartedIn(t *testing.T) {
 		TraceFlags: trace.FlagsSampled,
 		Remote:     true,
 	})
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ startTracedInput) (tracedStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ startTracedInput) (tracedStepOutput, error) {
 		_, err := workflow.Step(ctx, startTracedStep, 1)
 		return tracedStepOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -265,13 +305,13 @@ func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 		TraceFlags: trace.FlagsSampled,
 		Remote:     true,
 	})
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ tracedStepInput) (tracedStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ tracedStepInput) (tracedStepOutput, error) {
 		// The runner's ctx reaches the step, so the step's span is a child
 		// of the span context the runner set.
 		ctx = trace.ContextWithRemoteSpanContext(ctx, parent)
 		_, err := workflow.Step(ctx, tracedStep, 1, workflow.StepOptions{MaxRetries: 1})
 		return tracedStepOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -289,7 +329,7 @@ func TestDurableStepSpansEachAttemptUnderTheRunnersSpan(t *testing.T) {
 		t.Fatalf("got %d spans", len(spans))
 	}
 	for i, span := range spans {
-		if span.Name != "step core_test.tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
+		if span.Name != "step tracedStep" || span.Parent.SpanID() != parent.SpanID() || span.SpanContext.TraceID() != parent.TraceID() {
 			t.Fatalf("span = %q with parent %v", span.Name, span.Parent)
 		}
 		if span.Status.Code != codes.Error {
@@ -311,13 +351,13 @@ type unencodableStepOutput struct{}
 func (unencodableStepInput) Workflow(unencodableStepOutput) {}
 
 func TestStepWhoseInputDoesNotEncodeIsCreatedWithThePlaceholderAndFailed(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ unencodableStepInput) (unencodableStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ unencodableStepInput) (unencodableStepOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, chan int) (int, error) { return 0, nil }, make(chan int))
 		if err == nil {
 			return unencodableStepOutput{}, errors.New("the step ran")
 		}
 		return unencodableStepOutput{}, nil
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -362,14 +402,14 @@ func retryDelayRunner() worlds.Runner {
 
 func TestFailedStepRetriesAfterASecondByDefault(t *testing.T) {
 	runner := retryDelayRunner()
-	world := testworld.NewManual(runner)
+	world := testworld.NewManual(worlds.Runners(runner))
 	defer world.Close()
 	ctx := workflow.NewContext(context.Background(), workflow.NewClient(world))
 	run, err := workflow.Start(ctx, retryDelayInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := core.NewRuntime(world, worlds.Runners(runner))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(world)}
 	for range 2 {
 		// The flow creates the step, and the step's delivery runs its
 		// first attempt, which asks for the message again when the retry
@@ -410,7 +450,7 @@ func TestFailedStepRetriesAfterASecondByDefault(t *testing.T) {
 }
 
 func TestStepWhoseRetryOutlivesItsMessageFails(t *testing.T) {
-	world := testworld.New(retryDelayRunner())
+	world := testworld.New(worlds.Runners(retryDelayRunner()))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -451,14 +491,14 @@ func TestStepThatRunsOutOfRetriesFailsWithAFatalErrorThatKeepsItsLastError(t *te
 	for _, inline := range []bool{false, true} {
 		t.Run(fmt.Sprintf("inline=%t", inline), func(t *testing.T) {
 			var stepErr error
-			world := testworld.New(workflow.Use(func(ctx context.Context, input exhaustedInput) (exhaustedOutput, error) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input exhaustedInput) (exhaustedOutput, error) {
 				if input.Inline {
 					_, stepErr = workflow.InlineStep(ctx, alwaysRefused, struct{}{}, workflow.StepOptions{MaxRetries: 0})
 				} else {
 					_, stepErr = workflow.Step(core.WithMaxInlineSteps(ctx, 0), alwaysRefused, struct{}{}, workflow.StepOptions{MaxRetries: 0})
 				}
 				return exhaustedOutput{}, stepErr
-			}))
+			})))
 			defer world.Close()
 			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 			defer cancel()
@@ -471,7 +511,7 @@ func TestStepThatRunsOutOfRetriesFailsWithAFatalErrorThatKeepsItsLastError(t *te
 			var fatal worlds.FatalError
 			var cause exhaustedCause
 			if !errors.As(err, &recorded) || recorded.Type != "FatalError" || !strings.HasPrefix(recorded.Message, `Step "`) ||
-				!strings.HasSuffix(recorded.Message, `.alwaysRefused" failed after 0 retries: refused with 7`) {
+				!strings.HasSuffix(recorded.Message, `//alwaysRefused" failed after 0 retries: refused with 7`) {
 				t.Fatalf("run = %#v, want the step's retries used up", err)
 			}
 			// The step's own error is the cause, which errors.As reaches.
@@ -549,10 +589,10 @@ func signalRunner(ctx context.Context, input signalInput) (signalOutput, error) 
 func TestStepDeliveryTellsTheWorldWhenItsStepWasCreatedAndThatItRan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
 	defer cancel()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(workflow.Use(signalRunner)), Runtime: core.NewRuntime(world)}
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -591,10 +631,10 @@ func TestStepDeliveryTellsTheWorldWhenItsStepWasCreatedAndThatItRan(t *testing.T
 func TestStepDeliveryReadsItsStepsCreationFromTheLogWhenItsMessageHasNone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
 	defer cancel()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(workflow.Use(signalRunner)), Runtime: core.NewRuntime(world)}
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{}); err != nil {
 		t.Fatal(err)
 	}
@@ -617,17 +657,17 @@ func TestStepDeliveryReadsItsStepsCreationFromTheLogWhenItsMessageHasNone(t *tes
 func TestStepFailedWithoutRunningIsNotMarkedAsAfterItsFunction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(queuedSteps(), 5*time.Second)
 	defer cancel()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
 	var calls atomic.Int32
-	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(func(ctx context.Context, _ signalInput) (signalOutput, error) {
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(workflow.Use(func(ctx context.Context, _ signalInput) (signalOutput, error) {
 		_, err := workflow.Step(ctx, func(context.Context, struct{}) (struct{}, error) {
 			calls.Add(1)
 			return struct{}{}, nil
 		}, struct{}{}, workflow.StepOptions{MaxRetries: 0})
 		return signalOutput{}, err
-	})))
+	})), Runtime: core.NewRuntime(world)}
 	if _, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{}); err != nil {
 		t.Fatal(err)
 	}
@@ -654,10 +694,10 @@ func TestStepFailedWithoutRunningIsNotMarkedAsAfterItsFunction(t *testing.T) {
 func TestInlineStepTellsTheWorldItRanAndMarksItsFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	world := &stepSignalWorld{World: manual}
-	runtime := core.NewRuntime(world, worlds.Runners(workflow.Use(signalRunner)))
+	runtime := worlds.BoundExecutor{Executor: worlds.Runners(workflow.Use(signalRunner)), Runtime: core.NewRuntime(world)}
 	run, err := workflow.Start(workflow.NewContext(ctx, workflow.NewClient(manual)), signalInput{Fail: true})
 	if err != nil {
 		t.Fatal(err)
@@ -699,7 +739,7 @@ func (mutatedInputInput) Workflow(int) {}
 func TestStepChangingItsInputLeavesTheWorkflowsValue(t *testing.T) {
 	for _, mode := range []string{"inline", "queued", "explicit inline"} {
 		t.Run(mode, func(t *testing.T) {
-			world := testworld.New(workflow.Use(func(ctx context.Context, input mutatedInputInput) (int, error) {
+			world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input mutatedInputInput) (int, error) {
 				values := []int{1}
 				change := func(_ context.Context, values []int) (int, error) {
 					values[0] = 99
@@ -715,7 +755,7 @@ func TestStepChangingItsInputLeavesTheWorkflowsValue(t *testing.T) {
 					_, err = workflow.InlineStep(ctx, change, values)
 				}
 				return values[0], err
-			}))
+			})))
 			defer world.Close()
 			ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 			defer cancel()

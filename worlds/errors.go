@@ -3,6 +3,8 @@ package worlds
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/eriicafes/go-workflow/internal/sdkerror"
@@ -161,6 +163,47 @@ func init() {
 			recorded.Decode("stage", &failed.Stage)
 			*e = failed
 		})
+	sdkerror.RegisterNamed("SerializationError",
+		func(*SerializationError) []sdkerror.Field { return nil },
+		func(e **SerializationError, recorded *sdkerror.Error) {
+			failed := &SerializationError{Message: recorded.Message, Cause: recorded.Unwrap()}
+			if failed.Cause != nil {
+				failed.Message = strings.TrimSuffix(failed.Message, ": "+failed.Cause.Error())
+			}
+			*e = failed
+		})
+	sdkerror.RegisterNamed("WorkflowRunFailedError",
+		func(e *RunFailedError) []sdkerror.Field {
+			fields := []sdkerror.Field{sdkerror.NewField("runId", e.RunID)}
+			if e.ErrorCode != "" {
+				fields = append(fields, sdkerror.NewField("errorCode", e.ErrorCode))
+			}
+			return fields
+		},
+		func(e **RunFailedError, recorded *sdkerror.Error) {
+			failed := &RunFailedError{Cause: recorded.Unwrap()}
+			recorded.Decode("runId", &failed.RunID)
+			recorded.Decode("errorCode", &failed.ErrorCode)
+			*e = failed
+		})
+	sdkerror.RegisterNamed("WorkflowRunCancelledError",
+		func(e *RunCancelledError) []sdkerror.Field {
+			return []sdkerror.Field{sdkerror.NewField("runId", e.RunID)}
+		},
+		func(e **RunCancelledError, recorded *sdkerror.Error) {
+			cancelled := &RunCancelledError{}
+			recorded.Decode("runId", &cancelled.RunID)
+			*e = cancelled
+		})
+	sdkerror.RegisterNamed("EncryptionKeyLookupError",
+		func(e *EncryptionKeyLookupError) []sdkerror.Field {
+			return []sdkerror.Field{sdkerror.NewField("runId", e.RunID)}
+		},
+		func(e **EncryptionKeyLookupError, recorded *sdkerror.Error) {
+			lookup := &EncryptionKeyLookupError{Cause: recorded.Unwrap()}
+			recorded.Decode("runId", &lookup.RunID)
+			*e = lookup
+		})
 	sdkerror.RegisterNamed("HookNotFoundError",
 		func(e *HookNotFoundError) []sdkerror.Field {
 			return []sdkerror.Field{sdkerror.NewField("token", e.Token)}
@@ -220,6 +263,28 @@ type FatalError struct{ Cause error }
 
 func (e FatalError) Error() string { return causeMessage(e.Cause) }
 func (e FatalError) Unwrap() error { return e.Cause }
+func (e FatalError) Fatal() bool   { return true }
+
+// IsFatal reports whether err must not be retried: whether its chain holds
+// a FatalError, or an error whose Fatal method returns true, such as a
+// *SerializationError, *RunFailedError, *RunCancelledError or
+// *EncryptionKeyLookupError. Read back from a record, as the SDK revives
+// errors, only a FatalError is still fatal.
+func IsFatal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if fatal, ok := err.(interface{ Fatal() bool }); ok && fatal.Fatal() {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() error }:
+		return IsFatal(wrapped.Unwrap())
+	case interface{ Unwrap() []error }:
+		return slices.ContainsFunc(wrapped.Unwrap(), IsFatal)
+	}
+	return false
+}
 
 // RetryableError requests a delay before the next attempt, while retries
 // remain. It is recorded as RetryableError, with when the retry is due as
@@ -239,6 +304,79 @@ func causeMessage(cause error) string {
 	}
 	return cause.Error()
 }
+
+// SerializationError reports a value that could not be encoded as a
+// payload, such as a step's arguments or return value. Encoding it again
+// fails the same way, so it is fatal. It is recorded as an Error named
+// SerializationError.
+type SerializationError struct {
+	// Message names what did not encode, such as "Failed to serialize step
+	// arguments".
+	Message string
+	// Cause is the encoding failure.
+	Cause error `json:"-" cbor:"-"`
+}
+
+func (e *SerializationError) Error() string {
+	if e.Cause == nil {
+		return e.Message
+	}
+	return e.Message + ": " + e.Cause.Error()
+}
+
+func (e *SerializationError) Unwrap() error { return e.Cause }
+func (e *SerializationError) Fatal() bool   { return true }
+
+// RunFailedError is the error of awaiting a run that failed. A run's
+// terminal state never changes, so it is fatal: a step awaiting the run
+// fails without retrying. It is recorded as an Error named
+// WorkflowRunFailedError.
+type RunFailedError struct {
+	RunID RunID
+	// ErrorCode is the category of the run's error, from its run_failed
+	// event, such as USER_ERROR.
+	ErrorCode string
+	// Cause is the error the run failed with.
+	Cause error `json:"-" cbor:"-"`
+}
+
+func (e *RunFailedError) Error() string {
+	return fmt.Sprintf("workflow: run %s failed: %s", e.RunID, causeMessage(e.Cause))
+}
+
+func (e *RunFailedError) Unwrap() error { return e.Cause }
+func (e *RunFailedError) Fatal() bool   { return true }
+
+// RunCancelledError is the error of awaiting a run that was cancelled. It
+// matches ErrRunCancelled. A run's terminal state never changes, so it is
+// fatal: a step awaiting the run fails without retrying. It is recorded as
+// an Error named WorkflowRunCancelledError.
+type RunCancelledError struct {
+	RunID RunID
+}
+
+func (e *RunCancelledError) Error() string {
+	return fmt.Sprintf("workflow: run %s cancelled", e.RunID)
+}
+
+func (e *RunCancelledError) Is(target error) bool { return target == ErrRunCancelled }
+func (e *RunCancelledError) Fatal() bool          { return true }
+
+// EncryptionKeyLookupError reports that the encryption key of run RunID
+// could not be resolved for good, such as for a run that does not exist. It
+// is fatal; a transient lookup failure is returned as it is instead, so it
+// is retried. It is recorded as an Error named EncryptionKeyLookupError.
+type EncryptionKeyLookupError struct {
+	RunID RunID
+	Cause error `json:"-" cbor:"-"`
+}
+
+func (e *EncryptionKeyLookupError) Error() string {
+	return fmt.Sprintf("workflow: encryption key lookup of run %s failed: %s", e.RunID, causeMessage(e.Cause))
+}
+
+func (e *EncryptionKeyLookupError) Unwrap() error { return e.Cause }
+func (e *EncryptionKeyLookupError) Fatal() bool   { return true }
 
 // Stages of a start whose outcome a *StartError could not confirm.
 const (

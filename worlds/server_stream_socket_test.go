@@ -86,7 +86,7 @@ func TestStreamSocketURL(t *testing.T) {
 
 func TestStreamSocketWritesAndCloses(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	server, upgrades := socketServer(t, world)
 	for _, name := range []string{"out", ""} {
@@ -138,7 +138,7 @@ func TestStreamSocketWritesAndCloses(t *testing.T) {
 
 func TestStreamSocketReportsAClosedStream(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	server, _ := socketServer(t, world)
 	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: "wrun_closed", Name: "out"}); err != nil {
@@ -163,7 +163,7 @@ func TestStreamSocketReportsAClosedStream(t *testing.T) {
 
 func TestStreamSocketFallsBack(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 
 	t.Run("Declined", func(t *testing.T) {
@@ -272,9 +272,9 @@ func (socketClientInput) Workflow(socketClientOutput) {}
 // TestHTTPClientWritesStreamsOverTheSocket checks that a remote client's
 // writer reaches the server's stream through its socket.
 func TestHTTPClientWritesStreamsOverTheSocket(t *testing.T) {
-	world := testworld.New(workflow.Use(func(context.Context, socketClientInput) (socketClientOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(context.Context, socketClientInput) (socketClientOutput, error) {
 		return socketClientOutput{}, nil
-	}))
+	})))
 	defer world.Close()
 	server, upgrades := socketServer(t, world)
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewHTTPClient(server.URL+"/v1/workflow")), 5*time.Second)
@@ -389,7 +389,7 @@ func (s *scriptedSocket) open(t *testing.T, world worlds.World, runID worlds.Run
 func TestStreamSocketWriterWaitsOutARateLimit(t *testing.T) {
 	defer worlds.SetStreamSocketThrottle(time.Millisecond, 20*time.Millisecond)()
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	ack := func(kind string) map[string]any { return map[string]any{"type": kind + "_ack"} }
 	throttled := func(retryAfter string) map[string]any {
@@ -516,7 +516,7 @@ func (w *throttledStreamWorld) StreamsWriteMulti(ctx context.Context, input worl
 func TestStreamSocketServerRefusesAThrottledWriteAsRetryable(t *testing.T) {
 	defer worlds.SetStreamSocketThrottle(time.Millisecond, time.Hour)()
 	ctx := context.Background()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	world := &throttledStreamWorld{World: manual}
 	server, _ := socketServer(t, world)

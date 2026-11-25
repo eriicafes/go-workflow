@@ -2,6 +2,7 @@ package workflowai_test
 
 import (
 	"encoding/json"
+	"github.com/eriicafes/go-workflow/worlds"
 	"slices"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestUIMessageChunksResume(t *testing.T) {
 		}
 
 		testModel = &fakeModel{responses: []func() ([]provider.StreamChunk, error){text("Hello!")}}
-		world := testworld.New(workflow.Use(ChatRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(ChatRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Chat{Messages: []workflowai.ModelMessage{user("hi")}})
@@ -94,7 +95,8 @@ func respond(t *testing.T, signature string, approved bool, input string) []work
 func TestStreamApprovedToolCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Booked!"))
-		testOptions.ToolApprovalSecret = []byte("0123456789abcdef0123456789abcdef")
+		t.Setenv("TOOL_APPROVAL_SECRET", "0123456789abcdef0123456789abcdef")
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
 		first := approvalTurn(t)
 		var signature string
 		for _, part := range first.Messages[len(first.Messages)-1].Content {
@@ -151,7 +153,8 @@ func TestStreamDeniedToolCall(t *testing.T) {
 func TestStreamRejectsTamperedApproval(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(toolCalls(call("c1", "bookFlight", `{"flightId":"LH123"}`)), text("Something went wrong."))
-		testOptions.ToolApprovalSecret = []byte("0123456789abcdef0123456789abcdef")
+		t.Setenv("TOOL_APPROVAL_SECRET", "0123456789abcdef0123456789abcdef")
+		testOptions.ToolApprovalSecret = &workflowai.ToolApprovalSecret{EnvironmentVariable: "TOOL_APPROVAL_SECRET"}
 		first := approvalTurn(t)
 		signature := first.Messages[len(first.Messages)-1].Content[1].Signature
 
@@ -160,8 +163,24 @@ func TestStreamRejectsTamperedApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if chunks[2]["type"] != "tool-output-error" || !strings.Contains(chunks[2]["errorText"].(string), "invalid signature") {
-			t.Fatalf("chunk = %v", chunks[2])
+		// Like in the Workflow SDK, the model gets the rejected call's error
+		// and the stream gets no output for it.
+		for _, chunk := range chunks {
+			if chunk["toolCallId"] == "c1" {
+				t.Fatalf("chunk = %v", chunk)
+			}
+		}
+		var sent string
+		for _, message := range testModel.prompts()[1] {
+			for _, part := range message.Content {
+				if part, ok := part.(types.ToolResultContent); ok && part.ToolCallID == "c1" {
+					data, _ := json.Marshal(part.Output)
+					sent = string(data)
+				}
+			}
+		}
+		if !strings.Contains(sent, "invalid signature") {
+			t.Fatalf("tool result = %s", sent)
 		}
 	})
 }

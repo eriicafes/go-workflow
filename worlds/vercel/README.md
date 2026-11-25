@@ -148,8 +148,8 @@ go-workflow's events have the Workflow SDK's shape, so the backend keeps each
 as it keeps a JS run's event: its metadata, such as a step's name or a wait's
 resume time, and its payload, already in the SDK's format. The runs, steps,
 hooks, and streams of Go runs show in Vercel's dashboard as JS ones do. Workflow and step
-names are recorded as Go names them, such as `example.com/app.Checkout`, not
-in the SDK's `workflow//` form.
+names are recorded in the SDK's form, such as
+`workflow//example.com/app//Checkout`.
 
 | Event | Payload | Metadata |
 | --- | --- | --- |
@@ -229,7 +229,7 @@ correlation ID stays on `/v4/events` for every run. On `/v5`:
 The World also relies on what the client cannot see, which
 `TestBackendAssumptionsLive` checks against a real project:
 
-- The backend enforces the fence only on `/v5`.
+- The backend enforces the fence on `/v4` too, for runs below spec 9.
 - An in-band write's stored `createdAt` is the `occurredAt` it was sent with.
 - `step_created` keeps `inline` and `creatorMessageId` in the event's data.
 - On a spec 9 run, a finished run refuses `step_created` and `step_started`,
@@ -357,7 +357,6 @@ Where it differs, it is for one of these reasons:
 
 | Difference | Reason |
 | --- | --- |
-| Workflow and step names are sent as Go names them, not in the SDK's `workflow//` form. | A Go run is resumed only by Go code. Resuming a run across languages is not supported. |
 | Events are written over HTTP only. The SDK can also write them over its events socket. | The socket carries the same frames and the same retry policy, so HTTP loses nothing but a connection setup. The World uses the socket for the event feed. |
 | `ownerMessageId` is never sent on `step_started`. The SDK's client sends it when the event's data has it. | Only a runtime below spec 9 writes it. A spec 9 run, which is all the Go runtime records, marks an inline step with `inline` on the event that creates it and names a flow's message as `creatorMessageId`. |
 | A stream write whose socket fails before its acknowledgment is sent again through HTTP, and the writer stays on HTTP once its socket fails, drains, or is closed. The SDK fails the writer after an unacknowledged write, and reconnects a socket that drained or closed while idle. | The Go writer reads its socket only while a request waits for its answer, so it cannot tell a socket closed while idle from one that lost a write. Sending the write again keeps every chunk, at the cost of a possible duplicate, where failing the writer fails the step that writes. |
@@ -396,8 +395,8 @@ go test -race ./worlds/vercel/...
 
 The tests run the conformance suites and end-to-end workflows against an
 in-process imitation of the workflow API, which keeps an event only as the
-backend does. Set `WORKFLOW_VERCEL_LIVE_OIDC_TOKEN` (a deployment's OIDC
-token), or `WORKFLOW_VERCEL_LIVE_TOKEN` with `VERCEL_PROJECT_ID` and
-`VERCEL_TEAM_ID`, to also run the end-to-end workflows against Vercel's
-storage, the backend contract tests against its `/v5` routes, and the
-backend assumptions.
+backend does. Set `WORKFLOW_VERCEL_AUTH_TOKEN`, a Vercel access token, with
+`WORKFLOW_VERCEL_PROJECT` and `WORKFLOW_VERCEL_TEAM`, the variables the
+Workflow SDK's tests use, to also run the end-to-end workflows against
+Vercel's storage, the backend contract tests against its `/v5` routes, and
+the backend assumptions.

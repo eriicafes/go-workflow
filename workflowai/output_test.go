@@ -26,7 +26,7 @@ func TestStreamOutput(t *testing.T) {
 		testOptions.Output = itineraryOutput()
 		var mu sync.Mutex
 		var output any
-		testOptions.OnEnd = func(_ context.Context, result workflowai.Result) {
+		testOptions.OnEnd = func(_ context.Context, result workflowai.EndEvent) {
 			mu.Lock()
 			defer mu.Unlock()
 			output = result.Output
@@ -60,8 +60,11 @@ func TestStreamOutputParseFailure(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected a parse error")
 		}
-		if !slices.Contains(chunkTypes(chunks), "error") {
-			t.Fatalf("chunks = %v", chunkTypes(chunks))
+		// The stream ends with a finish part and no error part, as in the
+		// Workflow SDK.
+		types := chunkTypes(chunks)
+		if slices.Contains(types, "error") || types[len(types)-1] != "finish" {
+			t.Fatalf("chunks = %v", types)
 		}
 	})
 }

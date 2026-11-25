@@ -9,15 +9,12 @@ import type {
 	AnalyticsRun,
 	AnalyticsStep,
 	AnalyticsWait,
-	Event,
 	EventBatchResult,
 	EventResult,
-	Hook,
 	MessageId,
 	PaginatedResponse,
 	Step,
 	StepWithoutData,
-	Wait,
 	ListWorkflowRunStepsParams,
 	ListWorkflowRunsParams,
 	WaitForTerminalRunStatusParams,
@@ -25,20 +22,19 @@ import type {
 	WorkflowRunWithoutData,
 	World,
 } from "@workflow/world";
-import { HOOK_RESUME_DEDUP_VERSION, START_HOOK_ADMISSION_REJECTED_CODE } from "@workflow/world";
-import { SPEC_VERSION_SINGLE_ORCHESTRATOR } from "@workflow/world/spec-version";
-import { HTTPWorldError, RPCClient, devkitName, goName, type RPC } from "./rpc.js";
+import { toHook, toRun, toStep, toWait } from "./entities.js";
+import { createOptions, jsonEncoded, runCreation, startHookConflict, toEventResult, withEventData, withEventDataPage } from "./events.js";
+import { queueHandler, queueInput } from "./queue.js";
+import { HTTPWorldError, RPCClient, type RPC } from "./rpc.js";
 import { HTTPStreamWriteSession } from "./stream-socket.js";
+import { createReadableStream, getStreamChunks } from "./stream-reader.js";
+import { GO_SPEC_VERSION, bytes, durationNanoseconds, environment, page } from "./utils.js";
 
 const HTTP_WORLD_RPC_VERSION = 1;
-// The code of the Workflow SDK's WorkflowWorldError for a start hook
-// candidate answered while admission is switched off.
-const START_HOOK_ADMISSION_DISABLED_CODE = "START_HOOK_ADMISSION_DISABLED";
 
-// GO_SPEC_VERSION is the spec version a Go World records on every run it
-// creates, whatever version the caller asked for: one orchestrator per run,
-// whose in-band writes the World fences.
-const GO_SPEC_VERSION = SPEC_VERSION_SINGLE_ORCHESTRATOR;
+// terminalWaitMs is how long one runs.waitForTerminalStatus request waits.
+const terminalWaitMs = 10_000;
+const terminalStatuses = new Set<RPC.Status>(["completed", "failed", "cancelled"]);
 
 export type { World } from "@workflow/world";
 export { HTTPWorldError } from "./rpc.js";
@@ -80,7 +76,7 @@ export async function createWorld(options: HTTPWorldOptions = {}): Promise<HTTPW
 	// server fails it instead of answering.
 	client.rpcVersion = HTTP_WORLD_RPC_VERSION;
 	const spec = await client.call<RPC.Spec>("client.spec", {});
-	return new HTTPWorld(client, spec);
+	return new HTTPWorld(client, spec, { token });
 }
 
 export class HTTPWorld implements World {
@@ -123,12 +119,23 @@ export class HTTPWorld implements World {
 	 */
 	readonly getDeploymentId: World["getDeploymentId"];
 	/**
-	 * HTTP worlds cannot receive queue deliveries in JavaScript: queue handling
-	 * belongs to the RPC server, not the client-side SDK adapter.
+	 * Deliveries reach the app's flow route from the Go World's
+	 * worlds.RemoteExecutor, which authenticates them with the World's bearer
+	 * token. The handler checks it, so the SDK runtime does not check them
+	 * itself.
 	 */
-	readonly createQueueHandler: World["createQueueHandler"] = () => {
-		throw new HTTPWorldError("unsupported", "workflow: HTTP worlds do not create queue handlers");
-	};
+	readonly queueAuthMode = "skip" as const;
+	/**
+	 * Returns the handler of the app's flow route for deliveries a Go World
+	 * sends with worlds.RemoteExecutor, in the Workflow SDK's local queue
+	 * format: the message as JSON, with its queue name, message ID, attempt,
+	 * delivery count and creation time in x-vqs-* headers. It answers
+	 * {timeoutSeconds} when `handler` asks for the message again, and
+	 * {ok: true} when the message is done. A delivery without the World's
+	 * token is refused with 401, and a handler that throws fails it with 500,
+	 * which the Go World retries.
+	 */
+	readonly createQueueHandler: World["createQueueHandler"];
 	/**
 	 * The key of a run's payloads, which the Go World resolves, or undefined
 	 * when they are not encrypted. Go runs' payloads are in the Workflow
@@ -136,8 +143,9 @@ export class HTTPWorld implements World {
 	 */
 	readonly getEncryptionKeyForRun: NonNullable<World["getEncryptionKeyForRun"]>;
 
-	constructor(client: RPCClient, spec: RPC.Spec) {
+	constructor(client: RPCClient, spec: RPC.Spec, options: { token?: string } = {}) {
 		client.rpcVersion = HTTP_WORLD_RPC_VERSION;
+		this.createQueueHandler = (prefix, handler) => queueHandler(prefix, handler, options.token);
 		this._spec = spec;
 		this.capabilities = HTTPWorld.createCapabilities(spec.capabilities);
 		this.getDeploymentId = () => client.call<string>("world.deploymentId", {});
@@ -194,7 +202,7 @@ export class HTTPWorld implements World {
 				...input,
 				...("status" in input && input.status !== undefined ? { status: Array.isArray(input.status) ? input.status : [input.status] } : {}),
 			};
-			return client.call<PaginatedResponse<RPC.Run>>("runs.list", normalized).then((page) => ({ ...page, data: page.data.map(toRun) }));
+			return client.call<PaginatedResponse<RPC.Run>>("runs.list", normalized).then((result) => ({ ...result, data: page(result).data.map(toRun) }));
 		}
 		function waitForTerminalStatus(runId: string, params: WaitForTerminalRunStatusParams & { resolveData: "none" }): Promise<WorkflowRunWithoutData>;
 		function waitForTerminalStatus(runId: string, params?: WaitForTerminalRunStatusParams & { resolveData?: "all" }): Promise<WorkflowRun>;
@@ -206,7 +214,7 @@ export class HTTPWorld implements World {
 			// timeoutMs it waits until the run finishes or signal aborts.
 			durationNanoseconds(timeoutMs);
 			const deadline = timeoutMs == null ? Infinity : Date.now() + timeoutMs;
-			for (;;) {
+			while (true) {
 				const wait = Math.max(0, Math.min(terminalWaitMs, deadline - Date.now()));
 				const run = await client.call<RPC.Run>("runs.waitForTerminalStatus", { runId, ...input, timeout: durationNanoseconds(wait) }, { signal });
 				if (terminalStatuses.has(run.status) || Date.now() >= deadline) {
@@ -245,7 +253,7 @@ export class HTTPWorld implements World {
 		function list(input: ListWorkflowRunStepsParams & { resolveData?: "all" }): Promise<PaginatedResponse<Step>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>>;
 		function list(input: ListWorkflowRunStepsParams): Promise<PaginatedResponse<Step | StepWithoutData>> {
-			return client.call<PaginatedResponse<RPC.Step>>("steps.list", input).then((page) => ({ ...page, data: page.data.map(toStep) }));
+			return client.call<PaginatedResponse<RPC.Step>>("steps.list", input).then((result) => ({ ...result, data: page(result).data.map(toStep) }));
 		}
 		return {
 			get,
@@ -283,7 +291,7 @@ export class HTTPWorld implements World {
 						event: {
 							eventType: event.eventType,
 							correlationId: event.correlationId ?? "",
-							data: jsonEncoded(storedEventData(event.eventData)),
+							data: jsonEncoded(event.eventData),
 							...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 							...(options?.inBand && options.occurredAt ? { occurredAt: options.occurredAt } : {}),
 						},
@@ -302,7 +310,7 @@ export class HTTPWorld implements World {
 					events: events.map(({ event, occurredAt }) => ({
 						eventType: event.eventType,
 						correlationId: event.correlationId ?? "",
-						data: jsonEncoded(storedEventData(event.eventData)),
+						data: jsonEncoded(event.eventData),
 						...(event.specVersion !== undefined ? { specVersion: event.specVersion } : {}),
 						...(occurredAt ? { occurredAt } : {}),
 					})),
@@ -324,8 +332,10 @@ export class HTTPWorld implements World {
 				// The caller's signal aborts the request and is not part of it.
 				const { signal, ...request } = input;
 				const page = await client.call<RPC.EventsPage>("events.list", request, { signal });
-				const { snapshot, ...rest } = page;
-				return { ...withEventDataPage(rest), snapshot: { seq: snapshot.eventCount, seqInBand: snapshot.inBandCount } };
+				const { snapshot, maxEvents, ...rest } = page as RPC.EventsPage & { maxEvents?: number };
+				// Go reports no limit as 0, which the SDK would read as a
+				// ceiling of zero events.
+				return { ...withEventDataPage(rest), snapshot: { seq: snapshot.eventCount, seqInBand: snapshot.inBandCount }, ...(maxEvents ? { maxEvents } : {}) };
 			},
 			listByCorrelationId: async (input) =>
 				withEventDataPage(await client.call<PaginatedResponse<RPC.Event>>("events.listByCorrelationID", input)),
@@ -336,18 +346,12 @@ export class HTTPWorld implements World {
 		return {
 			get: (hookId, params) => client.call<RPC.Hook>("hooks.get", { hookId, ...params }).then(toHook),
 			getByToken: (token, params) => client.call<RPC.Hook>("hooks.getByToken", { token, ...params }).then(toHook),
-			list: (input) => client.call<PaginatedResponse<RPC.Hook>>("hooks.list", input).then((page) => ({ ...page, data: page.data.map(toHook) })),
+			list: (input) => client.call<PaginatedResponse<RPC.Hook>>("hooks.list", input).then((result) => ({ ...result, data: page(result).data.map(toHook) })),
 		};
 	}
 
 	private static createQueue(client: RPCClient): World["queue"] {
 		return (queueName, message, options) => {
-			// A health check probes a queue consumer in JavaScript, and an HTTP
-			// world's deliveries are consumed by the RPC server instead, so the
-			// probe is not queued.
-			if ("__healthCheck" in message) {
-				return Promise.resolve({ messageId: null });
-			}
 			return client.call<{ messageId: MessageId | null }>("queue.queue", queueInput(queueName, message, options));
 		};
 	}
@@ -386,12 +390,14 @@ export class HTTPWorld implements World {
 				await client.call<RPC.Empty>("streams.close", { runId, name });
 			},
 			get: async (runId, name, startIndex = 0) => createReadableStream(client, { runId, name, startIndex }),
-			list: (runId) => client.call<string[]>("streams.list", { runId }),
+			list: async (runId) => (await client.call<string[] | null>("streams.list", { runId })) ?? [],
 			getChunks: async (runId, name, options = {}) => {
 				const result = await getStreamChunks(client, { runId, name, ...options });
 				return {
 					data: result.data,
-					cursor: result.cursor,
+					// The SDK ends pagination with a null cursor once no more
+					// chunks are available.
+					cursor: result.hasMore ? result.cursor : null,
 					hasMore: result.hasMore,
 					done: result.done,
 				};
@@ -413,432 +419,29 @@ export class HTTPWorld implements World {
 				list: (input = {}) => client.call<PaginatedResponse<AnalyticsRun>>("analytics.runs.list", {
 					...input,
 					...(input.status === undefined ? {} : { status: Array.isArray(input.status) ? input.status : [input.status] }),
-				}),
+				}).then(page),
 			},
 			attributes: {
-				list: (input = {}) => client.call<PaginatedResponse<AnalyticsAttributeKey>>("analytics.attributes.list", input),
+				list: (input = {}) => client.call<PaginatedResponse<AnalyticsAttributeKey>>("analytics.attributes.list", input).then(page),
 			},
 			steps: {
 				get: (runId, stepId) => client.call<AnalyticsStep>("analytics.steps.get", { runId, stepId }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsStep>>("analytics.steps.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsStep>>("analytics.steps.list", input).then(page),
 			},
 			events: {
 				get: (runId, eventId) => client.call<AnalyticsEvent>("analytics.events.get", { runId, eventId }),
-				getMany: (runId, eventIds) => client.call<AnalyticsEvent[]>("analytics.events.getMany", { runId, eventIds }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.list", input),
-				listByCorrelationId: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.listByCorrelationId", input),
+				getMany: async (runId, eventIds) => (await client.call<AnalyticsEvent[] | null>("analytics.events.getMany", { runId, eventIds })) ?? [],
+				list: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.list", input).then(page),
+				listByCorrelationId: (input) => client.call<PaginatedResponse<AnalyticsEvent>>("analytics.events.listByCorrelationId", input).then(page),
 			},
 			hooks: {
 				get: (hookId, params) => client.call<AnalyticsHook>("analytics.hooks.get", { hookId, ...params }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsHook>>("analytics.hooks.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsHook>>("analytics.hooks.list", input).then(page),
 			},
 			waits: {
 				get: (runId, waitId) => client.call<AnalyticsWait>("analytics.waits.get", { runId, waitId }),
-				list: (input) => client.call<PaginatedResponse<AnalyticsWait>>("analytics.waits.list", input),
+				list: (input) => client.call<PaginatedResponse<AnalyticsWait>>("analytics.waits.list", input).then(page),
 			},
 		};
 	}
-}
-
-async function getStreamChunks(client: RPCClient, input: RPC.GetStreamChunksInput): Promise<RPC.StreamChunksResult> {
-	const { waitMs, ...request } = input;
-	const result = await client.call<RPC.WireStreamChunksResult>("streams.getChunks", {
-		...request,
-		wait: durationNanoseconds(waitMs),
-	});
-	return {
-		data: result.data,
-		cursor: result.cursor || null,
-		hasMore: result.hasMore,
-		done: result.done,
-		retryAfterMs: durationMilliseconds(result.retryAfter),
-	};
-}
-
-function createReadableStream(client: RPCClient, input: RPC.GetStreamInput): ReadableStream<Uint8Array> {
-	let cursor = input.cursor ?? "";
-	return new ReadableStream({
-		async pull(controller) {
-			try {
-				const result = await getStreamChunks(client, {
-					...input,
-					cursor,
-					waitMs: input.pollIntervalMs ?? 100,
-				});
-				// Once a page returns a cursor, it replaces startIndex.
-				if (result.cursor !== null) {
-					cursor = result.cursor;
-				}
-				for (const chunk of result.data) {
-					controller.enqueue(chunk.data);
-				}
-				if (result.done && !result.hasMore) {
-					controller.close();
-				}
-			} catch (error) {
-				controller.error(error);
-			}
-		},
-	});
-}
-
-// createOptions keeps the create parameters the Go world understands. Its
-// in-band fence is the writer's expected in-band count.
-function createOptions(options: CreateEventParams | undefined): Record<string, unknown> | undefined {
-	if (!options) {
-		return undefined;
-	}
-	return {
-		...(options.eventCount !== undefined ? { eventCount: options.eventCount } : {}),
-		...(options.sinceCursor ? { sinceCursor: options.sinceCursor } : {}),
-		...(options.resolveData ? { resolveData: options.resolveData } : {}),
-		...(options.inBand && options.expectedSeqInBand !== undefined ? { inBandCount: options.expectedSeqInBand } : {}),
-		...(options.resumeId ? { resumeId: options.resumeId } : {}),
-		...(options.resumePayloadDigest ? { resumePayloadDigest: options.resumePayloadDigest } : {}),
-		...(options.afterStepBody ? { afterStepBody: true } : {}),
-		// The SDK passes the step's creation time as epoch milliseconds.
-		...(typeof options.stepCreatedAt === "number" && Number.isFinite(options.stepCreatedAt) ? { stepCreatedAt: new Date(options.stepCreatedAt) } : {}),
-	};
-}
-
-// toEventResult shapes an RPC event result as the Workflow SDK's EventResult.
-function toEventResult(result: RPC.EventResult): EventResult {
-	return {
-		// A run_started of a running run appends no event.
-		...(result.event ? { event: withEventData(result.event) } : {}),
-		...(result.run ? { run: toRun(result.run) } : {}),
-		...(result.step ? { step: toStep(result.step) } : {}),
-		...(result.hook ? { hook: toHook(result.hook) } : {}),
-		...(result.wait ? { wait: toWait(result.wait) } : {}),
-		...(result.stepCreated ? { stepCreated: true } : {}),
-		allocated: result.allocated,
-		...(result.events ? { events: result.events.map(withEventData), cursor: null, hasMore: result.hasMore ?? false } : {}),
-	} as EventResult;
-}
-
-// jsonEncoded encodes event data as the JSON the Go world stores, with bytes
-// as base64 strings, as Go encodes []byte.
-function jsonEncoded(value: unknown): Uint8Array {
-	if (value === undefined) {
-		return new Uint8Array();
-	}
-	// The replacer reads the holder's original value, because a Buffer's
-	// toJSON has already run on item.
-	const text = JSON.stringify(value, function (this: Record<string, unknown>, key, item) {
-		const original = this[key];
-		return original instanceof Uint8Array ? Buffer.from(original).toString("base64") : item;
-	});
-	return new TextEncoder().encode(text);
-}
-
-// payloadFields are the eventData fields that hold payloads, in the Workflow
-// SDK's serialized form. The Go World stores event data as JSON, with
-// payload bytes as base64 strings.
-const payloadFields = ["input", "output", "result", "error", "payload", "metadata"];
-
-// dateFields are the eventData fields that hold times, which the Go World
-// stores as RFC 3339 strings.
-const dateFields = ["resumeAt", "retryAfter", "tokenRetentionUntil"];
-
-// storedEventData returns event data as the Go World stores it: with its
-// workflow and step names in Go form, like the names beside it in the log.
-function storedEventData(value: unknown): unknown {
-	if (!value || typeof value !== "object" || Array.isArray(value) || value instanceof Uint8Array) {
-		return value;
-	}
-	const fields = { ...(value as Record<string, unknown>) };
-	if (typeof fields.workflowName === "string") {
-		fields.workflowName = goName("workflow", fields.workflowName);
-	}
-	if (typeof fields.stepName === "string") {
-		fields.stepName = goName("step", fields.stepName);
-	}
-	return fields;
-}
-
-// reviveDates replaces the times among fields with Dates.
-function reviveDates(fields: Record<string, unknown>): void {
-	for (const field of dateFields) {
-		const value = fields[field];
-		if (typeof value === "string" && !Number.isNaN(Date.parse(value))) {
-			fields[field] = new Date(value);
-		}
-	}
-}
-
-// withEventData exposes an event's stored data as the eventData object the
-// Workflow SDK reads: its payloads as bytes, its times as Dates, and Go
-// workflow and step names in SDK form. An event about the run itself has no
-// correlation ID.
-function withEventData(event: RPC.Event): Event {
-	const { data, occurredAt, resumeId, correlationId, ...fields } = event;
-	const rest = { ...fields, ...(correlationId ? { correlationId } : {}), ...(occurredAt ? { occurredAt } : {}), ...(resumeId ? { resumeId } : {}) };
-	const eventData = decodeData(data);
-	if (eventData === undefined) {
-		return rest as Event;
-	}
-	if (eventData && typeof eventData === "object" && !Array.isArray(eventData)) {
-		const fields = eventData as Record<string, unknown>;
-		if (typeof fields.workflowName === "string") {
-			fields.workflowName = devkitName("workflow", fields.workflowName);
-		}
-		if (typeof fields.stepName === "string") {
-			fields.stepName = devkitName("step", fields.stepName);
-		}
-		for (const field of payloadFields) {
-			if (typeof fields[field] === "string") {
-				fields[field] = new Uint8Array(Buffer.from(fields[field] as string, "base64"));
-			}
-		}
-		reviveDates(fields);
-		// A run's start hook is recorded in its creation.
-		const startHook = fields.startHook;
-		if (startHook && typeof startHook === "object") {
-			reviveDates(startHook as Record<string, unknown>);
-		}
-	}
-	return { ...rest, eventData } as Event;
-}
-
-// decodeData decodes stored event data, the JSON the Go World writes.
-// Empty or undecodable bytes are undefined.
-function decodeData(data: Uint8Array | null | undefined): unknown {
-	if (!data || data.byteLength === 0) {
-		return undefined;
-	}
-	try {
-		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data));
-	} catch {
-		return undefined;
-	}
-}
-
-// payload returns stored payload bytes as the Workflow SDK reads them, or
-// undefined when there are none.
-function payload(data: Uint8Array | null | undefined): Uint8Array | undefined {
-	return data && data.byteLength > 0 ? data : undefined;
-}
-
-// toRun exposes a run as the Workflow SDK reads one. It reports the spec
-// version the World recorded on the run, which decides how the SDK wakes and
-// cancels it. A Go World records one on every run it creates; a run the World
-// has none for is left without one, which the SDK reads as a legacy run.
-function toRun(run: RPC.Run): WorkflowRun {
-	const { input, output, error, errorCode, startedAt, completedAt, expiredAt, executionContext, startHook, specVersion, ...rest } = run;
-	return {
-		...rest,
-		// The SDK's schemas take a field the run does not have as absent, not
-		// null or empty.
-		...(errorCode ? { errorCode } : {}),
-		...(startedAt ? { startedAt } : {}),
-		...(completedAt ? { completedAt } : {}),
-		...(expiredAt ? { expiredAt } : {}),
-		...(executionContext ? { executionContext } : {}),
-		...(startHook ? { startHook } : {}),
-		...(specVersion ? { specVersion } : {}),
-		input: payload(input),
-		output: payload(output),
-		error: payload(error),
-	} as WorkflowRun;
-}
-
-// toWait exposes a wait as the Workflow SDK reads one, without the times it
-// does not have.
-function toWait(wait: RPC.Wait): Wait {
-	const { resumeAt, completedAt, ...rest } = wait;
-	return { ...rest, ...(resumeAt ? { resumeAt } : {}), ...(completedAt ? { completedAt } : {}) };
-}
-
-// toStep exposes a step as the Workflow SDK reads one, without the times it
-// does not have.
-function toStep(step: RPC.Step): Step {
-	const { input, output, error, startedAt, completedAt, retryAfter, ...rest } = step;
-	return {
-		...rest,
-		...(startedAt ? { startedAt } : {}),
-		...(completedAt ? { completedAt } : {}),
-		...(retryAfter ? { retryAfter } : {}),
-		input: payload(input),
-		output: payload(output),
-		error: payload(error),
-	} as Step;
-}
-
-// toHook exposes a hook as the Workflow SDK reads one: without the fields it
-// does not have, and with the owner, project and environment its schema
-// requires, which a Go World does not have and are empty as in
-// world-postgres. A hook the World says it deduplicates resumes of, on a read
-// by token, carries the SDK's attestation of that, so resumeHook sends the
-// resume with its ID and digest.
-function toHook(hook: RPC.Hook): Hook {
-	const { metadata, tokenRetentionUntil, claimedFrom, resumeContext, resumeDedup, ...rest } = hook;
-	return {
-		...rest,
-		ownerId: "",
-		projectId: "",
-		environment: "",
-		// A resume context always names its deployment and workflow, even a
-		// World without deployments, whose deployment ID is empty.
-		...(resumeContext ? { resumeContext: { ...present(resumeContext), deploymentId: resumeContext.deploymentId ?? "", workflowName: resumeContext.workflowName ?? "" } } : {}),
-		...(payload(metadata) ? { metadata } : {}),
-		...(tokenRetentionUntil ? { tokenRetentionUntil } : {}),
-		...(claimedFrom ? { claimedFrom: present(claimedFrom) } : {}),
-		...(resumeDedup ? { resumeCapabilities: { hookResumeDedupVersion: HOOK_RESUME_DEDUP_VERSION } } : {}),
-	} as Hook;
-}
-
-// present returns value without its null, empty and zero fields, which Go
-// sends for the ones it leaves unset.
-function present<T extends object>(value: T): T {
-	return Object.fromEntries(Object.entries(value).filter(([, item]) => item != null && item !== "" && item !== 0)) as T;
-}
-
-// sdkQueue reads a Workflow SDK queue name, "__wkf_workflow_<name>" or
-// "__wkf_step_<name>", with an optional namespace as in
-// "__<namespace>_wkf_workflow_<name>". It returns the workflow a workflow
-// queue is for, and undefined for a name that is not the SDK's.
-function sdkQueue(queueName: string): { workflowName?: string } | undefined {
-	const match = /^__(?:[^_]+_)?wkf_(workflow|step)_(.+)$/.exec(queueName);
-	return match ? (match[1] === "workflow" ? { workflowName: match[2] } : {}) : undefined;
-}
-
-// RunCreation is what creates a run: the data of a run_created event, and the
-// runInput of the run's first queue message.
-type RunCreation = {
-	workflowName: string;
-	input?: unknown;
-	attributes?: Record<string, string>;
-	allowReservedAttributes?: boolean;
-	deploymentId?: string;
-	encryptionPublicKey?: string;
-	executionContext?: Record<string, unknown>;
-	startHook?: { token: string; tokenRetentionUntil?: Date; metadata?: unknown };
-};
-
-// runCreation returns the Go World's input for creating the run runId from
-// data. The run_created write and the run's first message both send it, so the
-// message's delivery creates the same run when run_created never landed.
-function runCreation(runId: string, data: RunCreation): Record<string, unknown> {
-	const { startHook } = data;
-	return {
-		runId,
-		workflowName: data.workflowName,
-		input: data.input,
-		...(data.attributes ? { attributes: data.attributes } : {}),
-		...(data.allowReservedAttributes ? { allowReservedAttributes: true } : {}),
-		...(data.deploymentId ? { deploymentId: data.deploymentId } : {}),
-		...(data.encryptionPublicKey ? { encryptionPublicKey: data.encryptionPublicKey } : {}),
-		...(data.executionContext ? { executionContext: data.executionContext } : {}),
-		...(startHook ? { startHook: { token: startHook.token, tokenRetentionUntil: startHook.tokenRetentionUntil, metadata: startHook.metadata } } : {}),
-	};
-}
-
-// queueInput returns the Go World's delivery for a message the Workflow SDK
-// queues. What the Go runtime has no use for, such as the trace carrier and
-// the resume's timing, is left out.
-function queueInput(queueName: string, message: Parameters<World["queue"]>[1], options: Parameters<World["queue"]>[2]): Record<string, unknown> {
-	const fields = message as {
-		runId: string;
-		stepId?: string;
-		stepName?: string;
-		stepAttempt?: number;
-		stepResent?: boolean;
-		stepCreatedAt?: number;
-		recovery?: boolean;
-		completeWaits?: string[];
-		runSpecVersion?: number;
-		deploymentMismatchRetryCount?: number;
-		runInput?: RunCreation;
-	};
-	// The SDK names a queue after its workflow, which a Go World routes the
-	// delivery by. A Go World's own queue names are not the SDK's, so an SDK
-	// name is not passed on as one.
-	const sdk = sdkQueue(queueName);
-	const { runInput } = fields;
-	// A run's first message carries its creation and is stored once, keyed
-	// by the run, as the Go client's is. The run it creates is recorded at
-	// the Go World's spec version.
-	const runSpecVersion = runInput ? GO_SPEC_VERSION : (fields.runSpecVersion ?? options?.specVersion);
-	const idempotencyKey = options?.idempotencyKey ?? (runInput ? fields.runId : undefined);
-	return {
-		...(sdk ? (sdk.workflowName ? { workflowName: sdk.workflowName } : {}) : { queueName }),
-		runId: fields.runId,
-		...(fields.stepId ? { stepId: fields.stepId } : {}),
-		...(fields.stepName ? { stepName: fields.stepName } : {}),
-		...(fields.stepAttempt ? { stepAttempt: fields.stepAttempt } : {}),
-		...(fields.stepResent ? { stepResent: true } : {}),
-		// The SDK carries the step's creation time as epoch milliseconds.
-		...(typeof fields.stepCreatedAt === "number" && Number.isFinite(fields.stepCreatedAt) ? { stepCreatedAt: new Date(fields.stepCreatedAt) } : {}),
-		...(fields.recovery ? { recovery: true } : {}),
-		...(fields.deploymentMismatchRetryCount ? { deploymentMismatchRetryCount: fields.deploymentMismatchRetryCount } : {}),
-		...(fields.completeWaits?.length ? { completeWaits: fields.completeWaits } : {}),
-		...(runSpecVersion ? { runSpecVersion } : {}),
-		...(runInput ? { runInput: runCreation(fields.runId, runInput) } : {}),
-		...(idempotencyKey ? { idempotencyKey } : {}),
-		...(options?.deploymentId ? { deploymentId: options.deploymentId } : {}),
-		...(options?.delaySeconds ? { notBefore: new Date(Date.now() + options.delaySeconds * 1_000) } : {}),
-		...(options?.retentionSeconds ? { retention: durationNanoseconds(options.retentionSeconds * 1_000) } : {}),
-	};
-}
-
-// terminalWaitMs is how long one runs.waitForTerminalStatus request waits.
-const terminalWaitMs = 10_000;
-const terminalStatuses = new Set<RPC.Status>(["completed", "failed", "cancelled"]);
-
-function withEventDataPage(page: PaginatedResponse<RPC.Event>): PaginatedResponse<Event> {
-	return { ...page, data: page.data.map(withEventData) };
-}
-
-
-function environment(name: string): string | undefined {
-	return typeof process === "undefined" ? undefined : process.env?.[name];
-}
-
-function bytes(value: RPC.StreamChunk): Uint8Array {
-	if (typeof value === "string") {
-		return new TextEncoder().encode(value);
-	}
-	return value;
-}
-
-function durationNanoseconds(milliseconds: number | undefined): number {
-	if (milliseconds == null) return 0;
-	if (!Number.isFinite(milliseconds) || milliseconds < 0) {
-		throw new RangeError("world-http: duration must be a non-negative finite millisecond value");
-	}
-	return Math.round(milliseconds * 1_000_000);
-}
-
-function durationMilliseconds(nanoseconds: number | undefined): number {
-	if (nanoseconds == null) {
-		return 0;
-	}
-	return Number(nanoseconds) / 1_000_000;
-}
-
-// startHookConflict returns a refused start hook as the Workflow SDK's
-// HookConflictError, which start() recognizes by its name, naming the run that
-// holds the token, and a rejected candidate as its WorkflowWorldError with
-// code START_HOOK_ADMISSION_REJECTED, and a candidate answered while admission
-// is switched off as its WorkflowWorldError with code
-// START_HOOK_ADMISSION_DISABLED, which start() does not take as the
-// candidate's outcome. Other errors are returned as they are.
-function startHookConflict(error: unknown, token: string): unknown {
-	if (error instanceof HTTPWorldError && error.sentinel === "start_hook_disabled") {
-		return Object.assign(new Error(error.message), { name: "WorkflowWorldError", code: START_HOOK_ADMISSION_DISABLED_CODE, status: 400, reason: "disabled", cause: error });
-	}
-	if (error instanceof HTTPWorldError && error.sentinel === "start_hook_rejected") {
-		// A candidate the World will never admit is the SDK's
-		// WorkflowWorldError with code START_HOOK_ADMISSION_REJECTED.
-		return Object.assign(new Error(error.message), { name: "WorkflowWorldError", code: START_HOOK_ADMISSION_REJECTED_CODE, cause: error });
-	}
-	if (!(error instanceof HTTPWorldError) || error.sentinel !== "hook_conflict" || !error.conflictingRunId) {
-		return error;
-	}
-	return Object.assign(new Error(`No run was created: workflow run "${error.conflictingRunId}" already owns this hook token`), {
-		name: "HookConflictError",
-		token,
-		conflictingRunId: error.conflictingRunId,
-		cause: error,
-	});
 }

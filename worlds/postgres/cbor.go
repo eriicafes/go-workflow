@@ -18,6 +18,17 @@ var cborDecoding = func() cbor.DecMode {
 	return mode
 }()
 
+// cborEncoding encodes a time as cbor-x encodes a Date, which the Workflow
+// SDK's Postgres World writes: tag 1 over its epoch seconds, fractional when
+// it has milliseconds.
+var cborEncoding = func() cbor.EncMode {
+	mode, err := cbor.EncOptions{Time: cbor.TimeUnixDynamic, TimeTag: cbor.EncTagRequired}.EncMode()
+	if err != nil {
+		panic(err)
+	}
+	return mode
+}()
+
 // encodeJSONValue returns value as CBOR after a JSON round trip, so a read
 // returns the same JSON values, such as float64 numbers, whatever Go types
 // the caller passed.

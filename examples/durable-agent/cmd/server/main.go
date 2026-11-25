@@ -34,6 +34,9 @@ func main() {
 	if os.Getenv("TOOL_APPROVAL_SECRET") == "" {
 		log.Print("TOOL_APPROVAL_SECRET is not set, so tool approvals are not signed")
 	}
+	// Tracing starts before the world, so the runs it continues are traced.
+	stopTracing := startTracing(context.Background())
+	defer stopTracing()
 
 	port := cmp.Or(os.Getenv("PORT"), "8080")
 	world, err := localworld.Open(localworld.Config{

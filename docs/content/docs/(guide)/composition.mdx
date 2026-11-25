@@ -48,14 +48,74 @@ workers, and can outlive its parent.
 
 ### Waiting for a child
 
-In workflow context, `Run` methods other than `Reader` and `Writer` read or
-change the run in an inline step and replay returns the recorded result, so
-they never wait. `Reader` and `Writer` return `workflow.ErrNotInStep` there.
-`Run.Value` returns
-`workflow.ErrRunNotFinished` for a child that had not finished.
+`Run.Value` waits for the child to finish and returns its output, or its error
+as a [`*workflow.Error`](/docs/errors) when it failed:
 
-To wait for a child, pass it a hook token and have it resume the hook when it
-finishes:
+```go
+func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
+	child, err := workflow.Start(ctx, workflows.Child{Item: input.Item})
+	if err != nil {
+		return workflows.ParentResult{}, err
+	}
+
+	result, err := child.Value(ctx)
+	if err != nil {
+		return workflows.ParentResult{}, err
+	}
+	return workflows.ParentResult{Value: result.Value}, nil
+}
+```
+
+The parent does not poll. The child records the parent's ID in its
+`executionContext`, as `completionParentRunId`, and once its `run_completed`,
+`run_failed`, or `run_cancelled` is recorded, the runtime, or the
+`Run.Cancel` call, resumes the parent's **child-run completion hook** with
+the child's ID and status. The hook is a system hook whose token is
+`wkf_child_run_completion:` followed by the parent's run ID. While it waits,
+the parent:
+
+1. registers the hook, on its first wait, and keeps it open for the rest of
+   the run,
+2. reads which of the children it waits for have already finished, in one
+   inline step, `readFinishedRuns`,
+3. suspends until a child resumes the hook, holding no worker, and
+4. reads the finished child's output in an inline step, `waitForRun`.
+
+While it waits, a timer reads the children again after 5 minutes, doubling up
+to 6 hours, in case a resume was lost. A `Run` from `workflow.Get` is not a
+child of the run, and `Value` waits for it in an inline step instead.
+
+`Run.ReturnValue` returns the wait as a promise, which starts when it is
+first awaited, so children awaited together are read in one step.
+
+### Fan-out to child runs
+
+```go
+results := make([]*workflow.Result[workflows.ChildResult], len(input.Items))
+for i, item := range input.Items {
+	child, err := workflow.Start(ctx, workflows.Child{Item: item})
+	if err != nil {
+		return Output{}, err
+	}
+	results[i] = child.ReturnValue(ctx)
+}
+
+if err := workflow.JoinOk(ctx, workflow.MapResults(results)...); err != nil {
+	return Output{}, err
+}
+
+values := make([]string, len(results))
+for i, result := range results {
+	values[i] = result.Unwrap(ctx).Value
+}
+```
+
+Every child resumes the parent's one completion hook.
+
+### Signalling the parent
+
+A child can also send its parent a value before it finishes, through a hook
+the parent passes it:
 
 ```go
 func Parent(ctx context.Context, input workflows.Parent) (workflows.ParentResult, error) {
@@ -98,44 +158,12 @@ func resumeParent(ctx context.Context, c completion) (struct{}, error) {
 
 `ResumeHook` works in step context, using the World that records the run.
 
-### Fan-out to child runs
-
-```go
-hooks := make([]*workflow.Hook[string], len(input.Items))
-for i, item := range input.Items {
-	hook := workflow.CreateHook[string](ctx)
-	defer hook.Dispose(ctx)
-
-	if owner, err := hook.GetConflict(ctx); err != nil {
-		return Output{}, err
-	} else if owner != nil {
-		return Output{}, &workflow.HookConflictError{}
-	}
-
-	if _, err := workflow.Start(ctx, workflows.Child{Token: hook.Token(), Item: item}); err != nil {
-		return Output{}, err
-	}
-
-	hooks[i] = hook
-}
-
-values := make([]string, len(hooks))
-for i, hook := range hooks {
-	value, err := hook.Next(ctx)
-	if err != nil {
-		return Output{}, err
-	}
-
-	values[i] = value
-}
-```
-
 ### Cancelling a child
 
 A `Run` has its own `Cancel` method. Calling it in workflow context records a durable inline step. A cancelled run stops new work and lets admitted steps finish naturally:
 
 ```go
-child, err := workflow.Start(ctx, workflows.Child{Token: hook.Token()})
+child, err := workflow.Start(ctx, workflows.Child{Item: input.Item})
 if err != nil {
 	return Result{}, err
 }

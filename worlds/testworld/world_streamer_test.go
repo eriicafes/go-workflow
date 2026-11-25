@@ -10,7 +10,7 @@ import (
 
 func TestStreamCursorsOutOfRangeDoNotPanic(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	runID := runCursors
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runID, WorkflowName: "w"}); err != nil {

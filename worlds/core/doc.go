@@ -4,6 +4,7 @@
 // built on, such as DurableStep, DurableWait, and DurableHook, declare their
 // operations through the delivery's Execution.
 //
-// World packages hand each delivery their queue receives to
-// Runtime.Execute.
+// World packages build one Runtime and hand each delivery their queue
+// receives to their worlds.Executor with it. A worlds.RunnerSet executor
+// calls Runtime.Execute with its runners.
 package core

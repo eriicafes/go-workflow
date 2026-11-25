@@ -50,7 +50,7 @@ func TestFlowWaitingOnAnInlineStepTakesAPushedPayloadBeforeItReadsTheLog(t *test
 	core.LogPollInterval, core.FeedPollInterval = time.Hour, time.Hour
 	defer func() { core.LogPollInterval, core.FeedPollInterval = logPoll, feedPoll }()
 
-	world := testworld.New(feedRunner())
+	world := testworld.New(worlds.Runners(feedRunner()))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()
@@ -75,7 +75,7 @@ func TestFlowWaitingOnAnInlineStepPollsTheLogWithoutAPush(t *testing.T) {
 	defer func() { core.LogPollInterval, core.FeedPollInterval = logPoll, feedPoll }()
 
 	runner := feedRunner()
-	base := testworld.NewManual(runner)
+	base := testworld.NewManual(worlds.Runners(runner))
 	defer base.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(base)), 5*time.Second)
 	defer cancel()
@@ -87,7 +87,7 @@ func TestFlowWaitingOnAnInlineStepPollsTheLogWithoutAPush(t *testing.T) {
 	go func() { resumed <- workflow.ResumeHookWithRetries(ctx, "poll", "polled", 100, 20*time.Millisecond) }()
 	// The flow's delivery waits on its inline step until the poll brings
 	// it the payload.
-	if err := core.NewRuntime(pollOnly{base}, worlds.Runners(runner)).Execute(ctx, base.QueuedMessages()[0].Input); err != nil {
+	if err := (worlds.BoundExecutor{Executor: worlds.Runners(runner), Runtime: core.NewRuntime(pollOnly{base})}).Execute(ctx, base.QueuedMessages()[0].Input); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-resumed; err != nil {

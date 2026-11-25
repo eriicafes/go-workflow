@@ -37,10 +37,10 @@ type Config struct {
 	// carries its runs' deliveries. Build it with Routes and Route.
 	Routes map[string]string
 	// Scheduler, when set, delivers work due more than 15 minutes ahead, beyond
-	// the SQS delay limit, and every delayed delivery to a FIFO queue. Without
-	// it, queueing such a delivery returns an error, and Capabilities report a
-	// MaxQueueDelay of 15 minutes, so the runtime reaches a later timer in
-	// hops.
+	// the SQS delay limit. Without
+	// it, such a delivery is sent with a 15-minute delay and sent again on each
+	// early arrival until it is due, and Capabilities report a MaxQueueDelay of
+	// 15 minutes, so the runtime reaches a later timer in hops.
 	Scheduler *SchedulerConfig
 	// Retention is how long a run's data is kept after the run completes,
 	// fails, or is cancelled. Finishing a run sets its ExpiredAt and queues a
@@ -65,19 +65,13 @@ type Config struct {
 	EncryptionScope string
 }
 
-// QueueConfig is an SQS queue that deliveries can be routed to.
+// QueueConfig is an SQS standard queue that deliveries can be routed to.
 type QueueConfig struct {
 	// URL is the queue URL. It is required.
 	URL string
 	// ARN is the queue ARN, the Scheduler target for deliveries due later. It
-	// is required when Config.Scheduler is set or FIFO is true.
+	// is required when Config.Scheduler is set.
 	ARN string
-	// FIFO marks a FIFO queue. Its messages' MessageGroupId is the run ID,
-	// so a run's deliveries never run at once, and their
-	// MessageDeduplicationId is the delivery ID. FIFO queues have no
-	// per-message delay, so every delayed delivery goes through Scheduler,
-	// which needs content-based deduplication enabled on the queue.
-	FIFO bool
 }
 
 // SchedulerConfig configures EventBridge Scheduler to deliver work due more
@@ -109,8 +103,8 @@ type World struct {
 // credentials, retry policy, and endpoints. It does not contact AWS. It returns
 // an error when a client, BaseURL, TableName, or QueueURL is missing, when
 // Scheduler lacks its client, target ARN, or role ARN, when a queue in Queues
-// lacks its URL, or the ARN Scheduler or FIFO needs, when a FIFO queue has no
-// Scheduler, or when a route names a queue not in Queues.
+// lacks its URL, or the ARN Scheduler needs, or when a route names a queue not
+// in Queues.
 func New(config Config, dynamoClient *dynamodb.Client, sqsClient *sqs.Client) (*World, error) {
 	if dynamoClient == nil || sqsClient == nil {
 		return nil, errors.New("workflow/aws: DynamoDB and SQS clients are required")
@@ -143,9 +137,7 @@ func newWorld(config Config, dynamoClient dynamoAPI, sqsClient sqsAPI, scheduler
 			return nil, errors.New("workflow/aws: a queue name is empty")
 		case queue.URL == "":
 			return nil, fmt.Errorf("workflow/aws: queue %q requires a URL", name)
-		case queue.FIFO && config.Scheduler == nil:
-			return nil, fmt.Errorf("workflow/aws: FIFO queue %q requires Scheduler for delayed deliveries", name)
-		case (queue.FIFO || config.Scheduler != nil) && queue.ARN == "":
+		case config.Scheduler != nil && queue.ARN == "":
 			return nil, fmt.Errorf("workflow/aws: queue %q requires an ARN as the Scheduler target", name)
 		}
 	}
@@ -201,14 +193,15 @@ func RPC(world *World) http.Handler { return worlds.RPCHandler(world) }
 // the hook token in its URL.
 func Webhook(world *World) http.Handler { return worlds.WebhookHandler(world) }
 
-// Queue returns the SQS Lambda handler, which executes deliveries for the
-// workflows of runners. Attach it through an SQS event source mapping with
+// Queue returns the SQS Lambda handler, which executes deliveries with
+// executor: a worlds.RunnerSet runs them with Go workflows, and a
+// worlds.RemoteExecutor sends them to a Workflow SDK app. Attach it through an SQS event source mapping with
 // ReportBatchItemFailures enabled. It reports each failed delivery
 // individually, so SQS redelivers only those.
-func Queue(world *World, runners worlds.RunnerSet) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
-	runtime := core.NewRuntime(world, runners)
+func Queue(world *World, executor worlds.Executor) func(context.Context, events.SQSEvent) (events.SQSEventResponse, error) {
+	bound := worlds.BoundExecutor{Executor: executor, Runtime: core.NewRuntime(world)}
 	return func(ctx context.Context, event events.SQSEvent) (events.SQSEventResponse, error) {
-		return world.consume(ctx, runtime, event), nil
+		return world.consume(ctx, bound, event), nil
 	}
 }
 

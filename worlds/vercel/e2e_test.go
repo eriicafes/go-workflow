@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func deliverAll(ctx context.Context, t *testing.T, queue *fakeVQS, consumer http
 // by operation IDs and on cancellation contexts read from the replay.
 func TestWorkflowsRunEndToEnd(t *testing.T) {
 	all, queue, backend := newWorlds(t, 1)
-	runEndToEnd(t, all[0], queue)
+	runEndToEnd(t, all[0], queue, 20*time.Second)
 	if backend.count("POST v5/runs/:id/events/batch") == 0 {
 		t.Fatal("inline steps were not written as a batch")
 	}
@@ -68,7 +69,7 @@ func TestWorkflowsRunEndToEndEncrypted(t *testing.T) {
 	t.Setenv("VERCEL_DEPLOYMENT_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)))
 	t.Setenv("VERCEL_PROJECT_ID", "prj_e2e")
 	all, queue, backend := newWorlds(t, 1)
-	runEndToEnd(t, all[0], queue)
+	runEndToEnd(t, all[0], queue, 20*time.Second)
 	runs, err := backend.store.RunsList(context.Background(), worlds.RunsListInput{})
 	if err != nil || len(runs.Data) != 1 {
 		t.Fatalf("runs = %#v err=%v", runs, err)
@@ -79,33 +80,20 @@ func TestWorkflowsRunEndToEndEncrypted(t *testing.T) {
 }
 
 // TestWorkflowsRunEndToEndLive runs the same workflows against Vercel's
-// workflow backend, with Vercel Queues played locally. It needs either
-// WORKFLOW_VERCEL_LIVE_OIDC_TOKEN, a deployment's OIDC token, or
-// WORKFLOW_VERCEL_LIVE_TOKEN, a Vercel access token, with VERCEL_PROJECT_ID
-// and VERCEL_TEAM_ID for the project to use. WORKFLOW_VERCEL_LIVE_BACKEND_URL
-// overrides the backend URL.
+// workflow backend, with Vercel Queues played locally. It needs the
+// variables liveConfig reads.
 func TestWorkflowsRunEndToEndLive(t *testing.T) {
-	oidc, token := os.Getenv("WORKFLOW_VERCEL_LIVE_OIDC_TOKEN"), os.Getenv("WORKFLOW_VERCEL_LIVE_TOKEN")
-	if oidc == "" && token == "" {
-		t.Skip("set WORKFLOW_VERCEL_LIVE_OIDC_TOKEN or WORKFLOW_VERCEL_LIVE_TOKEN to run against Vercel")
-	}
 	queue := &fakeVQS{}
 	server := httptest.NewServer(queue)
 	t.Cleanup(server.Close)
-	world, err := New(Config{
-		BaseURL:    "http://localhost/v1/workflow",
-		QueueURL:   server.URL + "/api/v3",
-		Topic:      "workflow",
-		OIDCToken:  staticOIDCToken(oidc),
-		Token:      token,
-		ProjectID:  os.Getenv("VERCEL_PROJECT_ID"),
-		TeamID:     os.Getenv("VERCEL_TEAM_ID"),
-		BackendURL: os.Getenv("WORKFLOW_VERCEL_LIVE_BACKEND_URL"),
-	})
+	config := liveConfig(t)
+	config.QueueURL = server.URL + "/api/v3"
+	world, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runEndToEnd(t, world, queue)
+	// Each request to Vercel takes a round trip, so the workflows take longer.
+	runEndToEnd(t, world, queue, 2*time.Minute)
 }
 
 type mailboxInput struct{ ChatID int }
@@ -152,7 +140,9 @@ func TestRunInputSurvivesReplay(t *testing.T) {
 	}
 }
 
-func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
+// runEndToEnd runs the workflows on world, delivering through queue, and
+// gives up after timeout.
+func runEndToEnd(t *testing.T, world *World, queue *fakeVQS, timeout time.Duration) {
 	runners := worlds.Runners(workflow.Use(func(ctx context.Context, input e2eInput) (e2eOutput, error) {
 		first, err := workflow.Step(ctx, double, input.N)
 		if err != nil {
@@ -197,7 +187,7 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 		return e2eOutput{Sum: sum, Payload: payload, Written: written}, nil
 	}))
 	consumer := Queue(world, runners)
-	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 20*time.Second)
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), timeout)
 	defer cancel()
 	go deliverAll(ctx, t, queue, consumer)
 
@@ -224,6 +214,10 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 	}
 	output, err := run.Value(ctx)
 	if err != nil {
+		events, _ := world.EventsList(context.Background(), worlds.EventsListInput{RunID: worlds.RunID(run.ID())})
+		for _, event := range events.Data {
+			t.Logf("%s %s %s %s", event.EventID, event.EventType, event.CorrelationID, event.Data)
+		}
 		t.Fatal(err)
 	}
 	if want := (e2eOutput{Sum: 10 + 2 + 4 + 6, Payload: "hello", Written: "hello"}); output != want {
@@ -273,4 +267,62 @@ func runEndToEnd(t *testing.T, world *World, queue *fakeVQS) {
 			t.Fatalf("wait as the backend keeps it = %s err=%v", event.Data, err)
 		}
 	}
+}
+
+// liveConfig returns the configuration of a World on Vercel's workflow
+// backend, from the variables the Workflow SDK's tests use:
+// WORKFLOW_VERCEL_AUTH_TOKEN, a Vercel access token, and WORKFLOW_VERCEL_PROJECT
+// and WORKFLOW_VERCEL_TEAM, the project and team to use. The World reads
+// WORKFLOW_VERCEL_BACKEND_URL itself, which overrides the backend URL. The
+// backend refuses to create a run without a deployment ID, and a run's key
+// is fetched for its deployment, so the World is given the project's newest
+// production deployment, as if it ran there. It skips the test without a
+// token.
+func liveConfig(t *testing.T) Config {
+	t.Helper()
+	token := os.Getenv("WORKFLOW_VERCEL_AUTH_TOKEN")
+	if token == "" {
+		t.Skip("set WORKFLOW_VERCEL_AUTH_TOKEN to run against Vercel")
+	}
+	project, team := os.Getenv("WORKFLOW_VERCEL_PROJECT"), os.Getenv("WORKFLOW_VERCEL_TEAM")
+	deployment, err := latestDeployment(context.Background(), token, project, team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Config{
+		BaseURL:      "http://localhost/v1/workflow",
+		Topic:        "workflow",
+		Token:        token,
+		ProjectID:    project,
+		TeamID:       team,
+		DeploymentID: deployment,
+	}
+}
+
+// latestDeployment returns the ID of the project's newest ready production
+// deployment, through Vercel's API with token.
+func latestDeployment(ctx context.Context, token, project, team string) (string, error) {
+	query := url.Values{"projectId": {project}, "target": {"production"}, "state": {"READY"}, "limit": {"1"}}
+	if team != "" {
+		query.Set("teamId", team)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.vercel.com/v6/deployments?"+query.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	var answer struct {
+		Deployments []struct {
+			UID string `json:"uid"`
+		} `json:"deployments"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&answer) != nil || len(answer.Deployments) == 0 {
+		return "", fmt.Errorf("no ready production deployment of project %s: %s", project, response.Status)
+	}
+	return answer.Deployments[0].UID, nil
 }

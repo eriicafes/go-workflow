@@ -16,7 +16,7 @@ type Queue interface {
 	//
 	// A message with an IdempotencyKey is stored once: a Queue with the key
 	// of a message that lives, sent within MinDeduplicationWindow of its
-	// first, stores nothing more and may return either message's ID.
+	// first, stores nothing more and returns the first message's ID.
 	//
 	// A delivery whose Runtime.Execute returns a *Redelivery is delivered
 	// again, with the same MessageID and the next DeliveryCount. A World
@@ -128,6 +128,13 @@ type (
 		// before Runtime.Execute when its queue reports it, and Queue
 		// ignores. Zero means the queue does not report it.
 		CreatedAt time.Time
+		// SDKMessage is set on a delivery a Workflow SDK runtime queued
+		// through world-http: the SDK's queue name and message, encoded as
+		// the JSON object {queueName, message}, with Uint8Array values as
+		// the SDK's local queue writes them. A World stores it with the
+		// delivery, and a RemoteExecutor sends both back to the SDK app
+		// unchanged. The Go Runtime ignores it.
+		SDKMessage []byte `json:",omitempty"`
 	}
 	// WaitContinuation marks a timer of the wait CorrelationID. A wait
 	// further away than the World's MaxQueueDelay is reached in hops,

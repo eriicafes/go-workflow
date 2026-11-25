@@ -6,13 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/scheduler"
 	"github.com/eriicafes/go-workflow"
 	"github.com/eriicafes/go-workflow/worlds"
 )
@@ -25,6 +23,35 @@ func TestCapabilitiesReportTheQueueContract(t *testing.T) {
 	with := testWorld(t, newFakeDynamo(), &fakeSQS{}, newFakeScheduler()).Capabilities()
 	if with.MaxQueueDelay != 0 {
 		t.Fatalf("capabilities with Scheduler = %+v", with)
+	}
+}
+
+// A delivery due beyond SQS's longest delay is accepted without Scheduler,
+// as a Workflow SDK runtime queues one through world-http: it is sent with
+// that delay, and each early arrival sends it again until it is due.
+func TestQueueHoldsALongDelayWithoutScheduler(t *testing.T) {
+	ctx := context.Background()
+	dynamo, queue := newFakeDynamo(), &fakeSQS{}
+	world := testWorld(t, dynamo, queue, nil)
+	later := time.Now().Add(time.Hour)
+	result, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_later", NotBefore: &later})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := queue.sent()
+	if len(sent) != 1 || sent[0].DelaySeconds != int32(maxSQSDelay/time.Second) {
+		t.Fatalf("sent = %d messages, first delayed %ds, want one delayed %ds", len(sent), sent[0].DelaySeconds, int32(maxSQSDelay/time.Second))
+	}
+	executor := &recordingExecutor{}
+	response, err := Queue(world, executor)(ctx, events.SQSEvent{Records: []events.SQSMessage{sqsRecord(t, result.MessageID, worlds.QueueInput{RunID: "wrun_later", NotBefore: &later})}})
+	if err != nil || len(response.BatchItemFailures) != 0 {
+		t.Fatalf("early arrival: response = %+v, err = %v", response, err)
+	}
+	if len(executor.inputs) != 0 {
+		t.Fatal("an early arrival was executed")
+	}
+	if sent := queue.sent(); len(sent) != 2 || sent[1].DelaySeconds != int32(maxSQSDelay/time.Second) {
+		t.Fatalf("early arrival re-sent %d messages, want one more delayed %ds", len(queue.sent())-1, int32(maxSQSDelay/time.Second))
 	}
 }
 
@@ -175,8 +202,8 @@ type orderedWorkflow struct {
 const (
 	backfillURL = "https://sqs.us-east-1.amazonaws.com/000000000000/backfill"
 	backfillARN = "arn:aws:sqs:us-east-1:000000000000:backfill"
-	orderedURL  = "https://sqs.us-east-1.amazonaws.com/000000000000/ordered.fifo"
-	orderedARN  = "arn:aws:sqs:us-east-1:000000000000:ordered.fifo"
+	orderedURL  = "https://sqs.us-east-1.amazonaws.com/000000000000/ordered"
+	orderedARN  = "arn:aws:sqs:us-east-1:000000000000:ordered"
 	schedARN    = "arn:aws:iam::000000000000:role/scheduler"
 	defaultARN  = "arn:aws:sqs:us-east-1:000000000000:workflow"
 )
@@ -189,7 +216,7 @@ func routingWorld(t *testing.T, queue *fakeSQS, schedules *fakeScheduler) *World
 		QueueURL:  testQueueURL,
 		Queues: map[string]QueueConfig{
 			"backfill": {URL: backfillURL, ARN: backfillARN},
-			"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
+			"ordered":  {URL: orderedURL, ARN: orderedARN},
 		},
 		Routes: worlds.Routes(
 			worlds.Route[routedWorkflow]("backfill"),
@@ -236,14 +263,9 @@ func TestQueueRoutesByWorkflow(t *testing.T) {
 	if url := awsv2.ToString(sent[1].QueueUrl); url != testQueueURL {
 		t.Errorf("unrouted delivery went to %s", url)
 	}
-	// a standard routed queue keeps the SQS delay
+	// a routed queue keeps the SQS delay
 	if url, delay := awsv2.ToString(sent[2].QueueUrl), sent[2].DelaySeconds; url != backfillURL || delay < 59 || delay > 60 {
 		t.Errorf("delayed routed delivery went to %s with delay %d", url, delay)
-	}
-	for _, message := range sent {
-		if message.MessageGroupId != nil || message.MessageDeduplicationId != nil {
-			t.Errorf("standard queue message has FIFO attributes: %+v", message)
-		}
 	}
 }
 
@@ -261,38 +283,6 @@ func TestQueueSchedulesLongDelaysToTheRoutedQueue(t *testing.T) {
 	}
 }
 
-func TestQueueFIFO(t *testing.T) {
-	ctx := context.Background()
-	queue, schedules := &fakeSQS{}, newFakeScheduler()
-	world := routingWorld(t, queue, schedules)
-	name := worlds.WorkflowName[orderedWorkflow]()
-
-	now, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: name})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sent := queue.sent()
-	if len(sent) != 1 {
-		t.Fatalf("sent %d messages, want 1", len(sent))
-	}
-	message := sent[0]
-	if awsv2.ToString(message.QueueUrl) != orderedURL || awsv2.ToString(message.MessageGroupId) != "wrun_ordered" || awsv2.ToString(message.MessageDeduplicationId) != now.MessageID || message.DelaySeconds != 0 {
-		t.Fatalf("FIFO message = %+v", message)
-	}
-
-	// a delayed delivery, even a short one, goes through Scheduler in the run's group
-	soon := time.Now().Add(2 * time.Second)
-	delayed, err := world.Queue(ctx, worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: name, NotBefore: &soon})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(queue.sent()) != 1 {
-		t.Fatal("a delayed FIFO delivery was sent with SQS")
-	}
-	schedule := schedules.schedules[scheduleName(delayed.MessageID)]
-	assertFIFOSchedule(t, schedule, delayed.MessageID)
-}
-
 func TestConsumerResendsAnEarlyDeliveryToItsQueue(t *testing.T) {
 	ctx := context.Background()
 	queue, schedules := &fakeSQS{}, newFakeScheduler()
@@ -300,45 +290,23 @@ func TestConsumerResendsAnEarlyDeliveryToItsQueue(t *testing.T) {
 	handler := Queue(world, worlds.Runners())
 
 	later := time.Now().Add(10 * time.Minute)
-	standard := worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later}
-	standardResult, err := world.Queue(ctx, standard)
+	routed := worlds.QueueInput{RunID: "wrun_routed", WorkflowName: worlds.WorkflowName[routedWorkflow](), NotBefore: &later}
+	result, err := world.Queue(ctx, routed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fifo := worlds.QueueInput{RunID: "wrun_ordered", WorkflowName: worlds.WorkflowName[orderedWorkflow](), NotBefore: &later}
-	fifoResult, err := world.Queue(ctx, fifo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sentBefore, schedulesBefore := len(queue.sent()), len(schedules.schedules)
+	sentBefore := len(queue.sent())
 
-	early := sqsRecord(t, standardResult.MessageID, standard)
+	early := sqsRecord(t, result.MessageID, routed)
 	early.EventSourceARN = backfillARN
-	earlyFIFO := sqsRecord(t, fifoResult.MessageID, fifo)
-	earlyFIFO.EventSourceARN = orderedARN
-	response, err := handler(ctx, events.SQSEvent{Records: []events.SQSMessage{early, earlyFIFO}})
+	response, err := handler(ctx, events.SQSEvent{Records: []events.SQSMessage{early}})
 	if err != nil || len(response.BatchItemFailures) != 0 {
 		t.Fatalf("response = %+v, err = %v", response, err)
 	}
 
 	sent := queue.sent()
 	if len(sent) != sentBefore+1 || awsv2.ToString(sent[len(sent)-1].QueueUrl) != backfillURL {
-		t.Fatalf("standard early delivery was not sent again to its queue: %+v", sent[sentBefore:])
-	}
-	if len(schedules.schedules) != schedulesBefore+1 {
-		t.Fatalf("FIFO early delivery created %d schedules, want 1", len(schedules.schedules)-schedulesBefore)
-	}
-	for scheduleName, schedule := range schedules.schedules {
-		if !strings.Contains(awsv2.ToString(schedule.Target.Input), fifoResult.MessageID) || scheduleName == "go-workflow-"+fifoResult.MessageID {
-			continue
-		}
-		assertFIFOSchedule(t, schedule, fifoResult.MessageID)
-		var resent, first queueMessage
-		_ = json.Unmarshal([]byte(awsv2.ToString(schedule.Target.Input)), &resent)
-		_ = json.Unmarshal([]byte(awsv2.ToString(schedules.schedules["go-workflow-"+fifoResult.MessageID].Target.Input)), &first)
-		if resent.Publish == "" || resent.Publish == first.Publish {
-			t.Fatalf("re-sent FIFO body publish = %q, first %q; want distinct bodies for content-based deduplication", resent.Publish, first.Publish)
-		}
+		t.Fatalf("early delivery was not sent again to its queue: %+v", sent[sentBefore:])
 	}
 }
 
@@ -359,15 +327,12 @@ func TestConsumerChangesVisibilityOnTheSourceQueue(t *testing.T) {
 	}
 }
 
-func assertFIFOSchedule(t *testing.T, schedule *scheduler.CreateScheduleInput, messageID string) {
-	t.Helper()
-	if schedule == nil {
-		t.Fatal("no schedule for the delayed FIFO delivery")
-	}
-	if awsv2.ToString(schedule.Target.Arn) != orderedARN || schedule.Target.SqsParameters == nil || awsv2.ToString(schedule.Target.SqsParameters.MessageGroupId) != "wrun_ordered" {
-		t.Fatalf("schedule target = %+v, want the FIFO queue in the run's group", schedule.Target)
-	}
-	if !strings.Contains(awsv2.ToString(schedule.Target.Input), messageID) {
-		t.Fatalf("schedule input = %s, want delivery %s", awsv2.ToString(schedule.Target.Input), messageID)
-	}
+// recordingExecutor records the deliveries it executes.
+type recordingExecutor struct {
+	inputs []worlds.QueueInput
+}
+
+func (e *recordingExecutor) Execute(_ context.Context, _ worlds.Runtime, input worlds.QueueInput) error {
+	e.inputs = append(e.inputs, input)
+	return nil
 }

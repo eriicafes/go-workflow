@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/eriicafes/go-workflow/worlds"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,10 +18,10 @@ import (
 )
 
 func TestReportWorkflows(t *testing.T) {
-	world := testworld.New(
+	world := testworld.New(worlds.Runners(
 		workflow.Use(flows.GenerateReport),
 		workflow.Use(flows.PublishReport),
-	)
+	))
 	defer world.Close()
 
 	handler := workflow.Middleware(routes(), workflow.NewClient(world))

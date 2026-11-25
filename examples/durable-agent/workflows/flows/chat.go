@@ -44,6 +44,7 @@ func Chat(ctx context.Context, input workflows.Chat) (workflows.ChatResult, erro
 		},
 		StopWhen:           []workflowai.StopCondition{workflowai.IsStepCount(10)},
 		ToolApprovalSecret: toolApprovalSecret(),
+		Telemetry:          agentTelemetry(),
 	})
 
 	result, err := agent.Stream(ctx, workflowai.CallOptions{

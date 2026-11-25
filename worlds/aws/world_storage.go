@@ -301,6 +301,8 @@ func hookItem(hook worlds.Hook) (map[string]ddb.AttributeValue, error) {
 		"list_group_sk":  avs(indexSortKey(hook.CreatedAt, string(hook.HookID))),
 	})
 	setString(item, "encryptionPublicKey", hook.ResumeContext.EncryptionPublicKey)
+	setString(item, "workflowCoreVersion", hook.ResumeContext.WorkflowCoreVersion)
+	setString(item, "nodeVersion", hook.ResumeContext.NodeVersion)
 	if hook.IsWebhook {
 		item["isWebhook"] = &ddb.AttributeValueMemberBOOL{Value: true}
 	}
@@ -346,7 +348,7 @@ func disposalFromItem(item map[string]ddb.AttributeValue) *hookDisposal {
 func hookFromItem(item map[string]ddb.AttributeValue) (worlds.Hook, error) {
 	hook := worlds.Hook{
 		RunID:               worlds.RunID(read(item, "runId")),
-		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName"), EncryptionPublicKey: read(item, "encryptionPublicKey"), RunSpecVersion: int(readInt(item, "runSpecVersion"))},
+		ResumeContext:       worlds.HookResumeContext{DeploymentID: read(item, "deploymentId"), WorkflowName: read(item, "workflowName"), EncryptionPublicKey: read(item, "encryptionPublicKey"), RunSpecVersion: int(readInt(item, "runSpecVersion")), WorkflowCoreVersion: read(item, "workflowCoreVersion"), NodeVersion: read(item, "nodeVersion")},
 		SpecVersion:         int(readInt(item, "specVersion")),
 		HookID:              worlds.HookID(read(item, "hookId")),
 		Token:               read(item, "token"),

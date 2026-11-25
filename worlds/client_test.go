@@ -43,7 +43,7 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 	for _, mode := range []string{"direct resume", "HTTP resume", "webhook"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
-			base := testworld.NewManual()
+			base := testworld.NewManual(nil)
 			defer base.Close()
 			world := &hookTakeoverWorld{World: base}
 			for _, id := range []worlds.RunID{runOld, runNew} {
@@ -95,10 +95,10 @@ func TestStaleTokenResumeReturnsTakeoverRaceWithoutRedirectingPayload(t *testing
 }
 
 func TestNewClientExecutesWorkflowAndDurableStep(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, input clientInput) (clientOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, input clientInput) (clientOutput, error) {
 		value, err := workflow.Step(ctx, func(_ context.Context, value int) (int, error) { return value + 1, nil }, input.Value)
 		return clientOutput{Value: value}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -116,9 +116,9 @@ func TestNewClientExecutesWorkflowAndDurableStep(t *testing.T) {
 }
 
 func TestNewHTTPClientExecutesWorkflow(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input clientInput) (clientOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input clientInput) (clientOutput, error) {
 		return clientOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
@@ -214,9 +214,9 @@ func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, erro
 }
 
 func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
-	world := testworld.New(workflow.Use(func(_ context.Context, input clientInput) (clientOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input clientInput) (clientOutput, error) {
 		return clientOutput{Value: input.Value}, nil
-	}))
+	})))
 	defer world.Close()
 	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
@@ -252,7 +252,7 @@ func TestHTTPClientWritesAndReadsRunStreams(t *testing.T) {
 }
 
 func TestHTTPClientCachesItsSpec(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	var requests atomic.Int32
 	handler := worlds.HTTPHandler(world, "")
@@ -279,7 +279,7 @@ func TestHTTPClientCachesItsSpec(t *testing.T) {
 
 func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runResume, WorkflowName: "test"}); err != nil {
 		t.Fatal(err)
@@ -311,7 +311,7 @@ func TestResumeHookQueuesADeliveryWhenTheHookIsNotActive(t *testing.T) {
 }
 
 func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	ctx := context.Background()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runStream, WorkflowName: "stream"}); err != nil {
 		t.Fatal(err)
@@ -327,7 +327,7 @@ func TestHTTPClientReadsStreamsFromAChunkIndex(t *testing.T) {
 }
 
 func TestHTTPClientReturnsWorldErrors(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	client := workflow.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), client), time.Second)
@@ -355,7 +355,7 @@ func TestHTTPClientReturnsWorldErrors(t *testing.T) {
 
 func TestCreateRunQueuesAPendingRunAgain(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	defer world.Close()
 	input := worlds.ClientRunsCreateInput{EventsCreateRunInput: worlds.EventsCreateRunInput{RunID: runRetried, WorkflowName: "flow"}}
 	if _, err := worlds.CreateRun(ctx, queueOutage{world}, input); !errors.Is(err, errQueueUnavailable) {

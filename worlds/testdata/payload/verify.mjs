@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { deriveRunPayloadKeys, hydrateDataWithKey, observabilityRevivers } from "@workflow/core/serialization-format";
 import { getCommonRevivers, getExternalRevivers } from "@workflow/core/serialization";
+import { QueuePayloadSchema } from "@workflow/world";
 
 const vectors = JSON.parse(readFileSync(new URL("./vectors.json", import.meta.url)));
 const go = JSON.parse(readFileSync(new URL("./go-vectors.json", import.meta.url)));
@@ -26,5 +27,18 @@ for (const [mode, b64] of Object.entries(go.stream)) {
 	const length = new DataView(frame.buffer).getUint32(0, false);
 	const value = await hydrateDataWithKey(frame.subarray(4, 4 + length), revivers, keys);
 	console.log("stream", mode, value);
+}
+// A queue message parses, and keeps every field Go wrote, which a field the
+// schema does not know would lose.
+for (const [name, body] of Object.entries(go.queue)) {
+	const message = JSON.parse(body);
+	const parsed = QueuePayloadSchema.safeParse(message);
+	const dropped = parsed.success ? Object.keys(message).filter((key) => !(key in parsed.data)) : [];
+	if (!parsed.success || dropped.length > 0) {
+		failed = true;
+		console.error("FAIL queue", name, parsed.error ?? `drops ${dropped.join(", ")}`);
+	} else {
+		console.log("queue", name, parsed.data);
+	}
 }
 process.exit(failed ? 1 : 0);

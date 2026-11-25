@@ -1,0 +1,85 @@
+# Workflow SDK tests of packages/world/src and packages/errors/src that
+# go-workflow does not port, in the format of skips.txt:
+#
+#   <upstream file>[ > <describe or test name>] -- <reason>
+
+# packages/world/src: Zod schemas of the SDK's TypeScript types. Go decodes
+# into structs and has no older clients to stay wire compatible with.
+packages/world/src/analytics.test.ts > AnalyticsEventSchema -- Zod parsing of request provenance fields (vercelId, requestId, computeInstanceId) on analytics events; worlds.AnalyticsEvent has no such fields.
+packages/world/src/attributes.test.ts > attribute schemas > leaves reserved-key policy to the contextual validator -- the split between the SDK's Zod attribute schema and its contextual validator; Go checks attributes in one place, CheckAttributeChanges, whose reserved-key rule is ported in workflowtest's SDKAttributeLimits.
+packages/world/src/attributes.test.ts > applyAttributeChanges > returns a new object (does not mutate input) -- JavaScript object identity of the SDK's applyAttributeChanges helper; Go Worlds apply attribute changes to their own stored run.
+packages/world/src/capabilities.test.ts -- the SDK's wire format of a peer World's capabilities, parsed with Zod; a Go World reports worlds.Capabilities, a struct of its own fields, and peers exchange it in CBOR.
+packages/world/src/event-metadata.test.ts > event metadata > classifies mutually exclusive entity events -- the SDK's entity event classes for its storage layer; Go has no event classes.
+packages/world/src/event-metadata.test.ts > event metadata > identifies sealed-log filler events without loading event schemas -- loading Zod event schemas lazily; Go compares an event's EventType with worlds.EventTypeNoop.
+packages/world/src/events.test.ts > dynamic workflow code storage shape -- dynamic workflow code; Go workflows are compiled in.
+packages/world/src/events.test.ts > step_started ownerMessageId > accepts an optional ownerMessageId on the create request -- go-workflow's step_started records no ownerMessageId (worlds.DataStepStarted).
+packages/world/src/events.test.ts > step_started ownerMessageId > retains ownerMessageId when reading back a stored step_started event (not stripped) -- go-workflow's step_started records no ownerMessageId (worlds.DataStepStarted).
+packages/world/src/events.test.ts > sealed-log noop events > parses a noop event from the read union -- Zod's read union of event types; Go reads every event into worlds.Event whatever its type.
+packages/world/src/events.test.ts > sealed-log noop events > parses a noop with no eventData at all -- Zod's read union of event types; Go reads every event into worlds.Event whatever its type.
+packages/world/src/hooks.test.ts -- Zod parsing of the Hook schema's optional resumeContext, and older clients stripping it; Go decodes hooks into worlds.Hook, whose ResumeContext the conformance suite checks.
+packages/world/src/runs.test.ts > WorkflowRunSchema -- Zod's optional output and error fields of terminal runs; worlds.Run holds them as nil-able byte slices.
+packages/world/src/runs.test.ts > BulkCancelWorkflowRunsRequestSchema -- bulk run cancellation, which go-workflow does not implement.
+packages/world/src/runs.test.ts > BulkCancelWorkflowRunResultSchema -- bulk run cancellation, which go-workflow does not implement.
+packages/world/src/runs.test.ts > BulkCancelWorkflowRunsResultSchema -- bulk run cancellation, which go-workflow does not implement.
+packages/world/src/shared.test.ts -- caching of compiled Zod page schemas per module copy; Go decodes pages into worlds.Page.
+packages/world/src/snapshots.test.ts -- the SDK's workflow VM snapshot envelope; go-workflow replays runs from their event log and stores no snapshots.
+packages/world/src/usage.test.ts -- the per-run usage report of the SDK's CLI and web UI (workflow inspect run --usage); go-workflow has no usage report.
+
+# packages/world/src/queue.test.ts: the SDK's queue topic names and message
+# payload schemas. Go Worlds deliver worlds.QueueInput through queues of
+# their own, with no namespaced topics, health checks or step input on a
+# message, and every Go run is spec 9.
+packages/world/src/queue.test.ts > getQueueTopicPrefix -- the SDK's namespaced queue topic names (__wkf_workflow_); Go Worlds route deliveries by QueueInput.QueueName with no topic prefix.
+packages/world/src/queue.test.ts > QueuePrefix schema -- the SDK's namespaced queue topic names (__wkf_workflow_); Go Worlds route deliveries by QueueInput.QueueName with no topic prefix.
+packages/world/src/queue.test.ts > ValidQueueName schema -- the SDK's namespaced queue topic names (__wkf_workflow_); Go Worlds route deliveries by QueueInput.QueueName with no topic prefix.
+packages/world/src/queue.test.ts > parseQueueName -- the SDK's namespaced queue topic names (__wkf_workflow_); Go Worlds route deliveries by QueueInput.QueueName with no topic prefix.
+packages/world/src/queue.test.ts > QueuePayloadSchema -- Zod's union of the SDK's queue payloads: health-check probes, a step's stepInput, and the replay divergence history; a Go delivery is a worlds.QueueInput with none of them, and counts divergences in ReplayDivergenceCount.
+packages/world/src/queue.test.ts > RunInputSchema environment -- Zod parsing of a first delivery's run input: its creator environment, dynamic workflow code, and unknown keys; Go's worlds.EventsCreateRunInput has no environment or dynamic code.
+packages/world/src/queue.test.ts > orchestratorRunIdOf > is undefined for anything without a run id -- JavaScript values without a string runId; a Go delivery is a worlds.QueueInput.
+packages/world/src/queue.test.ts > messageRunSpecVersion -- reading a spec version from the SDK's payload fields to tell single-orchestrator messages apart; every Go run is spec 9, and the Runtime reads QueueInput.RunSpecVersion.
+packages/world/src/queue.test.ts > singleOrchestratorContinuationPayload -- the SDK's continuation payload built from its invoke payload's fields; Go queues a new worlds.QueueInput for a continuation.
+packages/world/src/queue.test.ts > parseQueueRoute -- the SDK's HTTP route of a queue consumer on the app; Go Worlds deliver to a Runtime in process or through their own handler.
+packages/world/src/queue.test.ts > getRunQueueNamespace -- the queue namespace a run records in its executionContext; Go Worlds have no queue namespaces.
+
+# packages/world/src/recovery.test.ts: the SDK's shared reenqueueActiveRuns
+# helper. Each Go World recovers its own runs (worlds/local/recovery.go,
+# worlds/postgres/recovery.go).
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > uses WORKFLOW_QUEUE_NAMESPACE for recovered runs -- queue namespaces of recovered runs; Go Worlds have no queue namespaces.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > prefers an explicit namespace over WORKFLOW_QUEUE_NAMESPACE -- queue namespaces of recovered runs; Go Worlds have no queue namespaces.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > re-enqueues a run to the queue namespace it recorded, not this process's -- queue namespaces of recovered runs; Go Worlds have no queue namespaces.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > rejects an invalid default namespace before enqueueing anything -- queue namespaces of recovered runs; Go Worlds have no queue namespaces.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > recovers runs without logging -- console output gated by the DEBUG environment variable; Go Worlds log with the log package.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > reports the recovery under DEBUG -- console output gated by the DEBUG environment variable; Go Worlds log with the log package.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > always reports a run it could not re-enqueue -- console output of the shared helper; the Postgres World logs a run it could not re-enqueue with log.Printf, and the local World returns the error.
+packages/world/src/recovery.test.ts > reenqueueActiveRuns > issues a single list call over ['pending', 'running'] (not one per status) -- the calls the shared helper makes to a mocked runs.list; each Go World reads its active runs with one query of its own storage.
+
+# packages/world/src/run-retention.test.ts: readRunRetention's report of
+# why it keeps data. worlds.ReadRunRetention returns RetainNone or
+# RetainDefault alone; what a World does with each value is ported in
+# workflowtest's SDKRetention.
+packages/world/src/run-retention.test.ts > readRunRetention > treats "default" as an explicit no-op rather than an unknown value -- the unsupported flag of readRunRetention's result; worlds.Retention reports no raw value or support.
+packages/world/src/run-retention.test.ts > readRunRetention > separates "a duration we cannot scale" from "a value we do not know" -- the wellFormed flag of readRunRetention's result; worlds.Retention reports no well-formedness.
+
+# packages/world/src/slot-identity.test.ts
+packages/world/src/slot-identity.test.ts > slotToEventId > refuses slots it cannot represent exactly -- JavaScript number checks: a Go slot is a uint64, so a negative, fractional or float-imprecise slot cannot be passed to worlds.EventIDForSlot.
+packages/world/src/slot-identity.test.ts > isSlotEventId > reads an id however it is prefixed -- the legacy wevt_ and bare event IDs of older SDK data; go-workflow keeps no compatibility with old data, and worlds.EventSlot reads the evnt_ IDs it mints.
+packages/world/src/slot-identity.test.ts > isRunCreationEvent -- a run_started holding the first slot as a run's creation; Go Worlds record a resilient start's creation as a run_created at the first slot, so a run_started never holds it (workflowtest's ResilientStart).
+
+# packages/world/src/spec-version.test.ts: go-workflow stamps every run with
+# one spec version, worlds.SpecVersion (9), and reads no other.
+packages/world/src/spec-version.test.ts > spec version classification -- classifying spec versions as capability-only or structural, for a backend that raises running runs across versions; Go Worlds stamp worlds.SpecVersion and never raise a run's version.
+packages/world/src/spec-version.test.ts > spec version constants > current spec version is the hook-force-claim version -- the SDK mints spec 8 by default and spec 9 only on opt-in; go-workflow always mints spec 9 (worlds.SpecVersion), on purpose, as a single-orchestrator runtime.
+packages/world/src/spec-version.test.ts > spec version constants > mintedSpecVersion -- choosing the minted spec version from WORKFLOW_SPEC_VERSION and a World's inBandFence capability; go-workflow always mints worlds.SpecVersion.
+packages/world/src/spec-version.test.ts > requiresNewerWorld > simulates a v4 reader rejecting a compression-era run -- replicates an older SDK release's predicate in JavaScript; there is no older go-workflow reader to simulate.
+packages/world/src/spec-version.test.ts > isLegacySpecVersion -- legacy (spec 1) runs of older SDK data; go-workflow keeps no compatibility with old data.
+
+# packages/errors/src: the SDK's error classes. Go errors are values and
+# types matched with errors.Is and errors.As, whose messages carry no docs
+# links or hints.
+packages/errors/src/corrupted-event-log-error.test.ts > CorruptedEventLogError > adds the corrupted event log docs link -- docs links in error messages; Go error messages carry none.
+packages/errors/src/fatal-error.test.ts > FatalError.is > returns false for non-Error values -- JavaScript values that are not Errors; a Go step returns an error.
+packages/errors/src/invocation.test.ts -- the SDK's invocation outcome wire format for World calls made through its invoke capability; Go's World RPC (worlds/server_rpc.go) carries World errors in a format of its own.
+packages/errors/src/max-events-exceeded-error.test.ts > formatErrorMessageWithDetails -- framing hints and docs links below an error's title; Go error messages carry none.
+packages/errors/src/replay-divergence-error.test.ts -- the SDK's ReplayDivergenceError class and its name-based is(); Go's replay divergence is an unexported worlds/core error that the Runtime answers with a recovery delivery, and it carries no docs link.
+packages/errors/src/runtime-decryption-error.test.ts -- the SDK's RuntimeDecryptionError class, its docs link and diagnostic context; Go reports a payload that does not decrypt as a wrapped error of internal/envelope.
+packages/errors/src/serialization-error.test.ts > SerializationError > renders the hint as a framed `╰▶ hint:` branch -- framing hints below an error's title; worlds.SerializationError carries no hint, and its message is its title and its cause's message.

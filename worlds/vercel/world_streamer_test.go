@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -158,14 +159,41 @@ func TestStreamWritesWaitOutARateLimit(t *testing.T) {
 	}
 }
 
+// An append the backend answers with a run it does not find yet is sent
+// again for a while, and then fails as the run's absence.
+func TestStreamWritesRetryARunNotFoundYet(t *testing.T) {
+	shorten(t, &streamAppendRetryBase, time.Millisecond)
+	shorten(t, &streamNotFoundBudget, 50*time.Millisecond)
+	var requests atomic.Int32
+	missing := int32(2)
+	world := newBackendWorld(t, func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= missing {
+			writeError(writer, http.StatusNotFound, "not-found", "workflow run not found")
+		}
+	})
+	ctx := context.Background()
+	write := func() error {
+		requests.Store(0)
+		return world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: worlds.NewRunID(), Name: "out", Chunk: []byte("a")})
+	}
+	if err := write(); err != nil || requests.Load() != 3 {
+		t.Fatalf("write = %v after %d requests, want success on the third", err, requests.Load())
+	}
+	missing = 1000
+	if err := write(); !errors.Is(err, worlds.ErrRunNotFound) || requests.Load() < 2 {
+		t.Fatalf("write to a missing run = %v after %d requests, want ErrRunNotFound after retries", err, requests.Load())
+	}
+}
+
 func TestStreamReadsReportExpiry(t *testing.T) {
 	ctx := context.Background()
 	code := "run-expired"
 	world := newBackendWorld(t, func(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusGone, code, "expired")
 	})
-	_, chunksErr := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_1", Name: "out", Cursor: "0"})
-	_, infoErr := world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: "wrun_1", Name: "out"})
+	runID := worlds.NewRunID()
+	_, chunksErr := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out", Cursor: "0"})
+	_, infoErr := world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: runID, Name: "out"})
 	for _, err := range []error{chunksErr, infoErr} {
 		if _, ok := errors.AsType[*worlds.RunExpiredError](err); !ok {
 			t.Fatalf("read of an expired run = %v, want &RunExpiredError{}", err)
@@ -173,8 +201,8 @@ func TestStreamReadsReportExpiry(t *testing.T) {
 	}
 	// A stream that expired on its own is reported as a *StreamExpiredError.
 	code = "stream-expired"
-	_, chunksErr = world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: "wrun_1", Name: "out", Cursor: "0"})
-	_, infoErr = world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: "wrun_1", Name: "out"})
+	_, chunksErr = world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: "out", Cursor: "0"})
+	_, infoErr = world.StreamsGetInfo(ctx, worlds.StreamsGetInfoInput{RunID: runID, Name: "out"})
 	for _, err := range []error{chunksErr, infoErr} {
 		if is[*worlds.RunExpiredError](err) || !is[*worlds.StreamExpiredError](err) {
 			t.Fatalf("read of an expired stream = %v, want &StreamExpiredError{}", err)
@@ -191,7 +219,7 @@ func TestStreamReadsFromTheBeginningOnAnInvalidCursor(t *testing.T) {
 			"done":    true,
 		})
 	})
-	result, err := world.StreamsGetChunks(context.Background(), worlds.StreamsGetChunksInput{RunID: "wrun_1", Name: "out", Cursor: "not-a-cursor"})
+	result, err := world.StreamsGetChunks(context.Background(), worlds.StreamsGetChunksInput{RunID: worlds.NewRunID(), Name: "out", Cursor: "not-a-cursor"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,5 +300,32 @@ func TestStreamWritersSkipTheSocketOverHTTPTransport(t *testing.T) {
 	writeThroughWriter(t, all[0])
 	if got := backend.count("GET websockets/v1/runs/:id/streams/:id"); got != 0 {
 		t.Fatalf("socket requests = %d, want none", got)
+	}
+}
+
+// A stream of an ID the chunk routes refuse, such as a Workflow SDK health
+// check's wrun_hc_<id>, is read whole once it is closed.
+func TestStreamsGetChunksReadsAHealthCheckStreamWhole(t *testing.T) {
+	all, _, _ := newWorlds(t, 1)
+	world := all[0]
+	ctx := context.Background()
+	id := strings.TrimPrefix(string(worlds.NewRunID()), "wrun_")
+	runID, name := worlds.RunID("wrun_hc_"+id), "__health_check__"+id
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: name, Chunk: []byte(`{"healthy":`)}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: name, Wait: 50 * time.Millisecond})
+	if err != nil || len(open.Data) != 0 || open.Done {
+		t.Fatalf("open stream = %+v err=%v, want nothing yet", open, err)
+	}
+	if err := world.StreamsWrite(ctx, worlds.StreamsWriteInput{RunID: runID, Name: name, Chunk: []byte(`true}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.StreamsClose(ctx, worlds.StreamsCloseInput{RunID: runID, Name: name}); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := world.StreamsGetChunks(ctx, worlds.StreamsGetChunksInput{RunID: runID, Name: name, Wait: time.Second})
+	if err != nil || len(closed.Data) != 1 || string(closed.Data[0].Data) != `{"healthy":true}` || !closed.Done {
+		t.Fatalf("closed stream = %+v err=%v, want its bytes as one chunk, done", closed, err)
 	}
 }

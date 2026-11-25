@@ -33,6 +33,31 @@ func TestCheckAttributesMatchesTheSDKLimits(t *testing.T) {
 	}
 }
 
+func TestCheckAttributeChangesUsesTheSDKMessages(t *testing.T) {
+	value := func(s string) *string { return &s }
+	overCap := make([]RunsAttributeChange, MaxAttributesPerRun+1)
+	for index := range overCap {
+		overCap[index] = RunsAttributeChange{Key: fmt.Sprint("k", index), Value: value("v")}
+	}
+	for _, test := range []struct {
+		changes []RunsAttributeChange
+		message string
+	}{
+		{[]RunsAttributeChange{{Key: "$system", Value: value("x")}}, `Attribute key "$system" starts with reserved prefix "$" — that namespace is reserved for framework/library code. Set { allowReservedAttributes: true } only if your caller is framework-level.`},
+		{[]RunsAttributeChange{{Key: "", Value: value("v")}}, "Attribute key must not be empty"},
+		{[]RunsAttributeChange{{Key: strings.Repeat("<", 257), Value: value("v")}}, `Attribute key length 257 exceeds limit 256: "` + strings.Repeat("<", 32) + "\"\u2026"},
+		{[]RunsAttributeChange{{Key: "note", Value: value(strings.Repeat("é", 200))}}, "Attribute value byte length 400 exceeds limit 256"},
+		{[]RunsAttributeChange{{Key: "a", Value: value("1")}, {Key: "a", Value: nil}}, `Attribute key "a" appears more than once in the same batch`},
+		{overCap, "Run attribute count would exceed limit 64 (post-merge 65)"},
+	} {
+		err := CheckAttributeChanges(nil, test.changes, false)
+		if err == nil || err.Error() != test.message || !errors.Is(err, ErrAttributeInvalid) {
+			t.Errorf("CheckAttributeChanges = %v, want %q matching ErrAttributeInvalid", err, test.message)
+		}
+	}
+}
+
+// SDK: packages/world/src/spec-version.test.ts > requiresNewerWorld > rejects runs newer than the highest supported spec version
 func TestCheckRunSpecVersion(t *testing.T) {
 	if err := CheckRunSpecVersion("wrun_a", SpecVersion); err != nil {
 		t.Fatalf("current spec version: %v", err)

@@ -259,7 +259,10 @@ type WorkerOptions struct {
 	Concurrency int
 }
 
-// Worker runs the loop that executes deliveries for the workflows of runners.
+// Worker runs the loop that executes deliveries with executor: a
+// worlds.RunnerSet runs them with Go workflows, and a worlds.RemoteExecutor
+// sends them to a Workflow SDK app. A nil executor fails each run as
+// unregistered.
 // It blocks until ctx is cancelled, waits for in-flight deliveries to return,
 // and returns ctx.Err(). Any number of workers in any number of processes may
 // share one database, and each delivery runs on one worker at a time. With
@@ -271,7 +274,7 @@ type WorkerOptions struct {
 // delivery resumes. Runs parked on a hook or a wait are left alone, and a
 // run's recovery flow is queued once while it lives, however many processes
 // start. A process that runs no Worker recovers nothing.
-func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options ...WorkerOptions) error {
+func Worker(ctx context.Context, world *World, executor worlds.Executor, options ...WorkerOptions) error {
 	var option WorkerOptions
 	if len(options) > 0 {
 		option = options[len(options)-1]
@@ -290,7 +293,7 @@ func Worker(ctx context.Context, world *World, runners worlds.RunnerSet, options
 			world.expireLoop(ctx)
 		}()
 	}
-	return world.work(ctx, core.NewRuntime(world, runners), option)
+	return world.work(ctx, worlds.BoundExecutor{Executor: executor, Runtime: core.NewRuntime(world)}, option)
 }
 
 // recoverOnce recovers the active runs unless Config.SkipRecovery or a

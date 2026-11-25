@@ -15,7 +15,10 @@ import (
 )
 
 type attributesInput struct{}
-type attributesOutput struct{ Reserved bool }
+type attributesOutput struct {
+	Reserved bool
+	Nil      bool
+}
 
 func (attributesInput) Workflow(attributesOutput) {}
 
@@ -26,7 +29,7 @@ func tagFromStep(ctx context.Context, value string) (struct{}, error) {
 }
 
 func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
 		if err := workflow.SetAttributes(ctx, map[string]*string{"phase": ptrTo("init"), "order": ptrTo("ord_1")}); err != nil {
 			return attributesOutput{}, err
 		}
@@ -37,8 +40,12 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 			return attributesOutput{}, err
 		}
 		err := workflow.SetAttributes(ctx, map[string]*string{"$internal": ptrTo("x")})
-		return attributesOutput{Reserved: errors.Is(err, worlds.ErrAttributeInvalid)}, nil
-	}))
+		nilErr := workflow.SetAttributes(ctx, nil)
+		return attributesOutput{
+			Reserved: errors.Is(err, worlds.ErrAttributeInvalid) && strings.Contains(err.Error(), "allowReservedAttributes"),
+			Nil:      errors.As(nilErr, new(worlds.FatalError)) && nilErr.Error() == "SetAttributes requires a mapping, got nil",
+		}, nil
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -52,6 +59,9 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 	}
 	if !output.Reserved {
 		t.Fatal("a reserved key without AllowReservedAttributes was accepted")
+	}
+	if !output.Nil {
+		t.Fatal("a nil attribute map did not return a FatalError")
 	}
 	stored, err := world.RunsGet(ctx, worlds.RunsGetInput{RunID: worlds.RunID(run.ID())})
 	if err != nil {
@@ -98,6 +108,40 @@ func TestSetAttributesRecordsWritesInWorkflowAndStepContext(t *testing.T) {
 	}
 }
 
+// A World may correlate a step's attribute write with the run, as the Vercel
+// backend does. Replay does not take that write for one of the workflow's own.
+func TestStepAttributeWriteCorrelatedWithTheRunReplays(t *testing.T) {
+	var world *testworld.World
+	world = testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+		_, err := workflow.Step(ctx, func(ctx context.Context, _ struct{}) (struct{}, error) {
+			step := workflow.GetStepMetadata(ctx)
+			runID := worlds.RunID(workflow.GetWorkflowMetadata(ctx).RunID)
+			data, err := json.Marshal(worlds.DataAttrSet{Changes: []worlds.RunsAttributeChange{{Key: "phase", Value: ptrTo("step")}}, Writer: worlds.AttributeWriter{Type: worlds.AttributeWriterStep, StepID: worlds.StepID(step.ID), Attempt: step.Attempt}})
+			if err != nil {
+				return struct{}{}, err
+			}
+			_, err = world.EventsCreate(ctx, worlds.EventsCreateInput{RunID: runID, Event: worlds.EventsCreateEvent{EventType: worlds.EventTypeAttrSet, CorrelationID: string(runID), Data: data}})
+			return struct{}{}, err
+		}, struct{}{})
+		if err != nil {
+			return attributesOutput{}, err
+		}
+		// A second step makes the run replay past the attribute write.
+		_, err = workflow.Step(ctx, tagFromStep, "after")
+		return attributesOutput{}, err
+	})))
+	defer world.Close()
+	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
+	defer cancel()
+	run, err := workflow.Start(ctx, attributesInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Value(ctx); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+}
+
 func TestSetAttributesPastTheRunLimitFailsTheRun(t *testing.T) {
 	batch := func(prefix string) map[string]*string {
 		attributes := map[string]*string{}
@@ -106,14 +150,14 @@ func TestSetAttributesPastTheRunLimitFailsTheRun(t *testing.T) {
 		}
 		return attributes
 	}
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ attributesInput) (attributesOutput, error) {
 		if err := workflow.SetAttributes(ctx, batch("a")); err != nil {
 			return attributesOutput{}, err
 		}
 		// Each write is within the limit, and only the World can tell that
 		// together they pass it.
 		return attributesOutput{}, workflow.SetAttributes(ctx, batch("b"))
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()

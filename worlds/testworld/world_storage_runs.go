@@ -61,7 +61,7 @@ func (m *World) RunsList(ctx context.Context, input worlds.RunsListInput) (world
 		}
 		return less(values[i], values[j])
 	})
-	return page(values, input.Pagination), nil
+	return keysetPage(values, input.Pagination, func(run worlds.Run) string { return entityKey(run.CreatedAt, string(run.RunID)) }), nil
 }
 
 func (m *World) RunsWaitForTerminalStatus(ctx context.Context, input worlds.RunsWaitForTerminalStatusInput) (worlds.Run, error) {

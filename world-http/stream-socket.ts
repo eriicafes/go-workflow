@@ -1,6 +1,7 @@
 import { decode, encode } from "cbor-x";
 import WebSocket from "ws";
 import { HTTPWorldError, type RPCClient, type RPC } from "./rpc.js";
+import { bytes } from "./utils.js";
 
 // Stream writes travel over a WebSocket held for a writer's lifetime, in the
 // Workflow SDK's v1 stream socket protocol, which the Go server's
@@ -38,49 +39,6 @@ class SocketFailed extends Error {}
 
 /** The server refused a request without applying it, and it is not sent on the socket again. */
 class SocketNotSent extends Error {}
-
-/** A 429's retryAfter in milliseconds: seconds, or an HTTP date. Zero when it names no wait. */
-function retryAfterMs(value: string | undefined): number {
-	if (!value) return 0;
-	const seconds = Number.parseInt(value, 10);
-	if (!Number.isNaN(seconds)) return Math.max(seconds, 0) * 1_000;
-	const date = Date.parse(value);
-	return Number.isNaN(date) ? 0 : Math.max(date - Date.now(), 0);
-}
-
-function encodeFrame(meta: object, body: Uint8Array): Uint8Array {
-	const encoded = encode(meta);
-	const frame = new Uint8Array(4 + encoded.byteLength + 4 + body.byteLength);
-	const view = new DataView(frame.buffer);
-	view.setUint32(0, encoded.byteLength);
-	frame.set(encoded, 4);
-	view.setUint32(4 + encoded.byteLength, body.byteLength);
-	frame.set(body, 8 + encoded.byteLength);
-	return frame;
-}
-
-function decodeReply(data: Uint8Array): Reply {
-	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-	const metaEnd = 4 + view.getUint32(0);
-	return decode(data.subarray(4, metaEnd)) as Reply;
-}
-
-function encodeChunks(chunks: Uint8Array[]): Uint8Array {
-	const size = chunks.reduce((total, chunk) => total + 4 + chunk.byteLength, 0);
-	const body = new Uint8Array(size);
-	const view = new DataView(body.buffer);
-	let offset = 0;
-	for (const chunk of chunks) {
-		view.setUint32(offset, chunk.byteLength);
-		body.set(chunk, offset + 4);
-		offset += 4 + chunk.byteLength;
-	}
-	return body;
-}
-
-function bytes(value: RPC.StreamChunk): Uint8Array {
-	return typeof value === "string" ? new TextEncoder().encode(value) : value;
-}
 
 /** Returns the socket URL of a writer of the stream name of runId. */
 export function streamSocketURL(baseURL: string, runId: string, name: string, writerId: string): string {
@@ -196,7 +154,7 @@ export class HTTPStreamWriteSession {
 
 	private async send(socket: WebSocket, meta: object, body: Uint8Array, ack: Reply["type"]): Promise<void> {
 		let waitedMs = 0;
-		for (;;) {
+		while (true) {
 			const reply = await this.request(socket, meta, body);
 			if (reply.type === ack) return;
 			if (reply.status === 429) {
@@ -288,4 +246,43 @@ export class HTTPStreamWriteSession {
 		void this.ready.then((socket) => socket?.close(1000));
 		this.socket = undefined;
 	}
+}
+
+/** A 429's retryAfter in milliseconds: seconds, or an HTTP date. Zero when it names no wait. */
+function retryAfterMs(value: string | undefined): number {
+	if (!value) return 0;
+	const seconds = Number.parseInt(value, 10);
+	if (!Number.isNaN(seconds)) return Math.max(seconds, 0) * 1_000;
+	const date = Date.parse(value);
+	return Number.isNaN(date) ? 0 : Math.max(date - Date.now(), 0);
+}
+
+function encodeFrame(meta: object, body: Uint8Array): Uint8Array {
+	const encoded = encode(meta);
+	const frame = new Uint8Array(4 + encoded.byteLength + 4 + body.byteLength);
+	const view = new DataView(frame.buffer);
+	view.setUint32(0, encoded.byteLength);
+	frame.set(encoded, 4);
+	view.setUint32(4 + encoded.byteLength, body.byteLength);
+	frame.set(body, 8 + encoded.byteLength);
+	return frame;
+}
+
+function decodeReply(data: Uint8Array): Reply {
+	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+	const metaEnd = 4 + view.getUint32(0);
+	return decode(data.subarray(4, metaEnd)) as Reply;
+}
+
+function encodeChunks(chunks: Uint8Array[]): Uint8Array {
+	const size = chunks.reduce((total, chunk) => total + 4 + chunk.byteLength, 0);
+	const body = new Uint8Array(size);
+	const view = new DataView(body.buffer);
+	let offset = 0;
+	for (const chunk of chunks) {
+		view.setUint32(offset, chunk.byteLength);
+		body.set(chunk, offset + 4);
+		offset += 4 + chunk.byteLength;
+	}
+	return body;
 }

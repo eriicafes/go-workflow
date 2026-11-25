@@ -367,6 +367,45 @@ type HookResumeContext struct {
 	EncryptionPublicKey string
 	// RunSpecVersion is the spec version of the hook's run.
 	RunSpecVersion int
+	// WorkflowCoreVersion and NodeVersion are the workflowCoreVersion and
+	// nodeVersion of the run's ExecutionContext, the versions of the
+	// runtime that started it, which tell a Workflow SDK resume the payload
+	// formats the run reads. Empty when the run did not record them.
+	WorkflowCoreVersion string
+	NodeVersion         string
+}
+
+// HookResumeContext returns the resume context a hook of the run copies
+// from it.
+func (run Run) HookResumeContext() HookResumeContext {
+	return HookResumeContext{
+		DeploymentID:        run.DeploymentID,
+		WorkflowName:        run.WorkflowName,
+		EncryptionPublicKey: run.EncryptionPublicKey,
+		RunSpecVersion:      run.SpecVersion,
+		WorkflowCoreVersion: executionString(run.ExecutionContext, ExecutionContextWorkflowCoreVersion),
+		NodeVersion:         executionString(run.ExecutionContext, ExecutionContextNodeVersion),
+	}
+}
+
+// HookResumeContext returns the resume context of the start hook created
+// with the run.
+func (input EventsCreateRunInput) HookResumeContext() HookResumeContext {
+	return HookResumeContext{
+		DeploymentID:        input.DeploymentID,
+		WorkflowName:        input.WorkflowName,
+		EncryptionPublicKey: input.EncryptionPublicKey,
+		RunSpecVersion:      SpecVersion,
+		WorkflowCoreVersion: executionString(input.ExecutionContext, ExecutionContextWorkflowCoreVersion),
+		NodeVersion:         executionString(input.ExecutionContext, ExecutionContextNodeVersion),
+	}
+}
+
+// executionString returns the string value of key in executionContext, or
+// "" when it has none.
+func executionString(executionContext map[string]any, key string) string {
+	value, _ := executionContext[key].(string)
+	return value
 }
 
 // Hook is the view of one hook derived from its run's event log. A hook
@@ -657,6 +696,13 @@ type (
 		// Events is incomplete. The write was appended, and the writer reads
 		// the log before it uses anything the write resolves.
 		MoreEvents bool
+		// Event is the appended event, set by a World whose write answers
+		// with it, and Run the run the answer holds. A World that sets Event
+		// answers with everything it has: Run and Step are nil when its
+		// answer holds none. Without Event, a caller reads the event and the
+		// entity it changed.
+		Event *Event
+		Run   *Run
 		// Step is the step created by a step_created event.
 		Step *Step
 		Hook *Hook
@@ -750,15 +796,34 @@ func EventIDForSlot(slot uint64) EventID {
 // EventSlot returns the 1-based log position encoded in id. It returns an
 // error wrapping ErrEventInvalid when id was not made by EventIDForSlot.
 func EventSlot(id EventID) (uint64, error) {
-	value := string(id)
-	if !strings.HasPrefix(value, "evnt_") || len(value) != len("evnt_")+26 {
+	body, ok := strings.CutPrefix(string(id), "evnt_")
+	if !ok || !isSlotBody(body) {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
-	slot, err := strconv.ParseUint(value[len("evnt_"):], 10, 64)
+	slot, err := strconv.ParseUint(body, 10, 64)
 	if err != nil || slot == 0 {
 		return 0, fmt.Errorf("%w: %q", ErrEventInvalid, id)
 	}
 	return slot, nil
+}
+
+// slotLeadingZeros is how many leading zeros the body of an event ID made by
+// EventIDForSlot has: the characters that hold a ULID's time, which is never
+// zero, so a slot's body is never mistaken for a ULID.
+const slotLeadingZeros = 10
+
+// isSlotBody reports whether body, an event ID without its prefix, is a
+// slot's: 26 decimal digits, the first slotLeadingZeros of them zeros.
+func isSlotBody(body string) bool {
+	if len(body) != 26 {
+		return false
+	}
+	for index := range len(body) {
+		if body[index] < '0' || body[index] > '9' || index < slotLeadingZeros && body[index] != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 // MaxDeleteDataRunIDs is the most run IDs one RunsDeleteDataMany call takes.

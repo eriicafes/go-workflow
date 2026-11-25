@@ -13,7 +13,7 @@ import (
 func TestListsPageStablyWithEqualTimestamps(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := context.Background()
-		world := testworld.NewManual()
+		world := testworld.NewManual(nil)
 		defer world.Close()
 		// Minted in the bubble, whose clock the World checks it against.
 		runID := worlds.NewRunID()

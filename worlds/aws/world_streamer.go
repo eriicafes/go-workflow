@@ -112,7 +112,11 @@ func (w *World) StreamsWriteMulti(ctx context.Context, input worlds.StreamsWrite
 	// Concurrent writers race on count and retry. The write's transaction
 	// also requires the run's data not to be deleted, so a deleted run's
 	// streams, including new ones, take no more data: a new one is closed.
-	// A closed stream drops the write.
+	// A closed stream drops the write. No chunks write nothing, not even
+	// the stream.
+	if len(input.Chunks) == 0 {
+		return ctx.Err()
+	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -162,11 +166,11 @@ func (w *World) StreamsGetChunks(ctx context.Context, input worlds.StreamsGetChu
 		return worlds.StreamChunksResult{}, err
 	}
 	if input.Cursor != "" {
-		value, err := strconv.Atoi(input.Cursor)
-		if err != nil || value < 0 {
-			return worlds.StreamChunksResult{}, fmt.Errorf("workflow/aws: invalid stream cursor %q", input.Cursor)
+		// A cursor that is not one of this World's reads from the start.
+		start = 0
+		if value, err := strconv.Atoi(input.Cursor); err == nil && value >= 0 {
+			start = value
 		}
-		start = value
 	}
 	limit := input.Limit
 	if limit <= 0 {

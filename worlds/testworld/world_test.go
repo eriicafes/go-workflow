@@ -11,7 +11,16 @@ import (
 func TestConformance(t *testing.T) {
 	t.Parallel()
 	workflowtest.Conformance(t, func(t *testing.T) worlds.World {
-		world := testworld.New()
+		world := testworld.New(nil)
+		t.Cleanup(world.Close)
+		return world
+	})
+}
+
+func TestConformanceDelivery(t *testing.T) {
+	t.Parallel()
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		world := testworld.New(executor)
 		t.Cleanup(world.Close)
 		return world
 	})
@@ -20,7 +29,7 @@ func TestConformance(t *testing.T) {
 func TestConformanceShared(t *testing.T) {
 	t.Parallel()
 	workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {
-		world := testworld.New()
+		world := testworld.New(nil)
 		t.Cleanup(world.Close)
 		return world, world
 	})

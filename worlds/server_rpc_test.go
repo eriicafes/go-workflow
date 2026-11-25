@@ -17,7 +17,7 @@ import (
 )
 
 func TestRPCRejectsUnsupportedContentAndReportsEnvelopeErrors(t *testing.T) {
-	handler := worlds.HTTPHandler(testworld.New(), "")
+	handler := worlds.HTTPHandler(testworld.New(nil), "")
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewBufferString("not cbor"))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -54,7 +54,7 @@ func TestRPCClassifiesMissingWorldRecordsAsNotFound(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(testworld.New(), "").ServeHTTP(response, request)
+	worlds.HTTPHandler(testworld.New(nil), "").ServeHTTP(response, request)
 	assertRPCError(t, response, "not_found")
 }
 
@@ -67,12 +67,12 @@ func TestRPCRejectsMismatchedRPCVersion(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", bytes.NewReader(body))
 	request.Header.Set("Content-Type", worlds.RPCContentType)
 	response := httptest.NewRecorder()
-	worlds.HTTPHandler(testworld.New(), "").ServeHTTP(response, request)
+	worlds.HTTPHandler(testworld.New(nil), "").ServeHTTP(response, request)
 	assertRPCError(t, response, "invalid_argument")
 }
 
 func TestRPCUsesEventsGetAndAnalyticsWaitInterfaces(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	ctx := context.Background()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runRpcInterfaces, WorkflowName: "test"}); err != nil {
@@ -146,7 +146,7 @@ func assertRPCError(t *testing.T, response *httptest.ResponseRecorder, code stri
 
 func TestRPCEncodesTimesAsTaggedRFC3339(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.New()
+	world := testworld.New(nil)
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTime, WorkflowName: "time"}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func callRPC(t *testing.T, handler http.Handler, method string, input any) map[s
 }
 
 func TestRPCEventWritesReturnWorkflowSDKResults(t *testing.T) {
-	handler := worlds.HTTPHandler(testworld.New(), "")
+	handler := worlds.HTTPHandler(testworld.New(nil), "")
 
 	// A run created without an ID gets one, and the result carries the run.
 	created := callRPC(t, handler, "events.createRun", worlds.EventsCreateRunInput{WorkflowName: "rpc", Input: []byte(`"in"`)})
@@ -291,7 +291,7 @@ func (w failingBatchWorld) EventsCreateBatch(ctx context.Context, input worlds.E
 }
 
 func TestRPCBatchDoesNotReappendAfterAnInternalError(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	ctx := context.Background()
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runBatch, WorkflowName: "rpc"}); err != nil {
@@ -312,7 +312,7 @@ func TestRPCBatchDoesNotReappendAfterAnInternalError(t *testing.T) {
 }
 
 func TestRPCCreatedEventKeepsItsDataWithoutResolveData(t *testing.T) {
-	handler := worlds.HTTPHandler(testworld.New(), "")
+	handler := worlds.HTTPHandler(testworld.New(nil), "")
 	created := callRPC(t, handler, "events.createRun", worlds.EventsCreateRunInput{WorkflowName: "rpc"})
 	var run worlds.Run
 	if err := cbor.Unmarshal(created["Run"], &run); err != nil {
@@ -344,7 +344,7 @@ func (w *recordingWaitWorld) StreamsGetChunks(ctx context.Context, input worlds.
 }
 
 func TestRPCCapsWaits(t *testing.T) {
-	world := &recordingWaitWorld{World: testworld.New()}
+	world := &recordingWaitWorld{World: testworld.New(nil)}
 	defer world.Close()
 	if _, err := world.EventsCreateRun(context.Background(), worlds.EventsCreateRunInput{RunID: runWait, WorkflowName: "rpc"}); err != nil {
 		t.Fatal(err)
@@ -373,7 +373,7 @@ func TestHTTPHandlerWithClientTokenProtectsClientEndpoints(t *testing.T) {
 		return response.Code
 	}
 
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("secret"))
+	handler := worlds.HTTPHandler(testworld.New(nil), "", worlds.WithClientToken("secret"))
 	for authorization, want := range map[string]int{
 		"":              http.StatusUnauthorized,
 		"Bearer wrong":  http.StatusUnauthorized,
@@ -384,7 +384,7 @@ func TestHTTPHandlerWithClientTokenProtectsClientEndpoints(t *testing.T) {
 			t.Errorf("Authorization %q: status = %d, want %d", authorization, got, want)
 		}
 	}
-	if got := rpc(worlds.HTTPHandler(testworld.New(), "", worlds.WithClientToken("")), "Bearer "); got != http.StatusUnauthorized {
+	if got := rpc(worlds.HTTPHandler(testworld.New(nil), "", worlds.WithClientToken("")), "Bearer "); got != http.StatusUnauthorized {
 		t.Errorf("empty token: status = %d, want 401", got)
 	}
 
@@ -406,7 +406,7 @@ func TestHTTPHandlerWithClientMiddlewareWrapsInOrder(t *testing.T) {
 			})
 		}
 	}
-	handler := worlds.HTTPHandler(testworld.New(), "", worlds.WithClientMiddleware(mark("outer")), worlds.WithClientMiddleware(mark("inner")))
+	handler := worlds.HTTPHandler(testworld.New(nil), "", worlds.WithClientMiddleware(mark("outer")), worlds.WithClientMiddleware(mark("inner")))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, httpPrefix+"/rpc", nil))
 	if len(order) != 2 || order[0] != "outer" || order[1] != "inner" {
 		t.Fatalf("order = %v", order)
@@ -427,7 +427,7 @@ func (noDeleteWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataMa
 
 func TestRPCDeletesRunData(t *testing.T) {
 	ctx := context.Background()
-	world := testworld.NewManual()
+	world := testworld.NewManual(nil)
 	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(world, "")))
 	if _, err := world.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runDelete, WorkflowName: "wf", Input: []byte(`"input"`)}); err != nil {
 		t.Fatal(err)
@@ -466,7 +466,7 @@ func (throttledWorld) RunsDeleteDataMany(context.Context, worlds.RunsDeleteDataM
 }
 
 func TestRPCCarriesThrottling(t *testing.T) {
-	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(throttledWorld{testworld.NewManual()}, "")))
+	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(throttledWorld{testworld.NewManual(nil)}, "")))
 	_, err := client.RunsDeleteDataMany(context.Background(), worlds.RunsDeleteDataManyInput{RunIDs: []worlds.RunID{"wrun_1"}})
 	var throttle *worlds.ThrottleError
 	if !errors.As(err, &throttle) || throttle.After != 3*time.Second {
@@ -495,7 +495,7 @@ var runTime = worlds.NewRunID()
 var runWait = worlds.NewRunID()
 
 func TestRPCQueueBatchCarriesEachItemsOutcome(t *testing.T) {
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	handler := worlds.HTTPHandler(refusingQueue{World: manual, refuse: "wrun_b", cause: &worlds.ThrottleError{}}, httpPrefix)
 	encoded, err := cbor.Marshal(worlds.QueueBatchInput{Items: []worlds.QueueInput{{RunID: "wrun_a"}, {RunID: "wrun_b"}}})
@@ -530,7 +530,7 @@ func (undecidedStartWorld) EventsCreateRun(context.Context, worlds.EventsCreateR
 
 func TestRPCCarriesAnUnconfirmedStart(t *testing.T) {
 	defer worlds.SetStartHookConfirmDelays()()
-	manual := testworld.NewManual()
+	manual := testworld.NewManual(nil)
 	defer manual.Close()
 	client := worlds.NewHTTPClient("http://world/v1/workflow", newInMemoryHTTPClient(worlds.HTTPHandler(undecidedStartWorld{manual}, "")))
 	runID := worlds.NewRunID()
@@ -552,7 +552,7 @@ func (w refusingWorld) EventsCreate(context.Context, worlds.EventsCreateInput) (
 }
 
 func TestRPCFailuresCarryEveryErrorOfTheirChain(t *testing.T) {
-	world := testworld.New()
+	world := testworld.New(nil)
 	defer world.Close()
 	cancel := func(refusal error) error {
 		handler := worlds.HTTPHandler(refusingWorld{World: world, err: refusal}, "")

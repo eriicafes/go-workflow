@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/eriicafes/go-workflow/worlds"
 	"reflect"
 	"slices"
 	"strings"
@@ -201,7 +202,7 @@ func TestStreamUnrepairedToolCall(t *testing.T) {
 		repair    ai.ToolCallRepairFunction
 		wantError string
 	}{
-		{"no repair", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) { return nil, nil }, "invalid input for tool getWeather"},
+		{"no repair", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) { return nil, nil }, "Invalid input for tool getWeather"},
 		{"repair error", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) {
 			return nil, errors.New("no luck")
 		}, "repairing tool call: no luck"},
@@ -254,12 +255,18 @@ func TestStreamProviderToolResult(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var output ai.UIMessageChunk
+		// The model call step streams the provider's result, and like in the
+		// Workflow SDK the agent writes it again with the step's results.
+		var outputs []ai.UIMessageChunk
 		for _, chunk := range chunks {
 			if chunk["type"] == "tool-output-available" {
-				output = chunk
+				outputs = append(outputs, chunk)
 			}
 		}
+		if len(outputs) != 2 || outputs[1]["toolCallId"] != "p1" {
+			t.Fatalf("chunks = %v", chunks)
+		}
+		output := outputs[0]
 		if output == nil || output["toolCallId"] != "p1" || output["providerExecuted"] != true {
 			t.Fatalf("chunks = %v", chunks)
 		}
@@ -282,6 +289,12 @@ func TestStreamProviderToolResult(t *testing.T) {
 	})
 }
 
+// webSearch is a provider tool that may deliver its results in a later
+// model call.
+func webSearch() workflowai.Tool {
+	return workflowai.Tool{Provider: &types.Tool{Name: "web_search", ProviderExecuted: true, SupportsDeferredResults: true}}
+}
+
 func TestStreamDeferredProviderToolResult(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		search := providerSearch("p1")
@@ -300,9 +313,20 @@ func TestStreamDeferredProviderToolResult(t *testing.T) {
 				{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonStop},
 			}, nil
 		})
+		testOptions.Tools["web_search"] = webSearch()
 		result, _, err := chat(t, []workflowai.ModelMessage{user("search and weather")})
 		if err != nil {
 			t.Fatal(err)
+		}
+		// The provider tool is sent to the model as it is, and its call has no
+		// result until the provider delivers it.
+		if tools := testModel.calls[0].Tools; !slices.ContainsFunc(tools, func(tool types.Tool) bool { return tool.Name == "web_search" && tool.ProviderExecuted }) {
+			t.Fatalf("tools = %+v", tools)
+		}
+		if slices.ContainsFunc(result.Steps[0].Content, func(part workflowai.ContentPart) bool {
+			return part.Type == workflowai.PartToolResult && part.ToolCallID == "p1"
+		}) {
+			t.Fatalf("first step content = %+v", result.Steps[0].Content)
 		}
 		last := result.Steps[1].Content
 		if len(last) == 0 || last[0].Type != workflowai.PartToolResult || last[0].ToolCallID != "p1" || !last[0].ProviderExecuted {
@@ -396,7 +420,7 @@ func TestGenerateInclude(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		setup(text("21 degrees."))
 		testCallOptions.Include = &ai.IncludeOptions{RequestBody: true, ResponseBody: true, RequestMessages: true}
-		world := testworld.New(workflow.Use(GenerateRunner))
+		world := testworld.New(worlds.Runners(workflow.Use(GenerateRunner)))
 		defer world.Close()
 		ctx := workflow.NewContext(t.Context(), workflow.NewClient(world))
 		run, err := workflow.Start(ctx, Generate{Prompt: "weather in Lagos?"})
@@ -439,6 +463,60 @@ func TestStreamErrorPartEndsTurn(t *testing.T) {
 		// once.
 		if result.Error != "overloaded" || result.Text != "partial" || len(testModel.calls) != 1 || len(reported) == 0 || reported[0].Error() != "overloaded" {
 			t.Fatalf("result = %+v after %d calls, reported %v", result, len(testModel.calls), reported)
+		}
+	})
+}
+
+// The loop continues to wait for a deferred provider result, even after a
+// step without local calls.
+func TestStreamWaitsForDeferredProviderResult(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		search := providerSearch("p1")
+		setup(func() ([]provider.StreamChunk, error) {
+			return []provider.StreamChunk{
+				{Type: provider.ChunkTypeToolCall, ToolCall: &search},
+				{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonToolCalls},
+			}, nil
+		}, func() ([]provider.StreamChunk, error) {
+			return []provider.StreamChunk{
+				providerResult("p1"),
+				{Type: provider.ChunkTypeText, Text: "Here you go."},
+				{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonStop},
+			}, nil
+		})
+		testOptions.Tools["web_search"] = webSearch()
+		result, _, err := chat(t, []workflowai.ModelMessage{user("search flights")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Steps) != 2 || result.Text != "Here you go." {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+}
+
+// A provider call without a result, whose tool does not defer results, gets
+// an empty result, as in the Workflow SDK.
+func TestStreamMissingProviderResult(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		search := providerSearch("p1")
+		setup(func() ([]provider.StreamChunk, error) {
+			return []provider.StreamChunk{
+				{Type: provider.ChunkTypeToolCall, ToolCall: &search},
+				{Type: provider.ChunkTypeFinish, FinishReason: types.FinishReasonToolCalls},
+			}, nil
+		})
+		result, _, err := chat(t, []workflowai.ModelMessage{user("search flights")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Steps) != 1 || len(result.ToolResults) != 1 || result.ToolResults[0].ToolCallID != "p1" || string(result.ToolResults[0].Output) != `""` {
+			t.Fatalf("result = %+v", result)
+		}
+		if !slices.ContainsFunc(result.Steps[0].Content, func(part workflowai.ContentPart) bool {
+			return part.Type == workflowai.PartToolResult && part.ToolCallID == "p1" && part.ProviderExecuted
+		}) {
+			t.Fatalf("step content = %+v", result.Steps[0].Content)
 		}
 	})
 }

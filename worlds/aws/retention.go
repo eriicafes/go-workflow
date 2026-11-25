@@ -49,7 +49,7 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 	input := worlds.QueueInput{RunID: runID, WorkflowName: workflowName}
 	queue := w.target(w.config.Routes[workflowName])
 	delay := time.Until(due)
-	if scheduled(queue, delay) && w.scheduler == nil {
+	if scheduled(delay) && w.scheduler == nil {
 		return errors.New("workflow/aws: run retention over 15 minutes requires Config.Scheduler")
 	}
 	inputJSON, err := json.Marshal(input)
@@ -62,7 +62,7 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 		"expire":    avbool(true),
 	})
 	setTime(item, "notBefore", &due)
-	if scheduled(queue, delay) {
+	if scheduled(delay) {
 		item["schedule"] = avs(scheduleName(id))
 	}
 	if queue.name != "" {
@@ -71,7 +71,7 @@ func (w *World) queueExpiry(ctx context.Context, runID worlds.RunID, workflowNam
 	if _, err := w.dynamo.PutItem(ctx, &dynamodb.PutItemInput{TableName: awsv2.String(w.config.TableName), Item: item}); err != nil {
 		return err
 	}
-	err = w.publish(ctx, queue, id, input, delay, scheduleName(id), true)
+	err = w.publish(ctx, queue, id, input, delay, scheduleName(id))
 	var exists *sch.ConflictException
 	if errors.As(err, &exists) {
 		return nil

@@ -102,6 +102,33 @@ func TestQueueConsumerNamesTheStepsAFlowRan(t *testing.T) {
 	}
 }
 
+// A Workflow SDK message without a run, such as a health check queued
+// through world-http, is delivered, and a message without one or the other is
+// dropped.
+func TestQueueConsumerDeliversAnSDKMessageWithoutARun(t *testing.T) {
+	all, _, _ := newWorlds(t, 1)
+	world := all[0]
+	var delivered []worlds.QueueInput
+	handler := &consumer{world: world, execute: func(_ context.Context, input worlds.QueueInput) error {
+		delivered = append(delivered, input)
+		return nil
+	}}
+	for _, message := range []queueMessage{
+		{ID: "health", SDKMessage: []byte(`{"queueName":"__wkf_workflow_health","message":{"__healthCheck":true}}`)},
+		{ID: "stray"},
+	} {
+		body, _ := json.Marshal(message)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, deliveryRequest("msg_"+message.ID, string(body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s delivery = %d %s", message.ID, response.Code, response.Body)
+		}
+	}
+	if len(delivered) != 1 || delivered[0].RunID != "" || len(delivered[0].SDKMessage) == 0 {
+		t.Fatalf("delivered = %+v, want only the health check, with its SDK message", delivered)
+	}
+}
+
 type namedStepInput struct{}
 type namedStepOutput struct{}
 

@@ -432,7 +432,7 @@ func (t *txn) materialize(event worlds.Event) error {
 		var value worlds.DataHookCreated
 		_ = json.Unmarshal(event.Data, &value)
 		id := worlds.HookID(event.CorrelationID)
-		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.DeploymentID, WorkflowName: run.WorkflowName, EncryptionPublicKey: run.EncryptionPublicKey, RunSpecVersion: run.SpecVersion}, HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, MetadataSlot: eventSlot(event)}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: run.RunID, ResumeContext: run.HookResumeContext(), HookID: id, Token: value.Token, IsWebhook: value.IsWebhook, IsSystem: value.IsSystem, TokenRetentionUntil: value.TokenRetentionUntil, ClaimedFrom: value.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, MetadataSlot: eventSlot(event)}
 		t.setHook(hook)
 		if value.Token != "" {
 			// A previous owner whose claim lapsed is deleted with its token.
@@ -795,7 +795,7 @@ func (w *World) createRun(s *store, input worlds.EventsCreateRunInput, now time.
 			}
 			return worlds.EventResult{}, &refused{decision.Err()}
 		}
-		hook := &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now}}
+		hook := &hookRecord{Hook: worlds.Hook{RunID: input.RunID, HookID: worlds.StartHookID(input.RunID), Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: input.HookResumeContext(), SpecVersion: worlds.SpecVersion, CreatedAt: now}}
 		if owner != nil {
 			// The previous owner's claim lapsed: it goes with its token.
 			if err := s.deleteHook(owner.HookID); err != nil {
@@ -1079,17 +1079,30 @@ func (w *World) EventsListByCorrelationID(ctx context.Context, input worlds.Even
 }
 
 // checkAppendIDs refuses an append whose run ID or correlation ID, when it
-// has one, is unsafe.
+// has one, is unsafe. A step, hook, or wait event names its entity by its
+// correlation ID, so it must have one.
 func checkAppendIDs(runID worlds.RunID, event worlds.EventsCreateEvent) error {
 	if runID != "" {
 		if err := checkID("run ID", string(runID)); err != nil {
 			return err
 		}
 	}
-	if event.CorrelationID != "" {
+	if event.CorrelationID != "" || correlated(event.EventType) {
 		return checkID("correlation ID", event.CorrelationID)
 	}
 	return nil
+}
+
+// correlated reports whether an event of eventType belongs to the step,
+// hook, or wait its correlation ID names.
+func correlated(eventType worlds.EventType) bool {
+	switch eventType {
+	case worlds.EventTypeStepCreated, worlds.EventTypeStepStarted, worlds.EventTypeStepCompleted, worlds.EventTypeStepFailed, worlds.EventTypeStepRetrying,
+		worlds.EventTypeHookCreated, worlds.EventTypeHookReceived, worlds.EventTypeHookDisposed,
+		worlds.EventTypeWaitCreated, worlds.EventTypeWaitCompleted:
+		return true
+	}
+	return false
 }
 
 func validAppend(eventType worlds.EventType) bool {

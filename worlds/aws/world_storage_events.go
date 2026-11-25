@@ -685,7 +685,14 @@ func (tx *appendTx) preload(ctx context.Context, runID worlds.RunID, events []wo
 			keys = append(keys, waitKey(string(runID), event.CorrelationID))
 		}
 	}
-	if err := tx.load(ctx, keys); err != nil {
+	// The run's META is read before the other items. BatchGetItem reads each
+	// item on its own, so a step read before a concurrent append and a META
+	// read after it would pass the commit's eventCount condition. Read
+	// first, META's eventCount covers every write the later reads miss.
+	if err := tx.load(ctx, keys[:1]); err != nil {
+		return err
+	}
+	if err := tx.load(ctx, keys[1:]); err != nil {
 		return err
 	}
 	var tokens []map[string]ddb.AttributeValue
@@ -961,9 +968,16 @@ func (tx *appendTx) admit(ctx context.Context, run *runEntry, requested worlds.E
 		if entry.hook == nil || entry.hook.RunID != run.view.RunID {
 			return nil, &worlds.HookNotFoundError{Token: requested.CorrelationID}
 		}
-		_, owned, err := tx.owns(ctx, entry.hook)
+		token, owned, err := tx.owns(ctx, entry.hook)
 		if err != nil {
 			return nil, err
+		}
+		// A finished run's hook is gone once its token retention lapses.
+		if owned {
+			if err := tx.releaseLapsed(ctx, token); err != nil {
+				return nil, err
+			}
+			owned = token.cur != nil && token.cur.hookID == entry.hook.HookID
 		}
 		if !owned {
 			return nil, &worlds.HookNotFoundError{Token: entry.hook.Token}
@@ -1156,7 +1170,7 @@ func (tx *appendTx) materialize(ctx context.Context, run *runEntry, event worlds
 		_ = json.Unmarshal(event.Data, &data)
 		id := worlds.HookID(event.CorrelationID)
 		// The metadata is kept in memory only for this append's result.
-		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: worlds.HookResumeContext{DeploymentID: run.view.DeploymentID, WorkflowName: run.view.WorkflowName, EncryptionPublicKey: run.view.EncryptionPublicKey, RunSpecVersion: run.view.SpecVersion}, HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, IsSystem: data.IsSystem, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
+		tx.hooks[id] = &hookEntry{hook: &worlds.Hook{RunID: run.view.RunID, ResumeContext: run.view.HookResumeContext(), HookID: id, Token: data.Token, Metadata: data.Metadata, IsWebhook: data.IsWebhook, IsSystem: data.IsSystem, TokenRetentionUntil: data.TokenRetentionUntil, ClaimedFrom: data.ForceClaimedFrom, SpecVersion: event.SpecVersion, CreatedAt: now}, dirty: true, createdEventID: event.EventID}
 		if data.Token != "" {
 			token, err := tx.token(ctx, data.Token)
 			if err != nil {
@@ -1411,7 +1425,7 @@ func (w *World) startHookItems(ctx context.Context, input worlds.EventsCreateRun
 		return nil, &worlds.HookConflictError{Token: start.Token, RunID: token.cur.runID, Start: true}
 	}
 	id := worlds.StartHookID(input.RunID)
-	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: worlds.HookResumeContext{DeploymentID: input.DeploymentID, WorkflowName: input.WorkflowName, EncryptionPublicKey: input.EncryptionPublicKey, RunSpecVersion: worlds.SpecVersion}, SpecVersion: worlds.SpecVersion, CreatedAt: now})
+	hook, err := hookItem(worlds.Hook{RunID: input.RunID, HookID: id, Token: start.Token, TokenRetentionUntil: start.TokenRetentionUntil, ResumeContext: input.HookResumeContext(), SpecVersion: worlds.SpecVersion, CreatedAt: now})
 	if err != nil {
 		return nil, err
 	}

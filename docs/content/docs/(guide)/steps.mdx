@@ -135,9 +135,12 @@ Read the current attempt's metadata inside a step:
 
 ```go
 meta := workflow.GetStepMetadata(ctx)
-log.Printf("step %s (%s), attempt %d, started %s",
-	meta.ID, meta.Name, meta.Attempt, meta.StartedAt)
+log.Printf("step %s (%s), attempt %d of %d, started %s",
+	meta.ID, meta.Name, meta.Attempt, meta.MaxAttempts, meta.StartedAt)
 ```
+
+`MaxAttempts` is the step's `MaxRetries` plus one. When `Attempt` reaches it,
+an error the step returns fails the step instead of retrying it.
 
 `workflow.StepID(ctx)` is shorthand for `GetStepMetadata(ctx).ID`. The ID stays
 the same across attempts. Outside step context, these functions return zero

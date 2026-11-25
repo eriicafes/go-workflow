@@ -2,6 +2,8 @@ package worlds
 
 import (
 	"reflect"
+	"runtime"
+	"strings"
 	"time"
 )
 
@@ -11,13 +13,42 @@ import (
 type Workflow[Out any] interface{ Workflow(Out) }
 
 // WorkflowName returns the name runs of the workflow type In are recorded
-// under: its package path and type name.
+// under, in the Workflow SDK's form: "workflow//<package path>//<type name>".
 func WorkflowName[In Workflow[Out], Out any]() string {
 	typeOf := reflect.TypeFor[In]()
 	for typeOf.Kind() == reflect.Pointer {
 		typeOf = typeOf.Elem()
 	}
-	return typeOf.PkgPath() + "." + typeOf.Name()
+	return "workflow//" + typeOf.PkgPath() + "//" + typeOf.Name()
+}
+
+// StepName returns the name the step function fn is recorded under, in the
+// Workflow SDK's form "step//<package path>//<name>", from fn's Go name. The
+// package path ends at the first dot after its last slash, and the name is
+// the rest of the Go name, without the -fm suffix of a method value: the
+// closure example.com/app/flows.Publish.func1 is
+// "step//example.com/app/flows//Publish.func1", and the method value
+// example.com/app/flows.(*Report).publish-fm is
+// "step//example.com/app/flows//(*Report).publish".
+func StepName(fn any) string {
+	return stepName(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
+}
+
+// stepName returns StepName of the function with the Go name function.
+func stepName(function string) string {
+	function = strings.TrimSuffix(function, "-fm")
+	// Type arguments, in brackets, may hold slashes and dots of their own.
+	head := function
+	if bracket := strings.IndexByte(head, '['); bracket >= 0 {
+		head = head[:bracket]
+	}
+	slash := strings.LastIndexByte(head, '/') + 1
+	dot := strings.IndexByte(head[slash:], '.')
+	if dot < 0 {
+		return "step//" + function
+	}
+	dot += slash
+	return "step//" + function[:dot] + "//" + function[dot+1:]
 }
 
 // QueueRoute routes the deliveries of one workflow's runs to a named queue.

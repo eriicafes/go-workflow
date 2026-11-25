@@ -22,10 +22,10 @@ func (inlineStepInput) Workflow(inlineStepOutput) {}
 func wallClock(context.Context, struct{}) (time.Time, error) { return time.Now(), nil }
 
 func TestDurableInlineStepRecordsItsResultInOneAttempt(t *testing.T) {
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ inlineStepInput) (inlineStepOutput, error) {
 		captured, err := workflow.InlineStep(ctx, wallClock, struct{}{})
 		return inlineStepOutput{Captured: captured}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), time.Second)
 	defer cancel()
@@ -90,7 +90,7 @@ func (latencyInput) Workflow(latencyOutput) {}
 
 func TestInlineStepsRecordLatencyTelemetryOnTheirFinalEvent(t *testing.T) {
 	failing := errors.New("second step failed")
-	world := testworld.New(workflow.Use(func(ctx context.Context, _ latencyInput) (latencyOutput, error) {
+	world := testworld.New(worlds.Runners(workflow.Use(func(ctx context.Context, _ latencyInput) (latencyOutput, error) {
 		if _, err := workflow.Step(ctx, wallClock, struct{}{}); err != nil {
 			return latencyOutput{}, err
 		}
@@ -106,7 +106,7 @@ func TestInlineStepsRecordLatencyTelemetryOnTheirFinalEvent(t *testing.T) {
 		}
 		_, err = workflow.Step(ctx, wallClock, struct{}{})
 		return latencyOutput{}, err
-	}))
+	})))
 	defer world.Close()
 	ctx, cancel := context.WithTimeout(workflow.NewContext(context.Background(), workflow.NewClient(world)), 5*time.Second)
 	defer cancel()

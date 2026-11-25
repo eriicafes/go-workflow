@@ -1,6 +1,7 @@
 package testworld
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -108,7 +109,7 @@ func (w *World) execute(input worlds.QueueInput) error {
 		}
 		defer func() { <-gate }()
 	}
-	return w.runtime.Execute(w.ctx, input)
+	return w.executor.Execute(w.ctx, input)
 }
 
 // flowGate returns the gate that lets one flow of runID execute at a time.
@@ -241,5 +242,6 @@ func cloneQueueInput(value worlds.QueueInput) worlds.QueueInput {
 		notBefore := *value.NotBefore
 		value.NotBefore = &notBefore
 	}
+	value.SDKMessage = bytes.Clone(value.SDKMessage)
 	return value
 }

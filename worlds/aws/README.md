@@ -63,11 +63,11 @@ world, err := awsworld.New(awsworld.Config{
 	// BaseURL, TableName, QueueURL, Scheduler, EncryptionKey...
 	Queues: map[string]awsworld.QueueConfig{
 		"backfill": {URL: backfillURL, ARN: backfillARN},
-		"ordered":  {URL: orderedURL, ARN: orderedARN, FIFO: true},
+		"reports":  {URL: reportsURL, ARN: reportsARN},
 	},
 	Routes: worlds.Routes(
 		worlds.Route[workflows.Backfill]("backfill"),
-		worlds.Route[workflows.Ledger]("ordered"),
+		worlds.Route[workflows.Report]("reports"),
 	),
 }, dynamoClient, sqsClient)
 ```
@@ -80,19 +80,11 @@ queue name, so a message that arrives early is sent again to the same queue.
 The worker reads messages from every queue; give each its own event source
 mapping.
 
-A `QueueConfig` needs its `URL`, and its `ARN` when `Scheduler` is set or the
-queue is FIFO; the ARN is the Scheduler target for deliveries due later. `New`
-rejects a route to a queue not in `Queues`.
-
-A FIFO queue (`FIFO: true`) runs one delivery of a run at a time: each
-message's `MessageGroupId` is the run ID and its `MessageDeduplicationId` the
-delivery ID. FIFO queues have no per-message delay, so every delayed delivery,
-retries and early arrivals included, goes through Scheduler into the run's
-message group, and `New` rejects a FIFO queue without `Scheduler`. Scheduler
-can't set a deduplication ID, so enable content-based deduplication on the
-queue; scheduled bodies carry a unique `publish` field so they never collide.
-FIFO groups order a run's messages, not separate runs: two runs of a workflow
-still interleave when one waits.
+A `QueueConfig` is an SQS standard queue. It needs its `URL`, and its `ARN`
+when `Scheduler` is set; the ARN is the Scheduler target for deliveries due
+later. `New` rejects a route to a queue not in `Queues`. A run never has two
+flows running at once on any queue: the flow lease (see below) serializes
+them.
 
 ### Queue delivery
 
@@ -108,8 +100,9 @@ still interleave when one waits.
   delivery either way.
 
 If publishing fails the record is deleted and the error returned. Without
-`Config.Scheduler`, a delivery due more than 15 minutes ahead returns an
-error, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the runtime
+`Config.Scheduler`, a delivery due more than 15 minutes ahead is sent with a
+15-minute delay, arrives early, and is sent again for the rest until it is
+due, and `Capabilities().MaxQueueDelay` reports 15 minutes, so the Go runtime
 reaches a later timer in hops of at most 15 minutes. With `Scheduler`,
 `MaxQueueDelay` is zero and any delay is scheduled directly. `New` rejects a
 `SchedulerConfig` without a client, target ARN, and role ARN.
@@ -150,8 +143,6 @@ visibility limit:
   without Scheduler, after 15 minutes, arriving early and waiting again for
   the rest.
 
-A FIFO queue gives a message sent again at once its own deduplication ID, so
-the queue does not drop it as a duplicate of its first send.
 
 **One flow of a run at a time.** Before executing a serialized flow
 (`QueueInput.SerializedFlow`), the handler takes the run's flow lease, a

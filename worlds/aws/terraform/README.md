@@ -5,8 +5,7 @@ Provisions the infrastructure `awsworld` needs:
 - the DynamoDB table with its `list` and `list_group` indexes (on-demand, encrypted,
   point-in-time recovery and deletion protection on by default);
 - the task queue and its dead-letter queue (SQS-managed encryption);
-- further queues, standard or FIFO, that `awsworld.Config.Routes` routes
-  workflows to, each with its own dead-letter queue;
+- further queues that `awsworld.Config.Routes` routes workflows to, each with its own dead-letter queue;
 - optionally, the SQS event source mappings for the queue worker Lambda, with
   `ReportBatchItemFailures`;
 - the EventBridge Scheduler group and the role Scheduler assumes to send to
@@ -60,35 +59,32 @@ module "workflow" {
   worker_function_name = aws_lambda_function.worker.function_name
   queues = {
     backfill = { maximum_concurrency = 5 }
-    ordered  = { fifo = true }
+    reports  = { batch_size = 1 }
   }
 }
 ```
 
 Each queue gets a dead-letter queue, a redrive policy, and, with
 `worker_function_name`, an event source mapping to the worker. Unset settings
-use the task queue's. A FIFO queue is named with the `.fifo` suffix and uses
-content-based deduplication, since Scheduler, which carries every delayed
-delivery to it, can't set a deduplication ID; it needs `enable_scheduler`.
+use the task queue's.
 
 The `queues` output and `WORKFLOW_QUEUES` (JSON) map each name to its queue:
 
 ```json
-{"backfill": {"url": "https://sqs...", "arn": "arn:aws:sqs:...", "fifo": false}}
+{"backfill": {"url": "https://sqs...", "arn": "arn:aws:sqs:..."}}
 ```
 
 Decode it into `awsworld.Config.Queues`:
 
 ```go
 var queues map[string]struct {
-	URL  string `json:"url"`
-	ARN  string `json:"arn"`
-	FIFO bool   `json:"fifo"`
+	URL string `json:"url"`
+	ARN string `json:"arn"`
 }
 json.Unmarshal([]byte(os.Getenv("WORKFLOW_QUEUES")), &queues)
 config.Queues = map[string]awsworld.QueueConfig{}
 for name, queue := range queues {
-	config.Queues[name] = awsworld.QueueConfig{URL: queue.URL, ARN: queue.ARN, FIFO: queue.FIFO}
+	config.Queues[name] = awsworld.QueueConfig{URL: queue.URL, ARN: queue.ARN}
 }
 config.Routes = worlds.Routes(worlds.Route[workflows.Backfill]("backfill"))
 ```
@@ -110,7 +106,7 @@ config.Routes = worlds.Routes(worlds.Route[workflows.Backfill]("backfill"))
 | `maximum_concurrency` | `null` | Cap on concurrent worker invocations (2-1000). |
 | `worker_role_name` | `null` | Attach the worker policy to this role. |
 | `api_role_name` | `null` | Attach the API policy to this role. |
-| `queues` | `{}` | Routed queues by name: `fifo`, `batch_size` (10), `maximum_concurrency`, `visibility_timeout_seconds`, `max_receive_count`. |
+| `queues` | `{}` | Routed queues by name: `batch_size` (10), `maximum_concurrency`, `visibility_timeout_seconds`, `max_receive_count`. |
 
 ## Permissions
 

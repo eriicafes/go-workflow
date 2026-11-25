@@ -101,14 +101,16 @@ type World struct {
 	changes   chan struct{}
 
 	queue *queue
-	// execute executes a delivery: runtime.Execute, or a test's stand-in.
+	// execute executes a delivery with the World's executor, or a test's
+	// stand-in.
 	execute func(context.Context, worlds.QueueInput) error
 }
 
-// Open returns a World on config.Dir that executes deliveries for the
-// workflows of runners. Open reads no state, so call Prepare before using the
-// World.
-func Open(config Config, runners worlds.RunnerSet) (*World, error) {
+// Open returns a World on config.Dir that executes deliveries with executor:
+// a worlds.RunnerSet runs them with Go workflows, and a worlds.RemoteExecutor
+// sends them to a Workflow SDK app. A nil executor fails each run as
+// unregistered. Open reads no state, so call Prepare before using the World.
+func Open(config Config, executor worlds.Executor) (*World, error) {
 	if err := worlds.CheckEncryptionKey(config.EncryptionKey); err != nil {
 		return nil, err
 	}
@@ -132,8 +134,8 @@ func Open(config Config, runners worlds.RunnerSet) (*World, error) {
 		return nil, err
 	}
 	world := &World{workers: &sync.WaitGroup{}, dir: dir, tag: config.Tag, baseURL: baseURL, encryptionKey: bytes.Clone(config.EncryptionKey), encryptionScope: config.EncryptionScope, hookRetentionLimit: limit, skipRecovery: config.SkipRecovery, changes: make(chan struct{})}
-	world.runtime = core.NewRuntime(world, runners)
-	world.execute = world.runtime.Execute
+	world.runtime = core.NewRuntime(world)
+	world.execute = worlds.BoundExecutor{Executor: executor, Runtime: world.runtime}.Execute
 	world.queue = newQueue(world, queueConcurrency(config.Concurrency))
 	return world, nil
 }

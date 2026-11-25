@@ -110,6 +110,11 @@ func scanRun(row pgx.Row) (worlds.Run, error) {
 		if err := cborDecoding.Unmarshal(startHook, &run.StartHook); err != nil {
 			return worlds.Run{}, err
 		}
+		// A fractional epoch time reads back to the millisecond it was.
+		if until := run.StartHook.TokenRetentionUntil; until != nil {
+			rounded := until.Round(time.Millisecond).UTC()
+			run.StartHook.TokenRetentionUntil = &rounded
+		}
 	}
 	if input != nil {
 		data, err := eventData(worlds.EventTypeRunCreated, input)

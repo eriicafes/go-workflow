@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/eriicafes/go-workflow/worlds"
@@ -137,8 +136,13 @@ type inlineOutcome struct {
 // pendingRun returns the function that calls fn with input as an attempt of
 // the step stepID outside the replay, in step context.
 func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID worlds.StepID, name string, maxRetries int, refs []cancellationReference, fn func(context.Context, In) (Out, error), input In) func(int, *stepLatency) (worlds.DataStepResult, error) {
+	// Attempts run outside the workflow goroutine, so the log is read here.
+	startedAt := stepStartedAt(execution.events, stepID, time.Time{})
 	return func(attempt int, latency *stepLatency) (result worlds.DataStepResult, err error) {
-		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: time.Now(), Attempt: attempt})
+		if startedAt.IsZero() {
+			startedAt = time.Now()
+		}
+		stepCtx := context.WithValue(ctx, stepContextKey{}, StepMetadata{ID: stepID, Name: name, StartedAt: startedAt, Attempt: attempt, MaxAttempts: maxRetries + 1})
 		stepCtx, stop, err := stepCancelContext(stepCtx, execution, refs)
 		if err != nil {
 			return worlds.DataStepResult{}, err
@@ -164,7 +168,7 @@ func pendingRun[In, Out any](ctx context.Context, execution *Execution, stepID w
 		}
 		output, err := execution.EncodePayload(value)
 		if err != nil {
-			return worlds.DataStepResult{Error: execution.encodeError(fmt.Errorf("workflow: encode step output: %w", err))}, nil
+			return worlds.DataStepResult{Error: execution.encodeError(stepReturnSerializationError(err))}, nil
 		}
 		return worlds.DataStepResult{Result: output}, nil
 	}

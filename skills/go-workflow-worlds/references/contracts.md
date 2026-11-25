@@ -114,8 +114,10 @@ an error. Queued deliveries are never cancelled. Set `QueueInput.MessageID`
 (stable across redeliveries), `DeliveryCount` (every redelivery), and
 `Attempt` (every redelivery but a handoff); the Runtime fails a run or step
 whose delivery passes `core.MaxDeliveries` attempts. A `*worlds.Redelivery`
-from `Runtime.Execute` asks for the same message again after `After`, a
-handoff when zero. Deliver one serialized flow of a run at a time
+from the World's `worlds.Executor` asks for the same message again after
+`After`, a handoff when zero. Store `QueueInput.SDKMessage` with the delivery
+and hand it back unchanged: a `worlds.RemoteExecutor` sends it to the Workflow
+SDK app. Deliver one serialized flow of a run at a time
 (`QueueInput.SerializedFlow`); report the furthest NotBefore the queue accepts as
 `MaxQueueDelay`, and the runtime reaches later timers in hops.
 
@@ -124,8 +126,11 @@ DeploymentMismatchRetryCount, and ReplayDivergenceCount. Runtime uses these
 fields to select work, route pinned runs, and bound recovery. Do not reset them
 while wrapping or serializing a message. A World that chooses a queue by
 WorkflowName persists it too. Every World copies
-the run's deployment and workflow name onto the hooks it creates
-(Hook.ResumeContext), which ResumeHook uses instead of reading the run.
+the run's resume context onto the hooks it creates (Hook.ResumeContext, built
+with Run.HookResumeContext, or EventsCreateRunInput.HookResumeContext for a
+start hook), which ResumeHook uses instead of reading the run. A Workflow SDK
+resume reads the runtime versions in it to choose the payload formats it
+writes, so a World stores every field.
 
 ## Streams
 

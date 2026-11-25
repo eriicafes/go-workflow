@@ -27,6 +27,24 @@ func TestConformance(t *testing.T) {
 	workflowtest.Conformance(t, func(t *testing.T) worlds.World { return newTestWorld(t) })
 }
 
+func TestConformanceDelivery(t *testing.T) {
+	t.Parallel()
+	workflowtest.ConformanceDelivery(t, func(t *testing.T, executor worlds.Executor) worlds.World {
+		world := newTestWorld(t)
+		ctx, stop := context.WithCancel(context.Background())
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			_ = Worker(ctx, world, executor)
+		}()
+		t.Cleanup(func() {
+			stop()
+			<-stopped
+		})
+		return world
+	})
+}
+
 func TestConformanceShared(t *testing.T) {
 	t.Parallel()
 	workflowtest.ConformanceShared(t, func(t *testing.T) (worlds.World, worlds.World) {

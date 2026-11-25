@@ -246,7 +246,7 @@ func toHook(values map[string]any) (worlds.Hook, error) {
 		CreatedAt:           requiredTime(values, "createdAt"),
 	}
 	if resume, ok := values["resumeContext"].(map[string]any); ok {
-		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName"), EncryptionPublicKey: str(resume, "encryptionPublicKey")}
+		hook.ResumeContext = worlds.HookResumeContext{DeploymentID: str(resume, "deploymentId"), WorkflowName: str(resume, "workflowName"), EncryptionPublicKey: str(resume, "encryptionPublicKey"), WorkflowCoreVersion: str(resume, "workflowCoreVersion"), NodeVersion: str(resume, "nodeVersion")}
 		hook.ResumeContext.RunSpecVersion, _ = asInt(resume["runSpecVersion"])
 	}
 	hook.SpecVersion, _ = asInt(values["specVersion"])

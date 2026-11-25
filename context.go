@@ -33,6 +33,18 @@ type WorkflowMetadata struct {
 	// StartedAt is when the run started, or when it was created if it has
 	// not started.
 	StartedAt time.Time
+	// URL is the absolute URL where the World's HTTP handler is mounted,
+	// which the run's webhooks are served under.
+	URL string
+	// Features reports the capabilities active for the run.
+	Features WorkflowFeatures
+}
+
+// WorkflowFeatures reports the capabilities active for a run.
+type WorkflowFeatures struct {
+	// Encryption reports whether the run's step inputs, outputs, and other
+	// payloads are encrypted at rest.
+	Encryption bool
 }
 
 // GetWorkflowMetadata returns metadata about the run ctx belongs to, or the
@@ -47,7 +59,13 @@ func GetWorkflowMetadata(ctx context.Context) WorkflowMetadata {
 	if run.StartedAt != nil {
 		startedAt = *run.StartedAt
 	}
-	return WorkflowMetadata{Name: run.WorkflowName, RunID: string(run.RunID), StartedAt: startedAt}
+	return WorkflowMetadata{
+		Name:      run.WorkflowName,
+		RunID:     string(run.RunID),
+		StartedAt: startedAt,
+		URL:       execution.World().BaseURL(),
+		Features:  WorkflowFeatures{Encryption: execution.Encrypted()},
+	}
 }
 
 // StepMetadata describes the step attempt that step context belongs to.
@@ -57,10 +75,15 @@ type StepMetadata struct {
 	ID string
 	// Name is the step function's name.
 	Name string
-	// StartedAt is when the current attempt started.
+	// StartedAt is when the step's first attempt started, so a retry
+	// can tell how long the step has been trying.
 	StartedAt time.Time
 	// Attempt is the current attempt number, starting at 1.
 	Attempt int
+	// MaxAttempts is the most attempts the step can make: its MaxRetries
+	// plus one. An error from an attempt where Attempt >= MaxAttempts fails
+	// the step instead of retrying it.
+	MaxAttempts int
 }
 
 // GetStepMetadata returns metadata about the step ctx belongs to, or the zero
@@ -70,7 +93,7 @@ func GetStepMetadata(ctx context.Context) StepMetadata {
 	if !ok {
 		return StepMetadata{}
 	}
-	return StepMetadata{ID: string(metadata.ID), Name: metadata.Name, StartedAt: metadata.StartedAt, Attempt: metadata.Attempt}
+	return StepMetadata{ID: string(metadata.ID), Name: metadata.Name, StartedAt: metadata.StartedAt, Attempt: metadata.Attempt, MaxAttempts: metadata.MaxAttempts}
 }
 
 // StepID returns the ID of the step ctx belongs to, or "" outside step context.

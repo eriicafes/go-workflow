@@ -3,6 +3,7 @@ package localworld
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -137,6 +138,7 @@ func TestFailedDeliveryCountsAnAttempt(t *testing.T) {
 	}
 }
 
+// SDK: packages/world-local/src/queue.test.ts > queue delaySeconds > close() aborts a pending delayed message without delivering it
 func TestQueueLosesMessagesOnClose(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -381,6 +383,9 @@ func TestQueueRoundTripsEveryField(t *testing.T) {
 	result, err := world.Queue(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.MessageID, "msg_") {
+		t.Fatalf("message ID %q, want msg_<ULID>", result.MessageID)
 	}
 	got := receive(t, deliveries)
 	want := input

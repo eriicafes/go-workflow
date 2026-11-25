@@ -114,6 +114,7 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | --- | --- |
 | `ID` | Run ID. |
 | `Value` | Output once the run finishes. Blocks outside workflow context until it finishes or `ctx` is done. |
+| `ReturnValue` | Promise of `Value`, in workflow context. |
 | `Status` | Current `Status`. |
 | `Exists` | Whether the run is recorded in its World. |
 | `WorkflowName` | Name of the workflow the run executes. |
@@ -122,9 +123,11 @@ run, err := workflow.Get[workflows.GenerateReportResult](ctx, runID)
 | `Reader` | Reads a stream from a chunk index. See [Streams](/docs/streams). |
 | `Writer` | Writes a stream from outside the run. |
 
-`Value` returns a failed run's error as a
-[`*workflow.Error`](/docs/errors) and a cancelled run's as
-`workflow.ErrRunCancelled`. `Status` and `WorkflowName` return
+`Value` returns a failed run's error as a `*workflow.RunFailedError` whose
+cause is the run's [`*workflow.Error`](/docs/errors), and a cancelled run's
+as a `*workflow.RunCancelledError`, which matches `workflow.ErrRunCancelled`.
+A run's terminal state never changes, so both are fatal: a step that awaits
+a failed or cancelled run fails without retrying. `Status` and `WorkflowName` return
 `worlds.ErrRunNotFound` for a missing run.
 
 ### Statuses
@@ -144,8 +147,10 @@ a fatal failure.
 
 Inside a runner, methods that read or change the run use
 [inline steps](/docs/inline-steps), and replay returns the recorded result.
-They never wait: `Value` returns `workflow.ErrRunNotFinished` for a run that
-hadn't finished. `WakeUp` records which waits it will wake in one inline step
+`Value` and `ReturnValue` wait for the run to finish: a child run through the
+parent's completion hook (see
+[Waiting for a child](/docs/composition#waiting-for-a-child)), and any other
+run in an inline step that waits for it. `WakeUp` records which waits it will wake in one inline step
 before waking them in another, so a retry never wakes a timer the other run
 created later. The exceptions are `Reader` and `Writer`, which are I/O and
 return `workflow.ErrNotInStep` there. Use them in a step.
@@ -153,7 +158,8 @@ return `workflow.ErrNotInStep` there. Use them in a step.
 ## Cancelling a run
 
 `Run.Cancel` stops new work and leaves already-running steps to finish.
-Reading a cancelled run returns `workflow.ErrRunCancelled`. A managed context
+Reading a cancelled run returns a `*workflow.RunCancelledError`, which
+matches `workflow.ErrRunCancelled`. A managed context
 passed to `Start` does not control the run's lifetime. See
 [Cancellation](/docs/cancellation#cancelling-a-run) for examples and step
 cancellation behavior.

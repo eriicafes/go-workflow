@@ -19,8 +19,10 @@ type SetAttributesOptions struct {
 
 // SetAttributes changes the run's plain-text attributes as one attr_set
 // event. A nil value deletes its key. Changes are recorded in key order, and
-// an empty map records nothing. Attributes outside the limits of
-// worlds.CheckAttributes return a FatalError, the last options apply.
+// an empty map records nothing, and a nil map returns a FatalError.
+// Attributes outside the limits of worlds.CheckAttributeChanges, or an
+// attr_set over worlds.MaxAttrSetDataBytes, return a FatalError with the
+// SDK's message. The last options apply.
 //
 // In workflow context the write draws its ID, attr_ and the run's next
 // correlation ULID, from the run's seed, so the runner must reach its writes
@@ -39,6 +41,9 @@ func SetAttributes(ctx context.Context, attributes map[string]*string, options .
 	if !inWorkflow && !inStep {
 		return ErrNoWorkflow
 	}
+	if attributes == nil {
+		return FatalError(errors.New("SetAttributes requires a mapping, got nil"))
+	}
 	keys := make([]string, 0, len(attributes))
 	for key := range attributes {
 		keys = append(keys, key)
@@ -56,14 +61,21 @@ func SetAttributes(ctx context.Context, attributes map[string]*string, options .
 	if err := worlds.CheckAttributeChanges(nil, changes, option.AllowReservedAttributes); err != nil {
 		return FatalError(err)
 	}
+	input := worlds.RunsSetAttributesInput{Changes: changes, AllowReservedAttributes: option.AllowReservedAttributes}
 	if inStep {
 		step, _ := core.StepMetadataFromContext(ctx)
-		return stepExecution.World().RunsSetAttributes(ctx, worlds.RunsSetAttributesInput{
-			RunID:                   stepExecution.Run().RunID,
-			Changes:                 changes,
-			Writer:                  &worlds.AttributeWriter{Type: worlds.AttributeWriterStep, StepID: step.ID, Attempt: step.Attempt},
-			AllowReservedAttributes: option.AllowReservedAttributes,
-		})
+		input.RunID = stepExecution.Run().RunID
+		input.Writer = &worlds.AttributeWriter{Type: worlds.AttributeWriterStep, StepID: step.ID, Attempt: step.Attempt}
+	}
+	data, err := worlds.EncodeAttrSet(input)
+	if err != nil {
+		return err
+	}
+	if err := worlds.CheckAttrSet(nil, data); err != nil {
+		return FatalError(err)
+	}
+	if inStep {
+		return stepExecution.World().RunsSetAttributes(ctx, input)
 	}
 	if !execution.World().Capabilities().SetAttributes {
 		return FatalError(fmt.Errorf("workflow: the World does not store attribute writes: %w", errors.ErrUnsupported))
