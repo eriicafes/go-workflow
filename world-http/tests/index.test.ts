@@ -309,7 +309,17 @@ describe("against a Go RPC server", () => {
 			await enqueue();
 			return { runId, created: await create() };
 		}
-		const [created] = await Promise.all([create(), enqueue()]);
+		// Like the SDK's start, a run the queued message created first is
+		// started, and its run_created event is read back.
+		const [created] = await Promise.all([
+			create().catch(async (error: unknown) => {
+				if ((error as { name?: string }).name !== "EntityConflictError") throw error;
+				const events = await world.events.list({ runId, pagination: { sortOrder: "asc" } } as never);
+				const event = events.data.find((event) => event.eventType === "run_created");
+				return { event, run: await world.runs.get(runId) } as EventResult;
+			}),
+			enqueue(),
+		]);
 		return { runId, created };
 	}
 
