@@ -1,5 +1,11 @@
 # go-workflow
 
+## 0.11.1
+
+### Patch Changes
+
+- c141b0f: `Run.Status`, `Run.Exists` and `Run.WorkflowName` read a run without its input and output.
+
 ## 0.11.0
 
 ### Minor Changes
