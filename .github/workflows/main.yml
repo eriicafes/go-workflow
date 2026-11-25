@@ -37,7 +37,7 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed=$(git diff --name-only "$BASE" HEAD | grep -v '\.md$' | grep -E '^([^/]+\.go|go\.(mod|sum)|worlds/[^/]+\.go|worlds/(core|vercel|testworld)/|internal/(devalue|envelope|sdkerror)/|workflowtest/|world-http/|package(-lock)?\.json|\.github/workflows/)' || true)
+          changed=$(git diff --name-only "$BASE" HEAD | grep -v '\.md$' | grep -E '^([^/]+\.go|go\.(mod|sum)|worlds/[^/]+\.go|worlds/(core|vercel|testworld)/|internal/(devalue|envelope|sdkerror)/|workflowtest/|world-http/|package-lock\.json|\.github/workflows/)' || true)
           if [ -n "$changed" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
 
   test:
