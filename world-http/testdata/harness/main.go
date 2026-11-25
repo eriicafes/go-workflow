@@ -15,7 +15,7 @@
 // the log to that file.
 //
 // HARNESS_APP=go runs the Go ports of the SDK's e2e fixtures in
-// world-http/tests/sdk-e2e-go in process instead, and serves the routes the
+// world-http/tests/sdk-e2e in process instead, and serves the routes the
 // suite reads from the app beside the World: the manifest, the webhook
 // route, and the flow route's health check.
 //
@@ -42,7 +42,7 @@ import (
 	"syscall"
 	"time"
 
-	sdke2e "github.com/eriicafes/go-workflow/world-http/tests/sdk-e2e-go"
+	sdke2e "github.com/eriicafes/go-workflow/world-http/tests/sdk-e2e"
 	"github.com/eriicafes/go-workflow/worlds"
 	localworld "github.com/eriicafes/go-workflow/worlds/local"
 	postgresworld "github.com/eriicafes/go-workflow/worlds/postgres"

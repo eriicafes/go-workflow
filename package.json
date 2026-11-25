@@ -20,7 +20,7 @@
     "release": "changeset publish",
     "test": "vitest run",
     "test:world-testing": "vitest run --config vitest.world-testing.config.ts",
-    "test:sdk-e2e": "world-http/tests/sdk-e2e/sdk-e2e.sh run"
+    "test:sdk-e2e": "world-http/tests/sdk-e2e/e2e-suite.sh run"
   },
   "keywords": [],
   "author": "Eric Afes <eriicafes@gmail.com>",

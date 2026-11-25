@@ -254,7 +254,7 @@ jobs:
           key: sdk-cargo-${{ env.SDK_COMMIT }}
       - run: npm ci
       - name: Build the Workflow SDK's workbench app
-        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
+        run: world-http/tests/sdk-e2e/e2e-suite.sh prepare
       - name: Run the Workflow SDK's e2e suite
         run: npm run test:sdk-e2e
       - name: Run the Workflow SDK's e2e suite on the Go fixtures
@@ -307,7 +307,7 @@ jobs:
           key: sdk-cargo-${{ env.SDK_COMMIT }}
       - run: npm ci
       - name: Build the Workflow SDK's workbench app
-        run: world-http/tests/sdk-e2e/sdk-e2e.sh prepare
+        run: world-http/tests/sdk-e2e/e2e-suite.sh prepare
       # parallelStepsThenWebhookWorkflow polls the backend's hook listing,
       # which shows a new hook about 20 seconds after it is created, for 10
       # hooks in a row: more than the test's 180 seconds.

@@ -3,11 +3,11 @@
 # workbench app runs with world-http as its World, backed by the harness in
 # world-http/testdata/harness, which delivers to the app with a
 # worlds.RemoteExecutor. With SDK_APP=go, the suite runs the Go ports of its
-# fixtures in world-http/tests/sdk-e2e-go instead, which the harness runs in
+# fixtures in world-http/tests/sdk-e2e instead, which the harness runs in
 # process and declares in their e2e-conformance.json.
 #
-#   sdk-e2e.sh prepare   installs and builds the app in SDK_DIR
-#   sdk-e2e.sh run       starts the harness and the app, then runs the suite
+#   e2e-suite.sh prepare   installs and builds the app in SDK_DIR
+#   e2e-suite.sh run       starts the harness and the app, then runs the suite
 #
 # SDK_DIR is a checkout of github.com/vercel/workflow, at the commit in
 # .github/workflows/main.yml. It must be outside this repository, whose
@@ -65,7 +65,7 @@ run() {
 	(cd "$ROOT" && npm run build >/dev/null && go build -o "$bin/harness" ./world-http/testdata/harness)
 
 	if [ "$SDK_APP" = go ]; then
-		cp "$ROOT/world-http/tests/sdk-e2e-go/e2e-conformance.json" "$GO_APP_DIR/"
+		cp "$ROOT/world-http/tests/sdk-e2e/e2e-conformance.json" "$GO_APP_DIR/"
 		HARNESS_ADDR="127.0.0.1:$HARNESS_PORT" HARNESS_APP=go "$bin/harness" </dev/null &
 		pids+=($!)
 		app_url="http://127.0.0.1:$HARNESS_PORT"
@@ -99,7 +99,7 @@ case "$command" in
 prepare) prepare ;;
 run) run "$@" ;;
 *)
-	echo "usage: sdk-e2e.sh prepare|run [vitest arguments]" >&2
+	echo "usage: e2e-suite.sh prepare|run [vitest arguments]" >&2
 	exit 2
 	;;
 esac
