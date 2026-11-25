@@ -685,7 +685,14 @@ func (tx *appendTx) preload(ctx context.Context, runID worlds.RunID, events []wo
 			keys = append(keys, waitKey(string(runID), event.CorrelationID))
 		}
 	}
-	if err := tx.load(ctx, keys); err != nil {
+	// The run's META is read before the other items. BatchGetItem reads each
+	// item on its own, so a step read before a concurrent append and a META
+	// read after it would pass the commit's eventCount condition. Read
+	// first, META's eventCount covers every write the later reads miss.
+	if err := tx.load(ctx, keys[:1]); err != nil {
+		return err
+	}
+	if err := tx.load(ctx, keys[1:]); err != nil {
 		return err
 	}
 	var tokens []map[string]ddb.AttributeValue
