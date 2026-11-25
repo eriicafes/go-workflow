@@ -427,6 +427,41 @@ func TestStructDeclaresWorkflowOutput(t *testing.T) {
 	}
 }
 
+// TestRunMetadataReadsSkipPayloads reads a run's status, existence and
+// workflow name from a World that cannot return the run's payloads.
+func TestRunMetadataReadsSkipPayloads(t *testing.T) {
+	ctx := context.Background()
+	inner := testworld.NewManual(nil)
+	defer inner.Close()
+	if _, err := inner.EventsCreateRun(ctx, worlds.EventsCreateRunInput{RunID: runTarget, WorkflowName: "target"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = workflow.NewContext(ctx, workflow.NewClient(payloadlessWorld{inner}))
+	run, err := workflow.Get[string](ctx, string(runTarget))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, err := run.Status(ctx); err != nil || status != worlds.StatusPending {
+		t.Fatalf("status = %q, %v", status, err)
+	}
+	if exists, err := run.Exists(ctx); err != nil || !exists {
+		t.Fatalf("exists = %v, %v", exists, err)
+	}
+	if name, err := run.WorkflowName(ctx); err != nil || name != "target" {
+		t.Fatalf("workflow name = %q, %v", name, err)
+	}
+}
+
+// payloadlessWorld fails every run read that resolves the run's payloads.
+type payloadlessWorld struct{ *testworld.World }
+
+func (w payloadlessWorld) RunsGet(ctx context.Context, input worlds.RunsGetInput) (worlds.Run, error) {
+	if input.ResolveData != worlds.ResolveDataNone {
+		return worlds.Run{}, errors.New("payloads cannot be read")
+	}
+	return w.World.RunsGet(ctx, input)
+}
+
 func TestPointerWorkflowMarkerUsesElementTypeIdentity(t *testing.T) {
 	world := testworld.New(worlds.Runners(workflow.Use(func(_ context.Context, input *pointerWorkflowInput) (pointerWorkflowOutput, error) {
 		return pointerWorkflowOutput{Value: input.Value + 1}, nil

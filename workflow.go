@@ -150,7 +150,7 @@ func runStatus(ctx context.Context, runID worlds.RunID) (Status, error) {
 	if err != nil {
 		return "", err
 	}
-	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		return "", nil
 	}
@@ -170,7 +170,7 @@ func runExists(ctx context.Context, runID worlds.RunID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	_, err = client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		return false, nil
 	}
@@ -198,7 +198,7 @@ func runWorkflowName(ctx context.Context, runID worlds.RunID) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID})
+	run, err := client.RunsGet(ctx, worlds.RunsGetInput{RunID: runID, ResolveData: worlds.ResolveDataNone})
 	if errors.Is(err, worlds.ErrRunNotFound) {
 		return "", nil
 	}
