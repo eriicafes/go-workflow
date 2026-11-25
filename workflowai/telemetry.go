@@ -3,8 +3,7 @@ package workflowai
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -13,29 +12,26 @@ import (
 
 	"github.com/digitallysavvy/go-ai/pkg/provider/types"
 	"github.com/digitallysavvy/go-ai/pkg/telemetry"
-	"github.com/eriicafes/go-workflow"
-	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// A Stream or Generate call spans many deliveries and processes, so no
-// process can draw its root span, or a span for each of its agent steps, as
-// they happen. Like the Workflow SDK, the agent records the call's telemetry
-// events in workflow code and reports them to the go-ai telemetry
-// integrations in the reportWorkflowAgentTelemetry step when the call ends.
-// The prepareWorkflowAgentTelemetry step reserves the IDs of the call's root
-// and step spans first, so the chat spans of its model calls, which are
-// drawn as they happen, are children of the step spans drawn at the end.
+// A Stream or Generate call spans many deliveries and processes, and
+// workflow code runs again on every replay, so no process can tell go-ai's
+// telemetry integrations about the call as it happens. Like the Workflow SDK
+// with its durable telemetry, the agent records the call's telemetry events
+// in workflow code, with the times they happened, and the
+// reportWorkflowAgentTelemetry step reports them to the integrations, once,
+// when the call ends.
 //
-// OpenTelemetry cannot be told the IDs and times of the spans go-ai draws,
-// so the tracer provider that draws them needs TelemetryIDGenerator and
-// NewTelemetrySpanProcessor, which apply the reserved IDs and the recorded
-// times. Without them, like the Workflow SDK without its durable telemetry
-// bridge, the agent only draws the spans of each model call as it happens.
+// OpenTelemetry cannot be told the times of the spans go-ai draws, so the
+// tracer provider that draws them needs NewTelemetrySpanProcessor, which
+// gives them the recorded times, and TelemetryIDGenerator, which gives the
+// call's root span the ID the prepareWorkflowAgentTelemetry step reserved,
+// so the spans of the call's steps nest under it.
 
-// TelemetryIDGenerator is an OpenTelemetry ID generator that gives the spans
-// of a workflow agent's telemetry the IDs the agent reserved for them, and
+// TelemetryIDGenerator is an OpenTelemetry ID generator that gives the root
+// span of a workflow agent's call the ID the agent reserved for it, and
 // random IDs to every other span. Use it with NewTelemetrySpanProcessor:
 //
 //	provider := sdktrace.NewTracerProvider(
@@ -64,10 +60,9 @@ func (TelemetryIDGenerator) NewSpanID(ctx context.Context, traceID trace.TraceID
 
 // NewTelemetrySpanProcessor returns an OpenTelemetry span processor that
 // passes spans to next, after it gives the spans a workflow agent reports
-// when a call ends the times their events were recorded at. It leaves out
-// the stand-in spans the agent draws so go-ai can draw a model call's chat
-// span in a later step's process. Until it shuts down, it turns on the
-// agent's reported telemetry in the process, so a process that runs workflow
+// when a call ends the times their events were recorded at. Until it shuts
+// down, the agent reserves the ID of each call's root span in the process,
+// so the steps the call runs nest under it; a process that runs workflow
 // agents creates it before it runs them. Use it with TelemetryIDGenerator.
 func NewTelemetrySpanProcessor(next sdktrace.SpanProcessor) sdktrace.SpanProcessor {
 	reportedTelemetry.Add(1)
@@ -83,20 +78,11 @@ type telemetrySpanProcessor struct {
 }
 
 func (p *telemetrySpanProcessor) OnStart(parent context.Context, span sdktrace.ReadWriteSpan) {
-	if parent.Value(standInKey{}) != nil {
-		span.SetAttributes(standInAttribute)
-		return
-	}
 	telemetryClock.start(span.SpanContext())
 	p.next.OnStart(parent, span)
 }
 
 func (p *telemetrySpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
-	for _, attr := range span.Attributes() {
-		if attr == standInAttribute {
-			return
-		}
-	}
 	if start, end, ok := telemetryClock.end(span.SpanContext()); ok {
 		span = reportedSpan{ReadOnlySpan: span, start: start, end: end, events: reportedEvents(span, start, end)}
 	}
@@ -185,11 +171,10 @@ func (c *clock) end(span trace.SpanContext) (start, end time.Time, ok bool) {
 
 // agentTelemetry is what prepareWorkflowAgentTelemetry records for a call.
 type agentTelemetry struct {
-	// Reported is set when the call's telemetry is reported when it ends.
-	Reported bool   `json:"reported,omitempty"`
-	CallID   string `json:"callId"`
-	// TraceID and RootSpanID are the reserved IDs of the root span, in hex,
-	// and Parent is the span the root span is a child of.
+	CallID string `json:"callId"`
+	// Reserved is set when the root span's IDs are reserved: TraceID and
+	// RootSpanID, in hex. Parent is the span the root span is a child of.
+	Reserved   bool        `json:"reserved,omitempty"`
 	TraceID    string      `json:"traceId,omitempty"`
 	RootSpanID string      `json:"rootSpanId,omitempty"`
 	TraceFlags byte        `json:"traceFlags,omitempty"`
@@ -231,30 +216,17 @@ func (t *agentTelemetry) parentContext(ctx context.Context) context.Context {
 	return trace.ContextWithSpanContext(ctx, parent)
 }
 
-// stepSpanID returns the reserved ID of the span of agent step stepNumber.
-func (t *agentTelemetry) stepSpanID(stepNumber int) trace.SpanID {
-	traceID, rootID := t.traceID(), t.rootSpanID()
-	data := make([]byte, 0, len(traceID)+len(rootID)+8)
-	data = append(append(data, traceID[:]...), rootID[:]...)
-	data = binary.BigEndian.AppendUint64(data, uint64(stepNumber))
-	sum := sha256.Sum256(data)
-	var id trace.SpanID
-	copy(id[:], sum[:])
-	return id
-}
-
-// prepareWorkflowAgentTelemetry reserves the IDs of a call's root span when
-// the process has a NewTelemetrySpanProcessor, as the Workflow SDK's step of
-// the same name does for its durable telemetry integrations.
+// prepareWorkflowAgentTelemetry draws the call's telemetry call ID and, when
+// the process has a NewTelemetrySpanProcessor, reserves the IDs of the call's
+// root span in this step's trace, as a child of the span this step's span is
+// a child of, as the Workflow SDK's step of the same name reserves them for
+// its durable telemetry integrations.
 func prepareWorkflowAgentTelemetry(ctx context.Context, input struct{}) (agentTelemetry, error) {
-	callID := workflow.StepID(ctx)
+	prepared := agentTelemetry{CallID: callID()}
 	if reportedTelemetry.Load() == 0 {
-		return agentTelemetry{CallID: callID}, nil
+		return prepared, nil
 	}
-	// The root span is in this step's trace, as a child of the span this
-	// step's span is a child of: the span of the code that started the run,
-	// when there is one.
-	prepared := agentTelemetry{Reported: true, CallID: callID, RootSpanID: randomSpanID().String(), TraceFlags: byte(trace.FlagsSampled)}
+	prepared.Reserved, prepared.RootSpanID, prepared.TraceFlags = true, randomSpanID().String(), byte(trace.FlagsSampled)
 	current := trace.SpanContextFromContext(ctx)
 	if current.IsValid() {
 		prepared.TraceID, prepared.TraceFlags = current.TraceID().String(), byte(current.TraceFlags())
@@ -271,36 +243,52 @@ func prepareWorkflowAgentTelemetry(ctx context.Context, input struct{}) (agentTe
 }
 
 // telemetryEvent is a telemetry event the agent records in workflow code and
-// reports when the call ends.
+// reports when the call ends. Contexts hold only the fields the telemetry
+// settings include.
 type telemetryEvent struct {
 	Type string `json:"type"`
 	// Timestamp is when the event happened, in milliseconds since the Unix
 	// epoch, as the Workflow SDK records it.
-	Timestamp     int64           `json:"timestamp"`
-	StepNumber    int             `json:"stepNumber,omitempty"`
-	ModelProvider string          `json:"modelProvider,omitempty"`
-	ModelID       string          `json:"modelId,omitempty"`
-	ToolCallID    string          `json:"toolCallId,omitempty"`
-	ToolName      string          `json:"toolName,omitempty"`
-	Input         json.RawMessage `json:"input,omitempty"`
-	Output        json.RawMessage `json:"output,omitempty"`
-	Error         string          `json:"error,omitempty"`
-	FinishReason  string          `json:"finishReason,omitempty"`
-	Usage         types.Usage     `json:"usage"`
-	Text          string          `json:"text,omitempty"`
-	ResponseID    string          `json:"responseId,omitempty"`
+	Timestamp        int64           `json:"timestamp"`
+	StepNumber       int             `json:"stepNumber,omitempty"`
+	ModelProvider    string          `json:"modelProvider,omitempty"`
+	ModelID          string          `json:"modelId,omitempty"`
+	ToolCallID       string          `json:"toolCallId,omitempty"`
+	ToolName         string          `json:"toolName,omitempty"`
+	Input            json.RawMessage `json:"input,omitempty"`
+	Output           json.RawMessage `json:"output,omitempty"`
+	Error            string          `json:"error,omitempty"`
+	FinishReason     string          `json:"finishReason,omitempty"`
+	Usage            types.Usage     `json:"usage"`
+	Text             string          `json:"text,omitempty"`
+	ResponseID       string          `json:"responseId,omitempty"`
+	ProviderMetadata map[string]any  `json:"providerMetadata,omitempty"`
+	Files            []ContentPart   `json:"files,omitempty"`
+	RuntimeContext   map[string]any  `json:"runtimeContext,omitempty"`
+	ToolsContext     map[string]any  `json:"toolsContext,omitempty"`
+	ToolContext      map[string]any  `json:"toolContext,omitempty"`
+	// Messages are the messages the call or model call started with, and
+	// Content the model call's content, recorded when the telemetry
+	// settings record inputs and outputs.
+	Messages  []ModelMessage      `json:"messages,omitempty"`
+	Content   []ContentPart       `json:"content,omitempty"`
+	Tools     []toolDefinition    `json:"tools,omitempty"`
+	Settings  *GenerationSettings `json:"settings,omitempty"`
+	ToolCalls []ToolCall          `json:"toolCalls,omitempty"`
 }
 
 // The types of telemetryEvent.
 const (
-	eventStart     = "start"
-	eventStepStart = "stepStart"
-	eventToolStart = "toolStart"
-	eventToolEnd   = "toolEnd"
-	eventStepEnd   = "stepEnd"
-	eventEnd       = "end"
-	eventError     = "error"
-	eventAbort     = "abort"
+	eventStart          = "start"
+	eventStepStart      = "stepStart"
+	eventModelCallStart = "modelCallStart"
+	eventModelCallEnd   = "modelCallEnd"
+	eventToolStart      = "toolStart"
+	eventToolEnd        = "toolEnd"
+	eventStepEnd        = "stepEnd"
+	eventEnd            = "end"
+	eventError          = "error"
+	eventAbort          = "abort"
 )
 
 // reportTelemetryInput is the input of reportWorkflowAgentTelemetry.
@@ -313,90 +301,189 @@ type reportTelemetryInput struct {
 
 // reportWorkflowAgentTelemetry reports a call's recorded telemetry events to
 // the go-ai telemetry integrations, as the Workflow SDK's step of the same
-// name does. The root and step spans take their reserved IDs, and every
-// span takes the times of the events that start and end it. The telemetry
-// settings come from the modelCall in ctx.
+// name does. Each integration gets the events on its own, so one that panics
+// does not keep the others from them. The telemetry settings come from the
+// modelCall in ctx.
 func reportWorkflowAgentTelemetry(ctx context.Context, input reportTelemetryInput) (struct{}, error) {
 	m, err := modelCallFrom(ctx)
 	if err != nil {
 		return struct{}{}, err
 	}
-	t := input.Telemetry
-	settings, callID, traceID := m.telemetry, t.CallID, t.traceID()
-	defer telemetryClock.clear(traceID)
+	if input.Telemetry.Reserved {
+		defer telemetryClock.clear(input.Telemetry.traceID())
+	}
+	if m.telemetry == nil || len(m.telemetry.Integrations) == 0 {
+		// go-ai does not list its globally registered integrations, so they
+		// get the events together.
+		reportTo(ctx, m.telemetry, input)
+		return struct{}{}, nil
+	}
+	for _, integration := range m.telemetry.Integrations {
+		settings := *m.telemetry
+		settings.Integrations = []telemetry.TelemetryIntegration{integration}
+		reportTo(ctx, &settings, input)
+	}
+	return struct{}{}, nil
+}
 
+// reportTo reports the recorded events to the integrations of settings. A
+// panicking integration stops getting them, as the Workflow SDK isolates an
+// integration that throws.
+func reportTo(ctx context.Context, settings *telemetry.Settings, input reportTelemetryInput) {
+	defer func() { _ = recover() }()
+	t := input.Telemetry
+	callID, operation := t.CallID, input.Operation
+	at := func(event telemetryEvent) {
+		if t.Reserved {
+			telemetryClock.set(t.traceID(), time.UnixMilli(event.Timestamp))
+		}
+	}
+	toolEnds := map[string]telemetryEvent{}
+	for _, event := range input.Events {
+		if event.Type == eventToolEnd {
+			toolEnds[event.ToolCallID] = event
+		}
+	}
 	root := t.parentContext(ctx)
 	steps := map[int]context.Context{}
-	for _, event := range input.Events {
-		telemetryClock.set(traceID, time.UnixMilli(event.Timestamp))
-		stepCtx := steps[event.StepNumber]
-		if stepCtx == nil {
-			stepCtx = root
+	calls := map[int]context.Context{}
+	stepContext := func(stepNumber int) context.Context {
+		if stepCtx := steps[stepNumber]; stepCtx != nil {
+			return stepCtx
 		}
+		return root
+	}
+	for _, event := range input.Events {
+		at(event)
 		switch event.Type {
 		case eventStart:
-			root = telemetry.FireOnStart(withReservedIDs(root, traceID, t.rootSpanID()), telemetry.TelemetryStartEvent{
-				CallID:        callID,
-				OperationType: input.Operation,
-				ModelProvider: event.ModelProvider,
-				ModelID:       event.ModelID,
-				Settings:      settings,
-				System:        input.Instructions,
-			})
+			start := root
+			if t.Reserved {
+				start = withReservedIDs(root, t.traceID(), t.rootSpanID())
+			}
+			startEvent := telemetry.TelemetryStartEvent{
+				CallID:         callID,
+				OperationType:  operation,
+				ModelProvider:  event.ModelProvider,
+				ModelID:        event.ModelID,
+				Settings:       settings,
+				System:         input.Instructions,
+				Messages:       toProviderMessages(event.Messages),
+				RuntimeContext: event.RuntimeContext,
+				ToolsContext:   event.ToolsContext,
+			}
+			if s := event.Settings; s != nil {
+				startEvent.MaxOutputTokens, startEvent.Temperature, startEvent.TopP, startEvent.TopK = s.MaxOutputTokens, s.Temperature, s.TopP, s.TopK
+				startEvent.PresencePenalty, startEvent.FrequencyPenalty, startEvent.StopSequences, startEvent.Seed = s.PresencePenalty, s.FrequencyPenalty, s.StopSequences, s.Seed
+				startEvent.Headers, startEvent.MaxRetries = s.Headers, s.MaxRetries
+			}
+			root = telemetry.FireOnStart(start, startEvent)
 		case eventStepStart:
-			steps[event.StepNumber] = telemetry.FireOnStepStart(withReservedIDs(root, traceID, t.stepSpanID(event.StepNumber)), telemetry.TelemetryStepStartEvent{
+			steps[event.StepNumber] = telemetry.FireOnStepStart(root, telemetry.TelemetryStepStartEvent{
+				Settings:       settings,
+				CallID:         callID,
+				OperationType:  operation,
+				StepNumber:     event.StepNumber,
+				ModelProvider:  event.ModelProvider,
+				ModelID:        event.ModelID,
+				RuntimeContext: event.RuntimeContext,
+				ToolsContext:   event.ToolsContext,
+			})
+		case eventModelCallStart:
+			startEvent := telemetry.LanguageModelCallStartEvent{
 				Settings:      settings,
 				CallID:        callID,
-				OperationType: input.Operation,
-				StepNumber:    event.StepNumber,
 				ModelProvider: event.ModelProvider,
 				ModelID:       event.ModelID,
+				Prompt:        types.Prompt{System: input.Instructions, Messages: promptMessages(event.Messages)},
+				Tools:         telemetryTools(event.Tools),
+				System:        input.Instructions,
+			}
+			if s := event.Settings; s != nil {
+				startEvent.Temperature, startEvent.MaxOutputTokens, startEvent.TopP, startEvent.TopK = s.Temperature, s.MaxOutputTokens, s.TopP, s.TopK
+				startEvent.PresencePenalty, startEvent.FrequencyPenalty, startEvent.StopSequences, startEvent.Seed = s.PresencePenalty, s.FrequencyPenalty, s.StopSequences, s.Seed
+			}
+			calls[event.StepNumber] = telemetry.FireOnLanguageModelCallStart(stepContext(event.StepNumber), startEvent)
+		case eventModelCallEnd:
+			callCtx := calls[event.StepNumber]
+			if callCtx == nil {
+				callCtx = stepContext(event.StepNumber)
+			}
+			telemetry.FireOnLanguageModelCallEnd(callCtx, telemetry.LanguageModelCallEndEvent{
+				Settings:         settings,
+				CallID:           callID,
+				ModelProvider:    event.ModelProvider,
+				ModelID:          event.ModelID,
+				FinishReason:     event.FinishReason,
+				Usage:            telemetryUsage(event.Usage),
+				Content:          contentParts(event.Content),
+				ResponseID:       event.ResponseID,
+				ProviderMetadata: event.ProviderMetadata,
 			})
 		case eventToolStart:
-			telemetry.FireOnToolCallStart(stepCtx, telemetry.TelemetryToolCallStartEvent{
-				Settings:   settings,
-				CallID:     callID,
-				ToolCallID: event.ToolCallID,
-				ToolName:   event.ToolName,
-				Args:       arguments(event.Input),
+			stepCtx := stepContext(event.StepNumber)
+			args := arguments(event.Input)
+			toolCtx := telemetry.FireOnToolCallStart(stepCtx, telemetry.TelemetryToolCallStartEvent{
+				Settings:    settings,
+				CallID:      callID,
+				ToolCallID:  event.ToolCallID,
+				ToolName:    event.ToolName,
+				Args:        args,
+				ToolContext: event.ToolContext,
+			})
+			// The tool ran in its own step, so the integrations wrap a
+			// stand-in that returns its recorded result.
+			end, ended := toolEnds[event.ToolCallID]
+			_, _ = telemetry.FireExecuteToolWithSettings(toolCtx, settings, event.ToolName, args, func(context.Context, map[string]any) (any, error) {
+				if !ended {
+					return nil, nil
+				}
+				at(end)
+				output, toolErr := end.result()
+				return output, toolErr
 			})
 		case eventToolEnd:
-			var output any
-			_ = json.Unmarshal(event.Output, &output)
-			var toolErr error
-			if event.Error != "" {
-				toolErr = errors.New(event.Error)
-			}
-			telemetry.FireOnToolCallFinish(stepCtx, telemetry.TelemetryToolCallFinishEvent{
-				Settings:   settings,
-				CallID:     callID,
-				ToolCallID: event.ToolCallID,
-				ToolName:   event.ToolName,
-				Args:       arguments(event.Input),
-				Result:     output,
-				Error:      toolErr,
+			output, toolErr := event.result()
+			telemetry.FireOnToolCallFinish(stepContext(event.StepNumber), telemetry.TelemetryToolCallFinishEvent{
+				Settings:    settings,
+				CallID:      callID,
+				ToolCallID:  event.ToolCallID,
+				ToolName:    event.ToolName,
+				Args:        arguments(event.Input),
+				Result:      output,
+				Error:       toolErr,
+				ToolContext: event.ToolContext,
 			})
 		case eventStepEnd:
-			telemetry.FireOnStepEnd(stepCtx, telemetry.TelemetryStepEndEvent{
-				Settings:      settings,
-				CallID:        callID,
-				OperationType: input.Operation,
-				StepNumber:    event.StepNumber,
-				FinishReason:  event.FinishReason,
-				Usage:         telemetryUsage(event.Usage),
-				Text:          event.Text,
-				ResponseID:    event.ResponseID,
+			telemetry.FireOnStepEnd(stepContext(event.StepNumber), telemetry.TelemetryStepEndEvent{
+				Settings:         settings,
+				CallID:           callID,
+				OperationType:    operation,
+				StepNumber:       event.StepNumber,
+				FinishReason:     event.FinishReason,
+				Usage:            telemetryUsage(event.Usage),
+				Text:             event.Text,
+				Files:            generatedFiles(event.Files),
+				ResponseID:       event.ResponseID,
+				ProviderMetadata: event.ProviderMetadata,
+				RuntimeContext:   event.RuntimeContext,
+				ToolsContext:     event.ToolsContext,
 			})
 		case eventEnd:
 			telemetry.FireOnEnd(root, telemetry.TelemetryFinishEvent{
-				Settings:      settings,
-				CallID:        callID,
-				OperationType: input.Operation,
-				FinishReason:  event.FinishReason,
-				Usage:         telemetryUsage(event.Usage),
-				ModelProvider: event.ModelProvider,
-				ModelID:       event.ModelID,
-				Text:          event.Text,
+				Settings:         settings,
+				CallID:           callID,
+				OperationType:    operation,
+				FinishReason:     event.FinishReason,
+				Usage:            telemetryUsage(event.Usage),
+				ModelProvider:    event.ModelProvider,
+				ModelID:          event.ModelID,
+				Text:             event.Text,
+				ToolCalls:        providerToolCalls(event.ToolCalls),
+				Files:            generatedFiles(event.Files),
+				ProviderMetadata: event.ProviderMetadata,
+				RuntimeContext:   event.RuntimeContext,
+				ToolsContext:     event.ToolsContext,
 			})
 		case eventError:
 			telemetry.FireOnError(root, telemetry.TelemetryErrorEvent{Settings: settings, CallID: callID, Error: errors.New(event.Error)})
@@ -404,40 +491,17 @@ func reportWorkflowAgentTelemetry(ctx context.Context, input reportTelemetryInpu
 			telemetry.FireOnAbort(root, telemetry.TelemetryAbortEvent{Settings: settings, CallID: callID, Reason: errors.New(event.Error)})
 		}
 	}
-	return struct{}{}, nil
 }
 
-// startStandIns draws stand-ins for the root span and the span of step
-// stepNumber, with their reserved IDs, so go-ai can draw a model call's chat
-// span as a child of the step span. NewTelemetrySpanProcessor leaves the
-// stand-ins out. The returned function ends them.
-func (t *agentTelemetry) startStandIns(ctx context.Context, settings *telemetry.Settings, operation string, stepNumber int, model modelCall) func() {
-	ctx = t.parentContext(context.WithValue(ctx, standInKey{}, true))
-	ctx = telemetry.FireOnStart(withReservedIDs(ctx, t.traceID(), t.rootSpanID()), telemetry.TelemetryStartEvent{
-		CallID:        t.CallID,
-		OperationType: operation,
-		ModelProvider: model.model.Provider(),
-		ModelID:       model.model.ModelID(),
-		Settings:      settings,
-	})
-	stepCtx := telemetry.FireOnStepStart(withReservedIDs(ctx, t.traceID(), t.stepSpanID(stepNumber)), telemetry.TelemetryStepStartEvent{
-		Settings:      settings,
-		CallID:        t.CallID,
-		OperationType: operation,
-		StepNumber:    stepNumber,
-		ModelProvider: model.model.Provider(),
-		ModelID:       model.model.ModelID(),
-	})
-	return func() {
-		telemetry.FireOnStepEnd(stepCtx, telemetry.TelemetryStepEndEvent{Settings: settings, CallID: t.CallID, OperationType: operation, StepNumber: stepNumber})
-		telemetry.FireOnEnd(ctx, telemetry.TelemetryFinishEvent{Settings: settings, CallID: t.CallID, OperationType: operation})
+// result returns a tool end event's output and error.
+func (e telemetryEvent) result() (any, error) {
+	var output any
+	_ = json.Unmarshal(e.Output, &output)
+	if e.Error != "" {
+		return output, errors.New(e.Error)
 	}
+	return output, nil
 }
-
-// standInKey marks the context of stand-in spans.
-type standInKey struct{}
-
-var standInAttribute = attribute.Bool("workflowai.stand_in", true)
 
 // reservedIDsKey is the context key of the IDs the next span takes.
 type reservedIDsKey struct{}
@@ -465,9 +529,79 @@ func randomSpanID() trace.SpanID {
 	return id
 }
 
+// callID returns a telemetry call ID in the Workflow SDK's form,
+// "call-" and 24 random characters.
+func callID() string {
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	id := make([]byte, 24)
+	_, _ = rand.Read(id)
+	for i, b := range id {
+		id[i] = alphabet[int(b)%len(alphabet)]
+	}
+	return "call-" + string(id)
+}
+
+// telemetryTools converts tool definitions to go-ai tools for telemetry.
+func telemetryTools(definitions []toolDefinition) []types.Tool {
+	var tools []types.Tool
+	for _, tool := range definitions {
+		tools = append(tools, types.Tool{Name: tool.Name, Description: tool.Description, Parameters: tool.InputSchema})
+	}
+	return tools
+}
+
+// contentParts converts content to go-ai content parts for telemetry.
+func contentParts(content []ContentPart) []types.ContentPart {
+	if len(content) == 0 {
+		return nil
+	}
+	return toProviderMessages([]ModelMessage{{Role: RoleAssistant, Content: content}})[0].Content
+}
+
+// providerToolCalls converts tool calls to go-ai tool calls for telemetry.
+func providerToolCalls(calls []ToolCall) []types.ToolCall {
+	var out []types.ToolCall
+	for _, call := range calls {
+		out = append(out, types.ToolCall{ID: call.ToolCallID, ToolName: call.ToolName, Arguments: arguments(call.Input), RawArguments: string(call.Input), ProviderExecuted: call.ProviderExecuted})
+	}
+	return out
+}
+
 // arguments decodes a tool call's JSON input for telemetry.
 func arguments(input json.RawMessage) map[string]any {
 	var args map[string]any
 	_ = json.Unmarshal(input, &args)
 	return args
+}
+
+// generatedFiles converts the file parts of a step to telemetry files.
+func generatedFiles(parts []ContentPart) []types.GeneratedFileContent {
+	var files []types.GeneratedFileContent
+	for _, part := range parts {
+		data, err := base64.StdEncoding.DecodeString(part.Data)
+		if err != nil {
+			data = []byte(part.Data)
+		}
+		files = append(files, types.GeneratedFileContent{MediaType: part.MediaType, Data: data})
+	}
+	return files
+}
+
+// includedContext returns the fields of a context map that include
+// selects, or nil when it selects none.
+func includedContext(context any, include map[string]bool) map[string]any {
+	values, ok := context.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var included map[string]any
+	for key, value := range values {
+		if include[key] {
+			if included == nil {
+				included = map[string]any{}
+			}
+			included[key] = value
+		}
+	}
+	return included
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/digitallysavvy/go-ai/pkg/ai"
 	"github.com/digitallysavvy/go-ai/pkg/provider"
 	"github.com/digitallysavvy/go-ai/pkg/provider/types"
+	"github.com/digitallysavvy/go-ai/pkg/schema"
 	"github.com/digitallysavvy/go-ai/pkg/telemetry"
 	"github.com/eriicafes/go-workflow"
 	"go.opentelemetry.io/otel/trace"
@@ -51,8 +53,8 @@ type WorkflowAgentOptions struct {
 	// invalid.
 	RepairToolCall ai.ToolCallRepairFunction
 	// Download fetches the file URLs in messages that the model does not
-	// support, before each model call and inside its step. Nil leaves URLs
-	// as they are.
+	// support, before each model call and inside its step. Nil uses go-ai's
+	// DefaultDownload, as the Workflow SDK downloads them by default.
 	Download ai.DownloadFunction
 	// Telemetry records OpenTelemetry spans through go-ai's telemetry
 	// integrations. A call's spans form one trace: its root span starts and
@@ -152,6 +154,9 @@ type CallOptions struct {
 	// PreventClose leaves the Writer's stream open, so the run can write
 	// more after the agent.
 	PreventClose bool
+	// GenerationSettings fields that are set replace the agent's, and the
+	// ones PrepareCall returns.
+	GenerationSettings
 }
 
 // PrepareCallFunc changes the settings of a Stream or Generate call. It runs
@@ -209,19 +214,32 @@ type PrepareStepInfo struct {
 	Messages       []ModelMessage
 	Model          provider.LanguageModel
 	RuntimeContext any
+	// Instructions and InstructionMessages are the instructions in effect,
+	// and InitialInstructions and InitialMessages the call's instructions
+	// and messages before any step changed them.
+	Instructions        string
+	InstructionMessages []ModelMessage
+	InitialInstructions string
+	InitialMessages     []ModelMessage
 }
 
 // PrepareStepResult holds the settings PrepareStep changes for one step.
 // Zero fields keep the current settings.
 type PrepareStepResult struct {
-	Model        provider.LanguageModel
-	Instructions string
+	Model provider.LanguageModel
+	// Instructions or InstructionMessages, when either is set, replace the
+	// call's instructions for this and later steps, as in the Workflow SDK.
+	Instructions        string
+	InstructionMessages []ModelMessage
 	// Messages replaces the messages sent to the model in this step.
 	Messages    []ModelMessage
 	ToolChoice  *types.ToolChoice
 	ActiveTools []string
 	// RuntimeContext replaces the runtime context for this and later steps.
 	RuntimeContext any
+	// GenerationSettings fields that are set replace the call's for this
+	// step.
+	GenerationSettings
 }
 
 // Result is the result of Stream or Generate. It encodes to JSON, so a
@@ -260,9 +278,36 @@ type StepResult struct {
 	ToolResults  []ToolResult `json:"toolResults,omitempty"`
 	FinishReason string       `json:"finishReason"`
 	Usage        types.Usage  `json:"usage"`
+	// Model is the model that made the step's call.
+	Model StepModel `json:"model"`
+	// Files and Sources are the files the model generated and the sources
+	// it cited, which Content also holds.
+	Files   []GeneratedFile `json:"files,omitempty"`
+	Sources []ContentPart   `json:"sources,omitempty"`
+	// ProviderMetadata is the provider's metadata of the response, and
+	// Warnings the warnings it reported.
+	ProviderMetadata map[string]any  `json:"providerMetadata,omitempty"`
+	Warnings         []types.Warning `json:"warnings,omitempty"`
+	// Performance is how fast the model answered.
+	Performance *StepPerformance `json:"performance,omitempty"`
+	// RuntimeContext and ToolsContext are the contexts the step ran with.
+	RuntimeContext any            `json:"runtimeContext,omitempty"`
+	ToolsContext   map[string]any `json:"toolsContext,omitempty"`
 	// Request holds what CallOptions.Include asks to keep of the request.
 	Request  StepRequest `json:"request,omitzero"`
 	Response Response    `json:"response"`
+}
+
+// StepModel identifies the model of a step.
+type StepModel struct {
+	Provider string `json:"provider"`
+	ModelID  string `json:"modelId"`
+}
+
+// GeneratedFile is a file a model generated, with its base64 content.
+type GeneratedFile struct {
+	Base64    string `json:"base64"`
+	MediaType string `json:"mediaType"`
 }
 
 // StepRequest is the request of a step's model call.
@@ -370,6 +415,9 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 	if r.toolsContext == nil {
 		r.toolsContext = a.options.ToolsContext
 	}
+	if r.toolsContext == nil {
+		r.toolsContext = map[string]any{}
+	}
 	if r.prepareStep == nil {
 		r.prepareStep = a.options.PrepareStep
 	}
@@ -396,13 +444,14 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		return Result{}, err
 	}
 
+	r.initialInstructions, r.initialMessages = r.instructions, slices.Clone(r.messages)
 	// Like the Workflow SDK, the call resumes the approvals in its messages,
 	// then starts, then records its root span.
 	r.startedAt = workflow.Now(ctx)
 	result := r.result(nil, nil)
 	err = r.resumeApprovals(ctx)
 	if err == nil {
-		r.callbacks.OnStart(ctx, StartEvent{Messages: r.messages})
+		r.callbacks.OnStart(ctx, StartEvent{Messages: r.messages, Model: r.model, RuntimeContext: r.runtimeContext, ToolsContext: r.toolsContext})
 		ctx, err = r.startTrace(ctx)
 	}
 	if err == nil {
@@ -414,14 +463,18 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 			err = errors.Join(err, logErr)
 		}
 	}
-	if err == nil && result.Error == "" {
-		result.Output, err = r.parseOutput(ctx)
+	// Like the Workflow SDK, Stream parses its output before the call ends,
+	// and a parse failure still ends the call before it fails.
+	var parseErr error
+	if r.streaming && err == nil && result.Error == "" {
+		result.Output, parseErr = r.parseOutput(ctx)
 	}
 	if r.stopTimeout != nil {
 		err = errors.Join(err, r.stopTimeout())
 	}
+	aborted := err != nil && (r.aborted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	switch {
-	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+	case aborted:
 		// A cancelled context or the Timeout aborted the call. The steps
 		// before it stay in the result, and the stream ends normally.
 		r.callbacks.OnAbort(ctx, AbortEvent{Steps: r.steps})
@@ -437,12 +490,32 @@ func (a *WorkflowAgent) execute(ctx context.Context, options CallOptions, stream
 		if !r.ended {
 			r.end(ctx, result)
 		}
+		// Like the Workflow SDK's generate result, Generate reports the tool
+		// calls and results of every step.
+		if !r.streaming {
+			result.ToolCalls, result.ToolResults = nil, nil
+			for _, step := range r.steps {
+				result.ToolCalls = append(result.ToolCalls, step.ToolCalls...)
+				result.ToolResults = append(result.ToolResults, step.ToolResults...)
+			}
+		}
+		// Generate parses its output after the call ends, as the plain text
+		// of the last step without an Output.
+		if !r.streaming && result.Error == "" {
+			result.Output, parseErr = r.generateOutput(ctx)
+		}
+		err = parseErr
 	}
 	// End the stream, so readers do not wait for parts that never come, then
 	// report the call's telemetry, as the Workflow SDK does.
-	err = errors.Join(err, r.closeWriter(ctx))
+	closeErr := r.closeWriter(ctx)
 	r.reportTelemetry(ctx)
-	return result, err
+	if r.aborted && r.streaming {
+		// Like the Workflow SDK's stream, an aborted Stream resolves with the
+		// steps that finished, while Generate fails with the abort's cause.
+		return result, closeErr
+	}
+	return result, errors.Join(err, closeErr)
 }
 
 // run holds the state of one Stream or Generate call.
@@ -467,6 +540,12 @@ type run struct {
 	approvalSecret *ToolApprovalSecret
 	toolApproval   ToolApprovalFunc
 	toolApprovals  map[string]ToolApprovalFunc
+	// deadline is when the Timeout passes, or zero without one. A model call
+	// is not dispatched after it.
+	deadline time.Time
+	// aborted is set when a cancelled context or the Timeout aborted the
+	// call.
+	aborted bool
 	// stopTimeout disarms the Timeout once the call ends.
 	stopTimeout func() error
 	tools       ToolSet
@@ -488,6 +567,10 @@ type run struct {
 	prepareStep    PrepareStepFunc
 	messages       []ModelMessage
 	steps          []StepResult
+	// initialInstructions and initialMessages are the call's instructions
+	// and messages before any step changed them.
+	initialInstructions string
+	initialMessages     []ModelMessage
 	// trace is what prepareWorkflowAgentTelemetry recorded, and events are
 	// the telemetry events the call reports when it ends.
 	trace     *agentTelemetry
@@ -526,6 +609,11 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		r.toolChoice = cmp.Or(prepared.ToolChoice, r.toolChoice)
 		r.activeTools = orNil(prepared.ActiveTools, r.activeTools)
 		r.concurrency = cmp.Or(r.options.ToolCallConcurrency, prepared.ToolCallConcurrency, r.concurrency)
+		// Stop conditions PrepareCall replaces the default step limit with
+		// are its own, so the default limit's warning is not logged for them.
+		if prepared.StopWhen != nil && (len(prepared.StopWhen) == 0 || len(r.stopWhen) == 0 || &prepared.StopWhen[0] != &r.stopWhen[0]) {
+			r.defaultLimit = false
+		}
 		r.stopWhen = orNil(prepared.StopWhen, r.stopWhen)
 		r.runtimeContext = cmp.Or(prepared.RuntimeContext, r.runtimeContext)
 		if prepared.ToolsContext != nil {
@@ -533,6 +621,7 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		}
 		r.settings = mergeSettings(r.settings, prepared.GenerationSettings)
 	}
+	r.settings = mergeSettings(r.settings, r.options.GenerationSettings)
 	switch {
 	case r.model == nil:
 		return ctx, errors.New("workflowai: model is required")
@@ -551,6 +640,11 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 		r.responseFormat = format
 	}
 	r.modelCtx = ctx
+	if r.timeout != 0 {
+		// Like the Workflow SDK, a negative Timeout is a deadline that has
+		// already passed.
+		r.deadline = workflow.Now(ctx).Add(r.timeout)
+	}
 	if r.timeout > 0 {
 		modelCtx, stop, err := workflow.WithTimeout(ctx, r.timeout)
 		if err != nil {
@@ -561,12 +655,35 @@ func (r *run) prepare(ctx context.Context) (context.Context, error) {
 	return ctx, nil
 }
 
-// startTrace runs the prepareWorkflowAgentTelemetry inline step when
-// telemetry is enabled. When the call is reported, it returns ctx with the
-// trace context of the call's root span, which every step the call starts
+// abortCause returns why the call is aborted: the cause of its context's
+// cancellation, or of its Timeout's, or nil while it is not.
+func (r *run) abortCause(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if r.modelCtx != nil && r.modelCtx.Err() != nil {
+		return context.Cause(r.modelCtx)
+	}
+	return nil
+}
+
+// telemetryActive reports whether the call reports telemetry: when its
+// Telemetry is enabled, or, without Telemetry, when go-ai has globally
+// registered integrations, as the Workflow SDK reports to its global ones.
+func (r *run) telemetryActive() bool {
+	if r.telemetry != nil {
+		return telemetry.Enabled(r.telemetry)
+	}
+	_, none := telemetry.GetTelemetryIntegration().(telemetry.NoopTelemetryIntegration)
+	return !none
+}
+
+// startTrace runs the prepareWorkflowAgentTelemetry inline step when the call
+// reports telemetry. When the step reserved the root span's IDs, it returns
+// ctx with the root span's trace context, which every step the call starts
 // after it gets.
 func (r *run) startTrace(ctx context.Context) (context.Context, error) {
-	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) {
+	if !r.telemetryActive() {
 		return ctx, nil
 	}
 	prepared, err := workflow.InlineStep(ctx, prepareWorkflowAgentTelemetry, struct{}{})
@@ -574,63 +691,148 @@ func (r *run) startTrace(ctx context.Context) (context.Context, error) {
 		return ctx, err
 	}
 	r.trace = &prepared
-	if !prepared.Reported {
-		r.events = nil
-		return ctx, nil
-	}
 	// The call started before it resumed the approvals in its messages, whose
 	// tool events were recorded before this step.
-	start := telemetryEvent{Type: eventStart, Timestamp: r.startedAt.UnixMilli(), ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()}
+	start := telemetryEvent{
+		Type:           eventStart,
+		Timestamp:      r.startedAt.UnixMilli(),
+		ModelProvider:  r.model.Provider(),
+		ModelID:        r.model.ModelID(),
+		RuntimeContext: r.includedRuntimeContext(),
+		ToolsContext:   r.includedToolsContext(),
+		Settings:       &r.settings,
+	}
+	if r.recordsInputs() {
+		start.Messages = r.messages
+	}
 	r.events = append([]telemetryEvent{start}, r.events...)
+	if !prepared.Reserved {
+		return ctx, nil
+	}
 	root := prepared.rootContext()
 	r.modelCtx = trace.ContextWithRemoteSpanContext(r.modelCtx, root)
 	return trace.ContextWithRemoteSpanContext(ctx, root), nil
 }
 
-// operation returns the telemetry operation of the call.
+// operation returns the telemetry operation of the call. go-ai names the
+// root span of these operations invoke_agent, as the Workflow SDK names the
+// root span of a WorkflowAgent call.
 func (r *run) operation() string {
 	if r.streaming {
-		return "ai.workflowAgent.stream"
+		return "ai.streamText"
 	}
-	return "ai.workflowAgent.generate"
+	return "ai.generateText"
 }
 
-// record records a telemetry event of a call whose telemetry is reported
-// when it ends. Events before prepareWorkflowAgentTelemetry are recorded in
-// case it reports the call.
+// record records a telemetry event of the call, which it reports when it
+// ends.
 func (r *run) record(ctx context.Context, event telemetryEvent) {
-	if r.telemetry == nil || !telemetry.Enabled(r.telemetry) || r.trace != nil && !r.trace.Reported {
+	if !r.telemetryActive() {
 		return
 	}
 	event.Timestamp = workflow.Now(ctx).UnixMilli()
 	r.events = append(r.events, event)
 }
 
+// recordsInputs reports whether the telemetry settings record inputs, which
+// the call then records for its report. Globally registered integrations
+// get them.
+func (r *run) recordsInputs() bool { return r.telemetry == nil || r.telemetry.RecordInputs }
+
+// recordsOutputs reports whether the telemetry settings record outputs.
+func (r *run) recordsOutputs() bool { return r.telemetry == nil || r.telemetry.RecordOutputs }
+
+// includedRuntimeContext returns the runtime context fields the telemetry
+// settings include.
+func (r *run) includedRuntimeContext() map[string]any {
+	if r.telemetry == nil {
+		return nil
+	}
+	return includedContext(r.runtimeContext, r.telemetry.IncludeRuntimeContext)
+}
+
+// includedToolsContext returns the tool context fields the telemetry
+// settings include, by tool.
+func (r *run) includedToolsContext() map[string]any {
+	if r.telemetry == nil {
+		return nil
+	}
+	var included map[string]any
+	for name, context := range r.toolsContext {
+		if fields := includedContext(context, r.telemetry.IncludeToolsContext[name]); fields != nil {
+			if included == nil {
+				included = map[string]any{}
+			}
+			included[name] = fields
+		}
+	}
+	return included
+}
+
+// includedToolContext returns the context fields of tool name the telemetry
+// settings include.
+func (r *run) includedToolContext(name string) map[string]any {
+	if r.telemetry == nil {
+		return nil
+	}
+	return includedContext(r.toolsContext[name], r.telemetry.IncludeToolsContext[name])
+}
+
 // reportTelemetry runs the reportWorkflowAgentTelemetry step with the call's
 // recorded events. Like in the Workflow SDK, telemetry never changes the
 // outcome of the call, so its error is ignored.
 func (r *run) reportTelemetry(ctx context.Context) {
-	if r.trace == nil || !r.trace.Reported {
+	if r.trace == nil {
 		return
 	}
 	input := reportTelemetryInput{Telemetry: *r.trace, Operation: r.operation(), Instructions: r.instructions, Events: r.events}
 	_, _ = workflow.Step(withModelCall(ctx, modelCall{model: r.model, telemetry: r.telemetry}), reportWorkflowAgentTelemetry, input)
 }
 
-// endStep ends an agent step.
-func (r *run) endStep(ctx context.Context, step StepResult) {
-	r.callbacks.OnStepEnd(ctx, step)
-	r.record(ctx, telemetryEvent{Type: eventStepEnd, StepNumber: step.StepNumber, FinishReason: step.FinishReason, Usage: step.Usage, Text: step.Text, ResponseID: step.Response.ID})
+// endStep ends an agent step: it calls OnStepEnd unless notify is false, and
+// records the step's end for telemetry.
+func (r *run) endStep(ctx context.Context, step StepResult, notify bool) {
+	if notify {
+		r.callbacks.OnStepEnd(ctx, step)
+	}
+	r.record(ctx, telemetryEvent{
+		Type:             eventStepEnd,
+		StepNumber:       step.StepNumber,
+		FinishReason:     step.FinishReason,
+		Usage:            step.Usage,
+		Text:             step.Text,
+		ResponseID:       step.Response.ID,
+		ProviderMetadata: step.ProviderMetadata,
+		Files:            fileParts(step.Content),
+		RuntimeContext:   r.includedRuntimeContext(),
+		ToolsContext:     r.includedToolsContext(),
+	})
 }
 
 // end ends the call.
 func (r *run) end(ctx context.Context, result Result) {
-	r.callbacks.OnEnd(ctx, result)
-	var usage types.Usage
-	for _, step := range r.steps {
-		usage = addUsage(usage, step.Usage)
+	r.callbacks.OnEnd(ctx, EndEvent{Result: result, RuntimeContext: r.runtimeContext, ToolsContext: r.toolsContext})
+	event := telemetryEvent{
+		Type:           eventEnd,
+		FinishReason:   result.FinishReason,
+		Usage:          result.TotalUsage,
+		Text:           result.Text,
+		ModelProvider:  r.model.Provider(),
+		ModelID:        r.model.ModelID(),
+		RuntimeContext: r.includedRuntimeContext(),
+		ToolsContext:   r.includedToolsContext(),
 	}
-	r.record(ctx, telemetryEvent{Type: eventEnd, FinishReason: result.FinishReason, Usage: usage, Text: result.Text, ModelProvider: r.model.Provider(), ModelID: r.model.ModelID()})
+	for _, step := range r.steps {
+		event.Files = append(event.Files, fileParts(step.Content)...)
+	}
+	if len(r.steps) > 0 {
+		last := r.steps[len(r.steps)-1]
+		event.ProviderMetadata = last.ProviderMetadata
+		if r.recordsOutputs() {
+			event.ToolCalls = last.ToolCalls
+		}
+	}
+	r.record(ctx, event)
 }
 
 // parseOutput parses the last step's text with the call's Output. It parses
@@ -640,11 +842,34 @@ func (r *run) parseOutput(ctx context.Context) (any, error) {
 		return nil, nil
 	}
 	last := r.steps[len(r.steps)-1]
-	if last.Text == "" || last.FinishReason == string(types.FinishReasonToolCalls) {
+	if last.Text == "" {
 		return nil, nil
 	}
+	return r.parse(ctx, r.output, last)
+}
+
+// generateOutput parses Generate's output from the last step when it
+// stopped, or when it has text and did not stop to call tools, as the
+// Workflow SDK's generate does. Without an Output, the output is the step's
+// text.
+func (r *run) generateOutput(ctx context.Context) (any, error) {
+	if len(r.steps) == 0 {
+		return nil, errors.New("No output generated.") //nolint:staticcheck // the Workflow SDK's error text
+	}
+	last := r.steps[len(r.steps)-1]
+	if last.FinishReason != string(types.FinishReasonStop) && (last.FinishReason == string(types.FinishReasonToolCalls) || last.Text == "") {
+		return nil, nil
+	}
+	if r.output == nil {
+		return last.Text, nil
+	}
+	return r.parse(ctx, r.output, last)
+}
+
+// parse parses a step's text with output.
+func (r *run) parse(ctx context.Context, output Output, last StepResult) (any, error) {
 	usage := last.Usage
-	return r.output.ParseOutput(ctx, ai.ParseCompleteOutputOptions{
+	return output.ParseOutput(ctx, ai.ParseCompleteOutputOptions{
 		Text:         last.Text,
 		Response:     &types.ResponseMetadata{ID: last.Response.ID, ModelID: last.Response.ModelID},
 		Usage:        &usage,
@@ -654,16 +879,27 @@ func (r *run) parseOutput(ctx context.Context) (any, error) {
 
 func (r *run) loop(ctx context.Context) (Result, error) {
 	for {
+		// Like the Workflow SDK, a call aborted before a step ends without
+		// starting it. A passed Timeout does not: the model call step runs
+		// and aborts without calling the model.
+		if ctx.Err() != nil {
+			r.aborted = true
+			return r.result(nil, nil), context.Cause(ctx)
+		}
 		stepNumber := len(r.steps)
-		model, instructions, messages := r.model, r.instructions, r.messages
-		toolChoice, activeTools := r.toolChoice, r.activeTools
+		model, messages := r.model, r.messages
+		toolChoice, activeTools, settings := r.toolChoice, r.activeTools, r.settings
 		if r.prepareStep != nil {
 			prepared, err := r.prepareStep(ctx, PrepareStepInfo{
-				StepNumber:     stepNumber,
-				Steps:          r.steps,
-				Messages:       r.messages,
-				Model:          r.model,
-				RuntimeContext: r.runtimeContext,
+				StepNumber:          stepNumber,
+				Steps:               r.steps,
+				Messages:            r.messages,
+				Model:               r.model,
+				RuntimeContext:      r.runtimeContext,
+				Instructions:        r.instructions,
+				InstructionMessages: r.instructionMessages,
+				InitialInstructions: r.initialInstructions,
+				InitialMessages:     r.initialMessages,
 			})
 			if err != nil {
 				return r.result(nil, nil), err
@@ -671,7 +907,9 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			if prepared.Model != nil {
 				model = prepared.Model
 			}
-			instructions = cmp.Or(prepared.Instructions, instructions)
+			if prepared.Instructions != "" || prepared.InstructionMessages != nil {
+				r.instructions, r.instructionMessages = prepared.Instructions, prepared.InstructionMessages
+			}
 			toolChoice = cmp.Or(prepared.ToolChoice, toolChoice)
 			activeTools = orNil(prepared.ActiveTools, activeTools)
 			if prepared.Messages != nil {
@@ -680,16 +918,17 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			if prepared.RuntimeContext != nil {
 				r.runtimeContext = prepared.RuntimeContext
 			}
+			settings = mergeSettings(settings, prepared.GenerationSettings)
 		}
-		r.callbacks.OnStepStart(ctx, StepStartEvent{StepNumber: stepNumber, Messages: messages})
-		r.record(ctx, telemetryEvent{Type: eventStepStart, StepNumber: stepNumber, ModelProvider: model.Provider(), ModelID: model.ModelID()})
+		r.callbacks.OnStepStart(ctx, StepStartEvent{StepNumber: stepNumber, Messages: messages, Model: model, Steps: slices.Clip(r.steps), RuntimeContext: r.runtimeContext, ToolsContext: r.toolsContext})
+		r.record(ctx, telemetryEvent{Type: eventStepStart, StepNumber: stepNumber, ModelProvider: model.Provider(), ModelID: model.ModelID(), RuntimeContext: r.includedRuntimeContext(), ToolsContext: r.includedToolsContext()})
 
 		input := modelCallInput{
-			Instructions:     instructions,
+			Instructions:     r.instructions,
 			Messages:         slices.Concat(r.instructionMessages, messages),
 			Tools:            r.toolDefinitions(activeTools),
 			ToolChoice:       toolChoice,
-			Settings:         r.settings,
+			Settings:         settings,
 			ResponseFormat:   r.responseFormat,
 			IncludeRawChunks: r.options.IncludeRawChunks,
 			StepNumber:       stepNumber,
@@ -697,18 +936,45 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			Include:          r.options.Include,
 			Writer:           r.options.Writer,
 		}
+		if !r.deadline.IsZero() {
+			input.Deadline = r.deadline.UnixMilli()
+		}
 		call := doGenerateStep
 		if r.streaming {
 			call = doStreamStep
 		}
-		callCtx := withModelCall(r.modelCtx, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform, trace: r.trace, operation: r.operation(), providerTools: r.providerTools(activeTools)})
+		base := r.modelCtx
+		if base.Err() != nil {
+			base = ctx
+		}
+		callCtx := withModelCall(base, modelCall{model: model, telemetry: r.telemetry, repair: r.repair, download: r.download, transforms: r.options.Transform, providerTools: r.providerTools(activeTools)})
 		// The model call retries opening the model itself, so the step is not
 		// retried: a retry would repeat a model call whose stream failed
 		// partway.
+		callStart := telemetryEvent{Type: eventModelCallStart, StepNumber: stepNumber, ModelProvider: model.Provider(), ModelID: model.ModelID(), Tools: input.Tools, Settings: &input.Settings}
+		if r.recordsInputs() {
+			callStart.Messages = input.Messages
+		}
+		r.record(ctx, callStart)
 		response, err := workflow.Step(callCtx, call, input, workflow.StepOptions{MaxRetries: 0})
 		if err != nil {
-			return r.result(nil, nil), err
+			if cause := r.abortCause(ctx); cause != nil {
+				r.aborted = true
+				return r.result(nil, nil), cause
+			}
+			// Like the Workflow SDK, the call fails with the model's error,
+			// not the step failure that wraps it.
+			return r.result(nil, nil), rootCause(err)
 		}
+		if response.Aborted {
+			r.aborted = true
+			return r.result(nil, nil), context.DeadlineExceeded
+		}
+		callEnd := telemetryEvent{Type: eventModelCallEnd, StepNumber: stepNumber, ModelProvider: model.Provider(), ModelID: model.ModelID(), FinishReason: response.FinishReason, Usage: response.Usage, ResponseID: response.Response.ID, ProviderMetadata: response.ProviderMetadata}
+		if r.recordsOutputs() {
+			callEnd.Content = response.Content
+		}
+		r.record(ctx, callEnd)
 		r.stepModel = model
 		if r.streaming && r.options.Writer != nil {
 			_, err := workflow.Step(ctx, writeDeferredToolCalls, writeDeferredToolCallsInput{Writer: *r.options.Writer, ToolCalls: []ToolCall{}})
@@ -718,12 +984,26 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		}
 
 		step := StepResult{
-			StepNumber:   stepNumber,
-			Content:      response.Content,
-			ToolCalls:    response.ToolCalls,
-			FinishReason: response.FinishReason,
-			Usage:        response.Usage,
-			Response:     response.Response,
+			StepNumber:       stepNumber,
+			Content:          response.Content,
+			ToolCalls:        response.ToolCalls,
+			FinishReason:     response.FinishReason,
+			Usage:            response.Usage,
+			Model:            StepModel{Provider: model.Provider(), ModelID: model.ModelID()},
+			ProviderMetadata: response.ProviderMetadata,
+			Warnings:         response.Warnings,
+			Performance:      response.Performance,
+			RuntimeContext:   r.runtimeContext,
+			ToolsContext:     r.toolsContext,
+			Response:         response.Response,
+		}
+		for _, part := range response.Content {
+			switch part.Type {
+			case PartFile:
+				step.Files = append(step.Files, GeneratedFile{Base64: part.Data, MediaType: part.MediaType})
+			case PartSource:
+				step.Sources = append(step.Sources, part)
+			}
 		}
 		if include := r.options.Include; include != nil {
 			step.Request.Body = response.RequestBody
@@ -736,10 +1016,12 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 				step.Text += part.Text
 			}
 		}
-		history := r.messages
+		// Like the Workflow SDK, tools and the approval policy get the
+		// messages the step sent, without its system messages.
+		history := slices.DeleteFunc(slices.Clone(messages), func(message ModelMessage) bool { return message.Role == RoleSystem })
 		var added []ModelMessage
-		if len(response.Content) > 0 {
-			added = append(added, ModelMessage{Role: RoleAssistant, Content: response.Content})
+		if content := assistantContent(response.Content); len(content) > 0 {
+			added = append(added, ModelMessage{Role: RoleAssistant, Content: content})
 		}
 
 		// An error in the model stream ends the turn without executing the
@@ -748,7 +1030,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.endStep(ctx, step)
+			r.endStep(ctx, step, true)
 			result := r.result(step.ToolCalls, nil)
 			result.Error = response.Error
 			return result, nil
@@ -758,6 +1040,16 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 		// provider reported results of the tools it executes.
 		toolExecutionAllowed := step.FinishReason == string(types.FinishReasonToolCalls) || step.FinishReason == string(types.FinishReasonStop)
 		providerResults := providerToolResults(response.Content)
+		// Like local results, the model sees a provider's results as the
+		// tool's ToModelOutput converts them.
+		if err := r.providerModelOutputs(ctx, step.Content, step.ToolCalls); err != nil {
+			return r.result(nil, nil), err
+		}
+		if len(added) > 0 {
+			if err := r.providerModelOutputs(ctx, added[0].Content, step.ToolCalls); err != nil {
+				return r.result(nil, nil), err
+			}
+		}
 		// A provider tool with deferred results may deliver a call's result
 		// in a later model call, which the loop waits for.
 		for _, call := range step.ToolCalls {
@@ -774,7 +1066,7 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.endStep(ctx, step)
+			r.endStep(ctx, step, true)
 			return r.result(step.ToolCalls, nil), nil
 		}
 		// When the finish reason does not allow tool execution, only invalid
@@ -862,7 +1154,9 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			}
 			// Calls that wait for the provider's approval have no result yet.
 			provider := r.providerResults(calls, providerResults, providerApprovals)
-			step.ToolResults = slices.Concat(executedResults(results), provider)
+			executed := slices.Concat(executedResults(results), provider)
+			step.ToolResults = successful(executed)
+			step.Content = stepContent(step.Content, calls, results, providerResults)
 			approvalRequests, err := r.approvalRequests(ctx, approvalCalls)
 			if err != nil {
 				return r.result(nil, nil), err
@@ -879,15 +1173,15 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 			step.Response.Messages = added
 			r.messages = append(r.messages, added...)
 			r.steps = append(r.steps, step)
-			r.endStep(ctx, step)
+			r.endStep(ctx, step, !r.streaming)
 			// Like the Workflow SDK, a paused turn ends before it writes its
 			// results and approval requests.
-			result := r.result(step.ToolCalls, step.ToolResults)
+			result := r.result(step.ToolCalls, executed)
 			r.end(ctx, result)
 			r.ended = true
 			if r.options.Writer != nil {
-				if len(step.ToolResults) > 0 {
-					if _, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults}); err != nil {
+				if len(executed) > 0 {
+					if _, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: executed}); err != nil {
 						return r.result(nil, nil), err
 					}
 				}
@@ -906,14 +1200,16 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 					}
 				}
 			}
-			return r.result(step.ToolCalls, step.ToolResults), nil
+			return result, nil
 		}
 
 		step.Content = slices.Concat(step.Content, automaticRequests, automaticResponses)
 		// The results keep the order of the calls, and provider results for
 		// calls of earlier steps come last.
 		provider := r.providerResults(calls, providerResults, nil)
-		step.ToolResults = orderedResults(calls, executedResults(results), provider)
+		executed := orderedResults(calls, executedResults(results), provider)
+		step.ToolResults = successful(executed)
+		step.Content = stepContent(step.Content, calls, results, providerResults)
 		if resolved := inCallOrder(calls, slices.Concat(results, denied)); len(resolved) > 0 {
 			added = append(added, toolMessage(resolved))
 		}
@@ -926,21 +1222,21 @@ func (r *run) loop(ctx context.Context) (Result, error) {
 					return r.result(nil, nil), err
 				}
 			}
-			_, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: step.ToolResults, WriteStepBoundary: true})
+			_, err := workflow.Step(ctx, writeToolResults, writeToolResultsInput{Writer: *r.options.Writer, Results: executed, WriteStepBoundary: true})
 			if err != nil {
 				return r.result(nil, nil), err
 			}
 		}
-		r.endStep(ctx, step)
+		r.endStep(ctx, step, true)
 		// The loop continues after local calls, or to wait for deferred
 		// provider results, and stop conditions are only checked when it
 		// could continue.
 		if !toolExecutionAllowed || (!hasLocalCalls && len(r.pendingResults) == 0) {
-			return r.result(step.ToolCalls, step.ToolResults), nil
+			return r.result(step.ToolCalls, executed), nil
 		}
 		if slices.ContainsFunc(r.stopWhen, func(stop StopCondition) bool { return stop(r.steps) }) {
 			r.defaultLimitStopped = r.defaultLimit
-			return r.result(step.ToolCalls, step.ToolResults), nil
+			return r.result(step.ToolCalls, executed), nil
 		}
 	}
 }
@@ -1029,10 +1325,17 @@ func (r *run) toolCallOptions(call ToolCall, messages []ModelMessage) ToolCallOp
 // in recorded order, so replay starts them the same way.
 func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall, messages []ModelMessage, checks map[string]ai.CollectedToolApproval) ([]toolResult, error) {
 	results := make([]toolResult, len(calls))
+	startedAt := map[string]time.Time{}
 	var running []int
 	var pending []*workflow.Result[any]
 	for next := 0; next < len(calls) || len(running) > 0; {
-		for next < len(calls) && (r.concurrency == 0 || len(running) < r.concurrency) {
+		// Like the Workflow SDK, no queued call starts once the call is
+		// aborted, and the abort fails it when the running calls settle.
+		aborted := r.abortCause(ctx)
+		if aborted != nil && len(running) == 0 {
+			return nil, aborted
+		}
+		for aborted == nil && next < len(calls) && (r.concurrency == 0 || len(running) < r.concurrency) {
 			i, call := next, calls[next]
 			next++
 			tool, known := r.tools[call.ToolName]
@@ -1044,9 +1347,15 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 				results[i] = errorResult(call, fmt.Sprintf("tool %q not found", call.ToolName))
 				results[i].invalid = true
 			default:
+				if schema := tool.ContextSchema; schema != nil {
+					if err := validateContext(schema, r.toolsContext[call.ToolName]); err != nil {
+						return nil, fmt.Errorf("workflowai: context of tool %q: %w", call.ToolName, err)
+					}
+				}
 				start := func() *workflow.Result[any] {
-					r.callbacks.OnToolExecutionStart(ctx, ToolExecutionStartEvent{StepNumber: stepNumber, ToolCall: call})
-					r.record(ctx, telemetryEvent{Type: eventToolStart, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input})
+					startedAt[call.ToolCallID] = workflow.Now(ctx)
+					r.callbacks.OnToolExecutionStart(ctx, ToolExecutionStartEvent{StepNumber: stepNumber, ToolCall: call, Messages: messages, ToolContext: r.toolsContext[call.ToolName]})
+					r.record(ctx, telemetryEvent{Type: eventToolStart, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input, ToolContext: r.includedToolContext(call.ToolName)})
 					return tool.Execute.Execute(ctx, call.Input, r.toolCallOptions(call, messages))
 				}
 				var result *workflow.Result[any]
@@ -1076,7 +1385,7 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 			results[running[j]] = errorResult(calls[running[j]], rejection.reason)
 			results[running[j]].rejected = true
 		} else {
-			results[running[j]] = r.finishTool(ctx, stepNumber, calls[running[j]], output, err)
+			results[running[j]] = r.finishTool(ctx, stepNumber, calls[running[j]], messages, startedAt[calls[running[j]].ToolCallID], output, err)
 		}
 		running = slices.Delete(running, j, j+1)
 		pending = slices.Delete(pending, j, j+1)
@@ -1085,9 +1394,18 @@ func (r *run) executeTools(ctx context.Context, stepNumber int, calls []ToolCall
 }
 
 // finishTool reports the end of a call's execution and returns its result.
-func (r *run) finishTool(ctx context.Context, stepNumber int, call ToolCall, output any, err error) toolResult {
-	r.callbacks.OnToolExecutionEnd(ctx, ToolExecutionEndEvent{StepNumber: stepNumber, ToolCall: call, Output: output, Error: err})
-	toolEnd := telemetryEvent{Type: eventToolEnd, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input, Output: marshalRaw(output)}
+func (r *run) finishTool(ctx context.Context, stepNumber int, call ToolCall, messages []ModelMessage, startedAt time.Time, output any, err error) toolResult {
+	r.callbacks.OnToolExecutionEnd(ctx, ToolExecutionEndEvent{
+		StepNumber:  stepNumber,
+		ToolCall:    call,
+		Output:      output,
+		Error:       err,
+		Success:     err == nil,
+		DurationMs:  workflow.Now(ctx).Sub(startedAt).Milliseconds(),
+		Messages:    messages,
+		ToolContext: r.toolsContext[call.ToolName],
+	})
+	toolEnd := telemetryEvent{Type: eventToolEnd, StepNumber: stepNumber, ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input, Output: marshalRaw(output), ToolContext: r.includedToolContext(call.ToolName)}
 	if err != nil {
 		toolEnd.Error = err.Error()
 	}
@@ -1097,7 +1415,15 @@ func (r *run) finishTool(ctx context.Context, stepNumber int, call ToolCall, out
 		// failing the run.
 		return errorResult(call, err.Error())
 	}
-	return toolResult{call: call, output: jsonOutput(output), raw: marshalRaw(output)}
+	result := toolResult{call: call, output: jsonOutput(output), raw: marshalRaw(output)}
+	if toModelOutput := r.tools[call.ToolName].ToModelOutput; toModelOutput != nil {
+		converted, err := toModelOutput(ctx, ToolModelOutputOptions{ToolCallID: call.ToolCallID, Input: call.Input, Output: output})
+		if err != nil {
+			return errorResult(call, err.Error())
+		}
+		result.output = &converted
+	}
+	return result
 }
 
 // approvalRequests returns the approval requests of calls. With a
@@ -1135,11 +1461,28 @@ func (r *run) approvalRequests(ctx context.Context, calls []ToolCall) ([]Content
 // of the approval responses in the last message, then removes the approval
 // parts from the conversation.
 func (r *run) resumeApprovals(ctx context.Context) error {
+	// Like the Workflow SDK, only the first response to an approval counts.
+	r.messages = firstApprovalResponses(r.messages)
 	collected, err := ai.CollectToolApprovals(toProviderMessages(r.messages))
 	if err != nil {
 		return err
 	}
 	approved, denied := collected.ApprovedToolApprovals, collected.DeniedToolApprovals
+	// Approved calls run in the order the model made them, as in the
+	// Workflow SDK, whatever the order of their responses.
+	order := map[string]int{}
+	for _, message := range r.messages {
+		for _, part := range message.Content {
+			if part.Type == PartToolCall {
+				if _, seen := order[part.ToolCallID]; !seen {
+					order[part.ToolCallID] = len(order)
+				}
+			}
+		}
+	}
+	slices.SortStableFunc(approved, func(a, b ai.CollectedToolApproval) int {
+		return cmp.Compare(order[a.ToolCall.ID], order[b.ToolCall.ID])
+	})
 	if len(approved) == 0 && len(denied) == 0 {
 		return nil
 	}
@@ -1149,6 +1492,7 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 	// and a call that fails its check gets an error result the model sees and
 	// the stream does not.
 	var executable []ToolCall
+	var missing []string
 	checks := map[string]ai.CollectedToolApproval{}
 	for _, approval := range approved {
 		call := approvedCall(approval)
@@ -1156,10 +1500,16 @@ func (r *run) resumeApprovals(ctx context.Context) error {
 			continue
 		}
 		if tool, known := r.tools[call.ToolName]; !known || tool.Execute == nil {
+			missing = append(missing, call.ToolCallID)
 			continue
 		}
 		executable = append(executable, call)
 		checks[call.ToolCallID] = approval
+	}
+	if len(missing) > 0 {
+		// The call gets no result, so the conversation cannot continue, as
+		// the Workflow SDK reports when it converts it for the model.
+		return missingToolResults(missing)
 	}
 	results, err := r.executeTools(ctx, 0, executable, r.messages, checks)
 	if err != nil {
@@ -1388,7 +1738,7 @@ func providerToolResults(content []ContentPart) map[string]providerResult {
 		if part.Type != PartToolResult || !part.ProviderExecuted {
 			continue
 		}
-		result := ToolResult{ToolCallID: part.ToolCallID, ToolName: part.ToolName, Output: json.RawMessage("null")}
+		result := ToolResult{ToolCallID: part.ToolCallID, ToolName: part.ToolName, Output: json.RawMessage("null"), ProviderExecuted: true, ProviderMetadata: part.ProviderOptions}
 		if part.Output != nil {
 			result.Output = rawOrNull(part.Output.Value)
 			result.IsError = strings.HasPrefix(part.Output.Type, "error")
@@ -1424,6 +1774,156 @@ func orderedResults(calls []ToolCall, local, provider []ToolResult) []ToolResult
 // callIndex returns the index of the call with id toolCallID in calls.
 func callIndex(calls []ToolCall, toolCallID string) int {
 	return slices.IndexFunc(calls, func(call ToolCall) bool { return call.ToolCallID == toolCallID })
+}
+
+// assistantContent returns the content a step's assistant message carries,
+// as the Workflow SDK builds it: without the sources and empty text parts of
+// the step's content, and with each part's provider metadata as the
+// provider options the next model call sends back.
+func assistantContent(content []ContentPart) []ContentPart {
+	out := make([]ContentPart, 0, len(content))
+	for _, part := range content {
+		if part.Type == PartSource || part.Type == PartText && part.Text == "" {
+			continue
+		}
+		if metadata := decodeMetadata(part.ProviderMetadata); metadata != nil && part.ProviderOptions == nil && part.Type != PartToolResult {
+			part.ProviderOptions = metadata
+			part.ProviderMetadata = nil
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+// rootCause returns the innermost error of err's chain.
+func rootCause(err error) error {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return err
+		}
+		err = next
+	}
+}
+
+// providerModelOutputs converts the outputs of the provider's results in
+// content with their tools' ToModelOutput, in place.
+func (r *run) providerModelOutputs(ctx context.Context, content []ContentPart, calls []ToolCall) error {
+	for i, part := range content {
+		toModelOutput := r.tools[part.ToolName].ToModelOutput
+		if part.Type != PartToolResult || !part.ProviderExecuted || toModelOutput == nil || part.Output == nil {
+			continue
+		}
+		var output any
+		_ = json.Unmarshal(part.Output.Value, &output)
+		var input json.RawMessage
+		if index := slices.IndexFunc(calls, func(call ToolCall) bool { return call.ToolCallID == part.ToolCallID }); index >= 0 {
+			input = calls[index].Input
+		}
+		converted, err := toModelOutput(ctx, ToolModelOutputOptions{ToolCallID: part.ToolCallID, Input: input, Output: output})
+		if err != nil {
+			return err
+		}
+		content[i].Output = &converted
+	}
+	return nil
+}
+
+// validateContext validates a tool's context against its JSON schema.
+func validateContext(contextSchema map[string]any, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var decoded any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	return schema.NewJSONSchema(contextSchema).Validate(decoded)
+}
+
+// firstApprovalResponses returns messages without the approval responses
+// that repeat an earlier response to the same approval.
+func firstApprovalResponses(messages []ModelMessage) []ModelMessage {
+	seen := map[string]bool{}
+	out := make([]ModelMessage, 0, len(messages))
+	for _, message := range messages {
+		content := slices.DeleteFunc(slices.Clone(message.Content), func(part ContentPart) bool {
+			if part.Type != PartToolApprovalResponse {
+				return false
+			}
+			repeated := seen[part.ApprovalID]
+			seen[part.ApprovalID] = true
+			return repeated
+		})
+		message.Content = content
+		out = append(out, message)
+	}
+	return out
+}
+
+// missingToolResults returns the AI SDK's error for tool calls without a
+// result.
+func missingToolResults(ids []string) error {
+	if len(ids) == 1 {
+		return fmt.Errorf("Tool result is missing for tool call %s.", ids[0]) //nolint:staticcheck // the AI SDK's error text
+	}
+	return fmt.Errorf("Tool results are missing for tool calls %s.", strings.Join(ids, ", ")) //nolint:staticcheck // the AI SDK's error text
+}
+
+// fileParts returns the file parts of content.
+func fileParts(content []ContentPart) []ContentPart {
+	var files []ContentPart
+	for _, part := range content {
+		if part.Type == PartFile {
+			files = append(files, part)
+		}
+	}
+	return files
+}
+
+// successful returns the results of the calls that did not fail.
+func successful(results []ToolResult) []ToolResult {
+	return slices.DeleteFunc(slices.Clone(results), func(result ToolResult) bool { return result.IsError })
+}
+
+// stepContent returns a step's content with the results of its tool calls,
+// as the Workflow SDK reports them: a tool-result part with its input for
+// each executed call, a tool-error part for each invalid or failed call, and
+// the provider's results with their calls' input, failed ones as tool-error
+// parts.
+func stepContent(content []ContentPart, calls []ToolCall, results []toolResult, provider map[string]providerResult) []ContentPart {
+	inputs := map[string]json.RawMessage{}
+	for _, call := range calls {
+		inputs[call.ToolCallID] = call.Input
+	}
+	out := make([]ContentPart, 0, len(content)+len(results))
+	for _, part := range content {
+		if part.Type == PartToolResult && part.ProviderExecuted {
+			part.Input = inputs[part.ToolCallID]
+			if result, ok := provider[part.ToolCallID]; ok && result.IsError {
+				part = ContentPart{Type: PartToolError, ToolCallID: part.ToolCallID, ToolName: part.ToolName, Input: part.Input, Error: errorText(result.Output), ProviderExecuted: true, ProviderOptions: part.ProviderOptions}
+			}
+		}
+		out = append(out, part)
+	}
+	for _, result := range results {
+		if result.isError {
+			out = append(out, ContentPart{Type: PartToolError, ToolCallID: result.call.ToolCallID, ToolName: result.call.ToolName, Input: result.call.Input, Error: errorText(result.raw)})
+			continue
+		}
+		out = append(out, ContentPart{Type: PartToolResult, ToolCallID: result.call.ToolCallID, ToolName: result.call.ToolName, Input: result.call.Input, Output: result.output})
+	}
+	return out
+}
+
+// errorText returns the message of a failed result's JSON output.
+func errorText(output json.RawMessage) string {
+	var message string
+	if json.Unmarshal(output, &message) != nil {
+		return string(output)
+	}
+	return message
 }
 
 // inCallOrder returns results in the order of their calls.
@@ -1476,11 +1976,32 @@ func mergeSettings(base, override GenerationSettings) GenerationSettings {
 	base.FrequencyPenalty = cmp.Or(override.FrequencyPenalty, base.FrequencyPenalty)
 	base.StopSequences = orNil(override.StopSequences, base.StopSequences)
 	base.Seed = cmp.Or(override.Seed, base.Seed)
+	// Like the Workflow SDK, headers and each provider's options merge into
+	// the ones they override.
 	if override.Headers != nil {
-		base.Headers = override.Headers
+		base.Headers = maps.Clone(base.Headers)
+		if base.Headers == nil {
+			base.Headers = map[string]string{}
+		}
+		maps.Copy(base.Headers, override.Headers)
 	}
 	if override.ProviderOptions != nil {
-		base.ProviderOptions = override.ProviderOptions
+		merged := maps.Clone(base.ProviderOptions)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		for name, options := range override.ProviderOptions {
+			current, isMap := merged[name].(map[string]any)
+			next, nextIsMap := options.(map[string]any)
+			if isMap && nextIsMap {
+				combined := maps.Clone(current)
+				maps.Copy(combined, next)
+				merged[name] = combined
+				continue
+			}
+			merged[name] = options
+		}
+		base.ProviderOptions = merged
 	}
 	base.MaxRetries = cmp.Or(override.MaxRetries, base.MaxRetries)
 	base.Reasoning = cmp.Or(override.Reasoning, base.Reasoning)
@@ -1502,11 +2023,29 @@ func addUsage(a, b types.Usage) types.Usage {
 		}
 		return &sum
 	}
-	return types.Usage{
+	usage := types.Usage{
 		InputTokens:  add(a.InputTokens, b.InputTokens),
 		OutputTokens: add(a.OutputTokens, b.OutputTokens),
 		TotalTokens:  add(a.TotalTokens, b.TotalTokens),
 	}
+	// Like the Workflow SDK, token details are kept, and a count no step
+	// reported stays unset.
+	if a.InputDetails != nil || b.InputDetails != nil {
+		x, y := cmp.Or(a.InputDetails, &types.InputTokenDetails{}), cmp.Or(b.InputDetails, &types.InputTokenDetails{})
+		usage.InputDetails = &types.InputTokenDetails{
+			NoCacheTokens:    add(x.NoCacheTokens, y.NoCacheTokens),
+			CacheReadTokens:  add(x.CacheReadTokens, y.CacheReadTokens),
+			CacheWriteTokens: add(x.CacheWriteTokens, y.CacheWriteTokens),
+		}
+	}
+	if a.OutputDetails != nil || b.OutputDetails != nil {
+		x, y := cmp.Or(a.OutputDetails, &types.OutputTokenDetails{}), cmp.Or(b.OutputDetails, &types.OutputTokenDetails{})
+		usage.OutputDetails = &types.OutputTokenDetails{
+			TextTokens:      add(x.TextTokens, y.TextTokens),
+			ReasoningTokens: add(x.ReasoningTokens, y.ReasoningTokens),
+		}
+	}
+	return usage
 }
 
 // approvalRejection is why an approved call from client-supplied messages

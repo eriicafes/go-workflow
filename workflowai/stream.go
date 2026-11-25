@@ -51,6 +51,14 @@ type ModelCallStreamPart struct {
 	FinishReason string       `json:"finishReason,omitempty"`
 	Usage        *types.Usage `json:"usage,omitempty"`
 
+	// Warnings, ModelID, Timestamp and Performance describe a model call in
+	// its model-call-start, model-call-response-metadata and model-call-end
+	// parts.
+	Warnings    []types.Warning  `json:"warnings,omitempty"`
+	ModelID     string           `json:"modelId,omitempty"`
+	Timestamp   string           `json:"timestamp,omitempty"`
+	Performance *StepPerformance `json:"performance,omitempty"`
+
 	ProviderMetadata json.RawMessage `json:"providerMetadata,omitempty"`
 
 	// RawValue holds an unprocessed provider chunk of a raw part, written
@@ -157,6 +165,12 @@ func ToUIMessageChunk(part ModelCallStreamPart) (ai.UIMessageChunk, bool) {
 // number of UI chunks the client already received as uiStartIndex.
 func UIMessageChunks(ctx context.Context, reader workflow.StreamReader, uiStartIndex int) <-chan ai.UIMessageChunk {
 	chunks := make(chan ai.UIMessageChunk)
+	if uiStartIndex < 0 {
+		// Like the Workflow SDK, an invalid start index is rejected: the
+		// channel closes without chunks.
+		close(chunks)
+		return chunks
+	}
 	go func() {
 		defer close(chunks)
 		index := 0

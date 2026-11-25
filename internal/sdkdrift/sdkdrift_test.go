@@ -42,40 +42,44 @@ func TestCheckReportsWhatIsNotAccountedFor(t *testing.T) {
 	}
 }
 
-// TestSDKTestsAreAccountedFor checks the tests of the vercel/workflow
-// checkout at SDK_DIR against this repository's ported tests and the skips
-// in skips*.txt.
-// Without SDK_DIR it is skipped.
+// TestSDKTestsAreAccountedFor checks the tests of each source's checkout,
+// at the path its environment variable holds, against this repository's
+// ported tests and the source's skips. A source without a checkout is
+// skipped.
 func TestSDKTestsAreAccountedFor(t *testing.T) {
-	sdk := os.Getenv("SDK_DIR")
-	if sdk == "" {
-		t.Skip("set SDK_DIR to a checkout of github.com/vercel/workflow to check the ported tests")
-	}
-	upstream, err := UpstreamTests(sdk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(upstream) == 0 {
-		t.Fatalf("no tests found in %s", sdk)
-	}
-	ported, err := PortedTests(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Each area keeps its skips in a file of its own, skips*.txt.
-	files, err := filepath.Glob("skips*.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var skips []Skip
-	for _, file := range files {
-		read, err := ReadSkips(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		skips = append(skips, read...)
-	}
-	if report := Check(upstream, ported, skips); !report.Empty() {
-		t.Fatalf("%d upstream tests checked:\n%s", len(upstream), report)
+	for _, source := range Sources {
+		t.Run(source.Comment, func(t *testing.T) {
+			checkout := os.Getenv(source.Env)
+			if checkout == "" {
+				t.Skipf("set %s to a checkout of %s to check the ported tests", source.Env, source.Repository)
+			}
+			upstream, err := source.UpstreamTests(checkout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(upstream) == 0 {
+				t.Fatalf("no tests found in %s", checkout)
+			}
+			ported, err := source.PortedTests(filepath.Join("..", ".."))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Each area keeps its skips in a file of its own.
+			files, err := filepath.Glob(source.Skips)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var skips []Skip
+			for _, file := range files {
+				read, err := ReadSkips(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				skips = append(skips, read...)
+			}
+			if report := Check(upstream, ported, skips); !report.Empty() {
+				t.Fatalf("%d upstream tests checked:\n%s", len(upstream), report)
+			}
+		})
 	}
 }

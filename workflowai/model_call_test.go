@@ -202,7 +202,7 @@ func TestStreamUnrepairedToolCall(t *testing.T) {
 		repair    ai.ToolCallRepairFunction
 		wantError string
 	}{
-		{"no repair", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) { return nil, nil }, "invalid input for tool getWeather"},
+		{"no repair", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) { return nil, nil }, "Invalid input for tool getWeather"},
 		{"repair error", func(context.Context, ai.ToolCallRepairOptions) (*types.ToolCall, error) {
 			return nil, errors.New("no luck")
 		}, "repairing tool call: no luck"},
@@ -323,7 +323,9 @@ func TestStreamDeferredProviderToolResult(t *testing.T) {
 		if tools := testModel.calls[0].Tools; !slices.ContainsFunc(tools, func(tool types.Tool) bool { return tool.Name == "web_search" && tool.ProviderExecuted }) {
 			t.Fatalf("tools = %+v", tools)
 		}
-		if slices.ContainsFunc(result.Steps[0].Content, func(part workflowai.ContentPart) bool { return part.Type == workflowai.PartToolResult }) {
+		if slices.ContainsFunc(result.Steps[0].Content, func(part workflowai.ContentPart) bool {
+			return part.Type == workflowai.PartToolResult && part.ToolCallID == "p1"
+		}) {
 			t.Fatalf("first step content = %+v", result.Steps[0].Content)
 		}
 		last := result.Steps[1].Content

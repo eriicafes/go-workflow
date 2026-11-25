@@ -17,10 +17,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Without NewTelemetrySpanProcessor, like the Workflow SDK without its
-// durable telemetry bridge, each model call draws go-ai's spans of the call
-// alone as it happens, under the step's span, and the call reports nothing.
-func TestStreamTelemetryWithoutReporting(t *testing.T) {
+// Without NewTelemetrySpanProcessor, the call still reports one span tree
+// when it ends: the root span, a span for each step, and the tool and model
+// call spans under them. Only their times and the root span's ID are left to
+// the processor and the ID generator.
+func TestStreamTelemetryWithoutProcessor(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		exporter := tracetest.NewInMemoryExporter()
 		provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
@@ -38,21 +39,16 @@ func TestStreamTelemetryWithoutReporting(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if slices.Contains(steps, "reportWorkflowAgentTelemetry") {
+		if steps[0] != "prepareWorkflowAgentTelemetry" || steps[len(steps)-1] != "reportWorkflowAgentTelemetry" {
 			t.Fatalf("steps = %v", steps)
 		}
 		tree := newSpanTree(t, exporter.GetSpans())
-		// Replays do not repeat spans: one step span per model call and tool
-		// call, and go-ai's operation, step, and chat spans under each model
-		// call.
-		if len(tree.byName["ai.workflowAgent.stream fake-model"]) != 0 || len(tree.byName["step doStreamStep"]) != 2 || len(tree.byName["step getWeather"]) != 1 ||
-			len(tree.byName["invoke_agent fake-model"]) != 2 || len(tree.byName["chat fake-model"]) != 2 {
-			t.Fatalf("spans = %v", slices.Sorted(maps.Keys(tree.byName)))
+		root, step1, step2, tool := tree.one(t, "invoke_agent fake-model"), tree.one(t, "step 1"), tree.one(t, "step 2"), tree.one(t, "execute_tool getWeather")
+		if tree.parent(step1) != root.Name || tree.parent(step2) != root.Name || tree.parent(tool) != "step 1" {
+			t.Fatalf("step 1 parent %q, step 2 parent %q, tool parent %q", tree.parent(step1), tree.parent(step2), tree.parent(tool))
 		}
-		for _, span := range tree.byName["invoke_agent fake-model"] {
-			if tree.parent(span) != "step doStreamStep" {
-				t.Fatalf("invoke_agent has parent %q", tree.parent(span))
-			}
+		if chats := tree.byName["chat fake-model"]; len(chats) != 2 || tree.parent(chats[0]) != "step 1" || tree.parent(chats[1]) != "step 2" {
+			t.Fatalf("chat spans = %v", chats)
 		}
 	})
 }
@@ -150,7 +146,7 @@ func TestStreamReportedTelemetry(t *testing.T) {
 		}
 
 		tree := newSpanTree(t, exporter.GetSpans())
-		root, step1, step2, tool := tree.one(t, "ai.workflowAgent.stream fake-model"), tree.one(t, "step 1"), tree.one(t, "step 2"), tree.one(t, "execute_tool wait")
+		root, step1, step2, tool := tree.one(t, "invoke_agent fake-model"), tree.one(t, "step 1"), tree.one(t, "step 2"), tree.one(t, "execute_tool wait")
 		for _, span := range exporter.GetSpans() {
 			if span.SpanContext.TraceID() != root.SpanContext.TraceID() {
 				t.Fatalf("span %q is in another trace", span.Name)
@@ -195,8 +191,8 @@ func TestStreamReportedLegacyTelemetry(t *testing.T) {
 			t.Fatal(err)
 		}
 		tree := newSpanTree(t, exporter.GetSpans())
-		root, tool := tree.one(t, "ai.workflowAgent.stream"), tree.one(t, "ai.toolCall")
-		if steps := tree.byName["ai.generateText.doGenerate"]; len(steps) != 2 || tree.parent(steps[0]) != root.Name || tree.parent(tool) != "ai.generateText.doGenerate" {
+		root, tool := tree.one(t, "ai.streamText"), tree.one(t, "ai.toolCall")
+		if steps := tree.byName["ai.streamText.doStream"]; len(steps) != 2 || tree.parent(steps[0]) != root.Name || tree.parent(tool) != "ai.streamText.doStream" {
 			t.Fatalf("spans = %v", slices.Sorted(maps.Keys(tree.byName)))
 		}
 		if d := tool.EndTime.Sub(tool.StartTime); d != 5*time.Second || root.EndTime.Sub(root.StartTime) < 5*time.Second {
@@ -219,7 +215,7 @@ func TestStreamReportedTelemetryResumedApproval(t *testing.T) {
 			t.Fatal(err)
 		}
 		tree := newSpanTree(t, exporter.GetSpans())
-		root, tool := tree.one(t, "ai.workflowAgent.stream fake-model"), tree.one(t, "execute_tool bookFlight")
+		root, tool := tree.one(t, "invoke_agent fake-model"), tree.one(t, "execute_tool bookFlight")
 		if tool.Parent.SpanID() != root.SpanContext.SpanID() {
 			t.Fatalf("execute_tool bookFlight has parent %q", tree.parent(tool))
 		}
@@ -240,9 +236,8 @@ func (i *recordingIntegration) OnStart(ctx context.Context, e telemetry.Telemetr
 	return ctx
 }
 
-// Globally registered integrations, which go-ai does not list, get the spans
-// of each model call as it happens and the reported call, without the
-// stand-ins of OpenTelemetry integrations.
+// Globally registered integrations get the call reported once, as the
+// Workflow SDK reports to its global integrations, even without Telemetry.
 func TestStreamReportedTelemetryGlobalIntegrations(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		reportedProvider(t)
@@ -250,11 +245,10 @@ func TestStreamReportedTelemetryGlobalIntegrations(t *testing.T) {
 		telemetry.RegisterTelemetryIntegration(recording)
 		defer telemetry.ClearTelemetryIntegrations()
 		setup(toolCalls(call("c1", "getWeather", `{"city":"Lagos"}`)), text("It is 21 degrees."))
-		testOptions.Telemetry = &telemetry.Options{}
 		if _, _, err := chat(t, []workflowai.ModelMessage{user("weather in Lagos?")}); err != nil {
 			t.Fatal(err)
 		}
-		if want := []string{"ai.streamText", "ai.streamText", "ai.workflowAgent.stream"}; !slices.Equal(recording.operations, want) {
+		if want := []string{"ai.streamText"}; !slices.Equal(recording.operations, want) {
 			t.Fatalf("operations = %v, want %v", recording.operations, want)
 		}
 	})

@@ -26,7 +26,7 @@ func TestStreamOutput(t *testing.T) {
 		testOptions.Output = itineraryOutput()
 		var mu sync.Mutex
 		var output any
-		testOptions.OnEnd = func(_ context.Context, result workflowai.Result) {
+		testOptions.OnEnd = func(_ context.Context, result workflowai.EndEvent) {
 			mu.Lock()
 			defer mu.Unlock()
 			output = result.Output

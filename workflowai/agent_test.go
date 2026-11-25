@@ -561,7 +561,7 @@ func TestStreamTimeoutAbortsModelCall(t *testing.T) {
 			defer mu.Unlock()
 			abortedSteps = len(event.Steps)
 		}
-		testOptions.OnEnd = func(context.Context, workflowai.Result) {
+		testOptions.OnEnd = func(context.Context, workflowai.EndEvent) {
 			mu.Lock()
 			defer mu.Unlock()
 			ends++
@@ -572,9 +572,11 @@ func TestStreamTimeoutAbortsModelCall(t *testing.T) {
 			errs++
 		}
 		start := time.Now()
-		_, chunks, err := chat(t, []workflowai.ModelMessage{user("weather in Lagos?")})
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("err = %v", err)
+		// Like the Workflow SDK's stream, the aborted Stream resolves with
+		// the steps that finished.
+		result, chunks, err := chat(t, []workflowai.ModelMessage{user("weather in Lagos?")})
+		if err != nil || len(result.Steps) != 1 {
+			t.Fatalf("err = %v, %d steps", err, len(result.Steps))
 		}
 		if elapsed := time.Since(start); elapsed != 30*time.Second {
 			t.Fatalf("aborted after %v", elapsed)
@@ -811,7 +813,8 @@ func TestStreamStepOrder(t *testing.T) {
 				delete(testOptions.Tools, "bookFlight")
 				return respond(t, "", true, `{"flightId":"LH123"}`)
 			},
-			want: []string{"doStreamStep", "writeDeferredToolCalls", "closeStream"},
+			// The call has no result, so the call fails, as in the AI SDK.
+			want: []string{"closeStream"},
 		},
 		{
 			name: "provider tool",

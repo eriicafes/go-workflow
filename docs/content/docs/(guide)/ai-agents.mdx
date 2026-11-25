@@ -199,7 +199,11 @@ to the model as the tool's result, so the model can recover. Calls to unknown
 tools or with input that does not match the schema are reported to the model
 as invalid and not executed.
 
-`Tool.InputSchema` sets a JSON schema explicitly.
+`Tool.InputSchema` sets a JSON schema explicitly. `Tool.ToModelOutput`
+converts a call's output to what the model sees of it, such as a summary of a
+large result, while the step's results and the stream keep the raw output.
+`Tool.ContextSchema` is the JSON schema of the tool's entry in `ToolsContext`:
+a call whose entry does not match it fails before the first model call.
 
 Choose an executor by where the work should run:
 
@@ -496,9 +500,17 @@ invalid options, returns its error without writing to the stream.
 `Timeout` in `WorkflowAgentOptions` or `CallOptions` limits how long a call's
 model calls run. It is a durable timeout, counted from the start of the call
 across replays and restarts. When it passes, the running model call is
-cancelled, `OnAbort` is called with the steps that finished, and `Stream`
-returns the cancellation error after closing the stream. A cancelled context
-passed to `Stream` aborts the call the same way.
+cancelled and its stream is no longer read, even when the provider ignores the
+cancellation. A model call step that starts after it passed, such as after a
+tool waited on a hook, runs and ends without calling the model. A cancelled
+context passed to the call aborts it the same way, and no queued tool call
+starts after it.
+
+An aborted call calls `OnAbort` with the steps that finished. Like
+`@ai-sdk/workflow`, `Stream` closes the stream and returns the result of those
+steps without an error, while `Generate` returns the cancellation error, such
+as `context.DeadlineExceeded`. An error returned from a callback, such as
+`PrepareStep` returning `context.Canceled`, fails the call instead.
 
 ## Telemetry
 
@@ -519,9 +531,11 @@ code and reports them when the call ends. The `prepareWorkflowAgentTelemetry`
 inline step reserves the IDs of the call's root span and step spans when the
 call starts, and the `reportWorkflowAgentTelemetry` step sends the recorded
 events to go-ai's integrations, which draw the root span, a span for each
-agent step, and the tool execution spans. The `chat` span of each model call
-is drawn as it happens, as a child of its agent step's span, and each step's
-[span](/docs/steps#tracing) nests under the root.
+agent step, and the `chat` and tool execution spans under their step's span.
+Each go-workflow step's [span](/docs/steps#tracing) nests under the root.
+Each integration in `Integrations` is reported to on its own, so one that
+panics does not stop the others. Without `Telemetry`, the call reports to
+go-ai's globally registered integrations.
 
 OpenTelemetry cannot be told the IDs and times of the spans go-ai draws, so
 the tracer provider needs workflowai's ID generator and span processor. The
@@ -536,13 +550,15 @@ otel.SetTracerProvider(provider)
 ```
 
 Create the processor in every process that runs agents, before they run.
-Without it, as in `@ai-sdk/workflow` without its durable telemetry bridge,
-the call reports nothing, and each model call draws go-ai's operation, step,
-and `chat` spans as it happens, under its step's span. Integrations other than
-`OpenTelemetry` and `LegacyOpenTelemetry` listed in `Integrations`, and
-integrations registered globally, which go-ai does not list, always get the
-spans of each model call as it happens, and the reported events when the call
-ends.
+Without it, the call still reports the same span tree when it ends, but the
+spans carry the times of the report and the root span gets a new ID.
+
+Because the events are reported when the call ends, integrations get them
+after the agent's own callbacks have run. go-ai's model call start event has
+no runtime context, so `EnrichSpan` sees `IncludeRuntimeContext` keys on the
+root and step spans but not on `chat` spans. go-ai does not list its global
+integrations, so they are reported to as one group, and one that panics stops
+the rest.
 
 ## Instructions and settings
 
@@ -554,11 +570,20 @@ conversation it sends.
 
 `WorkflowAgentOptions` also holds the model call settings: `Temperature`,
 `MaxOutputTokens`, `Reasoning`, `SendReasoning`, `ProviderOptions`, and the
-rest of `GenerationSettings`.
+rest of `GenerationSettings`. `CallOptions`, `PrepareCall`'s result and
+`PrepareStep`'s result embed `GenerationSettings` too, and override the
+agent's settings field by field; `ProviderOptions` and `Headers` are merged
+key by key.
 
-Every model call normalizes its prompt like go-ai does. With a `Download`
-function, it also fetches the file URLs in messages that the model does not
-support, inside the model call's step. Without one, URLs are sent as they are.
+Every model call normalizes its prompt like go-ai does. It also fetches the
+file URLs in messages that the model does not support, inside the model
+call's step, with the `Download` function or, without one, go-ai's
+`DefaultDownload`. A `Download` function can leave a URL as it is by
+returning a nil result for it.
+
+A tool choice the model does not follow, such as a tool call with
+`ToolChoice` set to `none`, is not executed: the step's tool parts are
+withheld and the step reports go-ai's `ToolChoiceViolationError`.
 
 `CallOptions` has a few more controls for one call:
 
@@ -581,13 +606,20 @@ support, inside the model call's step. Without one, URLs are sent as they are.
   generation settings. Tools cannot change, and a `ToolCallConcurrency` set
   in `CallOptions` takes precedence over the one it returns.
 - `PrepareStep` runs before each model call and can change the model,
-  instructions, messages, tool choice, and active tools for that call.
+  instructions, instruction messages, messages, tool choice, active tools,
+  runtime context, and generation settings for that call. It gets the
+  current and initial instructions and messages, and the steps so far.
 - `OnStart`, `OnStepStart`, `OnToolExecutionStart`, `OnToolExecutionEnd`,
   `OnStepEnd`, `OnEnd`, `OnError`, and `OnAbort` are called as the agent
   runs. Set them on `WorkflowAgentOptions` or `CallOptions`; both are called,
   the agent's first. `OnStart` is called after the call resumes the approvals
   in its messages, and a turn that ends to wait for the user calls `OnEnd`
-  before it writes its tool results and approval requests.
+  before it writes its tool results and approval requests. `OnEnd` gets an
+  `EndEvent` with the call's `Result` and its runtime and tools contexts.
+
+Each `StepResult` holds the step's model, content, files, sources, warnings,
+provider metadata, usage, `Performance` timings, and the contexts it ran
+with.
 
 <Callout type="warn" title="Callbacks replay">
 `PrepareCall`, `PrepareStep`, `NeedsApproval`, `ToolApproval`, `Execute`, and

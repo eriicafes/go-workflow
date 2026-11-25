@@ -3,8 +3,8 @@
 #   <upstream file>[ > <describe or test name>] -- <reason>
 #
 # A file skips all its tests, and a describe block all the tests in it. Every
-# other test of internal/sdkdrift.TrackedDirs is ported to a Go test that names
-# it in a `// SDK: <file> > <test name>` comment.
+# other test of internal/sdkdrift.WorkflowSDK.TrackedDirs is ported to a Go
+# test that names it in a `// SDK: <file> > <test name>` comment.
 
 # JavaScript and Node.js runtime concerns, which Go has no counterpart of.
 packages/errors/src/ansi.test.ts -- ANSI coloring of error output; Go errors are plain strings.

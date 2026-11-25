@@ -1,0 +1,6 @@
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > prepareCall > aborts before starting when prepareCall returns an aborted signal -- AbortSignal mechanics; PrepareCallResult cannot carry a cancellation, which Go passes through ctx
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > tool execution error handling > should pass the effective abort signal to locally executed tools -- AbortSignal mechanics; Go tools get the workflow ctx
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > tool execution error handling > should pass an aborting timeout signal to locally executed tools -- AbortSignal mechanics; Timeout limits only model calls, tools get the workflow ctx
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > experimental_sandbox -- workflowai has no sandbox
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > prompt parameter > should accept an array of messages as prompt -- TypeScript union typing; Go's Prompt is a string and message arrays go in Messages
+packages/workflow/src/workflow-agent.test.ts > WorkflowAgent > allowSystemInMessages > should reject system messages in prompt by default -- Go's Prompt is a string, so it cannot carry system messages

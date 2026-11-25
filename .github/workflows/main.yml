@@ -292,14 +292,18 @@ jobs:
         env:
           SDK_APP: go
 
-  # Every test of the Workflow SDK packages go-workflow mirrors is ported to
-  # a Go test that names it, or skipped with a reason, in internal/sdkdrift.
+  # Every test of the Workflow SDK packages and @ai-sdk/workflow that
+  # go-workflow mirrors is ported to a Go test that names it, or skipped with
+  # a reason, in internal/sdkdrift.
   sdk-drift:
     name: SDK Drift
     runs-on: ubuntu-latest
     env:
       SDK_COMMIT: *sdk-commit
       SDK_DIR: ${{ github.workspace }}/sdk
+      # The AI SDK commit whose @ai-sdk/workflow tests workflowai accounts for.
+      AI_SDK_COMMIT: 7fffff9f023882dc1e1f019aaaee0fbcf90539a5
+      AI_SDK_DIR: ${{ github.workspace }}/ai-sdk
     steps:
       - uses: actions/checkout@v7
         with:
@@ -309,6 +313,12 @@ jobs:
           repository: vercel/workflow
           ref: ${{ env.SDK_COMMIT }}
           path: sdk
+      - uses: actions/checkout@v7
+        with:
+          repository: vercel/ai
+          ref: ${{ env.AI_SDK_COMMIT }}
+          path: ai-sdk
+          sparse-checkout: packages/workflow/src
       - name: Setup Go
         uses: actions/setup-go@v6
         with:

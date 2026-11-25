@@ -1,8 +1,10 @@
-// Package sdkdrift checks that every test of the Workflow SDK packages that
+// Package sdkdrift checks that every test of the upstream packages that
 // go-workflow mirrors is accounted for: ported to a Go test that names it in
-// a `// SDK: <file> > <test name>` comment, or skipped in skips.txt with a
-// reason. Its test runs the check against a checkout of vercel/workflow at
-// SDK_DIR.
+// a comment, or skipped with a reason. Each Source is one upstream
+// repository: the Workflow SDK, whose ports name their tests in
+// `// SDK: <file> > <test name>` comments, and the AI SDK's @ai-sdk/workflow,
+// whose ports workflowai holds, in `// AI SDK: <file> > <test name>`
+// comments. Its test runs the check against a checkout of each.
 package sdkdrift
 
 import (
@@ -16,15 +18,50 @@ import (
 	"strings"
 )
 
-// TrackedDirs are the vercel/workflow directories whose tests go-workflow
-// accounts for: the World interface and its schemas, the error classes, and
-// the local and Postgres Worlds, whose behavior the Go Worlds share.
-var TrackedDirs = []string{
-	"packages/world/src",
-	"packages/errors/src",
-	"packages/world-local/src",
-	"packages/world-postgres/src",
+// Source is an upstream repository whose tests go-workflow accounts for.
+type Source struct {
+	// Repository names the upstream repository, and Env the environment
+	// variable that holds the path of its checkout.
+	Repository string
+	Env        string
+	// Comment is the label of the comments that name its ported tests, as
+	// in `// <Comment>: <file> > <test name>`.
+	Comment string
+	// TrackedDirs are the directories of the checkout whose tests are
+	// accounted for.
+	TrackedDirs []string
+	// Skips is the glob of the skips files of its tests, in this package.
+	Skips string
 }
+
+// WorkflowSDK is the Workflow SDK, vercel/workflow: the World interface and
+// its schemas, the error classes, and the local and Postgres Worlds, whose
+// behavior the Go Worlds share.
+var WorkflowSDK = Source{
+	Repository: "github.com/vercel/workflow",
+	Env:        "SDK_DIR",
+	Comment:    "SDK",
+	TrackedDirs: []string{
+		"packages/world/src",
+		"packages/errors/src",
+		"packages/world-local/src",
+		"packages/world-postgres/src",
+	},
+	Skips: "skips*.txt",
+}
+
+// AISDK is the AI SDK, vercel/ai: @ai-sdk/workflow, whose WorkflowAgent
+// workflowai ports.
+var AISDK = Source{
+	Repository:  "github.com/vercel/ai",
+	Env:         "AI_SDK_DIR",
+	Comment:     "AI SDK",
+	TrackedDirs: []string{"packages/workflow/src"},
+	Skips:       "ai-sdk-skips*.txt",
+}
+
+// Sources are the upstream repositories go-workflow accounts for.
+var Sources = []Source{WorkflowSDK, AISDK}
 
 // Test is an upstream test: its file, relative to the checkout, and its full
 // name, the names of its describe blocks and its own joined with " > ".
@@ -141,10 +178,10 @@ func Check(upstream []Test, ported map[string][]string, skips []Skip) Report {
 }
 
 // UpstreamTests returns the tests of the tracked directories of the
-// vercel/workflow checkout at root.
-func UpstreamTests(root string) ([]Test, error) {
+// checkout of source at root.
+func (source Source) UpstreamTests(root string) ([]Test, error) {
 	var tests []Test
-	for _, dir := range TrackedDirs {
+	for _, dir := range source.TrackedDirs {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -175,12 +212,11 @@ func UpstreamTests(root string) ([]Test, error) {
 	return tests, nil
 }
 
-// sdkComment matches a `// SDK: <file> > <test name>` comment.
-var sdkComment = regexp.MustCompile(`^\s*//\s*SDK:\s*(\S+\.test\.ts > .+?)\s*$`)
-
 // PortedTests returns, for each upstream test a Go file under root names in
-// a `// SDK:` comment, the files that name it.
-func PortedTests(root string) (map[string][]string, error) {
+// a `// <Comment>: <file> > <test name>` comment of source, the files that
+// name it.
+func (source Source) PortedTests(root string) (map[string][]string, error) {
+	comment := regexp.MustCompile(`^\s*//\s*` + regexp.QuoteMeta(source.Comment) + `:\s*(\S+\.test\.ts > .+?)\s*$`)
 	ported := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -201,7 +237,7 @@ func PortedTests(root string) (map[string][]string, error) {
 		scanner := bufio.NewScanner(file)
 		scanner.Buffer(make([]byte, 1<<20), 1<<20)
 		for scanner.Scan() {
-			if match := sdkComment.FindStringSubmatch(scanner.Text()); match != nil {
+			if match := comment.FindStringSubmatch(scanner.Text()); match != nil {
 				ported[match[1]] = append(ported[match[1]], filepath.ToSlash(relative))
 			}
 		}

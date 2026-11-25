@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -61,7 +62,10 @@ type modelCallInput struct {
 	Tools        []toolDefinition   `json:"tools,omitempty"`
 	ToolChoice   *types.ToolChoice  `json:"toolChoice,omitempty"`
 	Settings     GenerationSettings `json:"settings"`
-	// StepNumber and Streaming describe the call to telemetry.
+	// Deadline is when the call's Timeout passes, in milliseconds since the
+	// Unix epoch, or 0 without one. The model is not called after it.
+	Deadline int64 `json:"deadline,omitempty"`
+	// StepNumber and Streaming describe the call.
 	StepNumber int  `json:"stepNumber"`
 	Streaming  bool `json:"streaming,omitempty"`
 	// IncludeRawChunks asks the provider for its raw chunks.
@@ -77,6 +81,10 @@ type modelCallInput struct {
 
 // modelCallResult is the recorded result of a model call step.
 type modelCallResult struct {
+	// Aborted is set when the call's deadline passed before the model was
+	// called, as the Workflow SDK returns an abort as data so the step is
+	// not retried.
+	Aborted bool `json:"aborted,omitempty"`
 	// Content is the assistant content in the order the model produced it.
 	Content      []ContentPart `json:"content"`
 	ToolCalls    []ToolCall    `json:"toolCalls,omitempty"`
@@ -86,6 +94,12 @@ type modelCallResult struct {
 	// Error is the message of the first error part of the model stream. A
 	// stream error ends the turn.
 	Error string `json:"error,omitempty"`
+	// ProviderMetadata is the provider's metadata of the response, and
+	// Warnings the warnings it reported.
+	ProviderMetadata map[string]any  `json:"providerMetadata,omitempty"`
+	Warnings         []types.Warning `json:"warnings,omitempty"`
+	// Performance is how fast the model answered.
+	Performance *StepPerformance `json:"performance,omitempty"`
 	// RequestBody is the request sent to the provider, kept when Include
 	// asks for it.
 	RequestBody any `json:"requestBody,omitempty"`
@@ -101,9 +115,6 @@ type modelCall struct {
 	repair     ai.ToolCallRepairFunction
 	download   ai.DownloadFunction
 	transforms []ai.StreamTransformFunc
-	// trace is the call's telemetry, and operation its telemetry operation.
-	trace     *agentTelemetry
-	operation string
 	// providerTools are the active provider tools, sent to the model as they
 	// are.
 	providerTools []types.Tool
@@ -120,7 +131,7 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 		PresencePenalty:  input.Settings.PresencePenalty,
 		StopSequences:    input.Settings.StopSequences,
 		Seed:             input.Settings.Seed,
-		Headers:          input.Settings.Headers,
+		Headers:          withUserAgent(input.Settings.Headers),
 		ProviderOptions:  input.Settings.ProviderOptions,
 		Reasoning:        input.Settings.Reasoning,
 		SendReasoning:    input.Settings.SendReasoning,
@@ -137,9 +148,13 @@ func (m modelCall) options(ctx context.Context, input modelCallInput) (*provider
 		options.ToolChoice = types.AutoToolChoice()
 	}
 	// Normalize the prompt like go-ai does before every model call, which
-	// also merges consecutive tool messages and, with a Download function,
-	// downloads the file URLs the model does not support.
-	prompt, err := promptutils.NormalizePromptWithDownloadSupport(ctx, options.Prompt, true, m.download, ai.SupportedURLCheckerForModel(m.model))
+	// also merges consecutive tool messages and downloads the file URLs the
+	// model does not support.
+	download := m.download
+	if download == nil {
+		download = ai.DefaultDownload
+	}
+	prompt, err := promptutils.NormalizePromptWithDownloadSupport(ctx, options.Prompt, true, download, ai.SupportedURLCheckerForModel(m.model))
 	if err != nil {
 		return nil, err
 	}
@@ -178,24 +193,35 @@ func doStreamStep(ctx context.Context, input modelCallInput) (result modelCallRe
 	if err != nil {
 		return modelCallResult{}, err
 	}
-	ctx, endSpans := m.startSpans(ctx, input, options)
-	defer func() { endSpans(result, err) }()
-	stream, err := retry(ctx, input.Settings.MaxRetries, func() (provider.TextStream, error) {
+	started := time.Now()
+	var firstOutput time.Time
+	stream, err := retry(ctx, input.Settings.MaxRetries, input.deadline(), func() (provider.TextStream, error) {
 		return m.model.DoStream(ctx, options)
 	})
+	if errors.Is(err, errDeadlinePassed) {
+		return modelCallResult{Aborted: true}, nil
+	}
 	if err != nil {
 		return modelCallResult{}, cancelCause(ctx, err)
 	}
 	defer stream.Close()
 
 	acc := newAccumulator(func(call types.ToolCall) ToolCall { return m.toolCall(ctx, input, call) })
+	acc.toolChoice, acc.provider, acc.modelID = input.ToolChoice, m.model.Provider(), m.model.ModelID()
+	acc.performance = func(usage types.Usage) *StepPerformance {
+		return measurePerformance(started, firstOutput, time.Now(), usage)
+	}
+	chunks := readChunks(ctx, stream)
 	for {
-		chunk, err := stream.Next()
+		chunk, err := nextChunk(ctx, chunks)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return modelCallResult{}, cancelCause(ctx, err)
+		}
+		if firstOutput.IsZero() && isOutputChunk(chunk.Type) {
+			firstOutput = time.Now()
 		}
 		for _, chunk := range m.transform(ctx, *chunk) {
 			parts := acc.add(&chunk)
@@ -221,12 +247,24 @@ func doStreamStep(ctx context.Context, input modelCallInput) (result modelCallRe
 			return modelCallResult{}, err
 		}
 	}
-	if acc.result.Error == "" && acc.result.FinishReason == "" && len(acc.result.Content) == 0 {
-		acc.result.Error = "no output generated"
+	switch {
+	case acc.result.FinishReason != "":
+	case acc.result.Error != "":
+		// Like the Workflow SDK, a stream that ends with an error and no
+		// finish chunk finishes with an error.
+		acc.result.FinishReason = string(types.FinishReasonError)
+	case !hasOutput(acc.result.Content):
+		// A stream that ends without a finish chunk and without output, such
+		// as one with only an empty text block, generated nothing.
+		acc.result.Error, acc.result.FinishReason = errNoOutput, string(types.FinishReasonOther)
 		if err := writePart(writer, ModelCallStreamPart{Type: "error", Error: acc.result.Error}); err != nil {
 			return modelCallResult{}, err
 		}
 	}
+	if acc.result.Performance == nil {
+		acc.result.Performance = measurePerformance(started, firstOutput, time.Now(), acc.result.Usage)
+	}
+	m.logWarnings(acc.result)
 	return acc.result, nil
 }
 
@@ -241,15 +279,19 @@ func doGenerateStep(ctx context.Context, input modelCallInput) (result modelCall
 	if err != nil {
 		return modelCallResult{}, err
 	}
-	ctx, endSpans := m.startSpans(ctx, input, options)
-	defer func() { endSpans(result, err) }()
-	generated, err := retry(ctx, input.Settings.MaxRetries, func() (*types.GenerateResult, error) {
+	started := time.Now()
+	generated, err := retry(ctx, input.Settings.MaxRetries, input.deadline(), func() (*types.GenerateResult, error) {
 		return m.model.DoGenerate(ctx, options)
 	})
+	if errors.Is(err, errDeadlinePassed) {
+		return modelCallResult{Aborted: true}, nil
+	}
 	if err != nil {
 		return modelCallResult{}, cancelCause(ctx, err)
 	}
-	result = modelCallResult{FinishReason: string(generated.FinishReason), Usage: generated.Usage}
+	ended := time.Now()
+	result = modelCallResult{FinishReason: string(generated.FinishReason), Usage: generated.Usage, ProviderMetadata: generated.ProviderMetadata, Warnings: generated.Warnings}
+	result.Performance = measurePerformance(started, ended, ended, generated.Usage)
 	if generated.ResponseMetadata != nil {
 		result.Response = Response{ID: generated.ResponseMetadata.ID, ModelID: generated.ResponseMetadata.ModelID}
 	}
@@ -259,21 +301,58 @@ func doGenerateStep(ctx context.Context, input modelCallInput) (result modelCall
 	if input.Include != nil && input.Include.ResponseBody {
 		result.Response.Body = generated.RawResponse
 	}
+	// Like the Workflow SDK, the step keeps the model's content in order,
+	// with each tool call where the model made it. Tool results in the
+	// content are the results of tools the provider executed.
+	calls := map[string]types.ToolCall{}
+	for _, call := range generated.ToolCalls {
+		calls[call.ID] = call
+	}
+	withhold := input.ToolChoice != nil && input.ToolChoice.Type == types.ToolChoiceNone
+	withheld := 0
+	addCall := func(call types.ToolCall) {
+		if withhold {
+			withheld++
+			return
+		}
+		toolCall := m.toolCall(ctx, input, call)
+		result.ToolCalls = append(result.ToolCalls, toolCall)
+		result.Content = append(result.Content, toolCall.contentPart())
+	}
 	hasText := false
 	for _, content := range generated.Content {
-		if part, ok := fromContentPart(content); ok && part.Type != PartToolCall {
-			hasText = hasText || part.Type == PartText
-			result.Content = append(result.Content, part)
+		if c, ok := content.(types.ToolCallContent); ok {
+			call, known := calls[c.ToolCallID]
+			if !known {
+				call = types.ToolCall{ID: c.ToolCallID, ToolName: c.ToolName, RawArguments: c.Input, Arguments: c.Arguments}
+			}
+			call.ProviderExecuted = call.ProviderExecuted || c.ProviderExecuted
+			delete(calls, c.ToolCallID)
+			addCall(call)
+			continue
 		}
+		part, ok := fromContentPart(content)
+		if !ok {
+			continue
+		}
+		if part.Type == PartToolResult {
+			part.ProviderExecuted = true
+		}
+		hasText = hasText || part.Type == PartText
+		result.Content = append(result.Content, part)
 	}
 	if !hasText && generated.Text != "" {
 		result.Content = append(result.Content, ContentPart{Type: PartText, Text: generated.Text})
 	}
 	for _, call := range generated.ToolCalls {
-		toolCall := m.toolCall(ctx, input, call)
-		result.ToolCalls = append(result.ToolCalls, toolCall)
-		result.Content = append(result.Content, toolCall.contentPart())
+		if _, left := calls[call.ID]; left {
+			addCall(call)
+		}
 	}
+	if violation := toolChoiceViolation(input.ToolChoice, result.ToolCalls, withheld, result.FinishReason, m.model.Provider(), m.model.ModelID()); violation != "" {
+		result.FinishReason, result.Error = string(types.FinishReasonError), violation
+	}
+	m.logWarnings(result)
 	return result, nil
 }
 
@@ -289,135 +368,6 @@ func (m modelCall) transform(ctx context.Context, chunk provider.StreamChunk) []
 		chunks = next
 	}
 	return chunks
-}
-
-// startSpans starts the spans of a model call. When the call's telemetry is
-// reported when it ends, OpenTelemetry integrations draw only the model
-// call's chat span, as a child of the agent step's span, and the others draw
-// the spans of the model call alone, as when it is not. The returned
-// function ends them with the call's result.
-func (m modelCall) startSpans(ctx context.Context, input modelCallInput, options *provider.GenerateOptions) (context.Context, func(modelCallResult, error)) {
-	if m.telemetry == nil || !telemetry.Enabled(m.telemetry) {
-		return ctx, func(modelCallResult, error) {}
-	}
-	if m.trace == nil || !m.trace.Reported {
-		return m.operationSpans(ctx, input, options, m.telemetry)
-	}
-	otel, others := splitIntegrations(m.telemetry)
-	if otel == nil {
-		return m.operationSpans(ctx, input, options, others)
-	}
-	callCtx, endChat := m.chatSpan(ctx, input, options, otel)
-	if others == nil {
-		return callCtx, endChat
-	}
-	_, endOperation := m.operationSpans(ctx, input, options, others)
-	return callCtx, func(result modelCallResult, err error) {
-		endChat(result, err)
-		endOperation(result, err)
-	}
-}
-
-// chatSpan draws a model call's chat span as a child of the reserved span of
-// its agent step, through stand-ins for the call's root and step spans.
-func (m modelCall) chatSpan(ctx context.Context, input modelCallInput, options *provider.GenerateOptions, settings *telemetry.Settings) (context.Context, func(modelCallResult, error)) {
-	callID, modelProvider, modelID := m.trace.CallID, m.model.Provider(), m.model.ModelID()
-	endStandIns := m.trace.startStandIns(ctx, settings, m.operation, input.StepNumber, m)
-	callCtx := telemetry.FireOnLanguageModelCallStart(ctx, languageModelCallStart(settings, callID, modelProvider, modelID, input, options))
-	start := time.Now()
-	return callCtx, func(result modelCallResult, err error) {
-		defer endStandIns()
-		if err != nil {
-			telemetry.FireOnStepError(callCtx, telemetry.TelemetryErrorEvent{Settings: settings, CallID: callID, Error: err})
-			return
-		}
-		telemetry.FireOnLanguageModelCallEnd(ctx, telemetry.LanguageModelCallEndEvent{
-			Settings:      settings,
-			CallID:        callID,
-			ModelProvider: modelProvider,
-			ModelID:       modelID,
-			FinishReason:  result.FinishReason,
-			Usage:         telemetryUsage(result.Usage),
-			ResponseID:    result.Response.ID,
-			Performance:   telemetry.LanguageModelCallPerformance{ResponseTimeMs: time.Since(start).Milliseconds()},
-		})
-	}
-}
-
-// operationSpans starts the spans of a model call alone under the span in
-// ctx: an operation span, a step span, and the model call span, whose context
-// the model call uses. The returned function ends them with the call's
-// result.
-func (m modelCall) operationSpans(ctx context.Context, input modelCallInput, options *provider.GenerateOptions, settings *telemetry.Settings) (context.Context, func(modelCallResult, error)) {
-	callID := workflow.StepID(ctx)
-	operation := "ai.generateText"
-	if input.Streaming {
-		operation = "ai.streamText"
-	}
-	modelProvider, modelID := m.model.Provider(), m.model.ModelID()
-	ctx = telemetry.FireOnStart(ctx, telemetry.TelemetryStartEvent{
-		CallID:        callID,
-		OperationType: operation,
-		ModelProvider: modelProvider,
-		ModelID:       modelID,
-		Settings:      settings,
-		System:        input.Instructions,
-		Messages:      options.Prompt.Messages,
-	})
-	ctx = telemetry.FireOnStepStart(ctx, telemetry.TelemetryStepStartEvent{
-		Settings:      settings,
-		CallID:        callID,
-		OperationType: operation,
-		StepNumber:    input.StepNumber,
-		ModelProvider: modelProvider,
-		ModelID:       modelID,
-	})
-	callCtx := telemetry.FireOnLanguageModelCallStart(ctx, languageModelCallStart(settings, callID, modelProvider, modelID, input, options))
-	start := time.Now()
-	return callCtx, func(result modelCallResult, err error) {
-		if err != nil {
-			telemetry.FireOnStepError(callCtx, telemetry.TelemetryErrorEvent{Settings: settings, CallID: callID, Error: err})
-			telemetry.FireOnError(ctx, telemetry.TelemetryErrorEvent{Settings: settings, CallID: callID, Error: err})
-			return
-		}
-		usage := telemetryUsage(result.Usage)
-		var text string
-		for _, part := range result.Content {
-			if part.Type == PartText {
-				text += part.Text
-			}
-		}
-		telemetry.FireOnLanguageModelCallEnd(ctx, telemetry.LanguageModelCallEndEvent{
-			Settings:      settings,
-			CallID:        callID,
-			ModelProvider: modelProvider,
-			ModelID:       modelID,
-			FinishReason:  result.FinishReason,
-			Usage:         usage,
-			ResponseID:    result.Response.ID,
-			Performance:   telemetry.LanguageModelCallPerformance{ResponseTimeMs: time.Since(start).Milliseconds()},
-		})
-		telemetry.FireOnStepEnd(ctx, telemetry.TelemetryStepEndEvent{
-			Settings:      settings,
-			CallID:        callID,
-			OperationType: operation,
-			StepNumber:    input.StepNumber,
-			FinishReason:  result.FinishReason,
-			Usage:         usage,
-			Text:          text,
-			ResponseID:    result.Response.ID,
-		})
-		telemetry.FireOnEnd(ctx, telemetry.TelemetryFinishEvent{
-			Settings:      settings,
-			CallID:        callID,
-			OperationType: operation,
-			FinishReason:  result.FinishReason,
-			Usage:         usage,
-			ModelProvider: modelProvider,
-			ModelID:       modelID,
-			Text:          text,
-		})
-	}
 }
 
 // toolCall parses a provider tool call. When the call is invalid and the
@@ -473,13 +423,32 @@ type accumulator struct {
 	// belong to.
 	textID, reasoningID string
 	blocks              int
+	// performance measures the call when it finishes.
+	performance func(types.Usage) *StepPerformance
+	// toolChoice is the call's tool choice, which the response must
+	// satisfy. With tool choice none, tool parts are withheld, and withheld
+	// counts the tool calls among them.
+	toolChoice        *types.ToolChoice
+	withheld          int
+	provider, modelID string
 }
 
 func newAccumulator(parse func(types.ToolCall) ToolCall) *accumulator {
-	return &accumulator{parse: parse, open: map[string]int{}}
+	return &accumulator{parse: parse, open: map[string]int{}, performance: func(types.Usage) *StepPerformance { return nil }}
 }
 
 func (a *accumulator) add(chunk *provider.StreamChunk) []ModelCallStreamPart {
+	if a.toolChoice != nil && a.toolChoice.Type == types.ToolChoiceNone {
+		// Like the Workflow SDK, tool choice none withholds tool parts, so
+		// readers cannot act on calls the response is rejected for.
+		switch chunk.Type {
+		case provider.ChunkTypeToolCall:
+			a.withheld++
+			return nil
+		case provider.ChunkTypeToolInputStart, provider.ChunkTypeToolInputDelta, provider.ChunkTypeToolInputEnd, provider.ChunkTypeToolResult:
+			return nil
+		}
+	}
 	switch chunk.Type {
 	case provider.ChunkTypeTextStart:
 		return a.start(PartText, a.blockID(chunk.ID, &a.textID), chunk.ProviderMetadata)
@@ -525,7 +494,7 @@ func (a *accumulator) add(chunk *provider.StreamChunk) []ModelCallStreamPart {
 		call := a.parse(*chunk.ToolCall)
 		a.result.ToolCalls = append(a.result.ToolCalls, call)
 		a.result.Content = append(a.result.Content, call.contentPart())
-		return append(parts, ModelCallStreamPart{
+		parts = append(parts, ModelCallStreamPart{
 			Type:             "tool-call",
 			ToolCallID:       call.ToolCallID,
 			ToolName:         call.ToolName,
@@ -535,6 +504,11 @@ func (a *accumulator) add(chunk *provider.StreamChunk) []ModelCallStreamPart {
 			ProviderExecuted: call.ProviderExecuted,
 			ProviderMetadata: marshalMetadata(chunk.ToolCall.ProviderMetadata),
 		})
+		// Like the Workflow SDK, an invalid call is followed by its error.
+		if call.Invalid && !call.ProviderExecuted {
+			parts = append(parts, ModelCallStreamPart{Type: "tool-error", ToolCallID: call.ToolCallID, ToolName: call.ToolName, Input: call.Input, Error: call.Error})
+		}
+		return parts
 	case provider.ChunkTypeToolApprovalRequest:
 		if chunk.ToolApprovalRequest == nil {
 			return nil
@@ -585,6 +559,16 @@ func (a *accumulator) add(chunk *provider.StreamChunk) []ModelCallStreamPart {
 			return nil
 		}
 		source := chunk.SourceContent
+		a.result.Content = append(a.result.Content, ContentPart{
+			Type:             PartSource,
+			SourceType:       source.SourceType,
+			SourceID:         source.ID,
+			URL:              source.URL,
+			Title:            source.Title,
+			MediaType:        source.MediaType,
+			Filename:         source.Filename,
+			ProviderMetadata: chunk.ProviderMetadata,
+		})
 		return []ModelCallStreamPart{{
 			Type:             "source",
 			ID:               source.ID,
@@ -597,18 +581,48 @@ func (a *accumulator) add(chunk *provider.StreamChunk) []ModelCallStreamPart {
 		}}
 	case provider.ChunkTypeResponseMetadata:
 		if chunk.ResponseMetadata != nil {
-			a.result.Response = Response{ID: chunk.ResponseMetadata.ID, ModelID: chunk.ResponseMetadata.ModelID}
+			metadata := chunk.ResponseMetadata
+			a.result.Response = Response{ID: metadata.ID, ModelID: metadata.ModelID}
+			part := ModelCallStreamPart{Type: "model-call-response-metadata", ID: metadata.ID, ModelID: metadata.ModelID}
+			if !metadata.Timestamp.IsZero() {
+				part.Timestamp = metadata.Timestamp.UTC().Format(time.RFC3339Nano)
+			}
+			return []ModelCallStreamPart{part}
 		}
 	case provider.ChunkTypeUsage:
 		if chunk.Usage != nil {
 			a.result.Usage = *chunk.Usage
 		}
+	case provider.ChunkTypeCustom:
+		if chunk.CustomContent != nil {
+			custom := chunk.CustomContent
+			a.result.Content = append(a.result.Content, ContentPart{Type: PartCustom, Kind: custom.Kind, ProviderOptions: custom.ProviderOptions, ProviderMetadata: custom.ProviderMetadata})
+		}
+	case provider.ChunkTypeStreamStart:
+		a.result.Warnings = append(a.result.Warnings, chunk.Warnings...)
+		return []ModelCallStreamPart{{Type: "model-call-start", Warnings: chunk.Warnings}}
 	case provider.ChunkTypeFinish, provider.ChunkTypeFinishStep:
 		if chunk.FinishReason != "" {
 			a.result.FinishReason = string(chunk.FinishReason)
 		}
+		if metadata := decodeMetadata(chunk.ProviderMetadata); metadata != nil {
+			a.result.ProviderMetadata = metadata
+		}
 		if chunk.Usage != nil {
 			a.result.Usage = *chunk.Usage
+		}
+		if chunk.Type == provider.ChunkTypeFinish {
+			usage := a.result.Usage
+			a.result.Performance = a.performance(usage)
+			violation := toolChoiceViolation(a.toolChoice, a.result.ToolCalls, a.withheld, a.result.FinishReason, a.provider, a.modelID)
+			if violation != "" {
+				a.result.FinishReason, a.result.Error = string(types.FinishReasonError), violation
+			}
+			parts := []ModelCallStreamPart{{Type: "model-call-end", FinishReason: a.result.FinishReason, Usage: &usage, ProviderMetadata: chunk.ProviderMetadata, Performance: a.result.Performance}}
+			if violation != "" {
+				parts = append(parts, ModelCallStreamPart{Type: "error", Error: violation})
+			}
+			return parts
 		}
 	}
 	return nil
@@ -674,13 +688,19 @@ func (a *accumulator) close() []ModelCallStreamPart {
 // not report as retryable, or maxRetries retries have failed. Nil maxRetries
 // retries twice. Retries wait 2 seconds and then twice as long as the
 // previous wait, up to a minute, or the delay of the error's retry headers.
-func retry[T any](ctx context.Context, maxRetries *int, fn func() (T, error)) (T, error) {
+func retry[T any](ctx context.Context, maxRetries *int, deadline time.Time, fn func() (T, error)) (T, error) {
 	retries := 2
 	if maxRetries != nil {
 		retries = *maxRetries
 	}
 	delay := 2 * time.Second
 	for attempt := 0; ; attempt++ {
+		// Like the Workflow SDK, the deadline is checked before every
+		// dispatch, so a model call does not start after it.
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			var zero T
+			return zero, errDeadlinePassed
+		}
 		value, err := fn()
 		var retryable interface{ IsRetryable() bool }
 		if err == nil || attempt >= retries || !errors.As(err, &retryable) || !retryable.IsRetryable() {
@@ -696,9 +716,64 @@ func retry[T any](ctx context.Context, maxRetries *int, fn func() (T, error)) (T
 	}
 }
 
+// errDeadlinePassed reports that a model call's deadline passed before it
+// was dispatched.
+var errDeadlinePassed = errors.New("workflowai: model call deadline passed")
+
+// deadline returns the call's deadline, or the zero time without one.
+func (input modelCallInput) deadline() time.Time {
+	if input.Deadline == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(input.Deadline)
+}
+
 // cancelCause returns the cause of ctx's cancellation when ctx is done, so
 // a model call cut short by cancellation reports it instead of the
 // provider's error, and err otherwise.
+// streamChunk is a chunk read from a model stream, or the error reading
+// it.
+type streamChunk struct {
+	chunk *provider.StreamChunk
+	err   error
+}
+
+// readChunks reads stream in its own goroutine until it ends, fails, or ctx
+// is done, so a model stream that ignores cancellation cannot keep the call
+// running.
+func readChunks(ctx context.Context, stream provider.TextStream) <-chan streamChunk {
+	chunks := make(chan streamChunk)
+	go func() {
+		defer close(chunks)
+		for {
+			chunk, err := stream.Next()
+			select {
+			case chunks <- streamChunk{chunk, err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return chunks
+}
+
+// nextChunk returns the next chunk of chunks, or ctx's cause once ctx is
+// done, as the Workflow SDK stops reading a stream when the call aborts.
+func nextChunk(ctx context.Context, chunks <-chan streamChunk) (*provider.StreamChunk, error) {
+	select {
+	case next, ok := <-chunks:
+		if !ok {
+			return nil, context.Cause(ctx)
+		}
+		return next.chunk, next.err
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
 func cancelCause(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
@@ -759,6 +834,145 @@ func mergeMetadata(part *ContentPart, metadata json.RawMessage) {
 	}
 }
 
+// toolChoiceViolation returns why a model call's response does not satisfy
+// its tool choice, as the Workflow SDK enforces it, or "": with tool choice
+// none it made a tool call, and with tool choice required or a named tool it
+// did not make the call, unless it was interrupted.
+func toolChoiceViolation(choice *types.ToolChoice, calls []ToolCall, withheld int, finishReason, providerName, modelID string) string {
+	if choice == nil {
+		return ""
+	}
+	violated := false
+	switch choice.Type {
+	case types.ToolChoiceNone:
+		violated = withheld > 0 || len(calls) > 0
+	case types.ToolChoiceRequired:
+		violated = finishReason != "interrupted" && len(calls) == 0
+	case types.ToolChoiceTool:
+		violated = finishReason != "interrupted" && !slices.ContainsFunc(calls, func(call ToolCall) bool { return call.ToolName == choice.ToolName })
+	}
+	if !violated {
+		return ""
+	}
+	return (&ai.ToolChoiceViolationError{ToolChoice: *choice, FinishReason: types.FinishReason(finishReason), Provider: providerName, ModelID: modelID}).Error()
+}
+
+// errNoOutput is the error of a model stream that ended without a finish
+// chunk and without output, as the Workflow SDK reports it.
+const errNoOutput = "No output generated. The model stream ended without a finish chunk."
+
+// hasOutput reports whether content holds model output: text, reasoning, a
+// tool call, or any other part that is not an empty text or reasoning block.
+func hasOutput(content []ContentPart) bool {
+	for _, part := range content {
+		switch part.Type {
+		case PartText, PartReasoning:
+			if part.Text != "" {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// userAgent is the user agent suffix the Workflow SDK adds to the model
+// calls of a WorkflowAgent, so providers can attribute its usage.
+const userAgent = "ai-sdk-agent/workflow"
+
+// withUserAgent returns headers with the agent's user agent suffix added to
+// their user-agent header.
+func withUserAgent(headers map[string]string) map[string]string {
+	out := maps.Clone(headers)
+	if out == nil {
+		out = map[string]string{}
+	}
+	key := "user-agent"
+	for name := range out {
+		if strings.EqualFold(name, key) {
+			key = name
+		}
+	}
+	out[key] = strings.TrimSpace(out[key] + " " + userAgent)
+	return out
+}
+
+// logWarnings logs the warnings the provider reported for a model call
+// through go-ai's warning logger, as the Workflow SDK does. The model call
+// step logs them, so replays do not log them again.
+func (m modelCall) logWarnings(result modelCallResult) {
+	if len(result.Warnings) == 0 {
+		return
+	}
+	ai.LogWarnings(ai.LogWarningsOptions{Warnings: result.Warnings, Provider: m.model.Provider(), Model: cmp.Or(result.Response.ModelID, m.model.ModelID())})
+}
+
+// StepPerformance is how fast a step's model call answered, as the Workflow
+// SDK measures it: its response time, its time to first output, and its
+// token rates.
+type StepPerformance struct {
+	ResponseTimeMs                 int64    `json:"responseTimeMs"`
+	EffectiveOutputTokensPerSecond float64  `json:"effectiveOutputTokensPerSecond"`
+	OutputTokensPerSecond          *float64 `json:"outputTokensPerSecond,omitempty"`
+	InputTokensPerSecond           *float64 `json:"inputTokensPerSecond,omitempty"`
+	EffectiveTotalTokensPerSecond  float64  `json:"effectiveTotalTokensPerSecond"`
+	TimeToFirstOutputMs            *int64   `json:"timeToFirstOutputMs,omitempty"`
+}
+
+// measurePerformance returns the performance of a model call that started,
+// produced its first output and ended at the given times.
+func measurePerformance(started, firstOutput, ended time.Time, usage types.Usage) *StepPerformance {
+	response := ended.Sub(started)
+	performance := &StepPerformance{ResponseTimeMs: response.Milliseconds()}
+	perSecond := func(tokens int64, d time.Duration) float64 {
+		if d <= 0 {
+			return 0
+		}
+		return float64(tokens) / d.Seconds()
+	}
+	var input, output int64
+	if usage.InputTokens != nil {
+		input = *usage.InputTokens
+	}
+	if usage.OutputTokens != nil {
+		output = *usage.OutputTokens
+	}
+	performance.EffectiveOutputTokensPerSecond = perSecond(output, response)
+	performance.EffectiveTotalTokensPerSecond = perSecond(input+output, response)
+	if !firstOutput.IsZero() {
+		first := firstOutput.Sub(started)
+		ms := first.Milliseconds()
+		performance.TimeToFirstOutputMs = &ms
+		inputRate := perSecond(input, first)
+		performance.InputTokensPerSecond = &inputRate
+		outputRate := perSecond(output, ended.Sub(firstOutput))
+		if ended.Equal(firstOutput) {
+			outputRate = performance.EffectiveOutputTokensPerSecond
+		}
+		performance.OutputTokensPerSecond = &outputRate
+	}
+	return performance
+}
+
+// isOutputChunk reports whether a chunk of a model stream is model output.
+func isOutputChunk(chunkType provider.ChunkType) bool {
+	switch chunkType {
+	case provider.ChunkTypeText, provider.ChunkTypeReasoning, provider.ChunkTypeToolCall, provider.ChunkTypeToolInputStart, provider.ChunkTypeToolInputDelta, provider.ChunkTypeFile, provider.ChunkTypeSource:
+		return true
+	}
+	return false
+}
+
+// decodeMetadata decodes provider metadata, or returns nil for none.
+func decodeMetadata(raw json.RawMessage) map[string]any {
+	var metadata map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &metadata) != nil || len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
 func marshalMetadata(metadata map[string]any) json.RawMessage {
 	if len(metadata) == 0 {
 		return nil
@@ -775,6 +989,7 @@ func parseToolCall(tools []toolDefinition, call types.ToolCall) (ToolCall, error
 		ToolName:         call.ToolName,
 		ProviderExecuted: call.ProviderExecuted,
 		ThoughtSignature: call.ThoughtSignature,
+		ProviderMetadata: marshalMetadata(call.ProviderMetadata),
 	}
 	raw := call.RawArguments
 	if raw == "" {
@@ -782,11 +997,15 @@ func parseToolCall(tools []toolDefinition, call types.ToolCall) (ToolCall, error
 		if call.Arguments == nil {
 			parsed.Input = json.RawMessage("{}")
 		}
-	} else {
+	} else if json.Valid([]byte(raw)) {
 		parsed.Input = json.RawMessage(raw)
+	} else {
+		// Input that is not JSON, such as truncated arguments, is kept as a
+		// JSON string, as the Workflow SDK keeps the raw text.
+		parsed.Input = marshalRaw(raw)
 	}
 	if call.Invalid {
-		parsed.Invalid = true
+		parsed.Invalid, parsed.Dynamic = true, true
 		parsed.Error = "invalid tool call"
 		if call.Error != nil {
 			parsed.Error = call.Error.Error()
@@ -797,11 +1016,11 @@ func parseToolCall(tools []toolDefinition, call types.ToolCall) (ToolCall, error
 		return parsed, nil
 	}
 	invalidInput := func(err error) (ToolCall, error) {
-		parsed.Invalid, parsed.Error = true, fmt.Sprintf("invalid input for tool %s: %v", call.ToolName, err)
-		return parsed, &ai.InvalidToolInputError{ToolName: call.ToolName, ToolInput: string(parsed.Input), Cause: err}
+		parsed.Invalid, parsed.Dynamic, parsed.Error = true, true, fmt.Sprintf("Invalid input for tool %s: %v", call.ToolName, err)
+		return parsed, &ai.InvalidToolInputError{ToolName: call.ToolName, ToolInput: cmp.Or(raw, string(parsed.Input)), Cause: err}
 	}
 	var input any
-	if err := json.Unmarshal(parsed.Input, &input); err != nil {
+	if err := json.Unmarshal([]byte(cmp.Or(raw, string(parsed.Input))), &input); err != nil {
 		return invalidInput(err)
 	}
 	names := make([]string, 0, len(tools))
@@ -817,7 +1036,7 @@ func parseToolCall(tools []toolDefinition, call types.ToolCall) (ToolCall, error
 		}
 		return parsed, nil
 	}
-	parsed.Invalid, parsed.Error = true, fmt.Sprintf("model tried to call unavailable tool %q", call.ToolName)
+	parsed.Invalid, parsed.Dynamic, parsed.Error = true, true, fmt.Sprintf("Model tried to call unavailable tool '%s'. Available tools: %s.", call.ToolName, strings.Join(names, ", "))
 	return parsed, &ai.NoSuchToolError{ToolName: call.ToolName, AvailableTools: names}
 }
 
@@ -834,58 +1053,6 @@ func promptMessages(messages []ModelMessage) []types.Message {
 		prompt[i] = message
 	}
 	return toProviderMessages(prompt)
-}
-
-// languageModelCallStart returns the telemetry event that starts a model
-// call.
-func languageModelCallStart(settings *telemetry.Settings, callID, modelProvider, modelID string, input modelCallInput, options *provider.GenerateOptions) telemetry.LanguageModelCallStartEvent {
-	return telemetry.LanguageModelCallStartEvent{
-		Settings:         settings,
-		CallID:           callID,
-		ModelProvider:    modelProvider,
-		ModelID:          modelID,
-		Prompt:           options.Prompt,
-		Tools:            options.Tools,
-		System:           input.Instructions,
-		Temperature:      options.Temperature,
-		MaxOutputTokens:  options.MaxTokens,
-		TopP:             options.TopP,
-		TopK:             options.TopK,
-		PresencePenalty:  options.PresencePenalty,
-		FrequencyPenalty: options.FrequencyPenalty,
-		StopSequences:    options.StopSequences,
-		Seed:             options.Seed,
-	}
-}
-
-// splitIntegrations splits the integrations of settings into the
-// OpenTelemetry integrations, which draw a model call's chat span under the
-// span of its agent step, and the others, which draw the spans of each model
-// call as it happens. go-ai does not list its globally registered
-// integrations, so with no integrations in settings they all count as others.
-// A nil result has no integrations.
-func splitIntegrations(settings *telemetry.Settings) (otel, others *telemetry.Settings) {
-	if len(settings.Integrations) == 0 {
-		return nil, settings
-	}
-	var otelIntegrations, otherIntegrations []telemetry.TelemetryIntegration
-	for _, integration := range settings.Integrations {
-		switch integration.(type) {
-		case telemetry.OpenTelemetry, *telemetry.OpenTelemetry, telemetry.LegacyOpenTelemetry, *telemetry.LegacyOpenTelemetry:
-			otelIntegrations = append(otelIntegrations, integration)
-		default:
-			otherIntegrations = append(otherIntegrations, integration)
-		}
-	}
-	with := func(integrations []telemetry.TelemetryIntegration) *telemetry.Settings {
-		if len(integrations) == 0 {
-			return nil
-		}
-		copied := *settings
-		copied.Integrations = integrations
-		return &copied
-	}
-	return with(otelIntegrations), with(otherIntegrations)
 }
 
 // telemetryUsage converts token usage to its telemetry form.

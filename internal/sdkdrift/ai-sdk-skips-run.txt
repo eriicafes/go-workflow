@@ -1,0 +1,20 @@
+packages/workflow/src/workflow-agent-contract.test.ts > WorkflowAgent error and abort callbacks > keeps the model error when onError throws, like ToolLoopAgent -- Go callbacks return nothing, so they cannot throw
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > stream() with chunkMs aborts both agents when the model goes quiet after output -- workflowai has no per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > stream() with firstChunkMs aborts both agents when only non-output parts arrive -- workflowai has no first-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > stream() with stepMs aborts both agents during the model call -- workflowai has no per-step timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > does not reset the chunk timer for empty text deltas -- workflowai has no per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > resets the chunk timer for text deltas -- workflowai has no per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > resets the chunk timer for reasoning deltas -- workflowai has no per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > resets the chunk timer for tool input deltas -- workflowai has no per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > starts the step timer again for every model call -- workflowai has no per-step timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > applies the first-chunk timeout to every model call -- workflowai has no first-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > rejects generate() with a step timeout in both agents -- workflowai has no per-step timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > ignores firstChunkMs and chunkMs in generate() -- workflowai has no first-chunk or per-chunk timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > counts SDK retries inside the step timeout -- workflowai has no per-step timeout
+packages/workflow/src/workflow-agent-timeout-contract.test.ts > WorkflowAgent timeout configuration > timeout validation > ${mode}() rejects %s before the model call -- Timeout is a time.Duration, which cannot be NaN, infinite, a string or an object with invalid fields
+packages/workflow/src/workflow-agent-timeout.test.ts -- resolveTimeoutSettings normalizes the JS number or object timeout; Timeout is a time.Duration
+packages/workflow/src/workflow-agent-timeout.integration.test.ts -- tests chunk, step and first-chunk timeouts, which workflowai lacks
+packages/workflow/src/model-call-timeouts.test.ts -- internal timers of per-step, first-chunk and per-chunk timeouts and AbortSignal stream reads; workflowai has one durable call Timeout
+packages/workflow/src/workflow-smoke.integration.test.ts -- smoke test of a plain Workflow runtime workflow, not of the agent; covered by go-workflow's own tests
+packages/workflow/src/workflow-agent-e2e.integration.test.ts > core > preserves undefined generation failures across the durable step boundary -- JS can throw undefined; Go errors cannot be undefined
+packages/workflow/src/workflow-agent-e2e.integration.test.ts > experimental_sandbox -- workflowai has no sandbox
