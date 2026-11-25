@@ -1,5 +1,32 @@
 # go-workflow
 
+## 0.11.0
+
+### Minor Changes
+
+- a2503d5: Remove FIFO queue support from the AWS World: `awsworld.QueueConfig` drops `FIFO`, and routed queues are standard queues.
+- be385b1: Add `Run.ReturnValue`, and wait for the run in `Run.Value` from workflow code.
+- c385036: Add `workflowtest.ConformanceDelivery`.
+- 165f547: Add `EventResult.Event` and `EventResult.Run`.
+- 91b8dc5: Add `IsFatal` and the fatal `SerializationError`, `RunFailedError`, `RunCancelledError` and `EncryptionKeyLookupError`.
+- af0d277: Add `worlds.WithHealthCheck`, `ParseHealthCheck` and `AnswerHealthCheck`.
+- f7cbefe: Add `HookOption.Metadata`.
+- 0522cc9: Add `HookResumeContext.WorkflowCoreVersion` and `NodeVersion`, and `Run.HookResumeContext`.
+- be385b1: Add `URL` and `Features` to `WorkflowMetadata` and `MaxAttempts` to `StepMetadata`.
+- bf9d933: Take a `worlds.Executor` in Worlds instead of runners, and add `worlds.RemoteExecutor` to run a Workflow SDK app's workflows through `world-http`.
+- e1e6269: Name workflows and steps in the Workflow SDK's form, and add `worlds.StepName` and `workflow.StructArgs`.
+- c462139: Add `StreamWriter.WriteValue`.
+- 7f31515: Change `workflowai.WorkflowAgentOptions.ToolApprovalSecret` to a `*workflowai.ToolApprovalSecret` naming the environment variable that holds the secret, and add `CallOptions.ToolApprovalSecret`.
+- 1e73a61: Pass a `workflowai.EndEvent` to `OnEnd`, with the call's `Result` and contexts.
+- 1e73a61: Embed `GenerationSettings` in `workflowai.CallOptions` and `PrepareStepResult`, add `InstructionMessages` to `PrepareStepResult`, and add the instructions and initial messages to `PrepareStepInfo`.
+- 7a1211b: Add `workflowai.Tool.Provider` to send a provider-executed go-ai tool, such as Anthropic's web search, to the model.
+- 343d12b: Add `workflowai.TelemetryIDGenerator` and `workflowai.NewTelemetrySpanProcessor`, which report a workflow agent's root, step and tool spans with their recorded times when the call ends.
+- 1e73a61: Add the model, files, sources, warnings, provider metadata, `Performance` and contexts to `workflowai.StepResult`, and the model, steps, messages and contexts to the callback events.
+- 1e73a61: `workflowai` `Stream` returns no error when its call is aborted, and model calls download unsupported file URLs with go-ai's `DefaultDownload` when `Download` is nil.
+- a2f00d5: Add `workflowai.ToolApprovalAlways` to decide every call of a tool with a fixed `ToolApprovalStatus`.
+- 64f6f54: Add `ToolApproval` and `ToolApprovals` to `workflowai.WorkflowAgentOptions` and `CallOptions` to approve or deny tool calls in code.
+- 1e73a61: Add `workflowai.Tool.ToModelOutput` and `Tool.ContextSchema`.
+
 ## 0.10.1
 
 ### Patch Changes
