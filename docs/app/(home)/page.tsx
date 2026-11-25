@@ -62,8 +62,14 @@ export default async function HomePage() {
             Make Any Go Function Durable
           </h1>
           <p className="mt-6 max-w-2xl text-base text-balance text-fd-muted-foreground md:text-lg">
-            go-workflow brings durability, reliability, and observability to Go. Build apps and AI
-            agents that can suspend, resume, and maintain state with ease.
+            go-workflow brings the durability, reliability, and observability of the{' '}
+            <a
+              href="https://workflow-sdk.dev"
+              className="underline underline-offset-4 decoration-fd-muted-foreground/50 hover:decoration-fd-muted-foreground"
+            >
+              Workflow SDK
+            </a>{' '}
+            to Go. Build apps and AI agents that can suspend, resume, and maintain state with ease.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <Link
