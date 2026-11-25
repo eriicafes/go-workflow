@@ -20,7 +20,7 @@ permissions:
 jobs:
   vercel-changes:
     name: Vercel Changes
-    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'vercel'))) }}
+    if: ${{ vars.VERCEL_TESTS == 'true' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'vercel'))) }}
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.changes.outputs.run }}
