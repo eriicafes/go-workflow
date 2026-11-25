@@ -2,9 +2,15 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
@@ -12,6 +18,28 @@ permissions:
   id-token: write
 
 jobs:
+  vercel-changes:
+    name: Vercel Changes
+    if: ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && contains(github.event.pull_request.labels.*.name, 'vercel'))) }}
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.changes.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE" HEAD | grep -vE '^(docs/|skills/|workflowai/|examples/|\.changeset/|internal/sdkdrift/|CHANGELOG\.md$|.*\.md$)' || true)
+          if [ -n "$changed" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -127,13 +155,10 @@ jobs:
       - name: Run the Workflow SDK's World test suite
         run: npm run test:world-testing
 
-  # The Vercel World runs on Vercel's workflow backend, with the variables the
-  # Workflow SDK's tests use, which the vercel environment holds. Its jobs run
-  # in this repository only, never for a fork or a pull request from one, and
-  # the environment's protection rules decide which runs may use them.
   world-testing-vercel:
     name: World Testing (vercel)
-    if: &vercel ${{ github.repository == 'eriicafes/go-workflow' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: vercel-changes
+    if: &vercel ${{ needs.vercel-changes.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: vercel
@@ -239,6 +264,7 @@ jobs:
 
   sdk-e2e-vercel:
     name: SDK E2E (vercel)
+    needs: vercel-changes
     if: *vercel
     runs-on: ubuntu-latest
     timeout-minutes: 30
